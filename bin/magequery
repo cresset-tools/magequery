@@ -1,0 +1,15 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Composer `bin` entry for cresset/magequery. magequery is a Rust binary;
+// this package ships only this thin launcher, which fetches the matching
+// prebuilt `magequery` for the current platform on first use, caches it, and
+// execs it — the same model as `uv format` and Mago's `composer/bin/mago`.
+
+namespace Cresset\Magequery;
+
+require __DIR__ . '/../src/Launcher.php';
+
+exit(Launcher::main(array_slice($argv, 1)));
