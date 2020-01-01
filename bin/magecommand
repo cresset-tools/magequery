@@ -1,0 +1,16 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Composer `bin` entry for cresset/magequery's write-side binary. magecommand
+// is a Rust binary; this package ships only this thin launcher, which fetches
+// the matching prebuilt `magecommand` for the current platform on first use,
+// caches it, and execs it. Same model as bin/magequery — magequery stays the
+// package's `extra.bougie.default-bin`.
+
+namespace Cresset\Magequery;
+
+require __DIR__ . '/../src/Launcher.php';
+
+exit(Launcher::main(array_slice($argv, 1), 'magecommand'));
