@@ -1,0 +1,42 @@
+{
+    "name": "cresset/magequery",
+    "description": "A fast Magento 2 codebase inspector (magequery: DI resolution, plugins, events, cron, routes, config across scopes, live DB introspection) and its write-side companion (magecommand: DI compile, static content). Fetches prebuilt Rust binaries on demand.",
+    "type": "library",
+    "license": "EUPL-1.2",
+    "keywords": ["magento", "magento2", "cli", "developer-tools", "dependency-injection"],
+    "homepage": "https://github.com/cresset-tools/magequery",
+    "authors": [
+        { "name": "Jelle Besseling", "email": "jelle@pingiun.com" }
+    ],
+    "require": {
+        "php": ">=8.1"
+    },
+    "suggest": {
+        "ext-curl": "Faster, more reliable binary downloads",
+        "ext-zip": "Required to install on Windows (the binary ships as a .zip)"
+    },
+    "bin": ["bin/magequery", "bin/magecommand"],
+    "extra": {
+        "bougie": {
+            "default-bin": "bin/magequery",
+            "native-binary": {
+                "spec": 1,
+                "name": "magequery",
+                "tag-prefix": "magequery-v",
+                "base-urls": [
+                    "https://releases.bougie.tools/github/magequery/releases/download",
+                    "https://github.com/cresset-tools/magequery/releases/download"
+                ],
+                "targets": [
+                    "x86_64-unknown-linux-gnu",
+                    "x86_64-unknown-linux-musl",
+                    "aarch64-apple-darwin",
+                    "x86_64-pc-windows-msvc"
+                ],
+                "sigstore": {
+                    "repository": "cresset-tools/magequery"
+                }
+            }
+        }
+    }
+}
