@@ -352,7 +352,7 @@ fn render_resolution(res: &Resolution, root: &Path) {
         println!(
             "  {} = {}   {}",
             a.name,
-            render_arg(&a.value),
+            render_arg(&a.value, 1),
             style::path(&short_loc(&a.source, root))
         );
     }
@@ -377,18 +377,35 @@ fn render_resolution(res: &Resolution, root: &Path) {
     }
 }
 
-/// Render an argument value as a PHP-like, syntax-colored literal (recursive for arrays).
-fn render_arg(v: &ArgValue) -> String {
+/// Render an argument value as a PHP-like, syntax-colored literal.
+///
+/// `depth` is the indentation level (in 2-space units) of this value's own
+/// bracket line. Arrays that contain a nested non-empty array break onto
+/// multiple lines, indented one level deeper; everything else stays inline.
+fn render_arg(v: &ArgValue, depth: usize) -> String {
     match v {
         // Object reference — leading backslash like a FQCN, no quotes.
         ArgValue::Object(c) => style::class(&format!("\\{}", c.as_str())),
         ArgValue::Scalar { xsi_type, text } => render_scalar(xsi_type, text),
+        ArgValue::Array(items) if items.is_empty() => "[]".to_string(),
         ArgValue::Array(items) => {
-            let inner: Vec<String> = items
+            let entry = |k: &str, val: &ArgValue, d: usize| {
+                format!("{} => {}", style::string_lit(&format!("'{k}'")), render_arg(val, d))
+            };
+            // Inline unless a child is itself a non-empty array (then it gets multi-line).
+            let multiline = items
                 .iter()
-                .map(|(k, val)| format!("{} => {}", style::string_lit(&format!("'{k}'")), render_arg(val)))
-                .collect();
-            format!("[{}]", inner.join(", "))
+                .any(|(_, val)| matches!(val, ArgValue::Array(inner) if !inner.is_empty()));
+            if multiline {
+                let item_pad = "  ".repeat(depth + 1);
+                let close_pad = "  ".repeat(depth);
+                let inner: Vec<String> =
+                    items.iter().map(|(k, val)| format!("{item_pad}{}", entry(k, val, depth + 1))).collect();
+                format!("[\n{}\n{close_pad}]", inner.join(",\n"))
+            } else {
+                let inner: Vec<String> = items.iter().map(|(k, val)| entry(k, val, depth)).collect();
+                format!("[{}]", inner.join(", "))
+            }
         }
         ArgValue::Null => style::keyword("null"),
     }
