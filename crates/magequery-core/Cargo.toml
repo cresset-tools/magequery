@@ -6,9 +6,19 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+# Live database connection testing (pulls in the `mysql` client).
+db = ["dep:mysql"]
+
 [dependencies]
 thiserror.workspace = true
 serde = { workspace = true }
 serde_json = "1"
 quick-xml.workspace = true
 rayon = "1"
+chacha20poly1305 = "0.10"
+aes = "0.8"
+simple-rijndael = "0.3"
+base64 = "0.22"
+mysql = { version = "25", optional = true, default-features = false, features = ["minimal"] }

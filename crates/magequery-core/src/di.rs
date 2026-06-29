@@ -158,6 +158,34 @@ fn merge_area(parsed: &[Parsed], area: Area, mut base: AreaConfig) -> AreaConfig
     base
 }
 
+/// Convert a parse-level `RawArg` into a `model::ArgValue`, attaching a `Source` to every
+/// array item from the file being merged (`p`).
+fn to_arg_value(raw: &parse::RawArg, p: &Parsed) -> crate::model::ArgValue {
+    use crate::model::{ArgItem, ArgValue};
+    match raw {
+        parse::RawArg::Object(c) => ArgValue::Object(c.clone()),
+        parse::RawArg::Scalar { xsi_type, text } => {
+            ArgValue::Scalar { xsi_type: xsi_type.clone(), text: text.clone() }
+        }
+        parse::RawArg::Null => ArgValue::Null,
+        parse::RawArg::Array(items) => ArgValue::Array(
+            items
+                .iter()
+                .map(|(key, value, line)| ArgItem {
+                    key: key.clone(),
+                    value: to_arg_value(value, p),
+                    source: Source {
+                        module: p.module.clone(),
+                        file: p.path.clone(),
+                        line: *line,
+                        area: p.area,
+                    },
+                })
+                .collect(),
+        ),
+    }
+}
+
 fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
     let file = match &p.file {
         Ok(f) => f,
@@ -178,16 +206,17 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
         cfg.virtual_types
             .insert(name.clone(), Located { value: type_.clone(), source: src(*line) });
     }
-    for (target, arg_name, value, line) in &file.arguments {
+    for (target, arg_name, raw, line) in &file.arguments {
+        let value = to_arg_value(raw, p);
         let by_name = cfg.type_args.entry(target.clone()).or_default();
         match by_name.get_mut(arg_name) {
             // Array arguments merge item-by-item across modules; others replace.
             Some(existing) => {
-                existing.value = existing.value.merged_with(value);
+                existing.value = existing.value.merged_with(&value);
                 existing.source = src(*line);
             }
             None => {
-                by_name.insert(arg_name.clone(), LocatedArg { value: value.clone(), source: src(*line) });
+                by_name.insert(arg_name.clone(), LocatedArg { value, source: src(*line) });
             }
         }
     }

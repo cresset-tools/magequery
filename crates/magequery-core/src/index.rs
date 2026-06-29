@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use crate::composer;
-use crate::di;
 use crate::error::{Diagnostic, Error, Result};
 use crate::ids::ModuleName;
 use crate::model::{Module, ModuleCheck, ModuleSource, UnregisteredModule};
@@ -15,9 +14,9 @@ use crate::parse;
 use crate::resolver;
 
 pub(crate) struct Index {
+    pub root: PathBuf,
     pub modules: Vec<Module>,
     pub check: ModuleCheck,
-    pub di: di::DiIndex,
     pub resolver: resolver::ClassResolver,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -111,16 +110,15 @@ impl Index {
             .collect();
         on_disk_not_in_config.sort_by(|a, b| a.name.cmp(&b.name));
 
-        let _p = std::time::Instant::now();
-        let di = di::build(&modules, &mut diagnostics);
-        prof("di.xml index", &_p);
-
+        // The di.xml index is built lazily (see `Magento`) — it's the expensive part and
+        // commands like `modules`/`events` don't need it. The resolver is cheap (PSR-4 maps
+        // only; PHP parsing is lazy), so it stays eager.
         let resolver = resolver::ClassResolver::build(&packages, &modules);
 
         Ok(Index {
+            root: root.to_path_buf(),
             modules,
             check: ModuleCheck { on_disk_not_in_config, in_config_not_on_disk },
-            di,
             resolver,
             diagnostics,
         })

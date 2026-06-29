@@ -14,6 +14,8 @@ pub(crate) struct PhpClass {
     /// Parent class(es) — one for a class, possibly several for an interface.
     pub extends: Vec<ClassName>,
     pub implements: Vec<ClassName>,
+    pub is_interface: bool,
+    pub is_abstract: bool,
 }
 
 enum Token {
@@ -28,6 +30,7 @@ pub(crate) fn parse_header(src: &str) -> Option<PhpClass> {
     let mut namespace = String::new();
     let mut uses: HashMap<String, String> = HashMap::new();
     let mut depth: i32 = 0;
+    let mut is_abstract = false;
     let mut i = 0;
 
     while i < tokens.len() {
@@ -42,11 +45,16 @@ pub(crate) fn parse_header(src: &str) -> Option<PhpClass> {
             Token::Ident(kw) if depth == 0 && kw == "use" => {
                 i = parse_use(&tokens, i + 1, &mut uses);
             }
+            Token::Ident(kw) if depth == 0 && kw == "abstract" => {
+                is_abstract = true;
+                i += 1;
+            }
             Token::Ident(kw)
                 if depth == 0
                     && matches!(kw.as_str(), "class" | "interface" | "trait" | "enum") =>
             {
-                return parse_type_header(&tokens, i + 1, &namespace, &uses);
+                let is_interface = kw == "interface";
+                return parse_type_header(&tokens, i + 1, &namespace, &uses, is_interface, is_abstract);
             }
             Token::Punct('{') => {
                 depth += 1;
@@ -67,6 +75,8 @@ fn parse_type_header(
     mut i: usize,
     namespace: &str,
     uses: &HashMap<String, String>,
+    is_interface: bool,
+    is_abstract: bool,
 ) -> Option<PhpClass> {
     let name = match tokens.get(i) {
         Some(Token::Ident(n)) => n.clone(),
@@ -101,7 +111,7 @@ fn parse_type_header(
     } else {
         ClassName::new(format!("{namespace}\\{name}"))
     };
-    Some(PhpClass { fqcn, extends, implements })
+    Some(PhpClass { fqcn, extends, implements, is_interface, is_abstract })
 }
 
 /// Parse a `use` statement starting at `i` (after the `use` keyword). Records imports into

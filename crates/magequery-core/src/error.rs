@@ -44,6 +44,10 @@ pub enum Error {
     /// so its inheritance chain (and thus inherited plugins) can't be determined.
     #[error("cannot resolve a source file for {class} (no PSR-4 autoload match)")]
     Unautoloadable { class: ClassName },
+
+    /// A database operation failed (connection, query, or the `db` feature is off).
+    #[error("database: {0}")]
+    Db(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

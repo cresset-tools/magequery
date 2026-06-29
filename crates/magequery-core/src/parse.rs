@@ -8,7 +8,6 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
 use crate::ids::{ClassName, EventName, ModuleName};
-use crate::model::ArgValue;
 
 /// Extract the `modules` map from `config.php` source, preserving declaration order
 /// (which is Magento's authoritative, already-sequence-resolved load order).
@@ -158,7 +157,7 @@ pub(crate) struct DiFile {
     /// `(name, type, line)`
     pub virtual_types: Vec<(ClassName, ClassName, u32)>,
     /// `(target type/virtualType, argument name, value, line)`
-    pub arguments: Vec<(ClassName, String, ArgValue, u32)>,
+    pub arguments: Vec<(ClassName, String, RawArg, u32)>,
 }
 
 /// Parse one di.xml file. Tracks the enclosing `<type>`/`<virtualType>` so `<plugin>` and
@@ -203,11 +202,21 @@ pub(crate) fn di_xml(xml: &str) -> Result<DiFile, String> {
     Ok(out)
 }
 
+/// A parsed argument value, carrying per-array-item line numbers but no full `Source` yet
+/// (module/file/area are added at merge time in `di.rs`, where the file context is known).
+pub(crate) enum RawArg {
+    Object(ClassName),
+    Scalar { xsi_type: String, text: String },
+    /// `(key, value, line)` per item.
+    Array(Vec<(String, RawArg, u32)>),
+    Null,
+}
+
 /// A frame on the argument-parse stack: the top-level `<arguments>` list (key `None`) or an
 /// `xsi:type="array"` (its key + the line it opened on).
 struct ArgFrame {
     key: Option<(String, u32)>,
-    items: Vec<(String, ArgValue, u32)>,
+    items: Vec<(String, RawArg, u32)>,
 }
 
 /// Parse an `<arguments>` subtree (reader positioned just after the opening tag), returning
@@ -216,7 +225,7 @@ fn parse_arguments(
     reader: &mut Reader<&[u8]>,
     lines: &LineMap,
     buf: &mut Vec<u8>,
-) -> Vec<(String, ArgValue, u32)> {
+) -> Vec<(String, RawArg, u32)> {
     let mut stack = vec![ArgFrame { key: None, items: Vec::new() }];
     // The scalar leaf currently being read: (key, xsi_type, line, accumulated text).
     let mut leaf: Option<(String, String, u32, String)> = None;
@@ -239,7 +248,7 @@ fn parse_arguments(
             Ok(Event::Empty(e)) if matches!(e.name().as_ref(), b"argument" | b"item") => {
                 let key = attr(&e, b"name").unwrap_or_default();
                 let xsi = attr(&e, b"xsi:type").unwrap_or_default();
-                let value = if xsi == "array" { ArgValue::Array(Vec::new()) } else { scalar(&xsi, "") };
+                let value = if xsi == "array" { RawArg::Array(Vec::new()) } else { scalar(&xsi, "") };
                 push_item(&mut stack, key, value, line);
             }
             Ok(Event::Text(e)) => {
@@ -256,10 +265,7 @@ fn parse_arguments(
                         // Closing an array frame.
                         let frame = stack.pop().unwrap();
                         let (key, kline) = frame.key.unwrap_or_default();
-                        let arr = ArgValue::Array(
-                            frame.items.into_iter().map(|(k, v, _)| (k, v)).collect(),
-                        );
-                        push_item(&mut stack, key, arr, kline);
+                        push_item(&mut stack, key, RawArg::Array(frame.items), kline);
                     }
                 }
                 _ => {}
@@ -270,19 +276,19 @@ fn parse_arguments(
     stack.pop().map(|f| f.items).unwrap_or_default()
 }
 
-fn push_item(stack: &mut [ArgFrame], key: String, value: ArgValue, line: u32) {
+fn push_item(stack: &mut [ArgFrame], key: String, value: RawArg, line: u32) {
     if let Some(frame) = stack.last_mut() {
         frame.items.push((key, value, line));
     }
 }
 
 /// Build a non-array value from an xsi:type and text.
-fn scalar(xsi: &str, text: &str) -> ArgValue {
+fn scalar(xsi: &str, text: &str) -> RawArg {
     match xsi {
-        "object" => ArgValue::Object(ClassName::new(text.trim_start_matches('\\'))),
-        "null" => ArgValue::Null,
-        _ if text.is_empty() && xsi.is_empty() => ArgValue::Null,
-        _ => ArgValue::Scalar { xsi_type: xsi.to_string(), text: text.to_string() },
+        "object" => RawArg::Object(ClassName::new(text.trim_start_matches('\\'))),
+        "null" => RawArg::Null,
+        _ if text.is_empty() && xsi.is_empty() => RawArg::Null,
+        _ => RawArg::Scalar { xsi_type: xsi.to_string(), text: text.to_string() },
     }
 }
 
@@ -561,4 +567,583 @@ pub(crate) fn webapi_xml(xml: &str) -> Vec<RawWebapi> {
         buf.clear();
     }
     out
+}
+
+// --- config.xml (<default>/<websites>/<stores> system-config defaults) ---
+
+struct CfgFrame {
+    name: String,
+    text: String,
+    had_children: bool,
+    line: u32,
+}
+
+/// Flatten a `config.xml` into `(scope, path, value, line)` leaves. The first element under
+/// `<config>` is the scope: `default` (→ scope `default`) or `websites`/`stores` (→
+/// `<type>/<code>`), with the remaining nesting forming the `a/b/c` config path.
+pub(crate) fn config_xml_defaults(xml: &str) -> Vec<(String, String, String, u32)> {
+    let lines = LineMap::new(xml);
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out = Vec::new();
+    let mut stack: Vec<CfgFrame> = Vec::new();
+
+    loop {
+        let ev = reader.read_event_into(&mut buf);
+        let line = lines.line(reader.buffer_position() as usize);
+        match ev {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                if let Some(top) = stack.last_mut() {
+                    top.had_children = true;
+                }
+                stack.push(CfgFrame {
+                    name: local_name(&e),
+                    text: String::new(),
+                    had_children: false,
+                    line,
+                });
+            }
+            Ok(Event::Empty(e)) => {
+                if let Some(top) = stack.last_mut() {
+                    top.had_children = true;
+                }
+                emit_leaf(&stack, &local_name(&e), "", line, &mut out);
+            }
+            Ok(Event::Text(e)) => {
+                if let Some(top) = stack.last_mut() {
+                    top.text.push_str(&e.unescape().unwrap_or_default());
+                }
+            }
+            Ok(Event::End(_)) => {
+                if let Some(frame) = stack.pop() {
+                    if !frame.had_children {
+                        let text = frame.text.trim();
+                        if !text.is_empty() {
+                            emit_leaf(&stack, &frame.name, text, frame.line, &mut out);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+fn emit_leaf(
+    ancestors: &[CfgFrame],
+    leaf: &str,
+    value: &str,
+    line: u32,
+    out: &mut Vec<(String, String, String, u32)>,
+) {
+    // ancestors includes the <config> root at [0]; drop it.
+    let mut names: Vec<&str> = ancestors.iter().map(|f| f.name.as_str()).collect();
+    names.push(leaf);
+    if names.len() < 2 {
+        return;
+    }
+    let names = &names[1..]; // skip <config>
+
+    let (scope, rest): (String, &[&str]) = match names[0] {
+        "default" => ("default".to_string(), &names[1..]),
+        "websites" | "stores" if names.len() >= 2 => {
+            (format!("{}/{}", names[0], names[1]), &names[2..])
+        }
+        _ => return,
+    };
+    if rest.is_empty() {
+        return;
+    }
+    out.push((scope, rest.join("/"), value.to_string(), line));
+}
+
+fn local_name(e: &BytesStart) -> String {
+    let raw = e.name();
+    let name = raw.as_ref();
+    let name = name.rsplit(|&b| b == b':').next().unwrap_or(name);
+    String::from_utf8_lossy(name).into_owned()
+}
+
+/// `true` only for an explicit `="true"`. Used for the boolean schema attributes
+/// (`nullable`, `unsigned`, `identity`, `disabled`) whose absence means `false`.
+fn attr_true(e: &BytesStart, key: &[u8]) -> bool {
+    attr(e, key).as_deref() == Some("true")
+}
+
+// ---------- declarative schema (db_schema.xml) ----------
+
+pub(crate) struct RawColumn {
+    pub name: String,
+    pub col_type: String,
+    pub nullable: bool,
+    pub unsigned: bool,
+    pub length: Option<String>,
+    pub precision: Option<String>,
+    pub scale: Option<String>,
+    pub default: Option<String>,
+    pub identity: bool,
+    pub comment: Option<String>,
+    pub disabled: bool,
+    pub line: u32,
+}
+
+pub(crate) struct RawConstraint {
+    pub id: String,
+    pub kind: String,
+    pub columns: Vec<String>,
+    pub reference_table: Option<String>,
+    pub reference_column: Option<String>,
+    pub on_delete: Option<String>,
+    pub disabled: bool,
+    pub line: u32,
+}
+
+pub(crate) struct RawIndex {
+    pub id: String,
+    pub index_type: String,
+    pub columns: Vec<String>,
+    pub disabled: bool,
+    pub line: u32,
+}
+
+pub(crate) struct RawTable {
+    pub name: String,
+    pub engine: Option<String>,
+    pub resource: Option<String>,
+    pub comment: Option<String>,
+    pub disabled: bool,
+    pub columns: Vec<RawColumn>,
+    pub constraints: Vec<RawConstraint>,
+    pub indexes: Vec<RawIndex>,
+    pub line: u32,
+}
+
+/// Parse a module's `db_schema.xml` into raw tables (each carrying line numbers; module/area
+/// provenance is attached at merge). A `<column>` directly under `<table>` is a definition
+/// (carries an `xsi:type`); a `<column>` inside a `<constraint>`/`<index>` is a column
+/// *reference* (only `name`), so we route it by the current context.
+pub(crate) fn db_schema_xml(xml: &str) -> Vec<RawTable> {
+    let lines = LineMap::new(xml);
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut tables: Vec<RawTable> = Vec::new();
+    // Index into the current table's `constraints`/`indexes` when inside one (for child columns).
+    let mut in_constraint: Option<usize> = None;
+    let mut in_index: Option<usize> = None;
+
+    loop {
+        let ev = reader.read_event_into(&mut buf);
+        let line = lines.line(reader.buffer_position() as usize);
+        match ev {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                schema_element(&e, line, false, &mut tables, &mut in_constraint, &mut in_index)
+            }
+            Ok(Event::Empty(e)) => {
+                schema_element(&e, line, true, &mut tables, &mut in_constraint, &mut in_index)
+            }
+            Ok(Event::End(e)) => match e.name().as_ref() {
+                // A self-closing (`Empty`) constraint/index never opened a context, so only
+                // the matching `End` of a real `Start` clears it.
+                b"constraint" => in_constraint = None,
+                b"index" => in_index = None,
+                _ => {}
+            },
+            _ => {}
+        }
+        buf.clear();
+    }
+    tables
+}
+
+/// Handle one `Start`/`Empty` schema element. `is_empty` marks a self-closing element, which
+/// must not open a child context (it has no matching `End`).
+fn schema_element(
+    e: &BytesStart,
+    line: u32,
+    is_empty: bool,
+    tables: &mut Vec<RawTable>,
+    in_constraint: &mut Option<usize>,
+    in_index: &mut Option<usize>,
+) {
+    match local_name(e).as_str() {
+        "table" => tables.push(RawTable {
+            name: attr(e, b"name").unwrap_or_default(),
+            engine: attr(e, b"engine"),
+            resource: attr(e, b"resource"),
+            comment: attr(e, b"comment"),
+            disabled: attr_true(e, b"disabled"),
+            columns: Vec::new(),
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            line,
+        }),
+        "column" => {
+            let Some(t) = tables.last_mut() else { return };
+            if let Some(ci) = *in_index {
+                if let Some(name) = attr(e, b"name") {
+                    t.indexes[ci].columns.push(name);
+                }
+            } else if let Some(ci) = *in_constraint {
+                if let Some(name) = attr(e, b"name") {
+                    t.constraints[ci].columns.push(name);
+                }
+            } else {
+                t.columns.push(RawColumn {
+                    name: attr(e, b"name").unwrap_or_default(),
+                    col_type: xsi_type(e).unwrap_or_default(),
+                    nullable: attr_true(e, b"nullable"),
+                    unsigned: attr_true(e, b"unsigned"),
+                    length: attr(e, b"length"),
+                    precision: attr(e, b"precision"),
+                    scale: attr(e, b"scale"),
+                    default: attr(e, b"default"),
+                    identity: attr_true(e, b"identity"),
+                    comment: attr(e, b"comment"),
+                    disabled: attr_true(e, b"disabled"),
+                    line,
+                });
+            }
+        }
+        "constraint" => {
+            let Some(t) = tables.last_mut() else { return };
+            // Foreign keys reference a single local column via the `column` attr.
+            let columns = attr(e, b"column").into_iter().collect();
+            t.constraints.push(RawConstraint {
+                id: attr(e, b"referenceId").unwrap_or_default(),
+                kind: xsi_type(e).unwrap_or_default(),
+                columns,
+                reference_table: attr(e, b"referenceTable"),
+                reference_column: attr(e, b"referenceColumn"),
+                on_delete: attr(e, b"onDelete"),
+                disabled: attr_true(e, b"disabled"),
+                line,
+            });
+            if !is_empty {
+                *in_constraint = Some(t.constraints.len() - 1);
+            }
+        }
+        "index" => {
+            let Some(t) = tables.last_mut() else { return };
+            t.indexes.push(RawIndex {
+                id: attr(e, b"referenceId").unwrap_or_default(),
+                index_type: attr(e, b"indexType").unwrap_or_else(|| "btree".into()),
+                columns: Vec::new(),
+                disabled: attr_true(e, b"disabled"),
+                line,
+            });
+            if !is_empty {
+                *in_index = Some(t.indexes.len() - 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The `xsi:type` attribute (the schema element discriminator), namespace-prefix agnostic.
+fn xsi_type(e: &BytesStart) -> Option<String> {
+    e.attributes().flatten().find_map(|a| {
+        let key = a.key.as_ref();
+        (key == b"xsi:type" || key.ends_with(b":type")).then(|| String::from_utf8_lossy(&a.value).into_owned())
+    })
+}
+
+// ---------- admin system configuration (adminhtml/system.xml) ----------
+
+pub(crate) struct RawSysTab {
+    pub id: String,
+    pub label: String,
+}
+
+pub(crate) struct RawSysField {
+    pub id: String,
+    pub label: String,
+    pub field_type: String,
+    pub config_path: Option<String>,
+    pub source_model: Option<String>,
+    pub backend_model: Option<String>,
+    pub show_default: bool,
+    pub show_website: bool,
+    pub show_store: bool,
+    pub line: u32,
+}
+
+pub(crate) struct RawSysGroup {
+    pub id: String,
+    pub label: String,
+    pub fields: Vec<RawSysField>,
+}
+
+pub(crate) struct RawSysSection {
+    pub id: String,
+    pub label: String,
+    pub tab: Option<String>,
+    pub resource: Option<String>,
+    pub groups: Vec<RawSysGroup>,
+}
+
+pub(crate) struct RawSystem {
+    pub tabs: Vec<RawSysTab>,
+    pub sections: Vec<RawSysSection>,
+}
+
+/// Where the next text run belongs (the inner leaf elements of system.xml carry their value
+/// as text, not attributes).
+enum SysText {
+    TabLabel,
+    SecLabel,
+    SecTab,
+    SecResource,
+    GrpLabel,
+    FieldLabel,
+    FieldSource,
+    FieldBackend,
+    FieldConfigPath,
+}
+
+/// Parse a module's `adminhtml/system.xml` into the tab/section/group/field tree (raw, with
+/// line numbers; provenance + cross-module merge happen in `breadth::SystemConfigIndex`).
+pub(crate) fn system_xml(xml: &str) -> RawSystem {
+    let lines = LineMap::new(xml);
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+
+    let mut tabs: Vec<RawSysTab> = Vec::new();
+    let mut sections: Vec<RawSysSection> = Vec::new();
+    let mut cur_tab: Option<usize> = None;
+    let mut cur_section: Option<usize> = None;
+    let mut cur_group: Option<usize> = None;
+    let mut cur_field: Option<usize> = None;
+    let mut target: Option<SysText> = None;
+
+    loop {
+        let ev = reader.read_event_into(&mut buf);
+        let line = lines.line(reader.buffer_position() as usize);
+        match ev {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
+                "tab" if attr(&e, b"id").is_some() => {
+                    tabs.push(RawSysTab { id: attr(&e, b"id").unwrap_or_default(), label: String::new() });
+                    cur_tab = Some(tabs.len() - 1);
+                }
+                // A `<tab>` with no id, inside a section, is the section's tab *reference*.
+                "tab" => target = Some(SysText::SecTab),
+                "section" => {
+                    sections.push(RawSysSection {
+                        id: attr(&e, b"id").unwrap_or_default(),
+                        label: String::new(),
+                        tab: None,
+                        resource: None,
+                        groups: Vec::new(),
+                    });
+                    cur_tab = None;
+                    cur_section = Some(sections.len() - 1);
+                    cur_group = None;
+                    cur_field = None;
+                }
+                "group" => {
+                    if let Some(s) = cur_section {
+                        sections[s].groups.push(RawSysGroup {
+                            id: attr(&e, b"id").unwrap_or_default(),
+                            label: String::new(),
+                            fields: Vec::new(),
+                        });
+                        cur_group = Some(sections[s].groups.len() - 1);
+                        cur_field = None;
+                    }
+                }
+                "field" => {
+                    if let (Some(s), Some(g)) = (cur_section, cur_group) {
+                        sections[s].groups[g].fields.push(RawSysField {
+                            id: attr(&e, b"id").unwrap_or_default(),
+                            label: String::new(),
+                            field_type: attr(&e, b"type").unwrap_or_default(),
+                            config_path: None,
+                            source_model: None,
+                            backend_model: None,
+                            show_default: attr(&e, b"showInDefault").as_deref() == Some("1"),
+                            show_website: attr(&e, b"showInWebsite").as_deref() == Some("1"),
+                            show_store: attr(&e, b"showInStore").as_deref() == Some("1"),
+                            line,
+                        });
+                        cur_field = Some(sections[s].groups[g].fields.len() - 1);
+                    }
+                }
+                // Leaf text elements — route by the innermost open container.
+                "label" => {
+                    target = Some(if cur_field.is_some() {
+                        SysText::FieldLabel
+                    } else if cur_group.is_some() {
+                        SysText::GrpLabel
+                    } else if cur_section.is_some() {
+                        SysText::SecLabel
+                    } else {
+                        SysText::TabLabel
+                    });
+                }
+                "resource" => target = Some(SysText::SecResource),
+                "source_model" => target = Some(SysText::FieldSource),
+                "backend_model" => target = Some(SysText::FieldBackend),
+                "config_path" => target = Some(SysText::FieldConfigPath),
+                _ => {}
+            },
+            Ok(Event::Text(e)) => {
+                let Some(t) = &target else { continue };
+                let text = e.unescape().unwrap_or_default().trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                write_sys_text(t, &text, &mut tabs, &mut sections, cur_tab, cur_section, cur_group, cur_field);
+            }
+            Ok(Event::End(e)) => match e.name().as_ref() {
+                // Closing a leaf element ends its text capture.
+                b"label" | b"tab" | b"resource" | b"source_model" | b"backend_model"
+                | b"config_path" => target = None,
+                b"field" => cur_field = None,
+                b"group" => cur_group = None,
+                b"section" => {
+                    cur_section = None;
+                    cur_group = None;
+                    cur_field = None;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    RawSystem { tabs, sections }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_sys_text(
+    target: &SysText,
+    text: &str,
+    tabs: &mut [RawSysTab],
+    sections: &mut [RawSysSection],
+    cur_tab: Option<usize>,
+    cur_section: Option<usize>,
+    cur_group: Option<usize>,
+    cur_field: Option<usize>,
+) {
+    match target {
+        SysText::TabLabel => {
+            if let Some(t) = cur_tab {
+                tabs[t].label = text.to_string();
+            }
+        }
+        SysText::SecLabel => {
+            if let Some(s) = cur_section {
+                sections[s].label = text.to_string();
+            }
+        }
+        SysText::SecTab => {
+            if let Some(s) = cur_section {
+                sections[s].tab = Some(text.to_string());
+            }
+        }
+        SysText::SecResource => {
+            if let Some(s) = cur_section {
+                sections[s].resource = Some(text.to_string());
+            }
+        }
+        SysText::GrpLabel => {
+            if let (Some(s), Some(g)) = (cur_section, cur_group) {
+                sections[s].groups[g].label = text.to_string();
+            }
+        }
+        SysText::FieldLabel | SysText::FieldSource | SysText::FieldBackend | SysText::FieldConfigPath => {
+            if let (Some(s), Some(g), Some(f)) = (cur_section, cur_group, cur_field) {
+                let field = &mut sections[s].groups[g].fields[f];
+                match target {
+                    SysText::FieldLabel => field.label = text.to_string(),
+                    SysText::FieldSource => field.source_model = Some(text.to_string()),
+                    SysText::FieldBackend => field.backend_model = Some(text.to_string()),
+                    SysText::FieldConfigPath => field.config_path = Some(text.to_string()),
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::db_schema_xml;
+
+    const XML: &str = r#"<?xml version="1.0"?>
+<schema xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <table name="store_group" resource="default" engine="innodb" comment="Store Groups">
+        <column xsi:type="smallint" name="group_id" unsigned="true" nullable="false" identity="true"/>
+        <column xsi:type="varchar" name="code" nullable="true" length="32"/>
+        <column xsi:type="decimal" name="rate" scale="4" precision="12" nullable="true"/>
+        <column xsi:type="int" name="legacy" disabled="true"/>
+        <constraint xsi:type="primary" referenceId="PRIMARY">
+            <column name="group_id"/>
+        </constraint>
+        <constraint xsi:type="foreign" referenceId="FK_GROUP_WEBSITE" table="store_group"
+                    column="website_id" referenceTable="store_website" referenceColumn="website_id"
+                    onDelete="CASCADE"/>
+        <index referenceId="IDX_CODE" indexType="btree">
+            <column name="code"/>
+        </index>
+    </table>
+</schema>"#;
+
+    #[test]
+    fn parses_columns_constraints_indexes() {
+        let tables = db_schema_xml(XML);
+        assert_eq!(tables.len(), 1);
+        let t = &tables[0];
+        assert_eq!(t.name, "store_group");
+        assert_eq!(t.engine.as_deref(), Some("innodb"));
+
+        // Column definitions (the `disabled` one is still parsed; it's dropped at merge time).
+        let names: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["group_id", "code", "rate", "legacy"]);
+        let group_id = &t.columns[0];
+        assert_eq!(group_id.col_type, "smallint");
+        assert!(group_id.unsigned && group_id.identity && !group_id.nullable);
+        assert_eq!(t.columns[1].length.as_deref(), Some("32"));
+        assert_eq!((t.columns[2].precision.as_deref(), t.columns[2].scale.as_deref()), (Some("12"), Some("4")));
+        assert!(t.columns[3].disabled);
+
+        // A `<column>` inside a constraint/index is a *reference*, not a new column definition.
+        assert_eq!(t.columns.len(), 4);
+
+        // Primary (child column) vs foreign (self-closing, attrs only).
+        let primary = t.constraints.iter().find(|c| c.id == "PRIMARY").unwrap();
+        assert_eq!(primary.kind, "primary");
+        assert_eq!(primary.columns, ["group_id"]);
+        let fk = t.constraints.iter().find(|c| c.id == "FK_GROUP_WEBSITE").unwrap();
+        assert_eq!(fk.kind, "foreign");
+        assert_eq!(fk.columns, ["website_id"]); // from the `column` attr
+        assert_eq!(fk.reference_table.as_deref(), Some("store_website"));
+        assert_eq!(fk.on_delete.as_deref(), Some("CASCADE"));
+
+        // The index's child column must NOT have leaked into the table columns.
+        let idx = &t.indexes[0];
+        assert_eq!(idx.id, "IDX_CODE");
+        assert_eq!(idx.columns, ["code"]);
+    }
+
+    #[test]
+    fn self_closing_foreign_does_not_capture_following_columns() {
+        // A foreign constraint is `Empty` (no End); the next table's columns must stay separate.
+        let xml = r#"<schema xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <table name="a">
+                <constraint xsi:type="foreign" referenceId="FK" column="x" referenceTable="b" referenceColumn="y"/>
+                <column xsi:type="int" name="after_fk"/>
+            </table>
+        </schema>"#;
+        let tables = db_schema_xml(xml);
+        let t = &tables[0];
+        // `after_fk` is a real column def, not swallowed as the FK's reference column.
+        assert_eq!(t.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["after_fk"]);
+        assert_eq!(t.constraints[0].columns, ["x"]);
+    }
 }

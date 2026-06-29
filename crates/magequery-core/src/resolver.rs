@@ -12,6 +12,19 @@ use crate::ids::ClassName;
 use crate::model::{InterceptKind, Module, ModuleSource, PluginMethod};
 use crate::php::{self, PhpClass};
 
+/// Base types that mark a controller action (an implementation of any of these is an
+/// endpoint). `ActionInterface` covers the modern `HttpGet/PostActionInterface` (which
+/// extend it) and the legacy `Action\Action` (which implements it); the others are belt-and-
+/// suspenders for older/admin bases.
+fn is_action_base(c: &ClassName) -> bool {
+    matches!(
+        c.as_str(),
+        "Magento\\Framework\\App\\ActionInterface"
+            | "Magento\\Framework\\App\\Action\\Action"
+            | "Magento\\Backend\\App\\AbstractAction"
+    )
+}
+
 pub(crate) struct ClassResolver {
     /// `(namespace prefix ending in '\', source dirs)`, sorted longest-prefix-first so PSR-4
     /// longest-match wins.
@@ -63,6 +76,17 @@ impl ClassResolver {
     /// Whether the class resolves to an existing source file.
     pub fn exists(&self, class: &ClassName) -> bool {
         self.file_for(class).is_some()
+    }
+
+    /// Whether `class` is a concrete controller action: an instantiable class (not an
+    /// interface or abstract base) whose ancestors include a Magento action base.
+    pub fn is_action(&self, class: &ClassName) -> bool {
+        match self.header(class) {
+            Some(h) if !h.is_interface && !h.is_abstract => {
+                self.ancestors(class).iter().any(is_action_base)
+            }
+            _ => false,
+        }
     }
 
     /// The parsed header for `class`, reading + parsing on first request and caching.

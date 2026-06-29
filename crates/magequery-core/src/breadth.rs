@@ -5,8 +5,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::ids::{Area, EventName};
-use crate::model::{CronJob, Module, Observer, Route, WebapiRoute};
+use rayon::prelude::*;
+
+use std::path::Path;
+
+use crate::ids::{Area, EventName, ModuleName};
+use crate::model::{
+    CronJob, DbColumn, DbConstraint, DbIndex, DbTable, Module, Observer, Route, SystemField,
+    WebapiRoute,
+};
 use crate::parse;
 use crate::source::Source;
 
@@ -26,8 +33,25 @@ fn area_path(m: &Module, area: Area, file: &str) -> PathBuf {
     }
 }
 
-fn read(path: &PathBuf) -> Option<String> {
-    std::fs::read_to_string(path).ok()
+/// Read + parse `etc/[<area>/]<file>` for every module **in parallel**, returning
+/// `(module index, path, parsed)` for the files that exist, in module (load) order — so the
+/// caller merges sequentially and deterministically. `rayon` preserves the collect order.
+fn read_parse<T: Send>(
+    modules: &[Module],
+    area: Area,
+    file: &str,
+    parse: impl Fn(&str) -> T + Sync,
+) -> Vec<(usize, PathBuf, T)> {
+    let jobs: Vec<(usize, PathBuf)> =
+        modules.iter().enumerate().map(|(i, m)| (i, area_path(m, area, file))).collect();
+    let parsed: Vec<Option<T>> = jobs
+        .par_iter()
+        .map(|(_, p)| std::fs::read_to_string(p).ok().map(|t| parse(t.as_str())))
+        .collect();
+    jobs.into_iter()
+        .zip(parsed)
+        .filter_map(|((i, p), r)| r.map(|t| (i, p, t)))
+        .collect()
 }
 
 // ---------- events / observers ----------
@@ -41,11 +65,11 @@ pub(crate) struct EventIndex {
 impl EventIndex {
     pub fn build(modules: &[Module]) -> Self {
         let mut global = EventMap::new();
-        merge_events(&mut global, modules, Area::Global);
+        apply_events(&mut global, modules, Area::Global);
         let mut by_area = HashMap::new();
         for area in REAL_AREAS {
             let mut cfg = global.clone();
-            merge_events(&mut cfg, modules, area);
+            apply_events(&mut cfg, modules, area);
             by_area.insert(area, cfg);
         }
         by_area.insert(Area::Global, global);
@@ -75,12 +99,11 @@ impl EventIndex {
     }
 }
 
-fn merge_events(out: &mut EventMap, modules: &[Module], area: Area) {
-    for m in modules {
-        let path = area_path(m, area, "events.xml");
-        let Some(text) = read(&path) else { continue };
-        for (event, obs) in parse::events_xml(&text) {
-            let source = Source { module: m.name.clone(), file: path.clone(), line: obs.line, area };
+fn apply_events(out: &mut EventMap, modules: &[Module], area: Area) {
+    for (i, path, observers) in read_parse(modules, area, "events.xml", parse::events_xml) {
+        let module = &modules[i].name;
+        for (event, obs) in observers {
+            let source = Source { module: module.clone(), file: path.clone(), line: obs.line, area };
             let by_name = out.entry(event.clone()).or_default();
             match by_name.get_mut(&obs.name) {
                 Some(existing) => {
@@ -121,12 +144,11 @@ pub(crate) struct CronIndex {
 impl CronIndex {
     pub fn build(modules: &[Module]) -> Self {
         let mut groups: HashMap<String, HashMap<String, CronJob>> = HashMap::new();
-        for m in modules {
-            let path = m.path.join("etc/crontab.xml");
-            let Some(text) = read(&path) else { continue };
-            for job in parse::crontab_xml(&text) {
+        for (i, path, jobs) in read_parse(modules, Area::Global, "crontab.xml", parse::crontab_xml) {
+            let module = &modules[i].name;
+            for job in jobs {
                 let source =
-                    Source { module: m.name.clone(), file: path.clone(), line: job.line, area: Area::Crontab };
+                    Source { module: module.clone(), file: path.clone(), line: job.line, area: Area::Crontab };
                 groups.entry(job.group.clone()).or_default().insert(
                     job.name.clone(),
                     CronJob {
@@ -169,10 +191,9 @@ impl RouteIndex {
         let mut by_area = HashMap::new();
         for area in [Area::Global, Area::Frontend, Area::Adminhtml, Area::WebapiRest, Area::Graphql] {
             let mut map: HashMap<(String, String), Route> = HashMap::new();
-            for m in modules {
-                let path = area_path(m, area, "routes.xml");
-                let Some(text) = read(&path) else { continue };
-                for r in parse::routes_xml(&text) {
+            for (i, path, parsed) in read_parse(modules, area, "routes.xml", parse::routes_xml) {
+                let module = &modules[i].name;
+                for r in parsed {
                     let key = (r.router.clone(), r.id.clone());
                     let entry = map.entry(key).or_insert_with(|| Route {
                         area,
@@ -181,7 +202,7 @@ impl RouteIndex {
                         front_name: r.front_name.clone(),
                         modules: Vec::new(),
                         source: Source {
-                            module: m.name.clone(),
+                            module: module.clone(),
                             file: path.clone(),
                             line: r.line,
                             area,
@@ -220,12 +241,11 @@ pub(crate) struct WebapiIndex {
 impl WebapiIndex {
     pub fn build(modules: &[Module]) -> Self {
         let mut routes = HashMap::new();
-        for m in modules {
-            let path = m.path.join("etc/webapi.xml");
-            let Some(text) = read(&path) else { continue };
-            for r in parse::webapi_xml(&text) {
+        for (i, path, parsed) in read_parse(modules, Area::Global, "webapi.xml", parse::webapi_xml) {
+            let module = &modules[i].name;
+            for r in parsed {
                 let source =
-                    Source { module: m.name.clone(), file: path.clone(), line: r.line, area: Area::WebapiRest };
+                    Source { module: module.clone(), file: path.clone(), line: r.line, area: Area::WebapiRest };
                 routes.insert(
                     (r.method.clone(), r.url.clone()),
                     WebapiRoute {
@@ -252,5 +272,271 @@ impl WebapiIndex {
             .collect();
         v.sort_by(|a, b| a.url.cmp(&b.url).then_with(|| a.method.cmp(&b.method)));
         v
+    }
+}
+
+// ---------- declarative schema (db_schema.xml) ----------
+
+pub(crate) struct SchemaIndex {
+    tables: HashMap<String, DbTable>,
+}
+
+impl SchemaIndex {
+    pub fn build(modules: &[Module]) -> Self {
+        let mut tables: HashMap<String, DbTable> = HashMap::new();
+        for (i, path, raw_tables) in read_parse(modules, Area::Global, "db_schema.xml", parse::db_schema_xml) {
+            let module = &modules[i].name;
+            for rt in raw_tables {
+                // A disabled table is dropped entirely (a later module can re-add it).
+                if rt.disabled {
+                    tables.remove(&rt.name);
+                    continue;
+                }
+                let entry = tables.entry(rt.name.clone()).or_insert_with(|| DbTable {
+                    name: rt.name.clone(),
+                    engine: None,
+                    resource: None,
+                    comment: None,
+                    columns: Vec::new(),
+                    constraints: Vec::new(),
+                    indexes: Vec::new(),
+                    source: Source { module: module.clone(), file: path.clone(), line: rt.line, area: Area::Global },
+                });
+                // Table-level attributes are last-wins; `source` keeps the first declaration.
+                if rt.engine.is_some() {
+                    entry.engine = rt.engine;
+                }
+                if rt.resource.is_some() {
+                    entry.resource = rt.resource;
+                }
+                if rt.comment.is_some() {
+                    entry.comment = rt.comment;
+                }
+                for rc in rt.columns {
+                    merge_column(entry, rc, module, &path);
+                }
+                for rcon in rt.constraints {
+                    merge_constraint(entry, rcon, module, &path);
+                }
+                for ri in rt.indexes {
+                    merge_index(entry, ri, module, &path);
+                }
+            }
+        }
+        Self { tables }
+    }
+
+    /// One table by exact name.
+    pub fn table(&self, name: &str) -> Option<DbTable> {
+        self.tables.get(name).cloned()
+    }
+
+    /// All tables whose name contains `filter` (or all, when `None`), sorted by name.
+    pub fn tables(&self, filter: Option<&str>) -> Vec<DbTable> {
+        let mut v: Vec<DbTable> = self
+            .tables
+            .values()
+            .filter(|t| filter.is_none_or(|f| t.name.contains(f)))
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
+    }
+}
+
+fn merge_column(t: &mut DbTable, rc: parse::RawColumn, module: &ModuleName, path: &Path) {
+    if rc.disabled {
+        t.columns.retain(|c| c.name != rc.name);
+        return;
+    }
+    let source = Source { module: module.clone(), file: path.to_path_buf(), line: rc.line, area: Area::Global };
+    let col = DbColumn {
+        name: rc.name.clone(),
+        col_type: rc.col_type,
+        nullable: rc.nullable,
+        unsigned: rc.unsigned,
+        length: rc.length,
+        precision: rc.precision,
+        scale: rc.scale,
+        default: rc.default,
+        identity: rc.identity,
+        comment: rc.comment,
+        source,
+    };
+    match t.columns.iter_mut().find(|c| c.name == rc.name) {
+        Some(existing) => *existing = col,
+        None => t.columns.push(col),
+    }
+}
+
+fn merge_constraint(t: &mut DbTable, rc: parse::RawConstraint, module: &ModuleName, path: &Path) {
+    if rc.disabled {
+        t.constraints.retain(|c| c.id != rc.id);
+        return;
+    }
+    let source = Source { module: module.clone(), file: path.to_path_buf(), line: rc.line, area: Area::Global };
+    let con = DbConstraint {
+        id: rc.id.clone(),
+        kind: rc.kind,
+        columns: rc.columns,
+        reference_table: rc.reference_table,
+        reference_column: rc.reference_column,
+        on_delete: rc.on_delete,
+        source,
+    };
+    match t.constraints.iter_mut().find(|c| c.id == rc.id) {
+        Some(existing) => *existing = con,
+        None => t.constraints.push(con),
+    }
+}
+
+fn merge_index(t: &mut DbTable, ri: parse::RawIndex, module: &ModuleName, path: &Path) {
+    if ri.disabled {
+        t.indexes.retain(|i| i.id != ri.id);
+        return;
+    }
+    let source = Source { module: module.clone(), file: path.to_path_buf(), line: ri.line, area: Area::Global };
+    let idx = DbIndex { id: ri.id.clone(), index_type: ri.index_type, columns: ri.columns, source };
+    match t.indexes.iter_mut().find(|i| i.id == ri.id) {
+        Some(existing) => *existing = idx,
+        None => t.indexes.push(idx),
+    }
+}
+
+// ---------- admin system configuration (adminhtml/system.xml) ----------
+
+#[derive(Default)]
+struct FieldBuild {
+    label: String,
+    field_type: String,
+    config_path: String,
+    scopes: Vec<String>,
+    source_model: Option<String>,
+    backend_model: Option<String>,
+    source: Option<Source>,
+}
+
+#[derive(Default)]
+struct GroupBuild {
+    label: String,
+    fields: HashMap<String, FieldBuild>,
+}
+
+#[derive(Default)]
+struct SectionBuild {
+    label: String,
+    tab: Option<String>,
+    groups: HashMap<String, GroupBuild>,
+}
+
+pub(crate) struct SystemConfigIndex {
+    tabs: HashMap<String, String>,
+    sections: HashMap<String, SectionBuild>,
+}
+
+impl SystemConfigIndex {
+    pub fn build(modules: &[Module]) -> Self {
+        let mut tabs: HashMap<String, String> = HashMap::new();
+        let mut sections: HashMap<String, SectionBuild> = HashMap::new();
+
+        for (i, path, raw) in read_parse(modules, Area::Adminhtml, "system.xml", parse::system_xml) {
+            let module = &modules[i].name;
+            for tab in raw.tabs {
+                if !tab.label.is_empty() {
+                    tabs.insert(tab.id, tab.label);
+                }
+            }
+            for sec in raw.sections {
+                let sec_id = sec.id;
+                let sb = sections.entry(sec_id.clone()).or_default();
+                if !sec.label.is_empty() {
+                    sb.label = sec.label;
+                }
+                if sec.tab.is_some() {
+                    sb.tab = sec.tab;
+                }
+                for grp in sec.groups {
+                    let grp_id = grp.id;
+                    let gb = sb.groups.entry(grp_id.clone()).or_default();
+                    if !grp.label.is_empty() {
+                        gb.label = grp.label;
+                    }
+                    for f in grp.fields {
+                        let config_path =
+                            f.config_path.unwrap_or_else(|| format!("{sec_id}/{grp_id}/{}", f.id));
+                        let mut scopes = Vec::new();
+                        if f.show_default {
+                            scopes.push("default".to_string());
+                        }
+                        if f.show_website {
+                            scopes.push("website".to_string());
+                        }
+                        if f.show_store {
+                            scopes.push("store".to_string());
+                        }
+                        let source =
+                            Source { module: module.clone(), file: path.clone(), line: f.line, area: Area::Adminhtml };
+                        // Merge non-empty over any prior declaration (a later module may only
+                        // tweak a field — e.g. add a scope — without re-stating everything).
+                        let entry = gb.fields.entry(f.id).or_default();
+                        if !f.label.is_empty() {
+                            entry.label = f.label;
+                        }
+                        if !f.field_type.is_empty() {
+                            entry.field_type = f.field_type;
+                        }
+                        entry.config_path = config_path;
+                        if !scopes.is_empty() {
+                            entry.scopes = scopes;
+                        }
+                        if f.source_model.is_some() {
+                            entry.source_model = f.source_model;
+                        }
+                        if f.backend_model.is_some() {
+                            entry.backend_model = f.backend_model;
+                        }
+                        entry.source = Some(source);
+                    }
+                }
+            }
+        }
+
+        Self { tabs, sections }
+    }
+
+    /// Every field whose config path or label contains `filter` (or all, when `None`), sorted
+    /// by config path. Each carries its admin breadcrumb (tab/section/group labels resolved).
+    pub fn fields(&self, filter: Option<&str>) -> Vec<SystemField> {
+        let needle = filter.map(str::to_lowercase);
+        let mut out = Vec::new();
+        for section in self.sections.values() {
+            let tab = section.tab.as_ref().and_then(|id| self.tabs.get(id)).cloned();
+            for group in section.groups.values() {
+                for fb in group.fields.values() {
+                    let Some(source) = &fb.source else { continue };
+                    if let Some(n) = &needle {
+                        if !fb.config_path.to_lowercase().contains(n)
+                            && !fb.label.to_lowercase().contains(n)
+                        {
+                            continue;
+                        }
+                    }
+                    out.push(SystemField {
+                        path: fb.config_path.clone(),
+                        label: fb.label.clone(),
+                        field_type: fb.field_type.clone(),
+                        tab: tab.clone(),
+                        section: section.label.clone(),
+                        group: group.label.clone(),
+                        scopes: fb.scopes.clone(),
+                        source_model: fb.source_model.clone(),
+                        backend_model: fb.backend_model.clone(),
+                        source: source.clone(),
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out
     }
 }

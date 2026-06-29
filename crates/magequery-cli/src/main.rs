@@ -6,8 +6,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use magequery_core::model::ModuleSource;
 use magequery_core::{
-    ArgValue, Area, ChainStep, ClassName, Error, EventName, Magento, MethodChain, Observer,
-    Plugin, Preference, Resolution, Route, Source, WebapiRoute,
+    ArgValue, Area, ChainStep, ClassName, ConfigSet, ConfigSourceKind, ConfigValue, DbColumn,
+    DbTable, Error, EventName, Magento, MethodChain, Observer, Plugin, Preference, Resolution,
+    Route, Source, WebapiRoute,
 };
 
 #[derive(Parser)]
@@ -43,6 +44,143 @@ enum Command {
     Routes(RoutesArgs),
     /// List REST endpoints from webapi.xml (optionally filtered by URL substring).
     Webapi(WebapiArgs),
+    /// List controller actions (subroutes): URL → action class. Greppable.
+    Actions(ActionsArgs),
+    /// Database connection info and connectivity test (from env.php).
+    Db(DbArgs),
+    /// Redis/Valkey usage (cache, page cache, session) info and connectivity test.
+    Redis(RedisArgs),
+    /// Session storage configuration (handler + location) from env.php.
+    Session(InfoArgs),
+    /// Cache backends per frontend and per-type enable flags, from env.php.
+    Cache(InfoArgs),
+    /// Locking backend (provider + settings) from env.php.
+    Lock(InfoArgs),
+    /// Message-queue connections (AMQP) from env.php.
+    Queue(InfoArgs),
+    /// Admin settings from system.xml: where each config path lives in Stores → Configuration.
+    SystemConfig(SystemConfigArgs),
+    /// Database tables from declarative db_schema.xml (static). List, or one table's DDL.
+    Schema(SchemaArgs),
+    /// URL rewrites from the database (request → target, redirects). Needs a reachable DB.
+    UrlRewrites(UrlRewritesArgs),
+    /// Resolve a system-config path (or section) with its source. Static sources only (no DB).
+    Config(ConfigArgs),
+}
+
+#[derive(clap::Args)]
+struct SystemConfigArgs {
+    /// Filter by a config-path or label substring (e.g. `web/secure` or `base url`).
+    /// Omit to list every admin setting.
+    filter: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct SchemaArgs {
+    /// Exact table name → full definition; otherwise a name substring to list matching tables.
+    /// Omit to list every table.
+    table: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct UrlRewritesArgs {
+    /// Filter by a substring of the request or target path (matched in SQL).
+    path: Option<String>,
+    /// Only rewrites for this store-view (code).
+    #[arg(long)]
+    store: Option<String>,
+    /// Only show redirects (301/302), not internal rewrites.
+    #[arg(long)]
+    redirects: bool,
+    /// Max rows to return (the table can be huge).
+    #[arg(long, default_value_t = 200)]
+    limit: usize,
+    #[arg(long)]
+    json: bool,
+}
+
+/// Args for the simple env.php deployment-info commands (session/cache/lock/queue).
+#[derive(clap::Args)]
+struct InfoArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct ConfigArgs {
+    /// Config path (`web/secure/base_url`) or section prefix (`web/secure`). Omit to list
+    /// every key.
+    #[arg(default_value = "")]
+    path: String,
+    /// Resolve a single scope (`default`, `websites/<code>`, `stores/<code>`). Default:
+    /// show every scope that sets the path.
+    #[arg(long)]
+    scope: Option<String>,
+    /// Also read admin-set values from `core_config_data` (needs a reachable database).
+    #[arg(long)]
+    db: bool,
+    /// Decrypt encrypted values (secrets) using the crypt key from env.php.
+    #[arg(long)]
+    decrypt: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct RedisArgs {
+    #[command(subcommand)]
+    command: RedisCommand,
+}
+
+#[derive(Subcommand)]
+enum RedisCommand {
+    /// Show Redis/Valkey instances from env.php.
+    Info {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Ping every configured instance.
+    Ping {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Args)]
+struct DbArgs {
+    #[command(subcommand)]
+    command: DbCommand,
+}
+
+#[derive(Subcommand)]
+enum DbCommand {
+    /// Show database connections from env.php.
+    Info {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Test a connection (default: the `default` connection).
+    Ping {
+        /// Connection name (default: `default`).
+        connection: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Args)]
+struct ActionsArgs {
+    /// Filter by URL substring (e.g. `catalog`).
+    url: Option<String>,
+    /// Area: frontend (default) or adminhtml.
+    #[arg(long)]
+    area: Option<String>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -162,25 +300,636 @@ fn main() -> Result<()> {
     let mage = Magento::open(&cli.root)
         .with_context(|| format!("opening Magento installation at {}", cli.root.display()))?;
 
-    // Diagnostics are non-fatal; surface them on stderr so stdout stays pipeable.
-    let diags = mage.diagnostics();
-    if !diags.is_empty() {
-        eprintln!("note: {} diagnostic(s) while indexing", diags.len());
-        for d in diags {
-            eprintln!("  {:?}: {}", d.severity, d.message);
-        }
-    }
-
-    match cli.command {
+    let result = match cli.command {
         Command::Modules(args) => modules(&mage, &args),
-        Command::Preference(args) => preference(&mage, &args),
+        Command::Preference(args) => preference(&mage, &args, &cli.root),
         Command::Plugins(args) => plugins(&mage, &args, &cli.root),
         Command::Di(args) => di(&mage, &args, &cli.root),
         Command::Events(args) => events(&mage, &args, &cli.root),
         Command::Cron(args) => cron(&mage, &args, &cli.root),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
+        Command::Actions(args) => actions(&mage, &args, &cli.root),
+        Command::Db(args) => db(&mage, &args),
+        Command::Redis(args) => match args.command {
+            RedisCommand::Info { json } => redis_info(&mage, json),
+            RedisCommand::Ping { json } => redis_ping(&mage, json),
+        },
+        Command::Session(args) => session_info(&mage, args.json),
+        Command::Cache(args) => cache_info(&mage, args.json),
+        Command::Lock(args) => lock_info(&mage, args.json),
+        Command::Queue(args) => queue_info(&mage, args.json),
+        Command::SystemConfig(args) => system_config(&mage, &args, &cli.root),
+        Command::Schema(args) => schema(&mage, &args, &cli.root),
+        Command::UrlRewrites(args) => url_rewrites(&mage, &args),
+        Command::Config(args) => config(&mage, &args, &cli.root),
+    };
+
+    // Diagnostics are non-fatal; surface them on stderr (so stdout stays pipeable) *after*
+    // the command, so any lazily-built index (di.xml) has contributed its diagnostics too.
+    let diags = mage.diagnostics();
+    if !diags.is_empty() {
+        eprintln!("note: {} diagnostic(s) while indexing", diags.len());
+        for d in &diags {
+            eprintln!("  {:?}: {}", d.severity, d.message);
+        }
     }
+
+    result
+}
+
+fn config(mage: &Magento, args: &ConfigArgs, root: &Path) -> Result<()> {
+    let set = mage.config(args.db).map_err(|e| anyhow!(e))?;
+    let dec = if args.decrypt { Some(mage.decryptor().map_err(|e| anyhow!(e))?) } else { None };
+    let dec = dec.as_ref();
+
+    // A single scope was requested.
+    if let Some(scope) = args.scope.as_deref() {
+        if let Some(v) = set.get(scope, &args.path) {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(v)?);
+                return Ok(());
+            }
+            let inherited = if v.scope != scope {
+                format!("  {}", style::dim("(inherited)"))
+            } else {
+                String::new()
+            };
+            println!("{} = {}", style::name(&v.path), show_val(&v.value, dec));
+            println!("   {}  scope={}  {}{inherited}", source_tag(v.source), style::area(&v.scope), config_loc(v, root));
+            return Ok(());
+        }
+        return config_section_or_unset(&set, scope, &args.path, args.json, root, dec);
+    }
+
+    // Default: show the value in every scope that sets it.
+    let values = set.scopes_for(&args.path);
+    if !values.is_empty() {
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&values)?);
+            return Ok(());
+        }
+        let width = values.iter().map(|v| v.scope.len()).max().unwrap_or(0);
+        println!("{}", style::name(&args.path));
+        for v in &values {
+            let scope = format!("{:<width$}", v.scope);
+            println!("  {}  {}   {}  {}", style::area(&scope), show_val(&v.value, dec), source_tag(v.source), config_loc(v, root));
+        }
+        return Ok(());
+    }
+
+    // Not a leaf anywhere — treat as a section (default scope).
+    config_section_or_unset(&set, "default", &args.path, args.json, root, dec)
+}
+
+fn config_section_or_unset(
+    set: &ConfigSet,
+    scope: &str,
+    path: &str,
+    json: bool,
+    root: &Path,
+    dec: Option<&magequery_core::Decryptor>,
+) -> Result<()> {
+    let section = set.section(scope, path);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&section)?);
+        return Ok(());
+    }
+    if section.is_empty() {
+        println!("{} {}", style::name(path), style::dim("(not set)"));
+        return Ok(());
+    }
+    let header = if path.is_empty() {
+        style::dim(&format!("all config — {} values", section.len()))
+    } else {
+        format!("{}{}  {}", style::name(path), style::dim("/*"), style::dim(&format!("({} values)", section.len())))
+    };
+    println!("{header}");
+    for v in &section {
+        println!("  {} = {}   {}  {}", style::name(&v.path), show_val(&v.value, dec), source_tag(v.source), config_loc(v, root));
+    }
+    Ok(())
+}
+
+fn val(s: &str) -> String {
+    if s.is_empty() {
+        style::dim("(empty)")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Render a config value, decrypting it when a decryptor is given and the value is encrypted.
+fn show_val(value: &str, dec: Option<&magequery_core::Decryptor>) -> String {
+    if let Some(d) = dec {
+        if let Some(plain) = d.decrypt(value) {
+            return format!("{} {}", style::ok(&plain), style::dim("🔓"));
+        }
+        if magequery_core::Decryptor::is_encrypted(value) {
+            // Couldn't decrypt: either the one cipher we don't support (Blowfish), or (more
+            // often) a DB imported from another environment whose crypt key isn't in env.php.
+            let note = match magequery_core::Decryptor::cipher_version(value) {
+                Some(0) => "(encrypted — legacy Blowfish cipher unsupported)".to_string(),
+                _ => "(encrypted — crypt key mismatch?)".to_string(),
+            };
+            return format!("{}  {}", val(value), style::err(&note));
+        }
+    }
+    val(value)
+}
+
+fn source_tag(kind: ConfigSourceKind) -> String {
+    let label = match kind {
+        ConfigSourceKind::ConfigXml => "config.xml",
+        ConfigSourceKind::ConfigPhp => "config.php",
+        ConfigSourceKind::EnvPhp => "env.php",
+        ConfigSourceKind::EnvVar => "env-var",
+        ConfigSourceKind::Database => "db",
+    };
+    style::kind(&format!("[{label}]"))
+}
+
+fn config_loc(v: &ConfigValue, root: &Path) -> String {
+    match v.source {
+        ConfigSourceKind::EnvVar => style::path(&format!("# ${}", env_var_name(&v.scope, &v.path))),
+        ConfigSourceKind::Database => style::path("# core_config_data"),
+        _ => match &v.file {
+            Some(f) => {
+                let rel = f.strip_prefix(root).unwrap_or(f);
+                let loc = if v.line == 0 {
+                    format!("# {}", rel.display())
+                } else {
+                    format!("# {}:{}", rel.display(), v.line)
+                };
+                style::path(&loc)
+            }
+            None => String::new(),
+        },
+    }
+}
+
+/// Reconstruct the `CONFIG__…` env var name for a (scope, path).
+fn env_var_name(scope: &str, path: &str) -> String {
+    let scope_part = if scope == "default" {
+        "DEFAULT".to_string()
+    } else if let Some(code) = scope.strip_prefix("websites/") {
+        format!("WEBSITES__{}", code.to_uppercase())
+    } else if let Some(code) = scope.strip_prefix("stores/") {
+        format!("STORES__{}", code.to_uppercase())
+    } else {
+        scope.to_uppercase()
+    };
+    format!("CONFIG__{scope_part}__{}", path.to_uppercase().replace('/', "__"))
+}
+
+fn redis_ping(mage: &Magento, json: bool) -> Result<()> {
+    let pings = mage.ping_redis().map_err(|e| anyhow!(e))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&pings)?);
+        if pings.iter().any(|p| !p.ok) {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+    if pings.is_empty() {
+        println!("{}", style::dim("(no Redis/Valkey configured)"));
+        return Ok(());
+    }
+    for p in &pings {
+        let db = p.database.as_deref().map(|d| format!(" db{d}")).unwrap_or_default();
+        if p.ok {
+            println!(
+                "{}  {}{} — {} ({}ms)",
+                style::ok("OK"),
+                style::area(&p.purpose),
+                style::dim(&db),
+                style::number(p.server_version.as_deref().unwrap_or("?")),
+                p.elapsed_ms,
+            );
+        } else {
+            println!(
+                "{}  {}{} — {}",
+                style::err("FAIL"),
+                style::area(&p.purpose),
+                style::dim(&db),
+                p.error.as_deref().unwrap_or("unknown error"),
+            );
+        }
+    }
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+    if pings.iter().any(|p| !p.ok) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn redis_info(mage: &Magento, json: bool) -> Result<()> {
+    let cfg = mage.redis_config().map_err(|e| anyhow!(e))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cfg)?);
+        return Ok(());
+    }
+    if cfg.instances.is_empty() {
+        println!("{}", style::dim("(no Redis/Valkey configured — cache & session use other backends)"));
+        return Ok(());
+    }
+    for r in &cfg.instances {
+        let label = match r.purpose.as_str() {
+            "default" => "cache (default)",
+            "page_cache" => "page cache",
+            "session" => "session",
+            other => other,
+        };
+        println!("[{}]", style::area(label));
+        if r.host.starts_with('/') {
+            println!("  socket    {}", style::path(&r.host));
+        } else {
+            println!("  host      {}:{}", style::class(&r.host), style::number(&r.port.unwrap_or(6379).to_string()));
+        }
+        println!("  database  {}", style::number(r.database.as_deref().unwrap_or("0")));
+        let pw = if r.password.is_empty() { style::dim("(empty)") } else { r.password.clone() };
+        println!("  password  {pw}");
+        if let Some(b) = &r.backend {
+            println!("  backend   {}", style::dim(b.trim_start_matches('\\')));
+        }
+    }
+    Ok(())
+}
+
+fn session_info(mage: &Magento, json: bool) -> Result<()> {
+    let cfg = mage.session_config().map_err(|e| anyhow!(e))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cfg)?);
+        return Ok(());
+    }
+    println!("handler   {}", style::ok(&cfg.handler));
+    if let Some(loc) = &cfg.location {
+        let label = if cfg.handler == "files" { "path" } else { "location" };
+        // A filesystem path (file save_path or a Redis socket) vs a host:port endpoint.
+        let styled = if loc.starts_with('/') { style::path(loc) } else { style::class(loc) };
+        println!("{label:<10}{styled}");
+    }
+    if let Some(db) = &cfg.database {
+        println!("database  {}", style::number(db));
+    }
+    Ok(())
+}
+
+fn cache_info(mage: &Magento, json: bool) -> Result<()> {
+    let cfg = mage.cache_config().map_err(|e| anyhow!(e))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cfg)?);
+        return Ok(());
+    }
+    for f in &cfg.frontends {
+        let label = if f.id == "page_cache" { "page cache" } else { &f.id };
+        println!("[{}]", style::area(label));
+        println!("  backend   {}", style::dim(f.backend.trim_start_matches('\\')));
+        if let Some(loc) = &f.location {
+            let styled = if loc.starts_with('/') { style::path(loc) } else { style::class(loc) };
+            println!("  location  {styled}");
+        }
+        if let Some(db) = &f.database {
+            println!("  database  {}", style::number(db));
+        }
+    }
+    if !cfg.types.is_empty() {
+        let on = cfg.types.iter().filter(|t| t.enabled).count();
+        println!("\n{}", style::dim(&format!("cache types ({on}/{} enabled)", cfg.types.len())));
+        for t in &cfg.types {
+            let flag = if t.enabled { style::ok("on ") } else { style::err("off") };
+            println!("  {flag}  {}", style::name(&t.name));
+        }
+    }
+    Ok(())
+}
+
+fn lock_info(mage: &Magento, json: bool) -> Result<()> {
+    let cfg = mage.lock_config().map_err(|e| anyhow!(e))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cfg)?);
+        return Ok(());
+    }
+    println!("provider  {}", style::ok(&cfg.provider));
+    for (k, v) in &cfg.config {
+        println!("{:<10}{}", k, style::class(v));
+    }
+    Ok(())
+}
+
+fn queue_info(mage: &Magento, json: bool) -> Result<()> {
+    let cfg = mage.queue_config().map_err(|e| anyhow!(e))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cfg)?);
+        return Ok(());
+    }
+    if cfg.connections.is_empty() {
+        println!("{}", style::dim("(no message-queue connections configured in env.php)"));
+    }
+    for c in &cfg.connections {
+        println!("[{}]", style::area(&c.name));
+        println!("  host         {}:{}", style::class(&c.host), style::number(&c.port.unwrap_or(5672).to_string()));
+        println!("  user         {}", c.user);
+        let pw = if c.password.is_empty() { style::dim("(empty)") } else { c.password.clone() };
+        println!("  password     {pw}");
+        if let Some(vh) = &c.virtualhost {
+            println!("  virtualhost  {}", style::name(vh));
+        }
+    }
+    if let Some(w) = &cfg.consumers_wait_for_messages {
+        println!("\n{} {}", style::dim("consumers_wait_for_messages"), style::number(w));
+    }
+    Ok(())
+}
+
+fn system_config(mage: &Magento, args: &SystemConfigArgs, root: &Path) -> Result<()> {
+    let fields = mage.system_config(args.filter.as_deref());
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&fields)?);
+        return Ok(());
+    }
+    if fields.is_empty() {
+        println!("{}", style::dim("(no admin setting matches)"));
+        return Ok(());
+    }
+
+    // Greppable: `config/path   Tab › Section › Group › Field   [scopes]   # loc`. The
+    // breadcrumb is exactly where to click in Stores → Configuration to find the setting.
+    let width = fields.iter().map(|f| f.path.len()).max().unwrap_or(0);
+    let sep = style::dim(" › ");
+    for f in &fields {
+        let pad = " ".repeat(width.saturating_sub(f.path.len()));
+        let mut crumbs: Vec<String> = Vec::new();
+        if let Some(tab) = &f.tab {
+            crumbs.push(style::dim(tab));
+        }
+        if !f.section.is_empty() {
+            crumbs.push(f.section.clone());
+        }
+        if !f.group.is_empty() {
+            crumbs.push(f.group.clone());
+        }
+        // The field itself — the leaf. Hidden/config-only fields have no label; fall back to
+        // the field id (the last path segment).
+        let leaf = if f.label.is_empty() {
+            f.path.rsplit('/').next().unwrap_or(&f.path)
+        } else {
+            &f.label
+        };
+        crumbs.push(style::target(leaf));
+        let scopes = if f.scopes.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", style::dim(&format!("[{}]", f.scopes.join(", "))))
+        };
+        println!(
+            "{}{pad}  {}{scopes}   {}",
+            style::name(&f.path),
+            crumbs.join(&sep),
+            style::path(&short_loc(&f.source, root)),
+        );
+    }
+    eprintln!("\n{} setting(s) {}", fields.len(), style::dim("· Stores → Configuration"));
+    Ok(())
+}
+
+fn schema(mage: &Magento, args: &SchemaArgs, root: &Path) -> Result<()> {
+    // An exact table name shows the full definition; anything else is a substring filter.
+    if let Some(name) = &args.table {
+        if let Some(table) = mage.table(name) {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&table)?);
+                return Ok(());
+            }
+            render_table(&table, root);
+            return Ok(());
+        }
+    }
+
+    let tables = mage.schema(args.table.as_deref());
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&tables)?);
+        return Ok(());
+    }
+    if tables.is_empty() {
+        println!("{}", style::dim("(no table matches)"));
+        return Ok(());
+    }
+    let width = tables.iter().map(|t| t.name.len()).max().unwrap_or(0);
+    for t in &tables {
+        let pad = " ".repeat(width.saturating_sub(t.name.len()));
+        println!(
+            "{}{pad}  {}  {}",
+            style::class(&t.name),
+            style::dim(&format!("{} cols", t.columns.len())),
+            style::path(&short_loc(&t.source, root)),
+        );
+    }
+    eprintln!("\n{} table(s)", tables.len());
+    Ok(())
+}
+
+fn render_table(t: &DbTable, root: &Path) {
+    let engine = t.engine.as_deref().map(|e| format!("  engine={e}")).unwrap_or_default();
+    println!("{}{}  {}", style::class(&t.name), style::dim(&engine), style::path(&short_loc(&t.source, root)));
+    if let Some(c) = &t.comment {
+        println!("  {}", style::dim(c));
+    }
+
+    let table_module = t.source.module.as_str();
+    let width = t.columns.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    for c in &t.columns {
+        let pad = " ".repeat(width.saturating_sub(c.name.len()));
+        let null = if c.nullable { style::dim("NULL") } else { style::dim("NOT NULL") };
+        let identity = if c.identity { format!("  {}", style::keyword("auto_increment")) } else { String::new() };
+        let default = c.default.as_deref().map(|d| format!("  default {}", style::number(d))).unwrap_or_default();
+        // Flag columns added by a *different* module than the one that declared the table —
+        // the whole point of merging db_schema.xml across modules.
+        let from = if c.source.module.as_str() != table_module {
+            format!("  {}", style::module(&format!("← {}", c.source.module.as_str())))
+        } else {
+            String::new()
+        };
+        let comment = c.comment.as_deref().map(|c| format!("   {}", style::dim(&format!("# {c}")))).unwrap_or_default();
+        println!("  {}{pad}  {}  {null}{identity}{default}{from}{comment}", style::name(&c.name), style::keyword(&col_type(c)));
+    }
+
+    if !t.constraints.is_empty() {
+        println!("  {}", style::dim("constraints:"));
+        for con in &t.constraints {
+            let cols = con.columns.join(", ");
+            let detail = if con.kind == "foreign" {
+                let rt = con.reference_table.as_deref().unwrap_or("?");
+                let rc = con.reference_column.as_deref().unwrap_or("?");
+                let on_del = con.on_delete.as_deref().map(|d| format!(" ON DELETE {d}")).unwrap_or_default();
+                format!("({cols}) → {}({rc}){on_del}", style::class(rt))
+            } else {
+                format!("({cols})")
+            };
+            println!("    {}  {}  {detail}", style::name(&con.id), style::kind(&con.kind));
+        }
+    }
+
+    if !t.indexes.is_empty() {
+        println!("  {}", style::dim("indexes:"));
+        for idx in &t.indexes {
+            println!("    {}  {}  ({})", style::name(&idx.id), style::dim(&idx.index_type), idx.columns.join(", "));
+        }
+    }
+}
+
+/// A SQL-ish type string: `varchar(32)`, `decimal(12,4)`, `int unsigned`.
+fn col_type(c: &DbColumn) -> String {
+    let mut s = c.col_type.clone();
+    if let Some(len) = &c.length {
+        s.push_str(&format!("({len})"));
+    } else if let (Some(p), Some(sc)) = (&c.precision, &c.scale) {
+        s.push_str(&format!("({p},{sc})"));
+    }
+    if c.unsigned {
+        s.push_str(" unsigned");
+    }
+    s
+}
+
+fn url_rewrites(mage: &Magento, args: &UrlRewritesArgs) -> Result<()> {
+    let set = mage
+        .url_rewrites(args.path.as_deref(), args.store.as_deref(), args.redirects, args.limit)
+        .map_err(|e| anyhow!(e))?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&set)?);
+        return Ok(());
+    }
+    if set.rewrites.is_empty() {
+        println!("{}", style::dim("(no URL rewrites match)"));
+        return Ok(());
+    }
+
+    let width = set.rewrites.iter().map(|r| r.request_path.len()).max().unwrap_or(0);
+    for r in &set.rewrites {
+        let pad = " ".repeat(width.saturating_sub(r.request_path.len()));
+        // Internal rewrite vs an HTTP redirect (301/302).
+        let arrow = if r.redirect_type == 0 {
+            style::dim("→")
+        } else {
+            style::err(&format!("⇒{}", r.redirect_type))
+        };
+        let manual = if r.autogenerated { "" } else { " manual" };
+        let meta = format!("# {}:{} · store={}{manual}", r.entity_type, r.entity_id, r.store);
+        println!("{}{pad}  {arrow}  {}   {}", style::name(&r.request_path), r.target_path, style::dim(&meta));
+    }
+
+    let shown = set.rewrites.len();
+    if set.truncated {
+        eprintln!(
+            "\n{}",
+            style::dim(&format!("showing first {shown} (more exist — narrow with a filter or raise --limit)"))
+        );
+    } else {
+        eprintln!("\n{shown} rewrite(s)");
+    }
+    Ok(())
+}
+
+fn db(mage: &Magento, args: &DbArgs) -> Result<()> {
+    match &args.command {
+        DbCommand::Info { json } => db_info(mage, *json),
+        DbCommand::Ping { connection, json } => db_ping(mage, connection.as_deref(), *json),
+    }
+}
+
+fn db_info(mage: &Magento, json: bool) -> Result<()> {
+    let cfg = mage.db_config().map_err(|e| anyhow!(e))?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cfg)?);
+        return Ok(());
+    }
+
+    let prefix = if cfg.table_prefix.is_empty() {
+        style::dim("(none)")
+    } else {
+        style::string_lit(&format!("\"{}\"", cfg.table_prefix))
+    };
+    println!("table_prefix: {prefix}");
+    for c in &cfg.connections {
+        let inactive = if c.active { String::new() } else { format!("  {}", style::err("(inactive)")) };
+        println!("\n[{}]{inactive}", style::area(&c.name));
+        match &c.unix_socket {
+            Some(sock) => println!("  socket    {}", style::path(sock)),
+            None => {
+                let port = c.port.unwrap_or(3306);
+                println!("  host      {}:{}", style::class(&c.host), style::number(&port.to_string()));
+            }
+        }
+        println!("  dbname    {}", style::class(&c.dbname));
+        println!("  username  {}", c.username);
+        let pw = if c.password.is_empty() { style::dim("(empty)") } else { c.password.clone() };
+        println!("  password  {pw}");
+        if let Some(m) = &c.model {
+            println!("  model     {}", style::dim(m));
+        }
+    }
+    Ok(())
+}
+
+fn db_ping(mage: &Magento, connection: Option<&str>, json: bool) -> Result<()> {
+    let ping = mage.ping_db(connection).map_err(|e| anyhow!(e))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&ping)?);
+        if !ping.ok {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if ping.ok {
+        println!(
+            "{}  {} — server {} ({}ms)",
+            style::ok("OK"),
+            style::area(&ping.connection),
+            style::number(ping.server_version.as_deref().unwrap_or("?")),
+            ping.elapsed_ms,
+        );
+    } else {
+        println!(
+            "{}  {} — {}",
+            style::err("FAIL"),
+            style::area(&ping.connection),
+            ping.error.as_deref().unwrap_or("unknown error"),
+        );
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn actions(mage: &Magento, args: &ActionsArgs, root: &Path) -> Result<()> {
+    let area = match &args.area {
+        Some(a) => a.parse::<Area>().map_err(|e| anyhow!("{e}"))?,
+        None => Area::Frontend,
+    };
+    let actions = mage.actions(area, args.url.as_deref());
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&actions)?);
+        return Ok(());
+    }
+
+    // Greppable: one line per action — `url  class  file`.
+    let width = actions.iter().map(|a| a.url.len()).max().unwrap_or(0);
+    for a in &actions {
+        let pad = " ".repeat(width.saturating_sub(a.url.len()));
+        println!(
+            "{}{pad}  {}  {}",
+            a.url,
+            style::class(a.class.as_str()),
+            style::path(&short_loc(&a.source, root)),
+        );
+    }
+    eprintln!("\n{} action(s)", actions.len());
+    Ok(())
 }
 
 fn events(mage: &Magento, args: &EventsArgs, root: &Path) -> Result<()> {
@@ -349,12 +1098,28 @@ fn render_resolution(res: &Resolution, root: &Path) {
 
     println!("\n{}", style::dim(&format!("arguments ({})", res.arguments.len())));
     for a in &res.arguments {
-        println!(
-            "  {} = {}   {}",
-            a.name,
-            render_arg(&a.value, 1),
-            style::path(&short_loc(&a.source, root))
-        );
+        match &a.value {
+            // Expand array arguments one item per line, each with the module/file that
+            // declared it — so e.g. routerList shows which module added each entry.
+            ArgValue::Array(items) if !items.is_empty() => {
+                println!("  {} = {}", a.name, style::dim("["));
+                for i in items {
+                    println!(
+                        "    {} => {}   {}",
+                        style::string_lit(&format!("'{}'", i.key)),
+                        render_arg(&i.value),
+                        style::path(&short_loc(&i.source, root)),
+                    );
+                }
+                println!("  {}", style::dim("]"));
+            }
+            _ => println!(
+                "  {} = {}   {}",
+                a.name,
+                render_arg(&a.value),
+                style::path(&short_loc(&a.source, root))
+            ),
+        }
     }
 
     println!("\n{}", style::dim(&format!("plugins ({})  — run order", res.plugins.len())));
@@ -377,35 +1142,19 @@ fn render_resolution(res: &Resolution, root: &Path) {
     }
 }
 
-/// Render an argument value as a PHP-like, syntax-colored literal.
-///
-/// `depth` is the indentation level (in 2-space units) of this value's own
-/// bracket line. Arrays that contain a nested non-empty array break onto
-/// multiple lines, indented one level deeper; everything else stays inline.
-fn render_arg(v: &ArgValue, depth: usize) -> String {
+/// Render an argument value as a PHP-like, syntax-colored literal, inline (recursive for
+/// nested arrays). Top-level array arguments are expanded with provenance by the caller.
+fn render_arg(v: &ArgValue) -> String {
     match v {
         // Object reference — leading backslash like a FQCN, no quotes.
         ArgValue::Object(c) => style::class(&format!("\\{}", c.as_str())),
         ArgValue::Scalar { xsi_type, text } => render_scalar(xsi_type, text),
-        ArgValue::Array(items) if items.is_empty() => "[]".to_string(),
         ArgValue::Array(items) => {
-            let entry = |k: &str, val: &ArgValue, d: usize| {
-                format!("{} => {}", style::string_lit(&format!("'{k}'")), render_arg(val, d))
-            };
-            // Inline unless a child is itself a non-empty array (then it gets multi-line).
-            let multiline = items
+            let inner: Vec<String> = items
                 .iter()
-                .any(|(_, val)| matches!(val, ArgValue::Array(inner) if !inner.is_empty()));
-            if multiline {
-                let item_pad = "  ".repeat(depth + 1);
-                let close_pad = "  ".repeat(depth);
-                let inner: Vec<String> =
-                    items.iter().map(|(k, val)| format!("{item_pad}{}", entry(k, val, depth + 1))).collect();
-                format!("[\n{}\n{close_pad}]", inner.join(",\n"))
-            } else {
-                let inner: Vec<String> = items.iter().map(|(k, val)| entry(k, val, depth)).collect();
-                format!("[{}]", inner.join(", "))
-            }
+                .map(|i| format!("{} => {}", style::string_lit(&format!("'{}'", i.key)), render_arg(&i.value)))
+                .collect();
+            format!("[{}]", inner.join(", "))
         }
         ArgValue::Null => style::keyword("null"),
     }
@@ -513,17 +1262,18 @@ fn print_plugin(p: &Plugin, concrete: &str, root: &Path) {
     );
 }
 
-/// `file:line` with the Magento root stripped for brevity.
+/// `# file:line` with the Magento root stripped for brevity. The leading `#` makes the
+/// location a trailing comment, so a rendered line can be copy-pasted without it breaking.
 fn short_loc(s: &Source, root: &Path) -> String {
     let rel = s.file.strip_prefix(root).unwrap_or(&s.file);
     if s.line == 0 {
-        rel.display().to_string()
+        format!("# {}", rel.display())
     } else {
-        format!("{}:{}", rel.display(), s.line)
+        format!("# {}:{}", rel.display(), s.line)
     }
 }
 
-fn preference(mage: &Magento, args: &PreferenceArgs) -> Result<()> {
+fn preference(mage: &Magento, args: &PreferenceArgs, root: &Path) -> Result<()> {
     let class = ClassName::new(args.class.trim_start_matches('\\'));
 
     // Decide which areas to report.
@@ -557,7 +1307,7 @@ fn preference(mage: &Magento, args: &PreferenceArgs) -> Result<()> {
         let loc = p
             .chain
             .last()
-            .map(|step| style::path(&step.source.location()))
+            .map(|step| style::path(&short_loc(&step.source, root)))
             .unwrap_or_else(|| style::dim("(no preference — concrete class)"));
         let area = format!("{:<11}", p.area.to_string());
         println!("{} {}\n            {}", style::area(&area), style::class(p.concrete.as_str()), loc);

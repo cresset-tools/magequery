@@ -184,24 +184,37 @@ pub enum ArgValue {
     /// Scalar value (`string`/`boolean`/`number`/`init_parameter`/`const`/…): the xsi type
     /// and its text.
     Scalar { xsi_type: String, text: String },
-    /// `xsi:type="array"` — ordered key → value items.
-    Array(Vec<(String, ArgValue)>),
+    /// `xsi:type="array"` — ordered items, each with its own provenance.
+    Array(Vec<ArgItem>),
     /// `xsi:type="null"` or an empty value.
     Null,
 }
 
+/// One `<item>` of an array argument, with the module/file/line that declared it — so a
+/// merged array (e.g. `routerList`) records which module contributed each entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ArgItem {
+    pub key: String,
+    pub value: ArgValue,
+    pub source: Source,
+}
+
 impl ArgValue {
     /// Merge a newer declaration over `self` the way Magento merges di.xml arguments:
-    /// two arrays merge by item key (newer overrides same-key, appends new keys, recursing
-    /// into nested arrays); anything else is replaced wholesale by `newer`.
+    /// two arrays merge by item key (newer overrides same-key — taking the newer item's
+    /// source — appends new keys, recursing into nested arrays); anything else is replaced.
     pub(crate) fn merged_with(&self, newer: &ArgValue) -> ArgValue {
         match (self, newer) {
             (ArgValue::Array(old), ArgValue::Array(new)) => {
                 let mut items = old.clone();
-                for (k, nv) in new {
-                    match items.iter_mut().find(|(ek, _)| ek == k) {
-                        Some((_, ev)) => *ev = ev.merged_with(nv),
-                        None => items.push((k.clone(), nv.clone())),
+                for ni in new {
+                    match items.iter_mut().find(|i| i.key == ni.key) {
+                        Some(ei) => {
+                            ei.value = ei.value.merged_with(&ni.value);
+                            ei.source = ni.source.clone();
+                        }
+                        None => items.push(ni.clone()),
                     }
                 }
                 ArgValue::Array(items)
@@ -249,6 +262,325 @@ pub struct Route {
     pub front_name: String,
     /// Modules handling the route, in declaration order across modules.
     pub modules: Vec<ModuleName>,
+    pub source: Source,
+}
+
+/// A controller action (a "subroute"): a concrete `Controller/.../Action.php` class reached
+/// via a route's frontName, mapped to its URL path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ControllerAction {
+    /// `frontName/controller/action`, e.g. `catalog/product/view`.
+    pub url: String,
+    pub class: ClassName,
+    /// `Frontend` or `Adminhtml`.
+    pub area: Area,
+    pub module: ModuleName,
+    pub source: Source,
+}
+
+/// Where a resolved config value came from (its source layer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigSourceKind {
+    /// Module `config.xml` `<default>` default.
+    ConfigXml,
+    /// `app/etc/config.php` `system` node (locked/dumped).
+    ConfigPhp,
+    /// `app/etc/env.php` `system` node.
+    EnvPhp,
+    /// A `CONFIG__*` environment variable.
+    EnvVar,
+    /// `core_config_data` (database).
+    Database,
+}
+
+/// A resolved system-config value at a given scope, with its source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ConfigValue {
+    /// Config path, e.g. `web/secure/base_url`.
+    pub path: String,
+    /// Scope: `default`, `websites/<code>`, or `stores/<code>`.
+    pub scope: String,
+    pub value: String,
+    pub source: ConfigSourceKind,
+    /// File the value was declared in (`None` for env var / database).
+    pub file: Option<std::path::PathBuf>,
+    /// 1-based line, or `0` if unknown (config.php/env.php aren't line-tracked).
+    pub line: u32,
+}
+
+/// A database connection from `env.php` (`db/connection/<name>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct DbConnection {
+    /// Connection name (`default`, `indexer`, split-db `checkout`/`sales`, …).
+    pub name: String,
+    pub host: String,
+    pub port: Option<u16>,
+    pub dbname: String,
+    pub username: String,
+    /// Raw password — callers should mask it for display unless explicitly revealing.
+    pub password: String,
+    /// `unix_socket` if the connection uses a socket instead of host/port.
+    pub unix_socket: Option<String>,
+    pub model: Option<String>,
+    pub engine: Option<String>,
+    pub active: bool,
+}
+
+/// The `db` section of `env.php`: the table prefix and all configured connections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct DbConfig {
+    pub table_prefix: String,
+    pub connections: Vec<DbConnection>,
+}
+
+/// Result of testing a database connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct DbPing {
+    pub connection: String,
+    pub ok: bool,
+    pub server_version: Option<String>,
+    pub error: Option<String>,
+    pub elapsed_ms: u128,
+}
+
+/// One Redis (or Valkey) instance Magento is configured to use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct RedisInstance {
+    /// What it backs: `default` (cache), `page_cache`, or `session`.
+    pub purpose: String,
+    /// Server — a hostname or a socket path (starts with `/`).
+    pub host: String,
+    pub port: Option<u16>,
+    /// Redis database number.
+    pub database: Option<String>,
+    pub password: String,
+    /// The cache backend class (for cache instances); `None` for session.
+    pub backend: Option<String>,
+}
+
+/// All Redis usages found in `env.php` (cache / page cache / session).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct RedisConfig {
+    pub instances: Vec<RedisInstance>,
+}
+
+/// Result of pinging one Redis instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct RedisPing {
+    pub purpose: String,
+    pub host: String,
+    pub database: Option<String>,
+    pub ok: bool,
+    pub server_version: Option<String>,
+    pub error: Option<String>,
+    pub elapsed_ms: u128,
+}
+
+/// Session storage configuration (the `session` section of `env.php`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct SessionConfig {
+    /// Save handler: `files`, `db`, or `redis`.
+    pub handler: String,
+    /// Where sessions live: the server/socket for `redis`, the save path for `files`
+    /// (`None` ⇒ Magento's default `var/session`); `None` for `db`.
+    pub location: Option<String>,
+    /// Redis database number, when the handler is `redis`.
+    pub database: Option<String>,
+}
+
+/// One configured cache frontend (`cache/frontend/<id>` in `env.php`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CacheFrontend {
+    /// Frontend id: `default` (the general cache) or `page_cache` (full-page cache).
+    pub id: String,
+    /// Backend class, e.g. `\Magento\Framework\Cache\Backend\Redis` or a file backend.
+    pub backend: String,
+    /// Server/socket for a Redis backend (`host:port` or a socket path); `None` otherwise.
+    pub location: Option<String>,
+    pub database: Option<String>,
+}
+
+/// Whether one Magento cache type is enabled (`cache_types` map in `env.php`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CacheType {
+    pub name: String,
+    pub enabled: bool,
+}
+
+/// Cache configuration: the backend per frontend, plus the per-type enable flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CacheConfig {
+    pub frontends: Vec<CacheFrontend>,
+    pub types: Vec<CacheType>,
+}
+
+/// Locking backend configuration (the `lock` section of `env.php`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct LockConfig {
+    /// Provider: `db` (default), `file`, `zookeeper`, or `cache`.
+    pub provider: String,
+    /// Provider-specific settings (`path`, `prefix`, `host`, …), sorted by key. NULL/empty
+    /// entries are omitted.
+    pub config: std::collections::BTreeMap<String, String>,
+}
+
+/// One message-queue connection (`queue/amqp` or `queue/connections/<name>` in `env.php`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct QueueConnection {
+    /// Connection name, e.g. `amqp`.
+    pub name: String,
+    pub host: String,
+    pub port: Option<u16>,
+    pub user: String,
+    /// Raw password (no masking, matching `db info`).
+    pub password: String,
+    pub virtualhost: Option<String>,
+}
+
+/// Message-queue configuration (the `queue` section of `env.php`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct QueueConfig {
+    pub connections: Vec<QueueConnection>,
+    /// The `consumers_wait_for_messages` flag, if set.
+    pub consumers_wait_for_messages: Option<String>,
+}
+
+/// One URL rewrite from the `url_rewrite` table (live DB only — these are runtime data,
+/// generated from products/categories/CMS pages plus manual entries; no static source).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct UrlRewrite {
+    /// The public path requested, e.g. `my-product.html`.
+    pub request_path: String,
+    /// What it resolves to: an internal route (`catalog/product/view/id/42`) or, for a
+    /// redirect, another request path.
+    pub target_path: String,
+    /// `product`, `category`, `cms-page`, or `custom`.
+    pub entity_type: String,
+    pub entity_id: u32,
+    /// `0` = internal rewrite (no redirect), else the HTTP redirect code (`301`/`302`).
+    pub redirect_type: u16,
+    /// Store-view code the rewrite applies to, or `store/<id>` if the id is unknown.
+    pub store: String,
+    pub description: Option<String>,
+    /// `true` for system-generated rewrites; `false` for manually-added ones.
+    pub autogenerated: bool,
+}
+
+/// A page of URL rewrites, with whether more existed beyond the requested limit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct UrlRewrites {
+    pub rewrites: Vec<UrlRewrite>,
+    /// `true` if the `url_rewrite` table held more matching rows than `limit` (dropped).
+    pub truncated: bool,
+}
+
+/// One column of a table, from declarative `db_schema.xml` (static — no DB needed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct DbColumn {
+    pub name: String,
+    /// The `xsi:type`: `int`, `smallint`, `varchar`, `text`, `decimal`, `timestamp`, …
+    pub col_type: String,
+    pub nullable: bool,
+    pub unsigned: bool,
+    /// `length` for `varchar`/`char`; `None` otherwise.
+    pub length: Option<String>,
+    /// `precision`/`scale` for `decimal`.
+    pub precision: Option<String>,
+    pub scale: Option<String>,
+    pub default: Option<String>,
+    /// `identity="true"` — auto-increment.
+    pub identity: bool,
+    pub comment: Option<String>,
+    pub source: Source,
+}
+
+/// An index (`<index>`), from `db_schema.xml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct DbIndex {
+    /// `referenceId`.
+    pub id: String,
+    /// `indexType`: `btree`, `fulltext`, `hash`.
+    pub index_type: String,
+    pub columns: Vec<String>,
+    pub source: Source,
+}
+
+/// A constraint (`<constraint>`): primary key, unique key, or foreign key, from `db_schema.xml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct DbConstraint {
+    /// `referenceId` (`PRIMARY` for the primary key).
+    pub id: String,
+    /// `primary`, `unique`, or `foreign`.
+    pub kind: String,
+    /// Local columns covered (the referencing column for a foreign key).
+    pub columns: Vec<String>,
+    /// Foreign keys only: the referenced table/column and `ON DELETE` action.
+    pub reference_table: Option<String>,
+    pub reference_column: Option<String>,
+    pub on_delete: Option<String>,
+    pub source: Source,
+}
+
+/// A table merged from every module's `db_schema.xml`, in load order (a module can add columns
+/// /indexes/constraints to another module's table; `disabled="true"` drops them).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct DbTable {
+    pub name: String,
+    pub engine: Option<String>,
+    pub resource: Option<String>,
+    pub comment: Option<String>,
+    pub columns: Vec<DbColumn>,
+    pub constraints: Vec<DbConstraint>,
+    pub indexes: Vec<DbIndex>,
+    /// Where the table was first declared.
+    pub source: Source,
+}
+
+/// One admin configuration field from `adminhtml/system.xml` — the map from a config `path`
+/// to **where it lives in the admin** (Stores → Configuration → tab → section → group → field)
+/// and how it behaves. Static; merged across modules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct SystemField {
+    /// `section/group/field` (or the field's explicit `<config_path>` override).
+    pub path: String,
+    /// The field's label (what the admin shows).
+    pub label: String,
+    /// Field input type: `text`, `select`, `multiselect`, `password`, …
+    pub field_type: String,
+    /// Tab label (the top of the breadcrumb), resolved from the section's `<tab>` reference.
+    pub tab: Option<String>,
+    /// Section label.
+    pub section: String,
+    /// Group label.
+    pub group: String,
+    /// Scopes the field is editable at: any of `default`, `website`, `store`.
+    pub scopes: Vec<String>,
+    pub source_model: Option<String>,
+    pub backend_model: Option<String>,
     pub source: Source,
 }
 
