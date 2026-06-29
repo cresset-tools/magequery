@@ -653,10 +653,10 @@ fn system_config(mage: &Magento, args: &SystemConfigArgs, root: &Path) -> Result
         return Ok(());
     }
 
-    // Greppable: `config/path   Tab › Section › Group › Field   [scopes]   # loc`. The
-    // breadcrumb is exactly where to click in Stores → Configuration to find the setting.
+    // Greppable: `config/path   Tab > Section > Group > Field   [scopes]   # loc`. The
+    // breadcrumb is exactly where to click in Stores > Configuration to find the setting.
     let width = fields.iter().map(|f| f.path.len()).max().unwrap_or(0);
-    let sep = style::dim(" › ");
+    let sep = style::dim(" > ");
     for f in &fields {
         let pad = " ".repeat(width.saturating_sub(f.path.len()));
         let mut crumbs: Vec<String> = Vec::new();

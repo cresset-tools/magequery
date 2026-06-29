@@ -417,11 +417,11 @@ it behaves. A `SystemConfigIndex` in `breadth.rs`, lazy (`OnceLock`), parsed in 
   module's `Source`.
 - `Magento::system_config(filter?)` — filter matches the config path **or** the label (so you
   can find a setting by its human name without knowing the path). CLI `magequery system-config
-  [<filter>]`: greppable `path  Tab › Section › Group › Field  [scopes]  # loc`; hidden
+  [<filter>]`: greppable `path  Tab > Section > Group > Field  [scopes]  # loc`; hidden
   config-only fields (no label) fall back to the field id. Validated on proforto: 2656
-  settings; `web/unsecure/base_url → General › Web › Base URLs › Base URL [default, website,
+  settings; `web/unsecure/base_url → General > Web > Base URLs > Base URL [default, website,
   store]`; cross-module section/group labels resolve (e.g. a third-party delivery method under
-  `Sales › Delivery Methods`); ~find by label works (`"sort order"`).
+  `Sales > Delivery Methods`); ~find by label works (`"sort order"`).
 
 ## Future query tools (backlog — not yet built)
 
