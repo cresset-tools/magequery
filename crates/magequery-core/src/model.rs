@@ -584,6 +584,27 @@ pub struct SystemField {
     pub source: Source,
 }
 
+/// An admin ACL resource from `acl.xml` — one node in the permission tree (Magento Admin →
+/// … → this resource). The ids that `webapi` and `system-config` cite as required
+/// `<resource>`s resolve here. Merged across modules: a module attaches resources under
+/// another module's by re-stating the ancestor path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct AclResource {
+    /// The unique resource id, e.g. `Magento_Sales::actions_view`.
+    pub id: String,
+    /// Human title shown in the admin role-permissions tree (empty when the id is used only as
+    /// a path anchor and never declared with a title).
+    pub title: String,
+    /// Parent resource id (`None` for a root, normally `Magento_Backend::admin`).
+    pub parent: Option<String>,
+    /// Direct child resource ids, sorted by (`sortOrder`, id).
+    pub children: Vec<String>,
+    pub sort_order: Option<i32>,
+    pub disabled: bool,
+    pub source: Source,
+}
+
 /// A REST endpoint from `webapi.xml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

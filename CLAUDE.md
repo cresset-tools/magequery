@@ -170,7 +170,7 @@ DATA          (persistence & model)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
-  acl (backlog)                                 menu (backlog)
+  acl [<resource>]                              menu (backlog)
 
 FRONTEND      (presentation)                    -- all backlog
   layout <handle>   widgets   email-templates   translations <str>   view   ui-components
@@ -476,12 +476,36 @@ it behaves. A `SystemConfigIndex` in `breadth.rs`, lazy (`OnceLock`), parsed in 
   store]`; cross-module section/group labels resolve (e.g. a third-party delivery method under
   `Sales > Delivery Methods`); ~find by label works (`"sort order"`).
 
+### `acl` (admin permission tree from `acl.xml`, static, done)
+
+The inverse lookup for the `<resource>` ids that `webapi` and `system-config` already print:
+*where does `Magento_Sales::actions_view` sit in the admin permission tree, what does it grant,
+who declares it.* Another lazy `AclIndex` (`OnceLock`) in `breadth.rs`, parsed in parallel via
+`read_parse` over `etc/acl.xml` (a **global** file — `read_parse(Area::Global, …)` — though
+each resource's `Source.area` is tagged `adminhtml`, its domain), merged in load order.
+- `parse::acl_xml` walks the nested `<resource>` tree with a **stack of enclosing ids**, so each
+  resource records its `parent` (from nesting), `title`/`sortOrder`/`disabled` (attributes, not
+  text — simpler than `system.xml`), and line. Only a non-self-closing `Start` pushes the stack,
+  so a leaf `<resource/>` can't capture following siblings. Two unit tests lock nesting + the
+  anchor-restatement case.
+- Merge (`AclIndex::build`): resources keyed by id, **merge-non-empty** — a later file re-states
+  ancestors as bare path anchors (no title) only to attach a child under another module's
+  resource, so title/sortOrder carry forward and the module that gives the **title** owns the
+  `Source`. After merge, children lists are built from the parent pointers (sorted by
+  `sortOrder` then id) and the whole forest is flattened to a **pre-order DFS** `order` for
+  stable tree rendering. Cycle-guarded (malformed parent loops can't hang the DFS/breadcrumb).
+- `Magento::acl(filter?)` (tree pre-order, or id/title substring matches), `acl_resource(id)`,
+  `acl_ancestors(id)` (breadcrumb), `acl_children(id)`. CLI `magequery acl [<resource>]`: exact
+  id → detail (the resource + its `Magento Admin → … →` breadcrumb + the sub-resources it
+  grants, all with provenance); substring → flat aligned list; no arg → the whole tree, indented
+  by depth. Validated on mageos-lite: the Sales permission tree renders nested with exact lines;
+  `acl Magento_Catalog::products` resolves the very resource `webapi /V1/products` cites
+  (`→ Catalog → Inventory`, grants `update_attributes` + …) — the loop the command closes.
+
 ## Future query tools (backlog — not yet built)
 
 Ideas surfaced while scoping breadth, in rough priority. All but the GraphQL/DB ones are
 static breadth-projections in the same `read_parse` + merge shape.
-- **`acl`** — admin ACL resource tree from `acl.xml` (the `<resource>` refs `webapi`/`system-
-  config` already cite). "What does `Magento_Sales::actions_view` grant / who declares it."
 - **`commands`** — console commands registered via di.xml's `CommandList`/
   `CommandListInterface` argument. "What custom `bin/magento` commands does this codebase add?"
 - **`indexers`** — `indexer.xml` + `mview.xml` (indexer definitions, their mview subscriptions

@@ -1071,6 +1071,119 @@ fn write_sys_text(
     }
 }
 
+// ---------- admin ACL (acl.xml) ----------
+
+/// A `<resource>` as written in one `acl.xml`. `title` is empty when the element only re-states
+/// an ancestor as a path anchor (to attach children under another module's resource); the
+/// declaring module is the one that gives it a non-empty title. Parent comes from nesting.
+pub(crate) struct RawAclResource {
+    pub id: String,
+    pub title: String,
+    pub parent: Option<String>,
+    pub sort_order: Option<i32>,
+    pub disabled: bool,
+    pub line: u32,
+}
+
+/// Parse a module's `acl.xml` into a flat list of `<resource>` declarations, each tagged with
+/// its parent id (from nesting) and line. Cross-module merge happens in `breadth::AclIndex`.
+pub(crate) fn acl_xml(xml: &str) -> Vec<RawAclResource> {
+    let lines = LineMap::new(xml);
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out: Vec<RawAclResource> = Vec::new();
+    // The enclosing `<resource>` ids, so a child knows its parent.
+    let mut stack: Vec<String> = Vec::new();
+
+    loop {
+        let ev = reader.read_event_into(&mut buf);
+        let line = lines.line(reader.buffer_position() as usize);
+        match ev {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) if local_name(&e) == "resource" => {
+                let id = attr(&e, b"id").unwrap_or_default();
+                out.push(raw_acl(&e, id.clone(), stack.last().cloned(), line));
+                // Only a non-self-closing element can hold children.
+                stack.push(id);
+            }
+            Ok(Event::Empty(e)) if local_name(&e) == "resource" => {
+                let id = attr(&e, b"id").unwrap_or_default();
+                out.push(raw_acl(&e, id, stack.last().cloned(), line));
+            }
+            Ok(Event::End(e)) if e.name().as_ref() == b"resource" => {
+                stack.pop();
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+fn raw_acl(e: &BytesStart, id: String, parent: Option<String>, line: u32) -> RawAclResource {
+    RawAclResource {
+        id,
+        title: attr(e, b"title").unwrap_or_default(),
+        parent,
+        sort_order: attr(e, b"sortOrder").and_then(|s| s.parse().ok()),
+        disabled: attr_true(e, b"disabled"),
+        line,
+    }
+}
+
+#[cfg(test)]
+mod acl_tests {
+    use super::acl_xml;
+
+    #[test]
+    fn nests_and_attributes_parent() {
+        let xml = r#"<?xml version="1.0"?>
+<config>
+    <acl>
+        <resources>
+            <resource id="Magento_Backend::admin" title="Magento Admin">
+                <resource id="Magento_Sales::sales" title="Sales" sortOrder="20">
+                    <resource id="Magento_Sales::sales_order" title="Orders"/>
+                </resource>
+            </resource>
+        </resources>
+    </acl>
+</config>"#;
+        let res = acl_xml(xml);
+        let by = |id: &str| res.iter().find(|r| r.id == id).unwrap();
+
+        assert_eq!(by("Magento_Backend::admin").parent, None);
+        assert_eq!(by("Magento_Backend::admin").title, "Magento Admin");
+
+        let sales = by("Magento_Sales::sales");
+        assert_eq!(sales.parent.as_deref(), Some("Magento_Backend::admin"));
+        assert_eq!(sales.sort_order, Some(20));
+
+        // A self-closing leaf gets the right parent and does not affect the stack.
+        let order = by("Magento_Sales::sales_order");
+        assert_eq!(order.parent.as_deref(), Some("Magento_Sales::sales"));
+        assert_eq!(order.title, "Orders");
+    }
+
+    #[test]
+    fn anchor_restatement_has_empty_title() {
+        // A second module re-states ancestors (no title) only to attach a new child.
+        let xml = r#"<config><acl><resources>
+            <resource id="Magento_Backend::admin">
+                <resource id="Magento_Sales::sales">
+                    <resource id="Vendor_Module::thing" title="Thing"/>
+                </resource>
+            </resource>
+        </resources></acl></config>"#;
+        let res = acl_xml(xml);
+        assert_eq!(res.iter().find(|r| r.id == "Magento_Backend::admin").unwrap().title, "");
+        assert_eq!(res.iter().find(|r| r.id == "Magento_Sales::sales").unwrap().title, "");
+        let thing = res.iter().find(|r| r.id == "Vendor_Module::thing").unwrap();
+        assert_eq!(thing.parent.as_deref(), Some("Magento_Sales::sales"));
+        assert_eq!(thing.title, "Thing");
+    }
+}
+
 #[cfg(test)]
 mod schema_tests {
     use super::db_schema_xml;

@@ -39,7 +39,7 @@ mod sysconfig;
 pub use error::{Diagnostic, Error, Result, Severity};
 pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
-    ArgItem, ArgValue, Argument, ByArea, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
+    AclResource, ArgItem, ArgValue, Argument, ByArea, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
     DbTable, InterceptKind, MethodChain, Module, ModuleCheck, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
@@ -73,6 +73,7 @@ pub struct Magento {
     webapi: OnceLock<breadth::WebapiIndex>,
     schema: OnceLock<breadth::SchemaIndex>,
     system_config: OnceLock<breadth::SystemConfigIndex>,
+    acl: OnceLock<breadth::AclIndex>,
 }
 
 struct DiBuilt {
@@ -98,6 +99,7 @@ impl Magento {
             webapi: OnceLock::new(),
             schema: OnceLock::new(),
             system_config: OnceLock::new(),
+            acl: OnceLock::new(),
         })
     }
 
@@ -357,6 +359,33 @@ impl Magento {
         self.system_config
             .get_or_init(|| breadth::SystemConfigIndex::build(&self.index.modules))
             .fields(filter)
+    }
+
+    fn acl_index(&self) -> &breadth::AclIndex {
+        self.acl.get_or_init(|| breadth::AclIndex::build(&self.index.modules))
+    }
+
+    /// Admin ACL resources from `acl.xml`, merged across modules in load order (a module can
+    /// attach resources under another's). Static. No filter → the whole tree in pre-order; a
+    /// filter → resources whose id or title contains it. These are the ids `webapi` and
+    /// `system-config` cite as required `<resource>`s.
+    pub fn acl(&self, filter: Option<&str>) -> Vec<AclResource> {
+        self.acl_index().resources(filter)
+    }
+
+    /// One ACL resource by exact id, with its parent and direct-child ids.
+    pub fn acl_resource(&self, id: &str) -> Option<AclResource> {
+        self.acl_index().resource(id)
+    }
+
+    /// The breadcrumb for an ACL resource: ancestors from the root down to (excluding) `id`.
+    pub fn acl_ancestors(&self, id: &str) -> Vec<AclResource> {
+        self.acl_index().ancestors(id)
+    }
+
+    /// The direct children of an ACL resource — the sub-permissions it groups.
+    pub fn acl_children(&self, id: &str) -> Vec<AclResource> {
+        self.acl_index().children(id)
     }
 
     /// The database configuration from `app/etc/env.php` (`db` section).

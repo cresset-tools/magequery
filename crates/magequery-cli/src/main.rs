@@ -6,9 +6,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use magequery_core::model::ModuleSource;
 use magequery_core::{
-    ArgValue, Area, ChainStep, ClassName, ConfigSet, ConfigSourceKind, ConfigValue, DbColumn,
-    DbTable, Error, EventName, Magento, MethodChain, Observer, Plugin, Preference, Resolution,
-    Route, Source, WebapiRoute,
+    AclResource, ArgValue, Area, ChainStep, ClassName, ConfigSet, ConfigSourceKind, ConfigValue,
+    DbColumn, DbTable, Error, EventName, Magento, MethodChain, Observer, Plugin, Preference,
+    Resolution, Route, Source, WebapiRoute,
 };
 
 // The top-level command list, grouped, for `print_help`. Kept in sync with the `Command`
@@ -42,6 +42,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("config", "Resolve a config path/section with its source (static, +--db)"),
             ("system-config", "Where each admin config path lives (Stores → Configuration)"),
+            ("acl", "Admin ACL resource tree from acl.xml; resolve a <resource> id"),
         ],
     ),
     (
@@ -204,6 +205,8 @@ enum Command {
     Config(ConfigArgs),
     /// Where each admin config path lives (Stores → Configuration).
     SystemConfig(SystemConfigArgs),
+    /// Admin ACL resource tree from acl.xml; resolve a <resource> id.
+    Acl(AclArgs),
 
     // ── Runtime: env.php config & live connections ──
     /// DB connections from env.php; info / ping.
@@ -231,6 +234,15 @@ struct SystemConfigArgs {
     /// Filter by a config-path or label substring (e.g. `web/secure` or `base url`).
     /// Omit to list every admin setting.
     filter: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct AclArgs {
+    /// An exact resource id (`Magento_Sales::actions_view`) → its tree position + children;
+    /// otherwise a substring matched against id or title. Omit to print the whole tree.
+    resource: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -488,6 +500,7 @@ fn main() -> Result<()> {
         Command::Lock(args) => lock_info(&mage, args.json),
         Command::Queue(args) => queue_info(&mage, args.json),
         Command::SystemConfig(args) => system_config(&mage, &args, &cli.root),
+        Command::Acl(args) => acl(&mage, &args, &cli.root),
         Command::Schema(args) => schema(&mage, &args, &cli.root),
         Command::UrlRewrites(args) => url_rewrites(&mage, &args),
         Command::Config(args) => config(&mage, &args, &cli.root),
@@ -859,6 +872,107 @@ fn system_config(mage: &Magento, args: &SystemConfigArgs, root: &Path) -> Result
     }
     eprintln!("\n{} setting(s) {}", fields.len(), style::dim("· Stores → Configuration"));
     Ok(())
+}
+
+fn acl(mage: &Magento, args: &AclArgs, root: &Path) -> Result<()> {
+    // An exact resource id → detail (tree position + children); otherwise a substring list.
+    if let Some(id) = &args.resource {
+        if let Some(res) = mage.acl_resource(id) {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&res)?);
+                return Ok(());
+            }
+            render_acl_detail(mage, &res, root);
+            return Ok(());
+        }
+    }
+
+    let list = mage.acl(args.resource.as_deref());
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+    if list.is_empty() {
+        println!("{}", style::dim("(no ACL resource matches)"));
+        return Ok(());
+    }
+
+    // No filter → render the permission tree (indent by depth). A substring filter → a flat,
+    // aligned list (its ancestors may not be in the result, so indentation would mislead).
+    let index: std::collections::HashMap<&str, &AclResource> =
+        list.iter().map(|r| (r.id.as_str(), r)).collect();
+    if args.resource.is_none() {
+        for r in &list {
+            let indent = "  ".repeat(acl_depth(r, &index));
+            println!("{indent}{}", acl_line(r, root));
+        }
+    } else {
+        let w = list.iter().map(|r| r.id.len()).max().unwrap_or(0);
+        for r in &list {
+            let pad = " ".repeat(w - r.id.len());
+            println!("{}{pad}  {}", style::name(&r.id), acl_title_loc(r, root));
+        }
+    }
+    eprintln!("\n{} resource(s)", list.len());
+    Ok(())
+}
+
+/// A tree line: `id  Title  # loc` (id only — depth is shown by the caller's indentation).
+fn acl_line(r: &AclResource, root: &Path) -> String {
+    format!("{}  {}", style::name(&r.id), acl_title_loc(r, root))
+}
+
+/// The `Title [disabled]  # loc` tail shared by the tree and flat renderings.
+fn acl_title_loc(r: &AclResource, root: &Path) -> String {
+    let title = if r.title.is_empty() {
+        style::dim("(anchor)")
+    } else {
+        style::target(&r.title)
+    };
+    let disabled = if r.disabled { format!("  {}", style::err("[disabled]")) } else { String::new() };
+    format!("{title}{disabled}   {}", style::path(&short_loc(&r.source, root)))
+}
+
+/// Depth of `r` within the result set (number of ancestors present), for tree indentation.
+fn acl_depth(r: &AclResource, index: &std::collections::HashMap<&str, &AclResource>) -> usize {
+    let mut depth = 0;
+    let mut cur = r.parent.as_deref();
+    while let Some(pid) = cur {
+        let Some(p) = index.get(pid) else { break };
+        depth += 1;
+        cur = p.parent.as_deref();
+        if depth > 64 {
+            break; // malformed-cycle guard
+        }
+    }
+    depth
+}
+
+fn render_acl_detail(mage: &Magento, res: &AclResource, root: &Path) {
+    println!("{}", acl_line(res, root));
+
+    // Breadcrumb: where this resource sits in the admin permission tree.
+    let ancestors = mage.acl_ancestors(&res.id);
+    if !ancestors.is_empty() {
+        let crumbs: Vec<String> = ancestors
+            .iter()
+            .map(|a| if a.title.is_empty() { a.id.clone() } else { a.title.clone() })
+            .collect();
+        println!("  {} {}", style::dim("path:"), crumbs.join(&style::dim(" → ")));
+    }
+
+    // Children = the sub-permissions this resource grants.
+    let children = mage.acl_children(&res.id);
+    if children.is_empty() {
+        println!("  {}", style::dim("(leaf — grants no sub-resources)"));
+    } else {
+        println!("  {}", style::dim(&format!("grants ({}):", children.len())));
+        let w = children.iter().map(|c| c.id.len()).max().unwrap_or(0);
+        for c in &children {
+            let pad = " ".repeat(w - c.id.len());
+            println!("    {}{pad}  {}", style::name(&c.id), acl_title_loc(c, root));
+        }
+    }
 }
 
 fn schema(mage: &Magento, args: &SchemaArgs, root: &Path) -> Result<()> {
