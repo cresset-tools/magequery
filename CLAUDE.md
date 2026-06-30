@@ -132,25 +132,78 @@ Rules:
 - Width/alignment: pad the *plain* string, then color (escape codes don't count toward
   display width), or color first and pad with computed spaces.
 
-## Command surface
+## Command surface (organization — LOCKED)
+
+**The one grammar rule: `magequery <command> [target] [flags]`.** The command names what
+you're inspecting (a noun); the argument is a *Magento entity* (a class, event, config path,
+table). One level deep. The namespace stays **flat** — `di Foo` must never become `wiring di
+Foo`; grep-ability and muscle memory are the whole UX. Grouping is a *help-rendering* concern
+(the `Command` enum order + a hand-rendered root help screen), **not** a typing one.
+
+**Nesting earns its keep in exactly one case: a noun with multiple verbs** — `db info`/`db
+ping`, `redis info`/`redis ping`. Info-only nouns (`session`/`cache`/`lock`/`queue`) stay flat.
+
+The `Command` enum in `main.rs` is ordered into these seven groups (banner comments mark
+them). clap can't natively head-group subcommands without *nesting* them (which would break
+flat invocation), and its `help_template` can't color literal text — so `main.rs` renders the
+**root** help/no-args screen itself (`print_help` + the `HELP_GROUPS`/`HELP_OPTIONS` tables,
+styled through the `style` module, so it's grouped *and* colored, and plain when piped). It's
+intercepted by `wants_root_help` *before* clap parses; every `magequery <command> --help`
+still uses clap's native per-command help. Keep `HELP_GROUPS` in sync with the enum. New
+commands MUST slot into a group, never append to the end ad hoc:
 
 ```
-magequery modules     [--enabled|--disabled] [--source app|vendor]
-magequery preference  <Class>
-magequery plugins     <Class>                  # interceptor chain, execution order
-magequery observers   [<event>]
-magequery di          <Type>                   # FLAGSHIP: preference + plugin chain + args + vtypes
-magequery cron        [<group>]
-magequery routes      [--area ...]
-magequery webapi      [<route>]
-magequery config      <path?> [--scope ...] [--show-source] [--decrypt]   # phase 2 (DB)
-magequery db                                   # phase 2, opt-in live introspection
-magequery redis                                # phase 2, opt-in
-magequery session|cache|lock|queue            # phase 2, env.php deployment-info (info only)
-magequery url-rewrites [<path>] [--store ...] [--redirects] [--limit ...]   # phase 2, DB
-magequery schema       [<table>]               # phase 2, static (db_schema.xml)
-magequery system-config [<filter>]             # static (adminhtml/system.xml) — where settings live
+WIRING        (object manager — how a class is assembled)
+  di <type>            flagship: preference + plugins + args + vtypes
+  preference <class>     focused view of di
+  plugins <class>        focused view of di  [--chain]
+  events [<event>]       observers per event   (NOT `observers` — that name is retired)
+  uses <class>           reverse DI: who injects it                         (backlog)
+
+ENTRY POINTS  (how execution starts)
+  routes [--area]    actions [<url>]    webapi [<url>]    cron [<group>]
+  graphql <type>   (backlog)            commands         (backlog)
+
+DATA          (persistence & model)
+  schema [<table>]       extension-attributes <type> (backlog)
+  indexers (backlog)     eav [<attr>] (backlog, --db)
+
+CONFIG & ADMIN (where settings & permissions live)
+  config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
+  acl (backlog)                                 menu (backlog)
+
+FRONTEND      (presentation)                    -- all backlog
+  layout <handle>   widgets   email-templates   translations <str>   view   ui-components
+
+RUNTIME       (env.php config & live connections)
+  db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
+  session   cache   lock   queue       (info-only)
+
+PROJECT       (the codebase itself)
+  modules [--check] [--enabled|--disabled] [--source app|vendor]
+  deps <module> (backlog)   patches [--db] (backlog)   doctor (backlog)   whatis <class> (backlog)
 ```
+
+### Cross-cutting flag vocabulary (a flag means the same thing everywhere)
+
+- **`--area <name>` / `--all-areas`** — only on area-aware commands (`di`, `preference`,
+  `plugins`, `events`, `routes`, `actions`, `webapi`). Default = collapsed diff.
+- **`--json`** and **`--color auto|always|never`** + **`--root <path>`** — global, every command.
+- **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config` today;
+  future `eav`, `indexers --status`, `patches`). Static by default; DB overlay when asked;
+  clean `Error::Db` if unreachable. Pure-live commands (`db`/`redis` `ping`, `url-rewrites`)
+  require the `db`/`redis` build feature instead.
+- **`--source app|vendor`** — listing commands, "only my code" (today `modules`; generalize).
+
+### Consolidations baked into this lock
+
+- `observers` is folded into **`events [<event>]`** (one command). Already done in code.
+- `preference` / `plugins` are **focused views of `di`** — kept flat (high-frequency), but
+  documented as such; `di <type>` is the single full entry point.
+- reverse-DI ships as **`uses <class>`** (or folded into `whatis`), never a literal
+  `reverse-di` command. `doctor` is the home for cross-index lints (the `modules --check`
+  philosophy, generalized: preference/vtype cycles, di refs to missing classes, plugins on
+  `final`/non-shared, `<sequence>` cycles).
 
 ## Module discovery (step 1, done)
 

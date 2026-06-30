@@ -11,6 +11,67 @@ use magequery_core::{
     Route, Source, WebapiRoute,
 };
 
+// The top-level command list, grouped, for `print_help`. Kept in sync with the `Command`
+// enum and CLAUDE.md's command surface. We render the root help ourselves (rather than via a
+// clap `help_template`) because clap can't head-group subcommands without nesting them — which
+// would break flat `magequery <command>` invocation — and a plain template string can't carry
+// the semantic colors. Rendering through `style` gives both grouping *and* color (and stays
+// plain when piped / `--color never`, since `style` decides once at startup).
+const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Wiring",
+        &[
+            ("di", "Full DI resolution: concrete type, args, virtual type, plugins"),
+            ("preference", "Concrete class for an interface/class"),
+            ("plugins", "Plugin (interceptor) chain for a class, incl. inherited"),
+            ("events", "Events and their observers"),
+        ],
+    ),
+    (
+        "Entry points",
+        &[
+            ("routes", "Frontend/adminhtml routes (frontName → modules)"),
+            ("actions", "Controller actions: URL → action class"),
+            ("webapi", "REST endpoints from webapi.xml"),
+            ("cron", "Cron jobs, optionally by group"),
+        ],
+    ),
+    ("Data", &[("schema", "Tables from db_schema.xml: a list, or one table's DDL")]),
+    (
+        "Config & admin",
+        &[
+            ("config", "Resolve a config path/section with its source (static, +--db)"),
+            ("system-config", "Where each admin config path lives (Stores → Configuration)"),
+        ],
+    ),
+    (
+        "Runtime",
+        &[
+            ("db", "DB connections from env.php; info / ping"),
+            ("redis", "Redis/Valkey usage from env.php; info / ping"),
+            ("session", "Session storage config from env.php"),
+            ("cache", "Cache backends and type flags from env.php"),
+            ("lock", "Locking backend from env.php"),
+            ("queue", "Message-queue (AMQP) connections from env.php"),
+            ("url-rewrites", "URL rewrites from the DB (request → target)"),
+        ],
+    ),
+    ("Project", &[("modules", "Installed modules in load order")]),
+];
+
+/// Global options, for `print_help`: (flags, placeholder, description). Mirror the `Cli`
+/// fields below plus clap's auto `--help`/`--version`.
+const HELP_OPTIONS: &[(&str, &str, &str)] = &[
+    ("-r, --root", "<ROOT>", "Path to the Magento root [default: .]"),
+    ("    --color", "<COLOR>", "When to colorize output [default: auto] [auto, always, never]"),
+    ("-h, --help", "", "Print help"),
+    ("-V, --version", "", "Print version"),
+];
+
+// We render the *root* `--help` / no-args screen ourselves (`print_help`, intercepted in
+// `main` before clap parses) to get grouped + colored output; subcommands keep clap's native
+// per-command help. The `help` subcommand stays enabled: bare `magequery help` is intercepted
+// to show our grouped screen, while `magequery help <command>` is clap's per-command help.
 #[derive(Parser)]
 #[command(name = "magequery", version, about = "Inspect a Magento 2 codebase from the command line")]
 struct Cli {
@@ -26,46 +87,143 @@ struct Cli {
     command: Command,
 }
 
+/// Does this invocation want the *root* help screen? True for a bare `magequery`, or `-h`/
+/// `--help` appearing before any subcommand. Scans only our fixed global flags; anything we
+/// don't recognize (including unknown flags and the subcommand itself) is handed to clap.
+/// MUST be updated if a new value-taking global flag is added.
+fn wants_root_help(args: &[String]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "-h" | "--help" => return true,
+            "-V" | "--version" => return false,
+            // Value-taking globals: skip the flag and its value token.
+            "--root" | "-r" | "--color" => i += 2,
+            // `--root=…` / `--color=…`: value is attached.
+            _ if a.starts_with("--root=") || a.starts_with("--color=") => i += 1,
+            // Bare `magequery help` → our grouped screen; `help <command>` → clap's
+            // per-command help.
+            "help" => return !args[i + 1..].iter().any(|t| !t.starts_with('-')),
+            // First non-flag token is the subcommand; any unknown flag → let clap handle it.
+            _ => return false,
+        }
+    }
+    // Only global flags, no subcommand → show help.
+    true
+}
+
+/// The `--color` choice from raw args (we render help before clap parses). Defaults to auto.
+fn color_from_args(args: &[String]) -> style::ColorChoice {
+    use clap::ValueEnum;
+    let mut i = 0;
+    while i < args.len() {
+        let v = match args[i].as_str() {
+            "--color" => args.get(i + 1).map(String::as_str),
+            a => a.strip_prefix("--color="),
+        };
+        if let Some(v) = v {
+            return style::ColorChoice::from_str(v, true).unwrap_or_default();
+        }
+        i += 1;
+    }
+    style::ColorChoice::default()
+}
+
+/// Render the grouped, colored top-level help (the root `--help` / no-args screen).
+fn print_help() {
+    let name_w = HELP_GROUPS
+        .iter()
+        .flat_map(|(_, cmds)| cmds.iter())
+        .map(|(n, _)| n.len())
+        .max()
+        .unwrap_or(0);
+
+    println!("Inspect a Magento 2 codebase from the command line\n");
+    println!("{} magequery [OPTIONS] <COMMAND>\n", style::target("Usage:"));
+
+    for (group, cmds) in HELP_GROUPS {
+        println!("{}", style::target(&format!("{group}:")));
+        for (name, desc) in *cmds {
+            let pad = " ".repeat(name_w - name.len());
+            println!("  {}{pad}  {desc}", style::name(name));
+        }
+        println!();
+    }
+
+    // Pad the *plain* "flags placeholder" column, then color the parts (escapes don't count
+    // toward width).
+    let left_w = HELP_OPTIONS
+        .iter()
+        .map(|(f, p, _)| f.len() + if p.is_empty() { 0 } else { p.len() + 1 })
+        .max()
+        .unwrap_or(0);
+    println!("{}", style::target("Options:"));
+    for (flags, placeholder, desc) in HELP_OPTIONS {
+        let (colored, plain_len) = if placeholder.is_empty() {
+            (style::name(flags), flags.len())
+        } else {
+            (format!("{} {}", style::name(flags), style::dim(placeholder)), flags.len() + 1 + placeholder.len())
+        };
+        let pad = " ".repeat(left_w - plain_len);
+        println!("  {colored}{pad}  {desc}");
+    }
+}
+
+// Ordered into the seven command groups of the LOCKED CLI organization (see CLAUDE.md
+// "Command surface"). Declaration order = the order clap lists them under `--help`, and it
+// mirrors the `COMMAND_GROUPS` legend below. New commands slot into a group, never append.
 #[derive(Subcommand)]
 enum Command {
-    /// List installed modules in config.php load order.
-    Modules(ModulesArgs),
-    /// Show the concrete class Magento instantiates for an interface/class.
-    Preference(PreferenceArgs),
-    /// Show the interceptor (plugin) chain for a class, including ancestor/interface plugins.
-    Plugins(PluginsArgs),
-    /// Full DI resolution: concrete type, arguments, virtual type, and plugins.
+    // ── Wiring (object manager): how a class is assembled ──
+    /// Full DI resolution: concrete type, arguments, virtual type, plugins.
     Di(DiArgs),
-    /// List events and their observers (or observers of one event).
+    /// Concrete class for an interface/class (a view of di).
+    Preference(PreferenceArgs),
+    /// Plugin (interceptor) chain for a class, incl. inherited (a view of di).
+    Plugins(PluginsArgs),
+    /// Events and their observers.
     Events(EventsArgs),
-    /// List cron jobs (optionally for one group).
-    Cron(CronArgs),
-    /// List frontend/adminhtml routes (frontName → modules).
+
+    // ── Entry points: how execution starts ──
+    /// Frontend/adminhtml routes (frontName → modules).
     Routes(RoutesArgs),
-    /// List REST endpoints from webapi.xml (optionally filtered by URL substring).
-    Webapi(WebapiArgs),
-    /// List controller actions (subroutes): URL → action class. Greppable.
+    /// Controller actions: URL → action class.
     Actions(ActionsArgs),
-    /// Database connection info and connectivity test (from env.php).
-    Db(DbArgs),
-    /// Redis/Valkey usage (cache, page cache, session) info and connectivity test.
-    Redis(RedisArgs),
-    /// Session storage configuration (handler + location) from env.php.
-    Session(InfoArgs),
-    /// Cache backends per frontend and per-type enable flags, from env.php.
-    Cache(InfoArgs),
-    /// Locking backend (provider + settings) from env.php.
-    Lock(InfoArgs),
-    /// Message-queue connections (AMQP) from env.php.
-    Queue(InfoArgs),
-    /// Admin settings from system.xml: where each config path lives in Stores → Configuration.
-    SystemConfig(SystemConfigArgs),
-    /// Database tables from declarative db_schema.xml (static). List, or one table's DDL.
+    /// REST endpoints from webapi.xml.
+    Webapi(WebapiArgs),
+    /// Cron jobs, optionally by group.
+    Cron(CronArgs),
+
+    // ── Data: persistence & model ──
+    /// Tables from db_schema.xml: a list, or one table's DDL.
     Schema(SchemaArgs),
-    /// URL rewrites from the database (request → target, redirects). Needs a reachable DB.
-    UrlRewrites(UrlRewritesArgs),
-    /// Resolve a system-config path (or section) with its source. Static sources only (no DB).
+
+    // ── Config & admin: where settings & permissions live ──
+    /// Resolve a config path/section with its source (static, +--db).
     Config(ConfigArgs),
+    /// Where each admin config path lives (Stores → Configuration).
+    SystemConfig(SystemConfigArgs),
+
+    // ── Runtime: env.php config & live connections ──
+    /// DB connections from env.php; info / ping.
+    Db(DbArgs),
+    /// Redis/Valkey usage from env.php; info / ping.
+    Redis(RedisArgs),
+    /// Session storage config from env.php.
+    Session(InfoArgs),
+    /// Cache backends and type flags from env.php.
+    Cache(InfoArgs),
+    /// Locking backend from env.php.
+    Lock(InfoArgs),
+    /// Message-queue (AMQP) connections from env.php.
+    Queue(InfoArgs),
+    /// URL rewrites from the DB (request → target).
+    UrlRewrites(UrlRewritesArgs),
+
+    // ── Project: the codebase itself ──
+    /// Installed modules in load order.
+    Modules(ModulesArgs),
 }
 
 #[derive(clap::Args)]
@@ -295,6 +453,16 @@ enum SourceFilter {
 }
 
 fn main() -> Result<()> {
+    // Take over the root `--help` / no-args screen (grouped + colored, via `print_help`)
+    // before clap can render its flat one; every `magequery <command> --help` still uses
+    // clap's native per-command help.
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if wants_root_help(&raw) {
+        style::init(color_from_args(&raw));
+        print_help();
+        return Ok(());
+    }
+
     let cli = Cli::parse();
     style::init(cli.color);
     let mage = Magento::open(&cli.root)
