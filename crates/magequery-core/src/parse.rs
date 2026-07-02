@@ -1341,6 +1341,94 @@ mod acl_tests {
     }
 }
 
+// ---------- admin menu (adminhtml/menu.xml) ----------
+
+/// The attributes of a menu `<add>`/`<update>` — all `Option` so `<update>` merges
+/// attribute-level (like plugins), and `<add>` states only what it declares.
+pub(crate) struct RawMenuItem {
+    pub id: String,
+    pub title: Option<String>,
+    /// Parent is an *attribute* here (unlike acl.xml's nesting).
+    pub parent: Option<String>,
+    /// The admin route, e.g. `catalog/product/`; grouping nodes have none.
+    pub action: Option<String>,
+    /// The guarding ACL resource id.
+    pub resource: Option<String>,
+    pub sort_order: Option<i32>,
+    pub depends_on_module: Option<String>,
+    pub depends_on_config: Option<String>,
+    pub line: u32,
+}
+
+pub(crate) enum RawMenuOp {
+    /// `<add>` and `<update>` merge identically for our purposes (upsert, non-empty attrs
+    /// win) — Magento only distinguishes them for strict-mode validation.
+    Upsert(RawMenuItem),
+    Remove { id: String },
+}
+
+/// Parse `adminhtml/menu.xml`: `<menu><add id= title= parent= …/><update …/><remove id=/>`.
+pub(crate) fn menu_xml(xml: &str) -> Vec<RawMenuOp> {
+    let lines = LineMap::new(xml);
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out = Vec::new();
+    loop {
+        let ev = reader.read_event_into(&mut buf);
+        let line = lines.line(reader.buffer_position() as usize);
+        match ev {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
+                "add" | "update" => out.push(RawMenuOp::Upsert(RawMenuItem {
+                    id: attr(&e, b"id").unwrap_or_default(),
+                    title: attr(&e, b"title"),
+                    parent: attr(&e, b"parent"),
+                    action: attr(&e, b"action"),
+                    resource: attr(&e, b"resource"),
+                    sort_order: attr(&e, b"sortOrder").and_then(|s| s.trim().parse().ok()),
+                    depends_on_module: attr(&e, b"dependsOnModule"),
+                    depends_on_config: attr(&e, b"dependsOnConfig"),
+                    line,
+                })),
+                "remove" => {
+                    if let Some(id) = attr(&e, b"id") {
+                        out.push(RawMenuOp::Remove { id });
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::{menu_xml, RawMenuOp};
+
+    #[test]
+    fn adds_updates_removes() {
+        let xml = r#"<config><menu>
+            <add id="A::a" title="Alpha" module="A" sortOrder="10" resource="A::a"/>
+            <add id="A::b" title="Beta" parent="A::a" action="alpha/beta/" resource="A::b"/>
+            <update id="A::b" title="Beta2"/>
+            <remove id="A::gone"/>
+        </menu></config>"#;
+        let ops = menu_xml(xml);
+        assert_eq!(ops.len(), 4);
+        let RawMenuOp::Upsert(a) = &ops[0] else { panic!() };
+        assert_eq!((a.id.as_str(), a.title.as_deref(), a.sort_order), ("A::a", Some("Alpha"), Some(10)));
+        let RawMenuOp::Upsert(b) = &ops[1] else { panic!() };
+        assert_eq!(b.parent.as_deref(), Some("A::a"));
+        assert_eq!(b.action.as_deref(), Some("alpha/beta/"));
+        let RawMenuOp::Upsert(u) = &ops[2] else { panic!() };
+        assert_eq!((u.title.as_deref(), u.parent.as_deref()), (Some("Beta2"), None));
+        assert!(matches!(&ops[3], RawMenuOp::Remove { id } if id == "A::gone"));
+    }
+}
+
 // ---------- message queues (communication.xml + queue_*.xml) ----------
 
 pub(crate) struct RawMqHandler {

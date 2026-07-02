@@ -52,6 +52,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("config", "Resolve a config path/section with its source (static, +--db)"),
             ("system-config", "Where each admin config path lives (Stores → Configuration)"),
             ("acl", "Admin ACL resource tree from acl.xml; resolve a <resource> id"),
+            ("menu", "Admin menu tree from menu.xml: what's where, guarded by which ACL"),
         ],
     ),
     (
@@ -237,6 +238,8 @@ enum Command {
     SystemConfig(SystemConfigArgs),
     /// Admin ACL resource tree from acl.xml; resolve a <resource> id.
     Acl(AclArgs),
+    /// Admin menu tree from menu.xml: what's where, guarded by which ACL.
+    Menu(MenuArgs),
 
     // ── Runtime: env.php config & live connections ──
     /// DB connections from env.php; info / ping.
@@ -351,6 +354,15 @@ struct GraphqlArgs {
     /// field; otherwise a name substring to list matching types. Omit to list every type.
     #[arg(value_name = "TYPE")]
     type_name: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct MenuArgs {
+    /// An exact item id (`Magento_Catalog::catalog_products`) → detail with breadcrumb and
+    /// children; otherwise a substring matched against id or title. Omit for the whole tree.
+    item: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -678,6 +690,7 @@ fn main() -> Result<()> {
         },
         Command::SystemConfig(args) => system_config(&mage, &args, &cli.root),
         Command::Acl(args) => acl(&mage, &args, &cli.root),
+        Command::Menu(args) => menu(&mage, &args, &cli.root),
         Command::Schema(args) => schema(&mage, &args, &cli.root),
         Command::UrlRewrites(args) => url_rewrites(&mage, &args),
         Command::Config(args) => config(&mage, &args, &cli.root),
@@ -1297,6 +1310,116 @@ fn render_acl_detail(mage: &Magento, res: &AclResource, root: &Path) {
         for c in &children {
             let pad = " ".repeat(w - c.id.len());
             println!("    {}{pad}  {}", style::name(&c.id), acl_title_loc(c, root));
+        }
+    }
+}
+
+fn menu(mage: &Magento, args: &MenuArgs, root: &Path) -> Result<()> {
+    // An exact item id → detail (breadcrumb + children); otherwise a substring list.
+    if let Some(id) = &args.item {
+        if let Some(item) = mage.menu_item(id) {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&item)?);
+                return Ok(());
+            }
+            render_menu_detail(mage, &item, root);
+            return Ok(());
+        }
+    }
+
+    let list = mage.menu(args.item.as_deref());
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+    if list.is_empty() {
+        println!("{}", style::dim("(no menu item matches)"));
+        return Ok(());
+    }
+
+    // No filter → the tree (indent by depth); a filter → a flat aligned list.
+    let index: std::collections::HashMap<&str, &magequery_core::MenuItem> =
+        list.iter().map(|i| (i.id.as_str(), i)).collect();
+    if args.item.is_none() {
+        for i in &list {
+            let mut depth = 0;
+            let mut cur = i.parent.as_deref();
+            while let Some(pid) = cur {
+                let Some(p) = index.get(pid) else { break };
+                depth += 1;
+                cur = p.parent.as_deref();
+                if depth > 64 {
+                    break;
+                }
+            }
+            println!("{}{}", "  ".repeat(depth), menu_line(i, root));
+        }
+    } else {
+        let w = list.iter().map(|i| i.id.len()).max().unwrap_or(0);
+        for i in &list {
+            let pad = " ".repeat(w - i.id.len());
+            println!("{}{pad}  {}", style::name(&i.id), menu_title_tail(i, root));
+        }
+    }
+    eprintln!("\n{} item(s)", list.len());
+    Ok(())
+}
+
+/// A tree line: `id  Title  action  # loc`.
+fn menu_line(i: &magequery_core::MenuItem, root: &Path) -> String {
+    format!("{}  {}", style::name(&i.id), menu_title_tail(i, root))
+}
+
+fn menu_title_tail(i: &magequery_core::MenuItem, root: &Path) -> String {
+    let title = if i.title.is_empty() { style::dim("(untitled)") } else { style::target(&i.title) };
+    let action = i
+        .action
+        .as_deref()
+        .map(|a| format!("  {}", style::area(a)))
+        .unwrap_or_default();
+    format!("{title}{action}   {}", style::path(&short_loc(&i.source, root)))
+}
+
+fn render_menu_detail(mage: &Magento, item: &magequery_core::MenuItem, root: &Path) {
+    println!("{}", menu_line(item, root));
+
+    let ancestors = mage.menu_ancestors(&item.id);
+    if !ancestors.is_empty() {
+        let crumbs: Vec<String> = ancestors
+            .iter()
+            .map(|a| if a.title.is_empty() { a.id.clone() } else { a.title.clone() })
+            .collect();
+        println!("  {} {} → {}", style::dim("path:"), crumbs.join(&style::dim(" → ")), style::target(&item.title));
+    }
+    if let Some(a) = &item.action {
+        println!("  {} {}", style::dim("action:"), style::area(a));
+    }
+    if let Some(r) = &item.resource {
+        println!(
+            "  {} {}  {}",
+            style::dim("acl:"),
+            style::name(r),
+            style::dim(&format!("→ magequery acl {r}")),
+        );
+    }
+    if let Some(d) = &item.depends_on_module {
+        println!("  {} {}", style::dim("depends on module:"), style::module(d));
+    }
+    if let Some(d) = &item.depends_on_config {
+        println!("  {} {}", style::dim("depends on config:"), style::name(d));
+    }
+
+    let children = mage.menu_children(&item.id);
+    if children.is_empty() {
+        if item.action.is_none() {
+            println!("  {}", style::dim("(no children)"));
+        }
+    } else {
+        println!("  {}", style::dim(&format!("children ({}):", children.len())));
+        let w = children.iter().map(|c| c.id.len()).max().unwrap_or(0);
+        for c in &children {
+            let pad = " ".repeat(w - c.id.len());
+            println!("    {}{pad}  {}", style::name(&c.id), menu_title_tail(c, root));
         }
     }
 }

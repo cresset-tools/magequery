@@ -177,7 +177,7 @@ DATA          (persistence & model)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
-  acl [<resource>]                              menu (backlog)
+  acl [<resource>]                              menu [<item>]
 
 FRONTEND      (presentation)                    -- all backlog
   layout <handle>   widgets   email-templates   translations <str>   view   ui-components
@@ -494,6 +494,26 @@ it behaves. A `SystemConfigIndex` in `breadth.rs`, lazy (`OnceLock`), parsed in 
   settings; `web/unsecure/base_url → General > Web > Base URLs > Base URL [default, website,
   store]`; cross-module section/group labels resolve (e.g. a third-party delivery method under
   `Sales > Delivery Methods`); ~find by label works (`"sort order"`).
+
+### `menu` (admin menu tree from `adminhtml/menu.xml`, static, done)
+
+The admin sidebar as data: *where does an admin page live, what route does it open, which
+ACL resource guards it.* A `MenuIndex` in `breadth.rs` (lazy, parallel `read_parse` over
+`etc/adminhtml/menu.xml`), shaped like `AclIndex` with one structural difference: parents
+come from the **`parent` attribute**, not nesting, and declarations are **ops** —
+`parse::menu_xml` yields `Upsert` (`<add>`/`<update>` merge identically for us:
+attribute-level upsert, the title-giver owns `Source`) and `Remove` (deletes the id;
+validated live: CurrencySymbol removes `Magento_Backend::system_currency` and replaces
+it). An item whose parent doesn't exist is treated as a root so nothing silently vanishes.
+Children by (`sortOrder`, id); pre-order DFS for the tree. `Magento::menu(filter?)`,
+`menu_item(id)`, `menu_ancestors(id)`, `menu_children(id)`.
+
+CLI `magequery menu [<item>]`: no arg → the whole tree indented by depth (`id  Title
+action  # loc`); substring → flat list (matches id or title); exact id → detail with the
+breadcrumb (`Catalog → Inventory → Products`), action, the guarding ACL resource with a
+`→ magequery acl <id>` cross-link (the loop with `acl`/`system-config`), dependsOn
+module/config, and children. Validated on mageos-lite: 76 items, tree exact, the remove
+case, filter by title.
 
 ### `acl` (admin permission tree from `acl.xml`, static, done)
 

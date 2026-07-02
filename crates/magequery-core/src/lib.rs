@@ -46,7 +46,7 @@ pub use model::{
     ConsoleCommand, ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
     DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, GqlArg, GqlField, GqlKind, GqlType,
     Indexer, InstanceInfo, InterceptKind,
-    MethodChain, Module, ModuleCheck, ModuleDeps,
+    MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps,
     MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
     Resolution, Route, UnregisteredModule, WebapiRoute,
@@ -85,6 +85,7 @@ pub struct Magento {
     indexers: OnceLock<breadth::IndexerIndex>,
     mq: OnceLock<breadth::MqIndex>,
     gql: OnceLock<breadth::GqlIndex>,
+    menu: OnceLock<breadth::MenuIndex>,
 }
 
 struct DiBuilt {
@@ -114,6 +115,7 @@ impl Magento {
             indexers: OnceLock::new(),
             mq: OnceLock::new(),
             gql: OnceLock::new(),
+            menu: OnceLock::new(),
         })
     }
 
@@ -1046,6 +1048,32 @@ impl Magento {
 
     fn mq_index(&self) -> &breadth::MqIndex {
         self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
+    }
+
+    fn menu_index(&self) -> &breadth::MenuIndex {
+        self.menu.get_or_init(|| breadth::MenuIndex::build(&self.index.modules))
+    }
+
+    /// Admin menu items from `adminhtml/menu.xml`, merged across modules in load order
+    /// (`<add>`/`<update>` upsert attribute-level, `<remove>` deletes). No filter → the
+    /// whole tree in pre-order; a filter → items whose id or title contains it. Static.
+    pub fn menu(&self, filter: Option<&str>) -> Vec<MenuItem> {
+        self.menu_index().items(filter)
+    }
+
+    /// One menu item by exact id.
+    pub fn menu_item(&self, id: &str) -> Option<MenuItem> {
+        self.menu_index().item(id)
+    }
+
+    /// The breadcrumb for a menu item: ancestors from the root down to (excluding) `id`.
+    pub fn menu_ancestors(&self, id: &str) -> Vec<MenuItem> {
+        self.menu_index().ancestors(id)
+    }
+
+    /// The direct children of a menu item.
+    pub fn menu_children(&self, id: &str) -> Vec<MenuItem> {
+        self.menu_index().children(id)
     }
 
     fn gql_index(&self) -> &breadth::GqlIndex {

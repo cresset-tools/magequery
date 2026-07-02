@@ -1112,6 +1112,29 @@ pub struct AclResource {
     pub source: Source,
 }
 
+/// One admin menu item from `adminhtml/menu.xml`, merged across modules in load order
+/// (`<add>`/`<update>` upsert attribute-level; `<remove>` deletes). The tree the admin
+/// sidebar renders — parents come from the `parent` attribute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct MenuItem {
+    /// e.g. `Magento_Catalog::catalog_products`.
+    pub id: String,
+    pub title: String,
+    pub parent: Option<String>,
+    /// The admin route (`catalog/product/`); `None` for a grouping node.
+    pub action: Option<String>,
+    /// The ACL resource guarding it (resolve with `magequery acl <id>`).
+    pub resource: Option<String>,
+    pub sort_order: Option<i32>,
+    /// Only shown when this module / config flag is active.
+    pub depends_on_module: Option<String>,
+    pub depends_on_config: Option<String>,
+    /// Direct child ids, sorted by (`sortOrder`, id).
+    pub children: Vec<String>,
+    pub source: Source,
+}
+
 /// A REST endpoint from `webapi.xml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
