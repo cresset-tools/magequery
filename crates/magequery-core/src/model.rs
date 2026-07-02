@@ -58,11 +58,14 @@ impl ModuleCheck {
 }
 
 /// The everyday facts about an installation, on one screen: what/where it is and how it's
-/// deployed. All static (env.php + config sources + composer metadata + `var/` flags);
-/// every field degrades to `None` on a fresh checkout that has no `env.php` yet.
+/// deployed. Config values always *try* the database (base URLs usually live only there)
+/// and fall back to the static sources; every env-derived field degrades to `None` on a
+/// fresh checkout that has no `env.php` yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
 pub struct InstanceInfo {
+    /// Why the database couldn't contribute (`None` = DB values included).
+    pub db_error: Option<String>,
     /// Magento version, from the product package in `installed.json`.
     pub version: Option<String>,
     /// The package the version came from (`magento/product-community-edition`,

@@ -187,7 +187,8 @@ RUNTIME       (env.php config & live connections)
   queue [info]|topology [<topic>]      session   cache   lock   (info-only)
 
 PROJECT       (the codebase itself)
-  info [--db]               modules [--check] [--enabled|--disabled] [--source app|vendor]
+  info      mode   maintenance   base-url [--secure]   admin-url   (single-fact views of info)
+  modules [--check] [--enabled|--disabled] [--source app|vendor]
   deps <module>             patches [--db] (backlog)   doctor (backlog)   whatis <class> (backlog)
 ```
 
@@ -197,7 +198,7 @@ PROJECT       (the codebase itself)
   `plugins`, `events`, `routes`, `actions`, `webapi`, `uses`). Default = collapsed diff.
   (`uses` has `--area` but no `--all-areas`: its default is already the merged union.)
 - **`--json`** and **`--color auto|always|never`** + **`--root <path>`** — global, every command.
-- **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config`, `info`;
+- **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config` today;
   future `eav`, `indexers --status`, `patches`). Static by default; DB overlay when asked;
   clean `Error::Db` if unreachable. Pure-live commands (`db`/`redis` `ping`, `url-rewrites`)
   require the `db`/`redis` build feature instead.
@@ -605,23 +606,30 @@ consumers, red flag when **no consumer reads a queue** or no route exists). Vali
 mageos-lite: sales_rule.codegenerator routes to queue `codegenerator` via both the direct
 publisher and its binding on exchange magento (amqp), consumer joined; ~3ms.
 
-### `info` (the everyday facts, done)
+### `info` + fact commands (the everyday facts, done)
 
-`magequery info [--db]` — one screen for "what am I looking at": Magento **version** (from
-the product package in `installed.json` — `*/product-enterprise-edition` →
+`magequery info` — one screen for "what am I looking at": Magento **version** (from the
+product package in `installed.json` — `*/product-enterprise-edition` →
 `*/product-community-edition` → `*/magento2-base`, first hit; the package name also tells
 the distribution apart), **deploy mode** (`env.php` `MAGE_MODE`; absent = "default"),
 **maintenance** (`var/.maintenance.flag` + exempt IPs from `var/.maintenance.ip`),
-**base URLs** (`web/{unsecure,secure}/base_url` at default scope via `ConfigSet`, plus an
-override count for other scopes), **admin URL** (`env.php` `backend/frontName` joined onto
-the first *concrete* base URL — never onto a `{{base_url}}` placeholder, which means
-auto-detect; the CLI explains the placeholder and hints `--db`), and **module counts**.
-`InstanceInfo` in core (`Magento::info(include_db)`); `installed.json` parsing also
-extracts each package's `version` now (kept on `PackageMeta`). Every env-derived field
-degrades to `None` on a fresh checkout with no `env.php` — the no-bootstrap promise. With
-`--db` the base URLs resolve from `core_config_data` (where they usually live). Validated
-on mageos-lite: static shows the placeholders honestly; `--db` resolves the real base URL
-and full admin URL against the live MariaDB.
+**base URLs**, **admin URL**, and **module counts**. Unlike the `--db` commands, `info`
+**always tries the database** (base URLs usually live only in `core_config_data`) and
+degrades to the static sources when unreachable — `InstanceInfo.db_error` records why and
+the CLI prints a stderr note; the fail-fast TCP pre-check keeps the down-DB case at ~50ms.
+Admin URL mirrors Magento: base = `admin/url/custom` when `use_custom`, else the first
+*concrete* base URL (secure preferred, never a `{{base_url}}` placeholder = auto-detect);
+path = `custom_path` when `use_custom_path`, else `env.php` `backend/frontName`.
+`installed.json` parsing also extracts each package's `version` (kept on `PackageMeta`).
+Every env-derived field degrades to `None` on a fresh checkout with no `env.php`.
+
+**Fact commands** — script-friendly single values, all views of `info()`: `mode` (prints
+`developer`/`production`/`default`), `maintenance` (`on`/`off`), `base-url [--secure]`,
+`admin-url`. Bare value on stdout; when the value isn't concrete (placeholder base URL, no
+frontName) they exit non-zero with the reason — incl. the DB error when that's why — so
+scripts can branch. Validated on mageos-lite against its live MariaDB (full URLs resolve
+with no flags) and on a synthetic root with an unreachable DB (static fallback + note,
+`admin-url` exits 1, maintenance flag + IPs read).
 
 ### `graphql` (schema types → resolvers, static, done)
 

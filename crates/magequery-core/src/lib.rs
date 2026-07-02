@@ -547,11 +547,11 @@ impl Magento {
     }
 
     /// The everyday facts, on one screen: version/distribution, deploy mode, maintenance
-    /// state, base URLs, admin URL, module counts. Static by default; on a fresh checkout
-    /// with no `env.php` the env-derived fields degrade to `None` instead of failing.
-    /// With `include_db`, base URLs also read `core_config_data` (where they usually live;
-    /// requires the `db` feature and a reachable database).
-    pub fn info(&self, include_db: bool) -> Result<InstanceInfo> {
+    /// state, base URLs, admin URL, module counts. Always *tries* the database for the
+    /// config values (base URLs usually live only in `core_config_data`) and degrades to
+    /// the static sources when it's unreachable — `db_error` says so instead of failing.
+    /// On a fresh checkout with no `env.php`, every env-derived field is `None`.
+    pub fn info(&self) -> InstanceInfo {
         // Version: the product package, most specific name first.
         let version_pkg = ["/product-enterprise-edition", "/product-community-edition", "/magento2-base"]
             .iter()
@@ -583,30 +583,53 @@ impl Magento {
             })
             .unwrap_or_default();
 
-        // Base URLs from the config sources, default scope; count the scopes that
-        // override either one (multi-store installs differ per store — see `config`).
-        // With include_db this is where an unreachable database surfaces as Err.
-        let set = self.config(include_db)?;
-        let get = |path: &str| set.get("default", path).map(|v| v.value.clone());
-        let base_url_overrides = ["web/unsecure/base_url", "web/secure/base_url"]
-            .iter()
-            .flat_map(|p| set.scopes_for(p))
-            .filter(|v| v.scope != "default")
-            .count();
+        // Config values, DB included when reachable; else the static sources alone.
+        let (set, db_error) = match self.config(true) {
+            Ok(s) => (Some(s), None),
+            Err(e) => (self.config(false).ok(), Some(e.to_string())),
+        };
+        let get = |path: &str| {
+            set.as_ref().and_then(|s| s.get("default", path)).map(|v| v.value.clone())
+        };
+        let base_url_overrides = set
+            .as_ref()
+            .map(|s| {
+                ["web/unsecure/base_url", "web/secure/base_url"]
+                    .iter()
+                    .flat_map(|p| s.scopes_for(p))
+                    .filter(|v| v.scope != "default")
+                    .count()
+            })
+            .unwrap_or(0);
         let base_url = get("web/unsecure/base_url");
         let base_url_secure = get("web/secure/base_url");
 
-        // Admin URL from the first *concrete* base URL (secure preferred) — never from a
-        // `{{base_url}}` placeholder (= auto-detect at request time).
-        let admin_url = admin_front_name.as_ref().and_then(|front| {
-            let base = [&base_url_secure, &base_url]
-                .into_iter()
-                .flatten()
-                .find(|b| !b.contains("{{"))?;
-            Some(format!("{}/{front}/", base.trim_end_matches('/')))
-        });
+        // Admin URL, mirroring Magento: base = `admin/url/custom` when `use_custom` is on,
+        // else the first *concrete* store base URL (secure preferred) — never a
+        // `{{base_url}}` placeholder (= auto-detect at request time). Path = frontName,
+        // or `admin/url/custom_path` when `use_custom_path` is on.
+        let concrete = |u: &Option<String>| u.clone().filter(|b| !b.contains("{{"));
+        let admin_base = if get("admin/url/use_custom").as_deref() == Some("1") {
+            concrete(&get("admin/url/custom"))
+        } else {
+            None
+        }
+        .or_else(|| concrete(&base_url_secure))
+        .or_else(|| concrete(&base_url));
+        let admin_path = if get("admin/url/use_custom_path").as_deref() == Some("1") {
+            get("admin/url/custom_path").or_else(|| admin_front_name.clone())
+        } else {
+            admin_front_name.clone()
+        };
+        let admin_url = match (&admin_base, &admin_path) {
+            (Some(base), Some(path)) => {
+                Some(format!("{}/{path}/", base.trim_end_matches('/')))
+            }
+            _ => None,
+        };
 
-        Ok(InstanceInfo {
+        InstanceInfo {
+            db_error,
             version: version_pkg.and_then(|p| p.version.clone()),
             version_package: version_pkg.map(|p| p.name.clone()),
             mode,
@@ -619,7 +642,7 @@ impl Magento {
             admin_url,
             modules_total: self.index.modules.len(),
             modules_enabled: self.index.modules.iter().filter(|m| m.enabled).count(),
-        })
+        }
     }
 
     /// The dependency graph around one module, both directions, from the two static

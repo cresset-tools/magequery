@@ -70,6 +70,10 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Project",
         &[
             ("info", "The everyday facts: version, mode, maintenance, base/admin URLs"),
+            ("mode", "Deploy mode (bare value, for scripting)"),
+            ("maintenance", "Maintenance status: on/off"),
+            ("base-url", "Store base URL [--secure] (bare value)"),
+            ("admin-url", "Admin URL (bare value)"),
             ("modules", "Installed modules in load order"),
             ("deps", "Module dependencies (sequence + composer), both directions"),
         ],
@@ -251,6 +255,14 @@ enum Command {
     // ── Project: the codebase itself ──
     /// The everyday facts: version, mode, maintenance, base/admin URLs, module counts.
     Info(InfoCmdArgs),
+    /// Deploy mode (bare value, for scripting; a view of info).
+    Mode,
+    /// Maintenance status: prints `on` or `off` (a view of info).
+    Maintenance,
+    /// Store base URL (bare value, for scripting; a view of info).
+    BaseUrl(BaseUrlArgs),
+    /// Admin URL (bare value, for scripting; a view of info).
+    AdminUrl,
     /// Installed modules in load order.
     Modules(ModulesArgs),
     /// Module dependencies from <sequence> + composer require, both directions.
@@ -259,12 +271,15 @@ enum Command {
 
 #[derive(clap::Args)]
 struct InfoCmdArgs {
-    /// Also read `core_config_data` for the base URLs (they usually live in the DB;
-    /// needs a reachable database).
-    #[arg(long)]
-    db: bool,
     #[arg(long)]
     json: bool,
+}
+
+#[derive(clap::Args)]
+struct BaseUrlArgs {
+    /// Print the secure (https) base URL instead of the unsecure one.
+    #[arg(long)]
+    secure: bool,
 }
 
 #[derive(clap::Args)]
@@ -594,6 +609,17 @@ fn main() -> Result<()> {
 
     let result = match cli.command {
         Command::Info(args) => info(&mage, &args),
+        Command::Mode => {
+            // No env.php / no MAGE_MODE = Magento's "default" mode.
+            println!("{}", mage.info().mode.as_deref().unwrap_or("default"));
+            Ok(())
+        }
+        Command::Maintenance => {
+            println!("{}", if mage.info().maintenance { "on" } else { "off" });
+            Ok(())
+        }
+        Command::BaseUrl(args) => base_url(&mage, args.secure),
+        Command::AdminUrl => admin_url(&mage),
         Command::Modules(args) => modules(&mage, &args),
         Command::Deps(args) => deps(&mage, &args, &cli.root),
         Command::Preference(args) => preference(&mage, &args, &cli.root),
@@ -2395,7 +2421,7 @@ fn modules(mage: &Magento, args: &ModulesArgs) -> Result<()> {
 }
 
 fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
-    let i = mage.info(args.db).map_err(|e| anyhow!(e))?;
+    let i = mage.info();
     if args.json {
         println!("{}", serde_json::to_string_pretty(&i)?);
         return Ok(());
@@ -2426,10 +2452,10 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         println!("maintenance  {}", style::ok("off"));
     }
     // A `{{base_url}}`-style value is the config.xml placeholder: auto-detect from the
-    // request — i.e. not configured statically; the real value usually lives in the DB.
+    // request — i.e. not configured in any reachable source.
     let url = |u: &Option<String>| match u {
         Some(u) if u.contains("{{") => {
-            format!("{}  {}", style::dim(u), style::dim("(auto — usually set in the DB; try --db)"))
+            format!("{}  {}", style::dim(u), style::dim("(auto-detected per request)"))
         }
         Some(u) => style::class(u),
         None => style::dim("(not set)"),
@@ -2461,7 +2487,50 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         String::new()
     };
     println!("modules      {}{dis}", style::number(&format!("{} enabled", i.modules_enabled)));
+    if let Some(e) = &i.db_error {
+        eprintln!("{}", style::dim(&format!("note: database unreachable, static values only ({e})")));
+    }
     Ok(())
+}
+
+/// `base-url`: the bare URL on stdout (script-friendly), non-zero when it isn't concrete.
+fn base_url(mage: &Magento, secure: bool) -> Result<()> {
+    let i = mage.info();
+    let (label, value) = if secure {
+        ("secure base url", &i.base_url_secure)
+    } else {
+        ("base url", &i.base_url)
+    };
+    match value {
+        Some(u) if !u.contains("{{") => {
+            println!("{u}");
+            Ok(())
+        }
+        Some(u) => Err(anyhow!(
+            "{label} is the auto-detect placeholder `{u}` — not configured in any reachable \
+             source{}",
+            i.db_error.as_deref().map(|e| format!(" (database unreachable: {e})")).unwrap_or_default()
+        )),
+        None => Err(anyhow!("{label} is not set")),
+    }
+}
+
+/// `admin-url`: the bare URL on stdout, non-zero when it can't be determined.
+fn admin_url(mage: &Magento) -> Result<()> {
+    let i = mage.info();
+    match &i.admin_url {
+        Some(u) => {
+            println!("{u}");
+            Ok(())
+        }
+        None => match &i.admin_front_name {
+            Some(f) => Err(anyhow!(
+                "no concrete base URL to build the admin URL from (frontName is `{f}`){}",
+                i.db_error.as_deref().map(|e| format!(" — database unreachable: {e}")).unwrap_or_default()
+            )),
+            None => Err(anyhow!("no backend/frontName in env.php — is this installed?")),
+        },
+    }
 }
 
 fn deps(mage: &Magento, args: &DepsArgs, root: &Path) -> Result<()> {
