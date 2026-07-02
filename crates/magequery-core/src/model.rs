@@ -251,6 +251,25 @@ pub struct CronJob {
     pub source: Source,
 }
 
+/// A console command registered on `CommandListInterface`'s `commands` array argument in
+/// di.xml — what `bin/magento` picks up from modules. (Commands registered through the
+/// bootstrap-time `cli_commands.php`/`CommandLocator` mechanism — a handful of framework
+/// ones like `maintenance:*` — have no di.xml declaration and are not listed.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ConsoleCommand {
+    /// The `bin/magento` command name (e.g. `indexer:reindex`), extracted from the command
+    /// class (`setName`/`$defaultName`/`parent::__construct`, following `self::CONST` into
+    /// ancestors). `None` when the class builds it dynamically.
+    pub name: Option<String>,
+    /// The command's description (`setDescription`), when stated literally.
+    pub description: Option<String>,
+    /// The di.xml array-item key the command is registered under (its merge identity).
+    pub item_key: String,
+    pub class: ClassName,
+    pub source: Source,
+}
+
 /// A frontend/adminhtml route from `routes.xml` (frontName → modules handling it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
@@ -556,6 +575,39 @@ pub struct DbTable {
     pub constraints: Vec<DbConstraint>,
     pub indexes: Vec<DbIndex>,
     /// Where the table was first declared.
+    pub source: Source,
+}
+
+/// One table an indexer's materialized view subscribes to (`mview.xml`): changes to it are
+/// change-logged and trigger partial reindexing when the indexer runs "by schedule".
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct MviewSubscription {
+    pub table: String,
+    /// The column identifying the changed entity (usually `entity_id`).
+    pub entity_column: Option<String>,
+    pub source: Source,
+}
+
+/// An indexer from `indexer.xml`, joined (on `view_id`) with its `mview.xml` view — the
+/// definition plus the tables whose changes feed it. Merged across modules in load order
+/// (a module can add subscriptions to another module's view).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Indexer {
+    /// Indexer id, e.g. `catalog_product_price` (what `bin/magento indexer:reindex` takes).
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub class: ClassName,
+    /// The `mview.xml` view this indexer subscribes through (usually equal to `id`).
+    pub view_id: Option<String>,
+    /// Indexers sharing one physical index; reindexing either validates both.
+    pub shared_index: Option<String>,
+    /// Indexer ids this one depends on (they index first).
+    pub dependencies: Vec<String>,
+    /// Tables the indexer's view subscribes to, from `mview.xml` (empty if no view).
+    pub subscriptions: Vec<MviewSubscription>,
     pub source: Source,
 }
 

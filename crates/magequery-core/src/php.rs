@@ -21,6 +21,8 @@ pub(crate) struct PhpClass {
 enum Token {
     Ident(String),
     Punct(char),
+    /// A single- or double-quoted string literal (content only, escapes collapsed).
+    Str(String),
 }
 
 /// Parse the header of a PHP class/interface/trait/enum file. Returns `None` if no type
@@ -229,6 +231,145 @@ pub(crate) fn plugin_methods(src: &str) -> Vec<PluginMethodRaw> {
     out
 }
 
+/// A value written as a string literal, a class-constant reference (`self::COMMAND_NAME`),
+/// or a property reference (`$this->commandName`) — the ways commands state their
+/// name/description.
+pub(crate) enum StrOrConst {
+    Str(String),
+    /// The constant's name; resolved against this file's `consts` or an ancestor's.
+    Const(String),
+    /// The property's name; resolved against this file's `props` or an ancestor's.
+    Prop(String),
+}
+
+/// What a console-command class declares about itself, found by a flat token scan:
+/// `setName(…)`/`setDescription(…)` calls, the Symfony `$defaultName`/`$defaultDescription`
+/// static properties, a name passed to `parent::__construct(…)`, plus every string class
+/// constant and `$var = '…'` assignment (for resolving `self::X`/`$this->x` references —
+/// the caller may also consult ancestors).
+#[derive(Default)]
+pub(crate) struct CommandInfo {
+    pub name: Option<StrOrConst>,
+    pub description: Option<StrOrConst>,
+    pub consts: HashMap<String, String>,
+    pub props: HashMap<String, String>,
+}
+
+/// Scan a command class file. Heuristic (no execution, no data flow): a name built from
+/// concatenation or a computed variable stays `None`.
+pub(crate) fn command_info(src: &str) -> CommandInfo {
+    let tokens = tokenize(src);
+    let mut info = CommandInfo::default();
+    let mut set_name = None;
+    let mut ctor_name = None;
+
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            // `const NAME = 'literal';`
+            Token::Ident(k) if k == "const" => {
+                if let (Some(Token::Ident(name)), Some(Token::Punct('=')), Some(Token::Str(v))) =
+                    (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3))
+                {
+                    info.consts.insert(name.clone(), v.clone());
+                    i += 4;
+                    continue;
+                }
+            }
+            // `$name = '…'` — a property default (`private $commandName = 'a:b';`, the
+            // Symfony `$defaultName`) or a plain assignment; first one wins per name.
+            Token::Punct('$') => {
+                if let (Some(Token::Ident(prop)), Some(Token::Punct('=')), Some(Token::Str(v))) =
+                    (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3))
+                {
+                    info.props.entry(prop.clone()).or_insert_with(|| v.clone());
+                }
+            }
+            // `setName(<value>)` / `setDescription(<value>)`, where the value may be
+            // wrapped in the `__('…')` translation helper.
+            Token::Ident(k) if k == "setName" || k == "setDescription" => {
+                if matches!(tokens.get(i + 1), Some(Token::Punct('('))) {
+                    let mut v = str_or_const(&tokens, i + 2);
+                    if v.is_none()
+                        && matches!(tokens.get(i + 2), Some(Token::Ident(f)) if f == "__")
+                        && matches!(tokens.get(i + 3), Some(Token::Punct('(')))
+                    {
+                        v = str_or_const(&tokens, i + 4);
+                    }
+                    if let Some(v) = v {
+                        if k == "setName" {
+                            set_name.get_or_insert(v);
+                        } else {
+                            info.description = Some(v);
+                        }
+                    }
+                }
+            }
+            // `parent::__construct(<str|self::CONST>)` — Symfony's Command constructor
+            // takes the name as its first argument.
+            Token::Ident(k) if k == "parent" => {
+                if let (
+                    Some(Token::Punct(':')),
+                    Some(Token::Punct(':')),
+                    Some(Token::Ident(m)),
+                    Some(Token::Punct('(')),
+                ) = (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3), tokens.get(i + 4))
+                {
+                    if m == "__construct" {
+                        if let Some(v) = str_or_const(&tokens, i + 5) {
+                            ctor_name.get_or_insert(v);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let default_name = info.props.get("defaultName").cloned().map(StrOrConst::Str);
+    info.name = set_name.or(default_name).or(ctor_name);
+    if info.description.is_none() {
+        info.description = info.props.get("defaultDescription").cloned().map(StrOrConst::Str);
+    }
+    info
+}
+
+/// Parse a string literal, a `self::CONST`/`static::CONST` reference, or a `$this->prop`
+/// reference at `i` — but only when it's the whole argument (followed by `)` or `,`), so a
+/// concatenation like `$this->prefix . 'x'` is never mistaken for its first operand.
+fn str_or_const(tokens: &[Token], i: usize) -> Option<StrOrConst> {
+    let ends_arg = |j: usize| matches!(tokens.get(j), Some(Token::Punct(')' | ',')));
+    match tokens.get(i)? {
+        Token::Str(s) if ends_arg(i + 1) => Some(StrOrConst::Str(s.clone())),
+        Token::Ident(recv) if recv == "self" || recv == "static" => {
+            if let (Some(Token::Punct(':')), Some(Token::Punct(':')), Some(Token::Ident(c))) =
+                (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3))
+            {
+                if ends_arg(i + 4) {
+                    return Some(StrOrConst::Const(c.clone()));
+                }
+            }
+            None
+        }
+        Token::Punct('$') => {
+            if let (
+                Some(Token::Ident(this)),
+                Some(Token::Punct('-')),
+                Some(Token::Punct('>')),
+                Some(Token::Ident(p)),
+            ) = (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3), tokens.get(i + 4))
+            {
+                if this == "this" && ends_arg(i + 5) {
+                    return Some(StrOrConst::Prop(p.clone()));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Look back over modifier keywords before a `function` token: a method is public unless
 /// explicitly `private`/`protected`.
 fn is_public_method(tokens: &[Token], func_idx: usize) -> bool {
@@ -299,17 +440,22 @@ fn tokenize(s: &str) -> Vec<Token> {
                 }
                 i += 2;
             }
-            // Strings — skip wholesale.
+            // Strings — captured (command names/descriptions live in literals). Escapes are
+            // collapsed to the escaped byte, which is exact for `\'`/`\"`/`\\` (all that
+            // matters in the identifiers we read).
             b'\'' | b'"' => {
                 let q = c;
                 i += 1;
+                let mut bytes = Vec::new();
                 while i < b.len() && b[i] != q {
-                    if b[i] == b'\\' {
+                    if b[i] == b'\\' && i + 1 < b.len() {
                         i += 1;
                     }
+                    bytes.push(b[i]);
                     i += 1;
                 }
                 i += 1;
+                out.push(Token::Str(String::from_utf8_lossy(&bytes).into_owned()));
             }
             _ if is_ident(c) => {
                 let start = i;
@@ -329,4 +475,98 @@ fn tokenize(s: &str) -> Vec<Token> {
 
 fn is_ident(c: u8) -> bool {
     c == b'_' || c == b'\\' || c.is_ascii_alphanumeric()
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::{command_info, StrOrConst};
+
+    fn as_str(v: &Option<StrOrConst>) -> Option<&str> {
+        match v {
+            Some(StrOrConst::Str(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn literal_set_name_and_description() {
+        let src = r#"<?php
+class CronCommand extends Command
+{
+    protected function configure()
+    {
+        $this->setName('cron:run')
+            ->setDescription('Runs jobs by schedule')
+            ->setDefinition($options);
+    }
+}"#;
+        let info = command_info(src);
+        assert_eq!(as_str(&info.name), Some("cron:run"));
+        assert_eq!(as_str(&info.description), Some("Runs jobs by schedule"));
+    }
+
+    #[test]
+    fn const_reference_resolves_via_consts() {
+        let src = r#"<?php
+class QueryLogEnableCommand extends Command
+{
+    public const COMMAND_NAME = 'dev:query-log:enable';
+    protected function configure()
+    {
+        $this->setName(self::COMMAND_NAME);
+    }
+}"#;
+        let info = command_info(src);
+        let Some(StrOrConst::Const(c)) = &info.name else { panic!("expected const ref") };
+        assert_eq!(c, "COMMAND_NAME");
+        assert_eq!(info.consts.get("COMMAND_NAME").map(String::as_str), Some("dev:query-log:enable"));
+    }
+
+    #[test]
+    fn default_name_and_ctor_fallbacks() {
+        let sym = r#"<?php
+class A extends Command
+{
+    protected static $defaultName = 'app:sym';
+    protected static $defaultDescription = 'Symfony style';
+}"#;
+        let info = command_info(sym);
+        assert_eq!(as_str(&info.name), Some("app:sym"));
+        assert_eq!(as_str(&info.description), Some("Symfony style"));
+
+        let ctor = r#"<?php
+class B extends Command
+{
+    public function __construct()
+    {
+        parent::__construct('app:ctor');
+    }
+}"#;
+        assert_eq!(as_str(&command_info(ctor).name), Some("app:ctor"));
+
+        // setName wins over both.
+        let both = r#"<?php
+class C extends Command
+{
+    protected static $defaultName = 'app:old';
+    protected function configure()
+    {
+        $this->setName('app:new');
+    }
+}"#;
+        assert_eq!(as_str(&command_info(both).name), Some("app:new"));
+    }
+
+    #[test]
+    fn dynamic_name_stays_none() {
+        let src = r#"<?php
+class D extends Command
+{
+    protected function configure()
+    {
+        $this->setName($this->prefix . 'thing');
+    }
+}"#;
+        assert!(command_info(src).name.is_none());
+    }
 }

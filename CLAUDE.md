@@ -162,11 +162,11 @@ WIRING        (object manager — how a class is assembled)
 
 ENTRY POINTS  (how execution starts)
   routes [--area]    actions [<url>]    webapi [<url>]    cron [<group>]
-  graphql <type>   (backlog)            commands         (backlog)
+  commands [<filter>]                   graphql <type>   (backlog)
 
 DATA          (persistence & model)
-  schema [<table>]       extension-attributes <type> (backlog)
-  indexers (backlog)     eav [<attr>] (backlog, --db)
+  schema [<table>]       indexers [<id>]
+  extension-attributes <type> (backlog)     eav [<attr>] (backlog, --db)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -246,10 +246,14 @@ Only genuine parse/read failures remain as `Diagnostic`s.
 
 ## DI index (step 2, done)
 
-`di.rs` builds the merged DI config per area, mirroring Magento: merge every module's
-`etc/di.xml` in load order → `global`; then each real area = `global.clone()` overlaid by
-that area's `etc/<area>/di.xml` in load order. Files are read+parsed in parallel (rayon),
-merged sequentially in load order so last-wins is deterministic.
+`di.rs` builds the merged DI config per area, mirroring Magento: merge Magento's **primary
+config `app/etc/di.xml` first** (it's where framework-level preferences live —
+`CommandListInterface → CommandList`, `ScopeConfigInterface → App\Config`, ~230 preferences
+on a real install; `Source.module` is the synthetic `(primary)`, module load orders shift
+by 1), then every module's `etc/di.xml` in load order → `global`; then each real area =
+`global.clone()` overlaid by that area's `etc/<area>/di.xml` in load order. Files are
+read+parsed in parallel (rayon), merged sequentially in load order so last-wins is
+deterministic.
 
 - `parse::di_xml` extracts preferences, plugins, and virtualTypes with **exact line
   provenance** (`LineMap`: byte offset → 1-based line via binary search over newline
@@ -502,14 +506,66 @@ each resource's `Source.area` is tagged `adminhtml`, its domain), merged in load
   `acl Magento_Catalog::products` resolves the very resource `webapi /V1/products` cites
   (`→ Catalog → Inventory`, grants `update_attributes` + …) — the loop the command closes.
 
+### `commands` (console commands from di.xml, static, done)
+
+"What custom `bin/magento` commands does this codebase add?" — a projection over the DI
+index, not a new parser. Modules register commands as items of the `commands` array argument
+on **either** `Magento\Framework\Console\CommandListInterface` (most) **or** the concrete
+`CommandList` (e.g. Magento_EncryptionKey); Magento unions them because argument config
+merges along the class hierarchy (`Relations` = parents + interfaces). `console_commands()`
+mirrors that: resolve the preference (declared in `app/etc/di.xml` — why the primary-config
+merge above was a prerequisite) → `args_of(concrete)` (whose ancestor walk pulls in the
+interface's args) → expand the array items, each with per-item provenance.
+
+The **actual CLI name** (`cache:clean` — the item key is just a merge identity) is extracted
+from the command class by `php.rs::command_info`: a token scan for `setName(…)`/
+`setDescription(…)` (incl. the `__('…')` translation wrapper), Symfony's `$defaultName`/
+`$defaultDescription`, and `parent::__construct('…')`; values may be literals, `self::CONST`,
+or `$this->prop` — consts/property-defaults are collected from the file and, when the
+reference isn't local, resolved via the **ancestor files** (`resolver::command_info`). A
+`\Proxy` class suffix (generated lazy wrapper, absent on a fresh checkout) is stripped to
+read the real class. Only whole-argument values count (a concatenation like
+`$this->prefix . 'x'` stays unknown → the CLI falls back to the dimmed `(item_key)`).
+Round-trip unit tests in `php::command_tests`. Limitation: commands registered via
+`cli_commands.php`/`CommandLocator` (a handful of framework ones: `maintenance:*`,
+setup's) have no di.xml declaration and aren't listed.
+
+CLI `magequery commands [<filter>]` (filter matches name/class/item key, case-insensitive):
+2 lines per command — `name  description` / `class  # di.xml:line`. Validated on
+mageos-lite: 64 commands, every name resolved (incl. `$this->commandName` property
+indirection in Indexer's dimension commands and the four MessageQueue `\Proxy` entries);
+`encryption:*` proves the interface+concrete union. ~20ms (di parse dominates).
+
+### `indexers` (indexer.xml + mview.xml, static, done)
+
+The "why isn't this index updating" surface: indexer definitions joined with the tables
+whose changes feed them. An `IndexerIndex` in `breadth.rs` (lazy `OnceLock`, parallel
+`read_parse`, both files global):
+- `parse::indexer_xml` — `<indexer id= view_id= class= shared_index=>` with `<title>`/
+  `<description>` text children and `<dependencies>`. The subtlety (same shape as
+  db_schema's column-reference case): an `<indexer>` inside `<dependencies>` is a
+  *reference* to another indexer, not a definition — routed by an `in_dependencies` context
+  opened only on a `Start` event. Unit tests lock it.
+- `parse::mview_xml` — `<view id=><subscriptions><table name= entity_column=/></…>`. Only
+  the id (join key) + subscriptions are read.
+- Merge: indexers keyed by id, merge-non-empty (a later module may re-state one to override
+  its class or **add dependencies** — e.g. Elasticsearch adds three deps to
+  `catalogsearch_fulltext`); dependencies union; `source` keeps the first declaration.
+  View subscriptions merge by table name, each keeping the **adding** module's `Source`.
+  Join `indexer.view_id → view` at build time.
+- `Magento::indexers(filter?)` (id/title substring) + `Magento::indexer(id)`.
+
+CLI `magequery indexers [<id>]`: exact id → detail (title, description, class, view,
+`shared` + the other indexers sharing that physical index, `depends on`, and the
+subscription list with cross-module `← Vendor_Module` tags); substring → filtered list;
+no arg → all (`id  Title  N tables  # loc`). Validated on mageos-lite: 12 indexers;
+`catalog_product_price` shows `catalogrule_product_price ← Magento_CatalogRule`; the
+`category_product` shared-index pair cross-references; deps exact. ~3ms.
+
 ## Future query tools (backlog — not yet built)
 
 Ideas surfaced while scoping breadth, in rough priority. All but the GraphQL/DB ones are
 static breadth-projections in the same `read_parse` + merge shape.
-- **`commands`** — console commands registered via di.xml's `CommandList`/
-  `CommandListInterface` argument. "What custom `bin/magento` commands does this codebase add?"
-- **`indexers`** — `indexer.xml` + `mview.xml` (indexer definitions, their mview subscriptions
-  and tracked tables). Common "why isn't this index updating" surface.
 - **queue topology** — `communication.xml` / `queue_topology.xml` / `queue_consumer.xml` /
   `queue_publisher.xml`: topics → consumers → handlers. Complements the `queue` deployment-info
   command (connection) with the wiring.

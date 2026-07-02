@@ -129,6 +129,45 @@ impl ClassResolver {
         result
     }
 
+    /// The `bin/magento` name and description a console-command class declares
+    /// (`setName`/`$defaultName`/`parent::__construct`, `setDescription`). A `self::CONST`
+    /// or `$this->prop` reference is resolved against the file's own constants/property
+    /// defaults, then its ancestors' files. `None` when the value is built dynamically.
+    pub fn command_info(&self, class: &ClassName) -> (Option<String>, Option<String>) {
+        // A `\Proxy` suffix names a generated lazy wrapper (absent on a fresh checkout —
+        // it lives in `generated/`); the real command class is the prefix.
+        let mut class = class.clone();
+        if self.file_for(&class).is_none() {
+            if let Some(real) = class.as_str().strip_suffix("\\Proxy") {
+                class = ClassName::new(real);
+            }
+        }
+        let Some(src) = self.file_for(&class).and_then(|f| std::fs::read_to_string(f).ok()) else {
+            return (None, None);
+        };
+        let info = php::command_info(&src);
+        let resolve = |v: &Option<php::StrOrConst>| {
+            let (key, from_props) = match v {
+                Some(php::StrOrConst::Str(s)) => return Some(s.clone()),
+                Some(php::StrOrConst::Const(c)) => (c, false),
+                Some(php::StrOrConst::Prop(p)) => (p, true),
+                None => return None,
+            };
+            let get = |i: &php::CommandInfo| {
+                if from_props { i.props.get(key).cloned() } else { i.consts.get(key).cloned() }
+            };
+            if let Some(s) = get(&info) {
+                return Some(s);
+            }
+            // Inherited: scan ancestor files (nearest-first) for the constant/property.
+            self.ancestors(&class).iter().find_map(|a| {
+                let src = std::fs::read_to_string(self.file_for(a)?).ok()?;
+                get(&php::command_info(&src))
+            })
+        };
+        (resolve(&info.name), resolve(&info.description))
+    }
+
     /// The interception methods a plugin class defines (`before*`/`around*`/`after*`), each
     /// with the target method it intercepts. Empty if the file can't be read.
     pub fn plugin_methods(&self, plugin: &ClassName) -> Vec<PluginMethod> {

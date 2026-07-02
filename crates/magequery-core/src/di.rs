@@ -7,7 +7,7 @@
 //! deterministic.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
@@ -93,14 +93,26 @@ struct Parsed {
     file: Result<parse::DiFile, String>,
 }
 
-pub(crate) fn build(modules: &[Module], diags: &mut Vec<Diagnostic>) -> DiIndex {
-    // Enumerate di.xml files: global `etc/di.xml` plus `etc/<area>/di.xml` per module.
+pub(crate) fn build(root: &Path, modules: &[Module], diags: &mut Vec<Diagnostic>) -> DiIndex {
+    // Enumerate di.xml files: Magento's "primary" config (`app/etc/di.xml` — where the
+    // framework-level preferences live, e.g. CommandListInterface → CommandList) merged
+    // first, then each module's global `etc/di.xml` plus `etc/<area>/di.xml`. Module load
+    // orders are shifted by 1 so the primary file sorts before every module.
     let mut jobs: Vec<Job> = Vec::new();
+    let primary = root.join("app/etc/di.xml");
+    if primary.is_file() {
+        jobs.push(Job {
+            load_order: 0,
+            area: Area::Global,
+            module: ModuleName::new("(primary)"),
+            path: primary,
+        });
+    }
     for m in modules {
         let global = m.path.join("etc/di.xml");
         if global.is_file() {
             jobs.push(Job {
-                load_order: m.load_order,
+                load_order: m.load_order + 1,
                 area: Area::Global,
                 module: m.name.clone(),
                 path: global,
@@ -109,7 +121,7 @@ pub(crate) fn build(modules: &[Module], diags: &mut Vec<Diagnostic>) -> DiIndex 
         for area in REAL_AREAS {
             let p = m.path.join("etc").join(area.dir().unwrap()).join("di.xml");
             if p.is_file() {
-                jobs.push(Job { load_order: m.load_order, area, module: m.name.clone(), path: p });
+                jobs.push(Job { load_order: m.load_order + 1, area, module: m.name.clone(), path: p });
             }
         }
     }

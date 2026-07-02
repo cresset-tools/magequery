@@ -7,8 +7,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use magequery_core::model::ModuleSource;
 use magequery_core::{
     AclResource, ArgValue, Area, ChainStep, ClassName, ConfigSet, ConfigSourceKind, ConfigValue,
-    DbColumn, DbTable, Error, EventName, Magento, MethodChain, Observer, Plugin, Preference,
-    Resolution, Route, Source, WebapiRoute,
+    DbColumn, DbTable, Error, EventName, Indexer, Magento, MethodChain, Observer, Plugin,
+    Preference, Resolution, Route, Source, WebapiRoute,
 };
 
 // The top-level command list, grouped, for `print_help`. Kept in sync with the `Command`
@@ -34,9 +34,16 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("actions", "Controller actions: URL → action class"),
             ("webapi", "REST endpoints from webapi.xml"),
             ("cron", "Cron jobs, optionally by group"),
+            ("commands", "Console (bin/magento) commands registered via di.xml"),
         ],
     ),
-    ("Data", &[("schema", "Tables from db_schema.xml: a list, or one table's DDL")]),
+    (
+        "Data",
+        &[
+            ("schema", "Tables from db_schema.xml: a list, or one table's DDL"),
+            ("indexers", "Indexers from indexer.xml + their mview subscriptions"),
+        ],
+    ),
     (
         "Config & admin",
         &[
@@ -195,10 +202,14 @@ enum Command {
     Webapi(WebapiArgs),
     /// Cron jobs, optionally by group.
     Cron(CronArgs),
+    /// Console (bin/magento) commands registered via di.xml.
+    Commands(CommandsArgs),
 
     // ── Data: persistence & model ──
     /// Tables from db_schema.xml: a list, or one table's DDL.
     Schema(SchemaArgs),
+    /// Indexers from indexer.xml + their mview subscriptions.
+    Indexers(IndexersArgs),
 
     // ── Config & admin: where settings & permissions live ──
     /// Resolve a config path/section with its source (static, +--db).
@@ -243,6 +254,23 @@ struct AclArgs {
     /// An exact resource id (`Magento_Sales::actions_view`) → its tree position + children;
     /// otherwise a substring matched against id or title. Omit to print the whole tree.
     resource: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct CommandsArgs {
+    /// Filter by a substring of the command name, class, or di.xml item key.
+    filter: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct IndexersArgs {
+    /// An exact indexer id (`catalog_product_price`) → full detail incl. subscriptions;
+    /// otherwise a substring matched against id or title. Omit to list every indexer.
+    id: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -487,6 +515,8 @@ fn main() -> Result<()> {
         Command::Di(args) => di(&mage, &args, &cli.root),
         Command::Events(args) => events(&mage, &args, &cli.root),
         Command::Cron(args) => cron(&mage, &args, &cli.root),
+        Command::Commands(args) => commands(&mage, &args, &cli.root),
+        Command::Indexers(args) => indexers(&mage, &args, &cli.root),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
         Command::Actions(args) => actions(&mage, &args, &cli.root),
@@ -1282,6 +1312,143 @@ fn cron(mage: &Magento, args: &CronArgs, root: &Path) -> Result<()> {
     }
     eprintln!("\n{} job(s)", jobs.len());
     Ok(())
+}
+
+fn commands(mage: &Magento, args: &CommandsArgs, root: &Path) -> Result<()> {
+    let cmds = mage.console_commands(args.filter.as_deref());
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&cmds)?);
+        return Ok(());
+    }
+    if cmds.is_empty() {
+        println!("{}", style::dim("(no console command matches)"));
+        return Ok(());
+    }
+
+    // Two lines per command: `name  description` / `    class  # di.xml loc`. The name is
+    // extracted from the command class; when it's built dynamically we fall back to the
+    // di.xml item key, dimmed and parenthesized to mark it as not the CLI name.
+    let plain = |c: &magequery_core::ConsoleCommand| match &c.name {
+        Some(n) => n.clone(),
+        None => format!("({})", c.item_key),
+    };
+    let width = cmds.iter().map(|c| plain(c).len()).max().unwrap_or(0);
+    for c in &cmds {
+        let p = plain(c);
+        let pad = " ".repeat(width.saturating_sub(p.len()));
+        let colored = match &c.name {
+            Some(n) => style::name(n),
+            None => style::dim(&p),
+        };
+        let desc = c.description.as_deref().unwrap_or("");
+        println!("{colored}{pad}  {desc}");
+        println!(
+            "    {}  {}",
+            style::class(c.class.as_str()),
+            style::path(&short_loc(&c.source, root)),
+        );
+    }
+    eprintln!("\n{} command(s)", cmds.len());
+    Ok(())
+}
+
+fn indexers(mage: &Magento, args: &IndexersArgs, root: &Path) -> Result<()> {
+    // An exact indexer id → full detail; anything else is an id/title substring filter.
+    if let Some(id) = &args.id {
+        if let Some(ix) = mage.indexer(id) {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&ix)?);
+                return Ok(());
+            }
+            render_indexer(mage, &ix, root);
+            return Ok(());
+        }
+    }
+
+    let list = mage.indexers(args.id.as_deref());
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+    if list.is_empty() {
+        println!("{}", style::dim("(no indexer matches)"));
+        return Ok(());
+    }
+    let width = list.iter().map(|ix| ix.id.len()).max().unwrap_or(0);
+    let title_w = list.iter().map(|ix| ix.title.len()).max().unwrap_or(0);
+    for ix in &list {
+        let pad = " ".repeat(width.saturating_sub(ix.id.len()));
+        let tpad = " ".repeat(title_w.saturating_sub(ix.title.len()));
+        println!(
+            "{}{pad}  {}{tpad}  {}  {}",
+            style::name(&ix.id),
+            style::target(&ix.title),
+            style::dim(&format!("{:>2} tables", ix.subscriptions.len())),
+            style::path(&short_loc(&ix.source, root)),
+        );
+    }
+    eprintln!("\n{} indexer(s)", list.len());
+    Ok(())
+}
+
+fn render_indexer(mage: &Magento, ix: &Indexer, root: &Path) {
+    println!(
+        "{}  {}   {}",
+        style::name(&ix.id),
+        style::target(&ix.title),
+        style::path(&short_loc(&ix.source, root)),
+    );
+    if let Some(d) = &ix.description {
+        println!("  {}", style::dim(d));
+    }
+    println!("  class      {}", style::class(ix.class.as_str()));
+    if let Some(v) = &ix.view_id {
+        println!("  view       {}", style::name(v));
+    }
+    if let Some(s) = &ix.shared_index {
+        // Indexers sharing one physical index validate together — name the others.
+        let others: Vec<String> = mage
+            .indexers(None)
+            .iter()
+            .filter(|o| o.shared_index.as_deref() == Some(s) && o.id != ix.id)
+            .map(|o| style::name(&o.id))
+            .collect();
+        let with = if others.is_empty() {
+            String::new()
+        } else {
+            format!("  {} {}", style::dim("shared with"), others.join(", "))
+        };
+        println!("  shared     {s}{with}");
+    }
+    if !ix.dependencies.is_empty() {
+        let deps: Vec<String> = ix.dependencies.iter().map(|d| style::name(d)).collect();
+        println!("  depends on {}", deps.join(", "));
+    }
+
+    if ix.subscriptions.is_empty() {
+        println!("  {}", style::dim("(no mview subscriptions — reindexes on demand only)"));
+        return;
+    }
+    println!("  {}", style::dim(&format!("subscriptions ({}):", ix.subscriptions.len())));
+    let w = ix.subscriptions.iter().map(|s| s.table.len()).max().unwrap_or(0);
+    let indexer_module = ix.source.module.as_str();
+    for s in &ix.subscriptions {
+        let pad = " ".repeat(w.saturating_sub(s.table.len()));
+        let col = s.entity_column.as_deref().map(|c| format!("({c})")).unwrap_or_default();
+        // Flag tables subscribed by a *different* module than the indexer's — the payoff
+        // of merging mview.xml across modules.
+        let from = if s.source.module.as_str() != indexer_module {
+            format!("  {}", style::module(&format!("← {}", s.source.module.as_str())))
+        } else {
+            String::new()
+        };
+        println!(
+            "    {}{pad}  {}{from}   {}",
+            style::class(&s.table),
+            style::dim(&col),
+            style::path(&short_loc(&s.source, root)),
+        );
+    }
 }
 
 fn routes(mage: &Magento, args: &RoutesArgs, root: &Path) -> Result<()> {

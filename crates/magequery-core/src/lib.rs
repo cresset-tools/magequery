@@ -40,8 +40,8 @@ pub use error::{Diagnostic, Error, Result, Severity};
 pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
     AclResource, ArgItem, ArgValue, Argument, ByArea, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
-    ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
-    DbTable, InterceptKind, MethodChain, Module, ModuleCheck, Observer,
+    ConsoleCommand, ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
+    DbTable, Indexer, InterceptKind, MethodChain, Module, ModuleCheck, MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
     Resolution, Route, UnregisteredModule, WebapiRoute,
 };
@@ -74,6 +74,7 @@ pub struct Magento {
     schema: OnceLock<breadth::SchemaIndex>,
     system_config: OnceLock<breadth::SystemConfigIndex>,
     acl: OnceLock<breadth::AclIndex>,
+    indexers: OnceLock<breadth::IndexerIndex>,
 }
 
 struct DiBuilt {
@@ -100,6 +101,7 @@ impl Magento {
             schema: OnceLock::new(),
             system_config: OnceLock::new(),
             acl: OnceLock::new(),
+            indexers: OnceLock::new(),
         })
     }
 
@@ -109,7 +111,7 @@ impl Magento {
             .di
             .get_or_init(|| {
                 let mut diagnostics = Vec::new();
-                let index = di::build(&self.index.modules, &mut diagnostics);
+                let index = di::build(&self.index.root, &self.index.modules, &mut diagnostics);
                 DiBuilt { index, diagnostics }
             })
             .index
@@ -386,6 +388,75 @@ impl Magento {
     /// The direct children of an ACL resource — the sub-permissions it groups.
     pub fn acl_children(&self, id: &str) -> Vec<AclResource> {
         self.acl_index().children(id)
+    }
+
+    /// Console commands modules register on `CommandListInterface`'s `commands` array
+    /// argument in di.xml — what `bin/magento` picks up. Each command's actual CLI name and
+    /// description are extracted from its class (never executed). Optionally filtered by a
+    /// case-insensitive substring of the name, class, or di.xml item key; sorted by command
+    /// name (unknown names last, by class).
+    pub fn console_commands(&self, filter: Option<&str>) -> Vec<ConsoleCommand> {
+        let iface = ClassName::new("Magento\\Framework\\Console\\CommandListInterface");
+        // The preference (app/etc/di.xml) points at the concrete CommandList; `args_of`
+        // then merges arguments declared on the concrete AND — via the ancestor walk — on
+        // the interface, because modules register on either.
+        let concrete = match self.preference(&iface, Area::Global) {
+            Ok(p) => p.concrete,
+            Err(_) => iface,
+        };
+        let args = self.args_of(&concrete, Area::Global, &mut std::collections::HashSet::new());
+        let Some((ArgValue::Array(items), _)) = args.get("commands") else {
+            return Vec::new();
+        };
+
+        let needle = filter.map(str::to_lowercase);
+        let mut out: Vec<ConsoleCommand> = items
+            .iter()
+            .filter_map(|item| {
+                let ArgValue::Object(class) = &item.value else { return None };
+                let (name, description) = self.index.resolver.command_info(class);
+                let cmd = ConsoleCommand {
+                    name,
+                    description,
+                    item_key: item.key.clone(),
+                    class: class.clone(),
+                    source: item.source.clone(),
+                };
+                match &needle {
+                    Some(n)
+                        if !cmd.name.as_deref().unwrap_or("").to_lowercase().contains(n)
+                            && !cmd.class.as_str().to_lowercase().contains(n)
+                            && !cmd.item_key.to_lowercase().contains(n) =>
+                    {
+                        None
+                    }
+                    _ => Some(cmd),
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| match (&a.name, &b.name) {
+            (Some(x), Some(y)) => x.cmp(y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.class.cmp(&b.class),
+        });
+        out
+    }
+
+    fn indexer_index(&self) -> &breadth::IndexerIndex {
+        self.indexers.get_or_init(|| breadth::IndexerIndex::build(&self.index.modules))
+    }
+
+    /// Indexers from `indexer.xml`, each joined (on `view_id`) with its `mview.xml` view —
+    /// definition, dependencies, and the tables whose changes feed it. Static. Filtered by
+    /// an id/title substring, sorted by id.
+    pub fn indexers(&self, filter: Option<&str>) -> Vec<Indexer> {
+        self.indexer_index().indexers(filter)
+    }
+
+    /// One indexer by exact id, with its full subscription list.
+    pub fn indexer(&self, id: &str) -> Option<Indexer> {
+        self.indexer_index().indexer(id)
     }
 
     /// The database configuration from `app/etc/env.php` (`db` section).
