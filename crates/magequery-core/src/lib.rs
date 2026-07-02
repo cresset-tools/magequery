@@ -46,8 +46,8 @@ pub use model::{
     Resolution, Route, UnregisteredModule, WebapiRoute,
 };
 pub use model::{
-    CacheConfig, CacheFrontend, CacheType, LockConfig, QueueConfig, QueueConnection, SessionConfig,
-    SystemField, UrlRewrite, UrlRewrites,
+    CacheConfig, CacheFrontend, CacheType, InjectionSite, LockConfig, QueueConfig,
+    QueueConnection, SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses,
 };
 pub use decrypt::Decryptor;
 pub use sysconfig::ConfigSet;
@@ -388,6 +388,85 @@ impl Magento {
     /// The direct children of an ACL resource — the sub-permissions it groups.
     pub fn acl_children(&self, id: &str) -> Vec<AclResource> {
         self.acl_index().children(id)
+    }
+
+    /// Reverse DI — everything the merged di.xml config wires *to* `class` (which may
+    /// itself be a virtual type): the types whose preference resolves to it, the virtual
+    /// types built on it, and every constructor argument (incl. nested array items) that
+    /// injects it — as the class itself, its generated `\Proxy`, or its name as a string
+    /// (factory/pool style). di.xml facts only: plain constructor type-hints resolved by
+    /// autowiring have no di.xml declaration and aren't listed.
+    ///
+    /// With `area: None`, scans the global config plus each area's **own** declarations
+    /// (facts inherited from global aren't repeated per area) — a merged all-areas view;
+    /// each hit's `source.area` says where it was declared. With `Some(area)`, scans that
+    /// area's fully merged config.
+    pub fn uses(&self, class: &ClassName, area: Option<Area>) -> Result<Uses> {
+        let mut uses = Uses {
+            class: class.clone(),
+            preferred_for: Vec::new(),
+            virtual_types: Vec::new(),
+            injections: Vec::new(),
+        };
+        match area {
+            Some(a) => self.scan_uses(a, class, None, &mut uses),
+            None => {
+                self.scan_uses(Area::Global, class, None, &mut uses);
+                for &a in Area::ALL.iter().filter(|&&a| a != Area::Global) {
+                    self.scan_uses(a, class, Some(a), &mut uses);
+                }
+            }
+        }
+        uses.preferred_for.sort_by(|a, b| a.name.cmp(&b.name));
+        uses.virtual_types.sort_by(|a, b| a.name.cmp(&b.name));
+        uses.injections.sort_by(|a, b| {
+            a.consumer
+                .cmp(&b.consumer)
+                .then_with(|| a.argument.cmp(&b.argument))
+                .then_with(|| a.item_path.cmp(&b.item_path))
+        });
+
+        // No references at all: fine for a real class ("unused"), an error for a typo.
+        if uses.preferred_for.is_empty()
+            && uses.virtual_types.is_empty()
+            && uses.injections.is_empty()
+            && !self.class_known(class, area.unwrap_or(Area::Global))
+        {
+            return Err(Error::ClassNotFound(class.clone()));
+        }
+        Ok(uses)
+    }
+
+    /// Scan one area's merged config for references to `class`. `declared_in` restricts
+    /// hits to declarations made in that area's own files (used by the merged view to
+    /// avoid repeating global-inherited facts per area).
+    fn scan_uses(&self, area: Area, class: &ClassName, declared_in: Option<Area>, out: &mut Uses) {
+        let cfg = self.di_index().config(area);
+        let keep = |s: &Source| declared_in.is_none_or(|a| s.area == a);
+        let proxy = ClassName::new(format!("{}\\Proxy", class.as_str()));
+
+        for (for_, located) in &cfg.preferences {
+            if located.value == *class && keep(&located.source) {
+                out.preferred_for.push(UseRef { name: for_.clone(), source: located.source.clone() });
+            }
+        }
+        for (name, vt) in &cfg.virtual_types {
+            if vt.value == *class && keep(&vt.source) {
+                out.virtual_types.push(UseRef { name: name.clone(), source: vt.source.clone() });
+            }
+        }
+        for (consumer, args) in &cfg.type_args {
+            let consumer_is_virtual = cfg.virtual_types.contains_key(consumer);
+            for (arg_name, la) in args {
+                scan_arg_for_class(
+                    &la.value,
+                    &la.source,
+                    &mut Vec::new(),
+                    &UseScan { class, proxy: &proxy, consumer, consumer_is_virtual, argument: arg_name, keep: &keep },
+                    &mut out.injections,
+                );
+            }
+        }
     }
 
     /// Console commands modules register on `CommandListInterface`'s `commands` array
@@ -879,6 +958,63 @@ fn scan_actions(
                 source: Source { module: ctx.module.clone(), file: path, line: 0, area: ctx.area },
             });
         }
+    }
+}
+
+/// Context for one argument-tree scan in [`Magento::uses`]: what to match and which
+/// consumer/argument the hits belong to.
+struct UseScan<'a> {
+    class: &'a ClassName,
+    /// `class\Proxy` — the generated lazy wrapper counts as an injection of the class.
+    proxy: &'a ClassName,
+    consumer: &'a ClassName,
+    consumer_is_virtual: bool,
+    argument: &'a str,
+    keep: &'a dyn Fn(&Source) -> bool,
+}
+
+/// Walk an argument value looking for references to the scanned class: `object` values
+/// (the class or its `\Proxy`) and `string` values spelling its name, recursing into array
+/// items (each with its own provenance and key path).
+fn scan_arg_for_class(
+    value: &ArgValue,
+    source: &Source,
+    path: &mut Vec<String>,
+    scan: &UseScan<'_>,
+    out: &mut Vec<model::InjectionSite>,
+) {
+    let mut hit = |declared: ClassName, as_string: bool| {
+        if (scan.keep)(source) {
+            out.push(model::InjectionSite {
+                consumer: scan.consumer.clone(),
+                consumer_is_virtual: scan.consumer_is_virtual,
+                argument: scan.argument.to_string(),
+                item_path: path.clone(),
+                declared,
+                as_string,
+                source: source.clone(),
+            });
+        }
+    };
+    match value {
+        ArgValue::Object(c) => {
+            if c == scan.class || c == scan.proxy {
+                hit(c.clone(), false);
+            }
+        }
+        ArgValue::Scalar { xsi_type, text } => {
+            if xsi_type == "string" && text.trim().trim_start_matches('\\') == scan.class.as_str() {
+                hit(scan.class.clone(), true);
+            }
+        }
+        ArgValue::Array(items) => {
+            for item in items {
+                path.push(item.key.clone());
+                scan_arg_for_class(&item.value, &item.source, path, scan, out);
+                path.pop();
+            }
+        }
+        ArgValue::Null => {}
     }
 }
 

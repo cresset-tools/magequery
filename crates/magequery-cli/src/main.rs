@@ -8,7 +8,7 @@ use magequery_core::model::ModuleSource;
 use magequery_core::{
     AclResource, ArgValue, Area, ChainStep, ClassName, ConfigSet, ConfigSourceKind, ConfigValue,
     DbColumn, DbTable, Error, EventName, Indexer, Magento, MethodChain, Observer, Plugin,
-    Preference, Resolution, Route, Source, WebapiRoute,
+    Preference, Resolution, Route, Source, UseRef, WebapiRoute,
 };
 
 // The top-level command list, grouped, for `print_help`. Kept in sync with the `Command`
@@ -25,6 +25,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("preference", "Concrete class for an interface/class"),
             ("plugins", "Plugin (interceptor) chain for a class, incl. inherited"),
             ("events", "Events and their observers"),
+            ("uses", "Reverse DI: who injects or depends on a class"),
         ],
     ),
     (
@@ -192,6 +193,8 @@ enum Command {
     Plugins(PluginsArgs),
     /// Events and their observers.
     Events(EventsArgs),
+    /// Reverse DI: who injects or depends on a class (a view of di, inverted).
+    Uses(UsesArgs),
 
     // ── Entry points: how execution starts ──
     /// Frontend/adminhtml routes (frontName → modules).
@@ -254,6 +257,18 @@ struct AclArgs {
     /// An exact resource id (`Magento_Sales::actions_view`) → its tree position + children;
     /// otherwise a substring matched against id or title. Omit to print the whole tree.
     resource: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct UsesArgs {
+    /// The class (or virtual type) to find dependents of (leading backslash optional).
+    class: String,
+    /// Restrict to one area's merged config. Default: base + every area's own
+    /// declarations, merged (each hit tagged with the area it's declared in).
+    #[arg(long)]
+    area: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -514,6 +529,7 @@ fn main() -> Result<()> {
         Command::Plugins(args) => plugins(&mage, &args, &cli.root),
         Command::Di(args) => di(&mage, &args, &cli.root),
         Command::Events(args) => events(&mage, &args, &cli.root),
+        Command::Uses(args) => uses(&mage, &args, &cli.root),
         Command::Cron(args) => cron(&mage, &args, &cli.root),
         Command::Commands(args) => commands(&mage, &args, &cli.root),
         Command::Indexers(args) => indexers(&mage, &args, &cli.root),
@@ -1311,6 +1327,101 @@ fn cron(mage: &Magento, args: &CronArgs, root: &Path) -> Result<()> {
         );
     }
     eprintln!("\n{} job(s)", jobs.len());
+    Ok(())
+}
+
+fn uses(mage: &Magento, args: &UsesArgs, root: &Path) -> Result<()> {
+    let class = ClassName::new(args.class.trim_start_matches('\\'));
+    let area = args
+        .area
+        .as_deref()
+        .map(|a| a.parse::<Area>())
+        .transpose()
+        .map_err(|e| anyhow!("{e}"))?;
+    let u = mage.uses(&class, area).map_err(|e| match e {
+        Error::ClassNotFound(c) => anyhow!(
+            "class not found: {c}\n  Nothing in di.xml references it and it has no PSR-4 \
+             source file. Check the namespace and spelling (leading backslash is optional)."
+        ),
+        other => anyhow!(other),
+    })?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&u)?);
+        return Ok(());
+    }
+
+    let scope = match area {
+        Some(a) => area_label(&[a]),
+        None => "all areas".to_string(),
+    };
+    println!("{}  ({})", style::class(class.as_str()), style::area(&scope));
+
+    if u.preferred_for.is_empty() && u.virtual_types.is_empty() && u.injections.is_empty() {
+        // Honest about scope: autowired constructor type-hints have no di.xml declaration.
+        println!(
+            "  {}",
+            style::dim("(nothing in di.xml references it — autowired constructor type-hints aren't declared there)")
+        );
+        return Ok(());
+    }
+
+    let use_ref_line = |r: &UseRef| {
+        format!(
+            "  {}  {}{}   {}",
+            style::class(r.name.as_str()),
+            style::dim("area="),
+            style::area(&area_label(&[r.source.area])),
+            style::path(&short_loc(&r.source, root)),
+        )
+    };
+    if !u.preferred_for.is_empty() {
+        let n = u.preferred_for.len();
+        println!("\n{}", style::dim(&format!("preferred for ({n}) — these resolve to it:")));
+        for r in &u.preferred_for {
+            println!("{}", use_ref_line(r));
+        }
+    }
+    if !u.virtual_types.is_empty() {
+        let n = u.virtual_types.len();
+        println!("\n{}", style::dim(&format!("virtual types built on it ({n}):")));
+        for r in &u.virtual_types {
+            println!("{}", use_ref_line(r));
+        }
+    }
+    if !u.injections.is_empty() {
+        let n = u.injections.len();
+        println!("\n{}", style::dim(&format!("injected into ({n}):")));
+        for s in &u.injections {
+            // `$argument['key']['key']` — the constructor argument (and array position)
+            // the class lands in.
+            let mut arg = style::name(&format!("${}", s.argument));
+            for k in &s.item_path {
+                arg.push_str(&style::dim("["));
+                arg.push_str(&style::string_lit(&format!("'{k}'")));
+                arg.push_str(&style::dim("]"));
+            }
+            let vt = if s.consumer_is_virtual {
+                format!(" {}", style::dim("(virtual type)"))
+            } else {
+                String::new()
+            };
+            let how = if s.as_string {
+                format!("  {}", style::dim("(as string)"))
+            } else if s.declared != u.class {
+                format!("  {}", style::dim("(via \\Proxy)"))
+            } else {
+                String::new()
+            };
+            println!(
+                "  {}{vt}  {arg}{how}  {}{}   {}",
+                style::class(s.consumer.as_str()),
+                style::dim("area="),
+                style::area(&area_label(&[s.source.area])),
+                style::path(&short_loc(&s.source, root)),
+            );
+        }
+    }
     Ok(())
 }
 

@@ -158,7 +158,7 @@ WIRING        (object manager — how a class is assembled)
   preference <class>     focused view of di
   plugins <class>        focused view of di  [--chain]
   events [<event>]       observers per event   (NOT `observers` — that name is retired)
-  uses <class>           reverse DI: who injects it                         (backlog)
+  uses <class>           reverse DI: who injects it
 
 ENTRY POINTS  (how execution starts)
   routes [--area]    actions [<url>]    webapi [<url>]    cron [<group>]
@@ -187,7 +187,8 @@ PROJECT       (the codebase itself)
 ### Cross-cutting flag vocabulary (a flag means the same thing everywhere)
 
 - **`--area <name>` / `--all-areas`** — only on area-aware commands (`di`, `preference`,
-  `plugins`, `events`, `routes`, `actions`, `webapi`). Default = collapsed diff.
+  `plugins`, `events`, `routes`, `actions`, `webapi`, `uses`). Default = collapsed diff.
+  (`uses` has `--area` but no `--all-areas`: its default is already the merged union.)
 - **`--json`** and **`--color auto|always|never`** + **`--root <path>`** — global, every command.
 - **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config` today;
   future `eav`, `indexers --status`, `patches`). Static by default; DB overlay when asked;
@@ -200,8 +201,8 @@ PROJECT       (the codebase itself)
 - `observers` is folded into **`events [<event>]`** (one command). Already done in code.
 - `preference` / `plugins` are **focused views of `di`** — kept flat (high-frequency), but
   documented as such; `di <type>` is the single full entry point.
-- reverse-DI ships as **`uses <class>`** (or folded into `whatis`), never a literal
-  `reverse-di` command. `doctor` is the home for cross-index lints (the `modules --check`
+- reverse-DI shipped as **`uses <class>`** (never a literal `reverse-di` command); if
+  `whatis` is ever built, `uses` becomes one of its focused views. `doctor` is the home for cross-index lints (the `modules --check`
   philosophy, generalized: preference/vtype cycles, di refs to missing classes, plugins on
   `final`/non-shared, `<sequence>` cycles).
 
@@ -567,6 +568,37 @@ no arg → all (`id  Title  N tables  # loc`). Validated on mageos-lite: 12 inde
 `catalog_product_price` shows `catalogrule_product_price ← Magento_CatalogRule`; the
 `category_product` shared-index pair cross-references; deps exact. ~3ms.
 
+### `uses` (reverse DI, done)
+
+The flip side of `di`: `di Foo` = "when Magento builds Foo, what does it get"; `uses Foo` =
+"who receives Foo" — the impact-analysis question. A pure inversion of the in-memory DI
+index (`Magento::uses(class, area?)` → `Uses`), no new parsing:
+- **`preferred_for`** — preference entries whose *target* is the class (which interfaces
+  resolve to it), directly (one hop, not transitive).
+- **`virtual_types`** — virtualTypes built on it (`type=` the class).
+- **`injections`** — every constructor argument wiring it in, walking argument trees
+  recursively: `Object` values matching the class **or its generated `\Proxy`** (lazy
+  wrappers count as injections, flagged `via \Proxy`), and `xsi:type="string"` values
+  spelling its FQCN (factory/pool-style registration, flagged `as string` — this is how
+  `RouterList` entries reference router classes, so it matters). Each hit carries the
+  consumer (flagged when itself a virtual type), the argument name + **array-key path**
+  (`$routerList['cms']['class']`), and the item-level `Source`. Whole-value matches only.
+
+Area model: default = the merged union — scan global fully, then each area keeping only
+declarations made **in that area's own files** (`source.area == area`), so global-inherited
+facts aren't repeated per area; each hit's `source.area` is the honest tag. `--area <name>`
+= that area's fully merged config instead. No `--all-areas` (the default is already the
+union). The target may itself be a virtual type (pools inject vtypes; works naturally, and
+`class_known` already treats vtypes as real). Zero hits on an unknown name →
+`Error::ClassNotFound`; on a real class → an honest "(nothing in di.xml references it)"
+note that autowired constructor type-hints have no di.xml declaration (the known scope
+limit: full constructor scanning would break the on-demand-PHP philosophy).
+
+Validated on mageos-lite: `Cms\Controller\Router` → `$routerList['cms']['class']` as
+string, area=frontend; `Session\Storage` → 1 reverse preference + 8 vtypes (incl. per-area
+declarations, each with its own source); a vtype target (`Backend\Model\Session\Storage`)
+resolves its injector. ~19ms (di parse dominates).
+
 ## Future query tools (backlog — not yet built)
 
 Ideas surfaced while scoping breadth, in rough priority. All but the GraphQL/DB ones are
@@ -574,8 +606,6 @@ static breadth-projections in the same `read_parse` + merge shape.
 - **queue topology** — `communication.xml` / `queue_topology.xml` / `queue_consumer.xml` /
   `queue_publisher.xml`: topics → consumers → handlers. Complements the `queue` deployment-info
   command (connection) with the wiring.
-- **reverse DI** — "who injects / depends on class X" (invert `type_args` + `preferences`); the
-  flip side of `di`.
 - **`deps <Module>`** — dependency graph from `<sequence>` + composer `require` (forward + who
   depends on it).
 - **`graphql <Type>`** — map a `schema.graphqls` type/field to its resolver class via di

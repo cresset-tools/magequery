@@ -251,6 +251,52 @@ pub struct CronJob {
     pub source: Source,
 }
 
+/// A named di.xml declaration pointing at a class: a `<preference for=name type=X>` (the
+/// name is the `for` type) or a `<virtualType name=name type=X>` (the name is the virtual
+/// type built on X).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct UseRef {
+    pub name: ClassName,
+    pub source: Source,
+}
+
+/// One place a class is wired into another type's constructor via di.xml `<arguments>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct InjectionSite {
+    /// The type receiving the class.
+    pub consumer: ClassName,
+    /// True when `consumer` is a virtual type rather than a real class.
+    pub consumer_is_virtual: bool,
+    /// The constructor argument name.
+    pub argument: String,
+    /// Array-item keys inside the argument (e.g. `["blog", "class"]` for
+    /// `routerList['blog']['class']`); empty when the class is the argument itself.
+    pub item_path: Vec<String>,
+    /// Exactly what di.xml declares: the class, its generated `\Proxy`, or its name as a
+    /// string literal.
+    pub declared: ClassName,
+    /// The declaration is `xsi:type="string"` (a factory/pool-style class-name value), not
+    /// an `object` injection.
+    pub as_string: bool,
+    pub source: Source,
+}
+
+/// Reverse DI — everything in the merged di.xml config that references a class: the
+/// inverse of [`Resolution`]. "Who depends on / receives this class?"
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Uses {
+    pub class: ClassName,
+    /// Types whose `<preference>` resolves (directly) to the class.
+    pub preferred_for: Vec<UseRef>,
+    /// Virtual types built on the class.
+    pub virtual_types: Vec<UseRef>,
+    /// Constructor arguments (incl. nested array items) injecting the class.
+    pub injections: Vec<InjectionSite>,
+}
+
 /// A console command registered on `CommandListInterface`'s `commands` array argument in
 /// di.xml — what `bin/magento` picks up from modules. (Commands registered through the
 /// bootstrap-time `cli_commands.php`/`CommandLocator` mechanism — a handful of framework
