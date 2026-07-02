@@ -2494,6 +2494,18 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         (None, Some(t)) => println!("frontend     {}  {}", style::class(t), style::dim("(custom theme)")),
         (None, None) => {}
     }
+    // The checkout stack; nothing beyond stock found = the default (Luma) checkout.
+    match &i.checkout {
+        Some(c) => {
+            let version = i
+                .checkout_version
+                .as_deref()
+                .map(|v| format!(" {}", style::number(v)))
+                .unwrap_or_default();
+            println!("checkout     {}{version}", style::ok(c));
+        }
+        None => println!("checkout     {}", style::dim("default (Luma)")),
+    }
     if let Some(s) = &i.search_engine {
         println!("search       {}", style::ok(s));
     }
@@ -2546,12 +2558,17 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         }
         println!("cache        {}", parts.join(&style::dim(" · ")));
     }
-    if let (Some(w), Some(s)) = (i.websites, i.store_views) {
-        println!(
-            "stores       {} website(s), {} store view(s)",
-            style::number(&w.to_string()),
-            style::number(&s.to_string()),
-        );
+    // The full hierarchy: websites → stores (groups) → store views.
+    let scope_parts: Vec<String> = [
+        (i.websites, "website(s)"),
+        (i.store_groups, "store(s)"),
+        (i.store_views, "store view(s)"),
+    ]
+    .into_iter()
+    .filter_map(|(n, label)| n.map(|n| format!("{} {label}", style::number(&n.to_string()))))
+    .collect();
+    if !scope_parts.is_empty() {
+        println!("stores       {}", scope_parts.join(", "));
     }
     let disabled = i.modules_total - i.modules_enabled;
     let dis = if disabled > 0 {

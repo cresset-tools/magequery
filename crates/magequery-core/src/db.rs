@@ -126,6 +126,24 @@ pub(crate) fn fetch_themes(
     .map_err(clean_err)
 }
 
+/// Count the store hierarchy — `(websites, store groups, store views)` — excluding the
+/// synthetic admin scopes (id 0).
+pub(crate) fn fetch_scope_counts(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<(usize, usize, usize), String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let count = |c: &mut mysql::Conn, sql: String| -> Result<usize, String> {
+        Ok(c.query_first::<u64, _>(sql).map_err(clean_err)?.unwrap_or(0) as usize)
+    };
+    let websites = count(&mut c, format!("SELECT COUNT(*) FROM {p}store_website WHERE website_id > 0"))?;
+    let groups = count(&mut c, format!("SELECT COUNT(*) FROM {p}store_group WHERE group_id > 0"))?;
+    let stores = count(&mut c, format!("SELECT COUNT(*) FROM {p}store WHERE store_id > 0"))?;
+    Ok((websites, groups, stores))
+}
+
 /// Read the `url_rewrite` table, resolving each row's `store_id` to a store code. Filters
 /// (path substring on request/target, store code, redirects-only) are applied **in SQL** —
 /// the table is often huge. Fetches `limit + 1` rows to detect truncation; returns

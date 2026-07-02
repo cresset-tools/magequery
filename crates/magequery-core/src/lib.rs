@@ -721,6 +721,39 @@ impl Magento {
             (None, None)
         };
 
+        // The checkout stack: a curated map of the known solutions' packages, then a
+        // generic "any non-core package named *checkout*" fallback (verbatim, so an
+        // unlisted solution still surfaces). `None` = stock (Luma) checkout.
+        const CHECKOUT_PACKAGES: [(&str, &str); 5] = [
+            ("hyva-themes/magento2-hyva-checkout", "Hyvä Checkout"),
+            ("swissup/firecheckout", "Firecheckout"),
+            ("mageplaza/module-one-step-checkout", "Mageplaza One Step Checkout"),
+            ("onestepcheckout/", "OneStepCheckout"),
+            ("bold-commerce/module-checkout", "Bold Checkout"),
+        ];
+        let core_vendor = |name: &str| {
+            name.starts_with("magento/")
+                || name.starts_with("mage-os/")
+                || name.starts_with("modulargento/")
+        };
+        let (checkout, checkout_version) = CHECKOUT_PACKAGES
+            .iter()
+            .find_map(|(prefix, label)| {
+                self.index
+                    .packages
+                    .iter()
+                    .find(|p| p.name.starts_with(prefix))
+                    .map(|p| (Some(label.to_string()), p.version.clone()))
+            })
+            .or_else(|| {
+                self.index
+                    .packages
+                    .iter()
+                    .find(|p| p.name.contains("checkout") && !core_vendor(&p.name))
+                    .map(|p| (Some(p.name.clone()), p.version.clone()))
+            })
+            .unwrap_or((None, None));
+
         // Deployment one-liners, from the existing env.php extractors (credentials
         // deliberately left out of this casual, paste-into-a-ticket view).
         let db_conn = self.db_config().ok().and_then(|c| {
@@ -741,20 +774,33 @@ impl Magento {
         });
         let cache = self.cache_config().ok();
 
-        // Website / store-view counts from config.php's `scopes` node (only present when
-        // the config is dumped); the synthetic `admin` website/store are excluded.
-        let scope_count = |section: &str| {
-            deploy::read_config_php(&self.index.root)
-                .ok()?
-                .get("scopes")?
-                .get(section)?
-                .as_array()
-                .map(|items| {
+        // The store hierarchy (websites → groups → store views): live DB when reachable,
+        // else config.php's `scopes` node (only present when the config is dumped). The
+        // synthetic admin scopes are excluded either way — id 0 in the DB; the `admin`
+        // website/store keys and the groups whose website_id is 0 in the scopes node.
+        let db_counts = if db_error.is_none() { self.fetch_scope_counts().ok() } else { None };
+        let (websites, store_groups, store_views) = match db_counts {
+            Some((w, g, s)) => (Some(w), Some(g), Some(s)),
+            None => {
+                let config_php = deploy::read_config_php(&self.index.root).ok();
+                let section = |name: &str| {
+                    config_php.as_ref()?.get("scopes")?.get(name)?.as_array()
+                };
+                let by_key = |name: &str| {
+                    section(name)
+                        .map(|items| items.iter().filter(|(k, _)| k.as_str() != Some("admin")).count())
+                };
+                let groups = section("groups").map(|items| {
                     items
                         .iter()
-                        .filter(|(k, _)| k.as_str() != Some("admin"))
+                        .filter(|(_, v)| {
+                            !matches!(v.get("website_id"), Some(phparray::PhpValue::Int(0)))
+                                && v.get("website_id").and_then(|w| w.as_str()) != Some("0")
+                        })
                         .count()
-                })
+                });
+                (by_key("websites"), groups, by_key("stores"))
+            }
         };
 
         InstanceInfo {
@@ -763,6 +809,8 @@ impl Magento {
             theme,
             frontend,
             frontend_version,
+            checkout,
+            checkout_version,
             db_name: db_conn.as_ref().map(|(n, _, _)| n.clone()),
             db_endpoint: db_conn.as_ref().map(|(_, e, _)| e.clone()),
             table_prefix: db_conn.and_then(|(_, _, p)| (!p.is_empty()).then_some(p)),
@@ -773,8 +821,9 @@ impl Magento {
                 .map(|c| c.types.iter().filter(|t| t.enabled).count())
                 .unwrap_or(0),
             cache_types_total: cache.as_ref().map(|c| c.types.len()).unwrap_or(0),
-            websites: scope_count("websites"),
-            store_views: scope_count("stores"),
+            websites,
+            store_groups,
+            store_views,
             installed_at,
             modules_vendor: self
                 .index
@@ -1045,6 +1094,19 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         db::fetch_config(conn, &cfg.table_prefix).map_err(Error::Db)
+    }
+
+    /// `(websites, store groups, store views)` counts, admin scopes excluded.
+    #[cfg(feature = "db")]
+    fn fetch_scope_counts(&self) -> Result<(usize, usize, usize)> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        db::fetch_scope_counts(conn, &cfg.table_prefix).map_err(Error::Db)
+    }
+
+    #[cfg(not(feature = "db"))]
+    fn fetch_scope_counts(&self) -> Result<(usize, usize, usize)> {
+        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
     }
 
     /// `(theme_id, parent_id, theme_path, area)` rows from the `theme` table.

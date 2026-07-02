@@ -98,6 +98,11 @@ pub struct InstanceInfo {
     pub frontend: Option<String>,
     /// The frontend package's version (Hyvä/Breeze; stock themes ship with Magento).
     pub frontend_version: Option<String>,
+    /// The checkout stack, from installed packages: a known solution's label (Hyvä
+    /// Checkout, Firecheckout, …) or the verbatim non-core package name containing
+    /// "checkout". `None` = nothing beyond the stock (Luma) checkout found.
+    pub checkout: Option<String>,
+    pub checkout_version: Option<String>,
     /// The default DB connection, credentials omitted: database name and endpoint
     /// (`host:port` or a socket path).
     pub db_name: Option<String>,
@@ -110,9 +115,11 @@ pub struct InstanceInfo {
     pub cache_frontends: Vec<CacheFrontend>,
     pub cache_types_enabled: usize,
     pub cache_types_total: usize,
-    /// Website / store-view counts from `config.php`'s `scopes` node (present on installs
-    /// with dumped config; the synthetic `admin` scopes are excluded).
+    /// The store hierarchy — websites → stores (groups) → store views — counted from the
+    /// live DB when reachable, else from `config.php`'s `scopes` node (present when the
+    /// config is dumped). The synthetic admin scopes (id 0) are excluded.
     pub websites: Option<usize>,
+    pub store_groups: Option<usize>,
     pub store_views: Option<usize>,
     /// `env.php` `install/date`, verbatim.
     pub installed_at: Option<String>,

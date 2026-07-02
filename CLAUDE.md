@@ -617,8 +617,12 @@ the distribution apart), **deploy mode** (`env.php` `MAGE_MODE`; absent = "defau
 (`catalog/search/engine`), **db** (dbname @ host/socket + table prefix, credentials
 deliberately omitted from this paste-into-a-ticket view), **session** and **cache**
 one-liners (reusing the env.php extractors; an empty backend class renders as the implicit
-`file` default), **websites/store views** (from `config.php`'s `scopes` node when the
-config is dumped, the synthetic `admin` scopes excluded; absent → line skipped),
+`file` default), the **store hierarchy** (websites → stores/groups → store views, counted from the live
+DB when reachable — `db::fetch_scope_counts` — else from `config.php`'s `scopes` node when
+the config is dumped; the synthetic admin scopes are excluded either way; unknown levels
+are skipped, never guessed), the **checkout stack** (a curated package map — Hyvä Checkout,
+Firecheckout, Mageplaza OSC, OneStepCheckout, Bold — then a generic "any non-core package
+named *checkout*" fallback reported verbatim; nothing found renders as "default (Luma)"),
 **module counts split vendor / app/code**, the **composer package count**, and the
 **install date** (`env.php` `install/date`).
 
