@@ -146,7 +146,9 @@ Foo`; grep-ability and muscle memory are the whole UX. Grouping is a *help-rende
 (the `Command` enum order + a hand-rendered root help screen), **not** a typing one.
 
 **Nesting earns its keep in exactly one case: a noun with multiple verbs** — `db info`/`db
-ping`, `redis info`/`redis ping`. Info-only nouns (`session`/`cache`/`lock`/`queue`) stay flat.
+ping`, `redis info`/`redis ping`, `queue info`/`queue topology` (bare `queue` = `queue info`,
+kept for back-compat via an optional clap subcommand). Info-only nouns
+(`session`/`cache`/`lock`) stay flat.
 
 The `Command` enum in `main.rs` is ordered into these seven groups (banner comments mark
 them). clap can't natively head-group subcommands without *nesting* them (which would break
@@ -182,7 +184,7 @@ FRONTEND      (presentation)                    -- all backlog
 
 RUNTIME       (env.php config & live connections)
   db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
-  session   cache   lock   queue       (info-only)
+  queue [info]|topology [<topic>]      session   cache   lock   (info-only)
 
 PROJECT       (the codebase itself)
   modules [--check] [--enabled|--disabled] [--source app|vendor]
@@ -573,6 +575,35 @@ no arg → all (`id  Title  N tables  # loc`). Validated on mageos-lite: 12 inde
 `catalog_product_price` shows `catalogrule_product_price ← Magento_CatalogRule`; the
 `category_product` shared-index pair cross-references; deps exact. ~3ms.
 
+### `queue topology` (message-queue wiring, static, done)
+
+The static half of the queue story (`queue info` = the env.php connections): *when code
+publishes topic X, which queue does it land in and who processes it* — joined from four
+global files in an `MqIndex` (lazy `OnceLock`, parallel `read_parse`):
+- `communication.xml` → topics + handlers (`parse::communication_xml`); topics merge by
+  name, handlers by name **attribute-level** (like plugins — `disabled` is `Option<bool>`
+  so a later `<handler name=… disabled="true"/>` keeps the class).
+- `queue_consumer.xml` → consumers by name, merge-non-empty (`connection` is optional —
+  Magento defaults amqp with db fallback at runtime; reported, not resolved).
+- `queue_topology.xml` → exchanges keyed **(connection, name)** (same exchange name on
+  amqp and db = two exchanges; connection absent ⇒ XSD default `amqp`), bindings by id.
+- `queue_publisher.xml` → publishers by topic; `<connection>` children merged by name,
+  flattened to the one enabled connection. Also parses the **direct `queue=` shorthand**
+  (`<publisher topic=… queue=…/>`, in this codebase's publisher.xsd) — most core modules
+  use it.
+
+`Magento::queue_topics(filter?)` (list) + `Magento::queue_topic(name)` → `MqTopicRoute`:
+topic + publisher + routes, where each route = one **queue**, every `via` leading to it (the
+publisher's direct `queue=` and/or each enabled binding whose **AMQP pattern matches** —
+`topic_matches` implements `.`-word semantics, `*` = one word, `#` = zero+, unit-tested),
+and the queue's consumers (joined by queue name). A topic declared only in
+queue_publisher.xml still routes (stub topic, empty handlers). CLI: `queue topology`
+(list: `topic  → queue(s)  (N handler, M consumer)  # loc`), exact topic → detail
+(request/response/schema, handlers, `publishes to exchange`, per-queue `via …` lines +
+consumers, red flag when **no consumer reads a queue** or no route exists). Validated on
+mageos-lite: sales_rule.codegenerator routes to queue `codegenerator` via both the direct
+publisher and its binding on exchange magento (amqp), consumer joined; ~3ms.
+
 ### `uses` (reverse DI, done)
 
 The flip side of `di`: `di Foo` = "when Magento builds Foo, what does it get"; `uses Foo` =
@@ -608,9 +639,6 @@ resolves its injector. ~19ms (di parse dominates).
 
 Ideas surfaced while scoping breadth, in rough priority. All but the GraphQL/DB ones are
 static breadth-projections in the same `read_parse` + merge shape.
-- **queue topology** — `communication.xml` / `queue_topology.xml` / `queue_consumer.xml` /
-  `queue_publisher.xml`: topics → consumers → handlers. Complements the `queue` deployment-info
-  command (connection) with the wiring.
 - **`deps <Module>`** — dependency graph from `<sequence>` + composer `require` (forward + who
   depends on it).
 - **`graphql <Type>`** — map a `schema.graphqls` type/field to its resolver class via di

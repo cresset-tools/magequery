@@ -46,8 +46,9 @@ pub use model::{
     Resolution, Route, UnregisteredModule, WebapiRoute,
 };
 pub use model::{
-    CacheConfig, CacheFrontend, CacheType, InjectionSite, LockConfig, QueueConfig,
-    QueueConnection, SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses,
+    CacheConfig, CacheFrontend, CacheType, InjectionSite, LockConfig, MqConsumer, MqHandler,
+    MqPublisher, MqRoute, MqTopic, MqTopicRoute, MqVia, QueueConfig, QueueConnection,
+    SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses,
 };
 pub use decrypt::Decryptor;
 pub use sysconfig::ConfigSet;
@@ -75,6 +76,7 @@ pub struct Magento {
     system_config: OnceLock<breadth::SystemConfigIndex>,
     acl: OnceLock<breadth::AclIndex>,
     indexers: OnceLock<breadth::IndexerIndex>,
+    mq: OnceLock<breadth::MqIndex>,
 }
 
 struct DiBuilt {
@@ -102,6 +104,7 @@ impl Magento {
             system_config: OnceLock::new(),
             acl: OnceLock::new(),
             indexers: OnceLock::new(),
+            mq: OnceLock::new(),
         })
     }
 
@@ -536,6 +539,27 @@ impl Magento {
     /// One indexer by exact id, with its full subscription list.
     pub fn indexer(&self, id: &str) -> Option<Indexer> {
         self.indexer_index().indexer(id)
+    }
+
+    fn mq_index(&self) -> &breadth::MqIndex {
+        self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
+    }
+
+    /// Message-queue topics from `communication.xml` (with handlers), optionally filtered
+    /// by a name substring, sorted by name. Static.
+    pub fn queue_topics(&self, filter: Option<&str>) -> Vec<MqTopic> {
+        self.mq_index().topics(filter)
+    }
+
+    /// The full journey of one topic (exact name): definition + handlers, its publisher,
+    /// and every queue its messages reach — via the publisher's direct `queue=` and/or
+    /// each enabled exchange binding whose AMQP pattern matches — with that queue's
+    /// consumers. The "who processes a message published on this topic" answer, joined
+    /// from `communication.xml` + `queue_publisher.xml` + `queue_topology.xml` +
+    /// `queue_consumer.xml`. (Consumers are joined by queue name; a consumer's declared
+    /// connection is reported, not matched.)
+    pub fn queue_topic(&self, name: &str) -> Option<MqTopicRoute> {
+        self.mq_index().topic_route(name)
     }
 
     /// The database configuration from `app/etc/env.php` (`db` section).

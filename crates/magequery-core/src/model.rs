@@ -527,6 +527,100 @@ pub struct QueueConfig {
     pub consumers_wait_for_messages: Option<String>,
 }
 
+/// A message-queue topic from `communication.xml`, with its handlers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct MqTopic {
+    pub name: String,
+    /// Request payload type (a class/interface name, or a primitive like `string`).
+    pub request: Option<String>,
+    pub response: Option<String>,
+    /// `schema="Class::method"` — request/response derived from a service method.
+    pub schema: Option<String>,
+    pub handlers: Vec<MqHandler>,
+    pub source: Source,
+}
+
+/// One handler of a topic (`<handler>` in `communication.xml`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct MqHandler {
+    pub name: String,
+    pub class: ClassName,
+    pub method: String,
+    pub disabled: bool,
+    pub source: Source,
+}
+
+/// A queue consumer from `queue_consumer.xml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct MqConsumer {
+    pub name: String,
+    pub queue: String,
+    /// Declared connection; absent ⇒ Magento's runtime default (amqp, falling back to db).
+    pub connection: Option<String>,
+    pub consumer_instance: Option<ClassName>,
+    /// `handler="Class::method"`; absent ⇒ handlers come from `communication.xml`.
+    pub handler: Option<String>,
+    pub max_messages: Option<String>,
+    pub source: Source,
+}
+
+/// A topic's publisher from `queue_publisher.xml`, flattened to its enabled connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct MqPublisher {
+    pub topic: String,
+    /// Direct-to-queue shorthand (`queue=` attribute), bypassing exchange routing.
+    pub queue: Option<String>,
+    /// The enabled `<connection>`'s name/exchange, when the element form is used.
+    pub connection: Option<String>,
+    pub exchange: Option<String>,
+    pub disabled: bool,
+    pub source: Source,
+}
+
+/// How a message travels from a topic into a queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub enum MqVia {
+    /// The topic's publisher names the queue directly (`<publisher queue=…>`).
+    PublisherQueue { source: Source },
+    /// An exchange binding whose topic pattern matches.
+    Binding {
+        exchange: String,
+        /// The exchange's connection (`amqp` when not declared — the XSD default).
+        connection: String,
+        id: String,
+        pattern: String,
+        source: Source,
+    },
+}
+
+/// One queue a topic's messages land in, how they get there, and who reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct MqRoute {
+    pub queue: String,
+    /// Every path leading here (a direct publisher queue and/or matching bindings).
+    pub via: Vec<MqVia>,
+    /// Consumers reading this queue (joined by queue name).
+    pub consumers: Vec<MqConsumer>,
+}
+
+/// The full journey of one topic: definition + handlers (`communication.xml`), its
+/// publisher (`queue_publisher.xml`), and each queue it reaches with that queue's
+/// consumers (`queue_topology.xml` + `queue_consumer.xml`) — the answer to "who processes
+/// a message published on this topic".
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct MqTopicRoute {
+    pub topic: MqTopic,
+    pub publisher: Option<MqPublisher>,
+    pub routes: Vec<MqRoute>,
+}
+
 /// One URL rewrite from the `url_rewrite` table (live DB only — these are runtime data,
 /// generated from products/categories/CMS pages plus manual entries; no static source).
 #[derive(Debug, Clone, PartialEq, Eq)]

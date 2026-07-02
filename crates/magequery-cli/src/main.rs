@@ -61,7 +61,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("session", "Session storage config from env.php"),
             ("cache", "Cache backends and type flags from env.php"),
             ("lock", "Locking backend from env.php"),
-            ("queue", "Message-queue (AMQP) connections from env.php"),
+            ("queue", "Message queues: connections (env.php); topology (topics → consumers)"),
             ("url-rewrites", "URL rewrites from the DB (request → target)"),
         ],
     ),
@@ -233,8 +233,8 @@ enum Command {
     Cache(InfoArgs),
     /// Locking backend from env.php.
     Lock(InfoArgs),
-    /// Message-queue (AMQP) connections from env.php.
-    Queue(InfoArgs),
+    /// Message queues: connections from env.php; static topic→consumer topology.
+    Queue(QueueArgs),
     /// URL rewrites from the DB (request → target).
     UrlRewrites(UrlRewritesArgs),
 
@@ -358,6 +358,33 @@ enum RedisCommand {
     },
     /// Ping every configured instance.
     Ping {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Args)]
+struct QueueArgs {
+    #[command(subcommand)]
+    command: Option<QueueCommand>,
+    /// (bare `queue`) Emit JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand)]
+enum QueueCommand {
+    /// Show message-queue connections from env.php (what bare `queue` does).
+    Info {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Static wiring: topic → exchange/queue → consumer, joined from communication.xml,
+    /// queue_publisher.xml, queue_topology.xml, and queue_consumer.xml.
+    Topology {
+        /// Exact topic name → the full route (publisher, queues, consumers); otherwise a
+        /// name substring to list matching topics. Omit to list every topic.
+        topic: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -544,7 +571,13 @@ fn main() -> Result<()> {
         Command::Session(args) => session_info(&mage, args.json),
         Command::Cache(args) => cache_info(&mage, args.json),
         Command::Lock(args) => lock_info(&mage, args.json),
-        Command::Queue(args) => queue_info(&mage, args.json),
+        Command::Queue(args) => match args.command {
+            Some(QueueCommand::Info { json }) => queue_info(&mage, json),
+            Some(QueueCommand::Topology { topic, json }) => {
+                queue_topology(&mage, topic.as_deref(), json, &cli.root)
+            }
+            None => queue_info(&mage, args.json),
+        },
         Command::SystemConfig(args) => system_config(&mage, &args, &cli.root),
         Command::Acl(args) => acl(&mage, &args, &cli.root),
         Command::Schema(args) => schema(&mage, &args, &cli.root),
@@ -867,6 +900,155 @@ fn queue_info(mage: &Magento, json: bool) -> Result<()> {
         println!("\n{} {}", style::dim("consumers_wait_for_messages"), style::number(w));
     }
     Ok(())
+}
+
+fn queue_topology(mage: &Magento, topic: Option<&str>, json: bool, root: &Path) -> Result<()> {
+    // An exact topic name → the full route; anything else is a substring filter.
+    if let Some(name) = topic {
+        if let Some(route) = mage.queue_topic(name) {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&route)?);
+                return Ok(());
+            }
+            render_topic_route(&route, root);
+            return Ok(());
+        }
+    }
+
+    let topics = mage.queue_topics(topic);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&topics)?);
+        return Ok(());
+    }
+    if topics.is_empty() {
+        println!("{}", style::dim("(no topic matches)"));
+        return Ok(());
+    }
+
+    // Greppable: `topic  → queue(s)  (counts)  # loc`; the detail view joins the rest.
+    let width = topics.iter().map(|t| t.name.len()).max().unwrap_or(0);
+    for t in &topics {
+        let route = mage.queue_topic(&t.name);
+        let (queues, consumers) = match &route {
+            Some(r) => (
+                r.routes.iter().map(|x| style::target(&x.queue)).collect::<Vec<_>>(),
+                r.routes.iter().map(|x| x.consumers.len()).sum::<usize>(),
+            ),
+            None => (Vec::new(), 0),
+        };
+        let dest = if queues.is_empty() {
+            style::err("(no queue route)")
+        } else {
+            format!("{} {}", style::dim("→"), queues.join(&style::dim(", ")))
+        };
+        let pad = " ".repeat(width.saturating_sub(t.name.len()));
+        println!(
+            "{}{pad}  {dest}  {}   {}",
+            style::name(&t.name),
+            style::dim(&format!("({} handler, {consumers} consumer)", t.handlers.len())),
+            style::path(&short_loc(&t.source, root)),
+        );
+    }
+    eprintln!("\n{} topic(s)", topics.len());
+    Ok(())
+}
+
+fn render_topic_route(r: &magequery_core::MqTopicRoute, root: &Path) {
+    println!("{}   {}", style::name(&r.topic.name), style::path(&short_loc(&r.topic.source, root)));
+    if let Some(req) = &r.topic.request {
+        println!("  request   {}", style::class(req));
+    }
+    if let Some(resp) = &r.topic.response {
+        println!("  response  {}", style::class(resp));
+    }
+    if let Some(s) = &r.topic.schema {
+        println!("  schema    {}", style::class(s));
+    }
+    if !r.topic.handlers.is_empty() {
+        println!("  {}", style::dim(&format!("handlers ({}):", r.topic.handlers.len())));
+        for h in &r.topic.handlers {
+            let dis = if h.disabled { format!("  {}", style::err("[DISABLED]")) } else { String::new() };
+            println!(
+                "    {}  {}::{}{dis}   {}",
+                style::name(&h.name),
+                style::class(h.class.as_str()),
+                h.method,
+                style::path(&short_loc(&h.source, root)),
+            );
+        }
+    }
+    if let Some(p) = &r.publisher {
+        // The exchange-connection form; a direct `queue=` shows up as a route's `via`.
+        if let Some(e) = &p.exchange {
+            let conn = p.connection.as_deref().unwrap_or("amqp");
+            let dis = if p.disabled { format!("  {}", style::err("[DISABLED]")) } else { String::new() };
+            println!(
+                "  {} {} ({}){dis}   {}",
+                style::dim("publishes to exchange"),
+                style::target(e),
+                style::area(conn),
+                style::path(&short_loc(&p.source, root)),
+            );
+        }
+    }
+
+    if r.routes.is_empty() {
+        println!(
+            "  {}",
+            style::dim("(no queue route — no publisher queue= and no binding pattern matches)")
+        );
+        return;
+    }
+    for route in &r.routes {
+        println!("\n  {} {}", style::dim("→ queue"), style::target(&route.queue));
+        for via in &route.via {
+            match via {
+                magequery_core::MqVia::PublisherQueue { source } => println!(
+                    "      {}   {}",
+                    style::dim("via publisher queue="),
+                    style::path(&short_loc(source, root)),
+                ),
+                magequery_core::MqVia::Binding { exchange, connection, id, pattern, source } => {
+                    println!(
+                        "      {} {} {} {} {} ({})   {}",
+                        style::dim("via binding"),
+                        style::name(id),
+                        style::string_lit(&format!("'{pattern}'")),
+                        style::dim("on exchange"),
+                        style::target(exchange),
+                        style::area(connection),
+                        style::path(&short_loc(source, root)),
+                    );
+                }
+            }
+        }
+        if route.consumers.is_empty() {
+            println!("      {}", style::err("(no consumer reads this queue)"));
+        }
+        for c in &route.consumers {
+            // What runs: the consumer's own Class::method handler, its consumerInstance,
+            // or (neither declared) the topic handlers from communication.xml.
+            let what = match (&c.handler, &c.consumer_instance) {
+                (Some(h), _) => match h.split_once("::") {
+                    Some((class, method)) => format!("{}::{}", style::class(class), method),
+                    None => style::class(h),
+                },
+                (None, Some(i)) => style::class(i.as_str()),
+                (None, None) => style::dim("(handlers from communication.xml)"),
+            };
+            let conn = c
+                .connection
+                .as_deref()
+                .map(|x| format!("  {}{}", style::dim("connection="), style::area(x)))
+                .unwrap_or_default();
+            println!(
+                "      {} {}  {what}{conn}   {}",
+                style::dim("consumer"),
+                style::name(&c.name),
+                style::path(&short_loc(&c.source, root)),
+            );
+        }
+    }
 }
 
 fn system_config(mage: &Magento, args: &SystemConfigArgs, root: &Path) -> Result<()> {
