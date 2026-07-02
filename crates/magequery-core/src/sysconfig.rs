@@ -166,6 +166,7 @@ fn scope_parents(config_php: &PhpValue) -> HashMap<String, String> {
 fn apply_modular(map: &mut HashMap<(String, String), ConfigValue>, modules: &[Module]) {
     let parsed: Vec<(PathBuf, Vec<(String, String, String, u32)>)> = modules
         .par_iter()
+        .filter(|m| m.enabled) // Magento only loads enabled modules' configuration
         .map(|m| {
             let path = m.path.join("etc/config.xml");
             let leaves = std::fs::read_to_string(&path)

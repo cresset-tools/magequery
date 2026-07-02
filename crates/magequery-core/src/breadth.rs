@@ -35,17 +35,22 @@ fn area_path(m: &Module, area: Area, file: &str) -> PathBuf {
     }
 }
 
-/// Read + parse `etc/[<area>/]<file>` for every module **in parallel**, returning
-/// `(module index, path, parsed)` for the files that exist, in module (load) order — so the
-/// caller merges sequentially and deterministically. `rayon` preserves the collect order.
+/// Read + parse `etc/[<area>/]<file>` for every **enabled** module **in parallel**
+/// (Magento only loads enabled modules' configuration), returning `(module index, path,
+/// parsed)` for the files that exist, in module (load) order — so the caller merges
+/// sequentially and deterministically. `rayon` preserves the collect order.
 fn read_parse<T: Send>(
     modules: &[Module],
     area: Area,
     file: &str,
     parse: impl Fn(&str) -> T + Sync,
 ) -> Vec<(usize, PathBuf, T)> {
-    let jobs: Vec<(usize, PathBuf)> =
-        modules.iter().enumerate().map(|(i, m)| (i, area_path(m, area, file))).collect();
+    let jobs: Vec<(usize, PathBuf)> = modules
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.enabled)
+        .map(|(i, m)| (i, area_path(m, area, file)))
+        .collect();
     let parsed: Vec<Option<T>> = jobs
         .par_iter()
         .map(|(_, p)| std::fs::read_to_string(p).ok().map(|t| parse(t.as_str())))

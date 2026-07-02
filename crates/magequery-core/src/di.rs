@@ -109,6 +109,10 @@ pub(crate) fn build(root: &Path, modules: &[Module], diags: &mut Vec<Diagnostic>
         });
     }
     for m in modules {
+        // Magento only loads enabled modules' configuration.
+        if !m.enabled {
+            continue;
+        }
         let global = m.path.join("etc/di.xml");
         if global.is_file() {
             jobs.push(Job {
