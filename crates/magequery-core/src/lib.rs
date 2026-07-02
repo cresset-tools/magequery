@@ -53,7 +53,7 @@ pub use model::{
     MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
     Resolution, Route, SchemaDrift, TableColumn, TranslationEntry, TranslationLayer,
-    TranslationMatch, UnregisteredModule, WebapiRoute, Widget,
+    TranslationMatch, Translations, UnregisteredModule, WebapiRoute, Widget,
     WidgetParam,
 };
 pub use model::{
@@ -1330,7 +1330,7 @@ impl Magento {
         needle: &str,
         locale: Option<&str>,
         include_db: bool,
-    ) -> Result<Vec<TranslationMatch>> {
+    ) -> Result<Translations> {
         let locale = match locale {
             Some(l) => l.to_string(),
             None => self
@@ -1418,12 +1418,35 @@ impl Magento {
             }
         }
 
-        let mut out: Vec<TranslationMatch> = by_key
+        let mut matches: Vec<TranslationMatch> = by_key
             .into_iter()
             .map(|(key, entries)| TranslationMatch { key, entries })
             .collect();
-        out.sort_by(|a, b| a.key.cmp(&b.key));
-        Ok(out)
+        matches.sort_by(|a, b| a.key.cmp(&b.key));
+
+        // Context for an honest empty result: what was scanned, and which dictionaries
+        // exist but can never load (disabled / not-in-config.php modules).
+        let dictionaries_scanned = jobs.iter().filter(|(_, p, _)| p.is_file()).count();
+        let dict = format!("{locale}.csv");
+        let mut inactive_dictionaries: Vec<ModuleName> = self
+            .index
+            .modules
+            .iter()
+            .filter(|m| !m.enabled)
+            .filter(|m| m.path.join("i18n").join(&dict).is_file())
+            .map(|m| m.name.clone())
+            .chain(
+                self.index
+                    .check
+                    .on_disk_not_in_config
+                    .iter()
+                    .filter(|m| m.path.join("i18n").join(&dict).is_file())
+                    .map(|m| m.name.clone()),
+            )
+            .collect();
+        inactive_dictionaries.sort();
+
+        Ok(Translations { locale, matches, dictionaries_scanned, inactive_dictionaries })
     }
 
     /// Language packs on disk for `locale`: `(name, sort_order, dir)` — composer packages

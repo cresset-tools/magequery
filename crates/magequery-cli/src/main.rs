@@ -1630,16 +1630,49 @@ fn catalog_attributes(mage: &Magento, args: &CatalogAttrsArgs, root: &Path) -> R
 }
 
 fn translations(mage: &Magento, args: &TranslationsArgs, root: &Path) -> Result<()> {
-    let matches = mage
+    let result = mage
         .translations(&args.phrase, args.locale.as_deref(), args.db)
         .map_err(|e| anyhow!(e))?;
 
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&matches)?);
+        println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
+    let matches = &result.matches;
     if matches.is_empty() {
-        println!("{}", style::dim("(no dictionary row matches — untranslated phrases have none)"));
+        // Explain the empty result: no dictionaries at all is a different situation
+        // from dictionaries that simply lack the phrase.
+        if result.dictionaries_scanned == 0 {
+            println!(
+                "{}",
+                style::dim(&format!(
+                    "(no {} dictionary exists in any enabled module, language pack, or theme)",
+                    result.locale
+                ))
+            );
+        } else {
+            println!(
+                "{}",
+                style::dim(&format!(
+                    "(no dictionary row matches across {} {} dictionaries — untranslated phrases have none)",
+                    result.dictionaries_scanned, result.locale
+                ))
+            );
+        }
+        if !result.inactive_dictionaries.is_empty() {
+            let names: Vec<&str> =
+                result.inactive_dictionaries.iter().map(|m| m.as_str()).collect();
+            println!(
+                "{}",
+                style::area(&format!(
+                    "note: {} module(s) ship a {} dictionary but are disabled or not in config.php \
+                     (their translations never load): {}",
+                    names.len(),
+                    result.locale,
+                    names.join(", ")
+                ))
+            );
+        }
         return Ok(());
     }
 
@@ -1652,7 +1685,7 @@ fn translations(mage: &Magento, args: &TranslationsArgs, root: &Path) -> Result<
         matches.iter().collect()
     } else {
         let w = matches.iter().map(|m| m.key.len()).max().unwrap_or(0).min(60);
-        for m in &matches {
+        for m in matches {
             let key = if m.key.len() > 60 { format!("{}…", &m.key[..59]) } else { m.key.clone() };
             let pad = " ".repeat(w.saturating_sub(key.len()));
             println!(

@@ -1149,6 +1149,21 @@ pub struct TranslationMatch {
     pub entries: Vec<TranslationEntry>,
 }
 
+/// The result of a translation scan, with enough context to explain an empty one:
+/// how many dictionaries for the locale were actually scanned, and which
+/// disabled/unregistered modules ship one that therefore never loads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Translations {
+    pub locale: String,
+    pub matches: Vec<TranslationMatch>,
+    /// `<locale>.csv` files that exist across enabled modules, packs, and themes.
+    pub dictionaries_scanned: usize,
+    /// Modules that ship a dictionary for this locale but are disabled or not in
+    /// config.php — their translations never load.
+    pub inactive_dictionaries: Vec<ModuleName>,
+}
+
 /// One attribute in a catalog attribute group, with the module that added it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
