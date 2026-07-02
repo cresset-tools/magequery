@@ -1341,6 +1341,116 @@ mod acl_tests {
     }
 }
 
+// ---------- translations (i18n/<locale>.csv + language.xml) ----------
+
+/// Parse a Magento i18n CSV into `(key, value, line)` rows: comma-separated, `"`-quoted
+/// fields with `""` escapes, values may span lines. Extra columns (legacy module scoping)
+/// are ignored.
+pub(crate) fn i18n_csv(text: &str) -> Vec<(String, String, u32)> {
+    let mut out = Vec::new();
+    let mut fields: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut in_quotes = false;
+    let mut line: u32 = 1;
+    let mut row_line: u32 = 1;
+    let mut chars = text.chars().peekable();
+
+    let flush_row = |fields: &mut Vec<String>, field: &mut String, out: &mut Vec<(String, String, u32)>, row_line: u32| {
+        fields.push(std::mem::take(field));
+        if fields.len() >= 2 && !fields[0].is_empty() {
+            out.push((fields[0].clone(), fields[1].clone(), row_line));
+        }
+        fields.clear();
+    };
+
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes => {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            }
+            '"' if field.is_empty() => in_quotes = true,
+            ',' if !in_quotes => fields.push(std::mem::take(&mut field)),
+            '\n' if !in_quotes => {
+                line += 1;
+                if !field.is_empty() || !fields.is_empty() {
+                    flush_row(&mut fields, &mut field, &mut out, row_line);
+                }
+                row_line = line;
+            }
+            '\r' if !in_quotes => {}
+            _ => {
+                if c == '\n' {
+                    line += 1;
+                }
+                field.push(c);
+            }
+        }
+    }
+    if !field.is_empty() || !fields.is_empty() {
+        flush_row(&mut fields, &mut field, &mut out, row_line);
+    }
+    out
+}
+
+/// Parse a language pack's `language.xml`: `(code, sort_order)`.
+pub(crate) fn language_xml(xml: &str) -> (Option<String>, Option<i32>) {
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut code = None;
+    let mut sort = None;
+    let mut into: Option<&'static str> = None;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => match local_name(&e).as_str() {
+                "code" => into = Some("code"),
+                "sort_order" => into = Some("sort"),
+                _ => {}
+            },
+            Ok(Event::Text(e)) => {
+                let t = e.unescape().unwrap_or_default().trim().to_string();
+                if !t.is_empty() {
+                    match into {
+                        Some("code") => code = Some(t),
+                        Some("sort") => sort = t.parse().ok(),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::End(_)) => into = None,
+            _ => {}
+        }
+        buf.clear();
+    }
+    (code, sort)
+}
+
+#[cfg(test)]
+mod i18n_tests {
+    use super::i18n_csv;
+
+    #[test]
+    fn quotes_escapes_and_multiline() {
+        let csv = "\"Add to Cart\",\"In winkelwagen\"\n\"Say \"\"hi\"\"\",\"Zeg \"\"hoi\"\"\"\n\"Plain\",\"Plain\"\n\"Multi\nline\",\"Waarde\",\"module\",\"extra\"\n";
+        let rows = i18n_csv(csv);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0], ("Add to Cart".into(), "In winkelwagen".into(), 1));
+        assert_eq!(rows[1].0, "Say \"hi\"");
+        assert_eq!(rows[1].1, "Zeg \"hoi\"");
+        // Identity row still parsed (the *loader* treats it as a reset, not the parser).
+        assert_eq!(rows[2].0, "Plain");
+        // Multiline key + extra legacy columns ignored.
+        assert_eq!(rows[3].0, "Multi\nline");
+        assert_eq!(rows[3].1, "Waarde");
+        assert_eq!(rows[3].2, 4);
+    }
+}
+
 // ---------- catalog attribute groups (etc/catalog_attributes.xml) ----------
 
 pub(crate) struct RawCatalogAttr {

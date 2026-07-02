@@ -181,7 +181,7 @@ CONFIG & ADMIN (where settings & permissions live)
 
 FRONTEND      (presentation)
   layout [<handle>] [--area]    widgets [<id>]    email-templates [<id>]
-  translations <str> (backlog)   ui-components (backlog)
+  translations <str> [--locale] [--db]   ui-components (backlog)
 
 RUNTIME       (env.php config & live connections)
   db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
@@ -962,6 +962,27 @@ CLI `magequery email-templates [<id>]`: list (`id  Label  file  # loc`, `themed�
 exact/single-match → detail with the resolved path and per-theme override files.
 Validated on mageos-lite: 32 templates; `customer_create_account_email_template` resolves
 its module file and Luma's override.
+
+### `translations` (dictionary rows in precedence order, done)
+
+`magequery translations <str> [--locale] [--db]` — every dictionary row for a phrase, in
+Magento's precedence order, **verified from `Framework\Translate` source** before
+building: (1) module `i18n/<locale>.csv` in load order, where at runtime the *current
+request's controller module* additionally loads last and wins the layer — request-scoped,
+not phrase-scoped, so it can't be resolved statically and the CLI prints the caveat when
+module rows conflict; (2) language packs (root `language.xml` probed on composer packages
++ `app/i18n`, filtered by locale code, ordered by `sort_order`; `<use>` inheritance not
+modeled); (3) theme `i18n/<locale>.csv` (parents load first, child wins — which chain
+applies is active-theme state, caveat printed); (4) the `translation` DB table via `--db`
+(store_id shown). **The `_addData` twist is modeled**: an identity row (`key == value`)
+*deletes* earlier translations — rendered red "(identity row — deletes earlier
+translations)", and the effective-value fold honors it, ending in "(untranslated — the
+phrase renders as-is)" when a reset lands last. `parse::i18n_csv` is a real CSV state
+machine (quotes, `""` escapes, multiline values, legacy extra columns ignored;
+unit-tested). Locale defaults to the configured `general/locale/code`. Exact phrase (or a
+single substring hit) → the layered view with `← effective`; multiple hits → key list.
+Validated synthetically: module load-order layering, theme override winning, and an
+identity row deleting an earlier module's translation.
 
 ## Future query tools (backlog — not yet built)
 

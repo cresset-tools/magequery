@@ -156,6 +156,27 @@ pub(crate) fn fetch_live_schema(
     Ok(out)
 }
 
+/// Rows from the `translation` table for one locale whose `string` contains `needle`
+/// (case-insensitive): `(string, translate, store_id)`.
+pub(crate) fn fetch_translations(
+    conn: &DbConnection,
+    table_prefix: &str,
+    locale: &str,
+    needle: &str,
+) -> Result<Vec<(String, String, u32)>, String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    c.exec(
+        format!(
+            "SELECT string, translate, store_id FROM {table_prefix}translation \
+             WHERE locale = :loc AND LOWER(string) LIKE :pat"
+        ),
+        params! { "loc" => locale, "pat" => format!("%{}%", needle.to_lowercase()) },
+    )
+    .map_err(clean_err)
+}
+
 /// Applied patch class names from `patch_list` (leading backslashes normalized away).
 pub(crate) fn fetch_patch_list(
     conn: &DbConnection,

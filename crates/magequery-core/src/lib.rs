@@ -52,7 +52,8 @@ pub use model::{
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
-    Resolution, Route, SchemaDrift, TableColumn, UnregisteredModule, WebapiRoute, Widget,
+    Resolution, Route, SchemaDrift, TableColumn, TranslationEntry, TranslationLayer,
+    TranslationMatch, UnregisteredModule, WebapiRoute, Widget,
     WidgetParam,
 };
 pub use model::{
@@ -1315,6 +1316,158 @@ impl Magento {
 
     fn mq_index(&self) -> &breadth::MqIndex {
         self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
+    }
+
+    /// Every dictionary row whose phrase key contains `needle` (case-insensitive), in
+    /// Magento's verified precedence order — module i18n CSVs (load order; at runtime the
+    /// *current request's controller module* additionally wins within this layer),
+    /// language packs (by `sort_order`), theme i18n (which theme applies depends on the
+    /// active theme), and with `include_db` the `translation` table. An identity row
+    /// (`key == value`) is flagged `reset`: Magento's loader deletes earlier translations
+    /// for it. `locale` defaults to the store's configured `general/locale/code`.
+    pub fn translations(
+        &self,
+        needle: &str,
+        locale: Option<&str>,
+        include_db: bool,
+    ) -> Result<Vec<TranslationMatch>> {
+        let locale = match locale {
+            Some(l) => l.to_string(),
+            None => self
+                .config(false)
+                .ok()
+                .and_then(|set| set.get("default", "general/locale/code").map(|v| v.value.clone()))
+                .unwrap_or_else(|| "en_US".to_string()),
+        };
+        let n = needle.to_lowercase();
+
+        // (layer, csv path, synthetic module tag) per source, in precedence order.
+        let mut jobs: Vec<(TranslationLayer, std::path::PathBuf, ModuleName)> = Vec::new();
+        for m in self.index.modules.iter().filter(|m| m.enabled) {
+            jobs.push((
+                TranslationLayer::Module(m.name.clone()),
+                m.path.join("i18n").join(format!("{locale}.csv")),
+                m.name.clone(),
+            ));
+        }
+        let mut packs = self.discover_language_packs(&locale);
+        packs.sort_by_key(|(_, sort, _)| *sort);
+        for (name, _, dir) in packs {
+            jobs.push((
+                TranslationLayer::Pack(name.clone()),
+                dir.join(format!("{locale}.csv")),
+                ModuleName::new(name),
+            ));
+        }
+        for (id, dir) in self.discover_themes() {
+            jobs.push((
+                TranslationLayer::Theme(id.clone()),
+                dir.join("i18n").join(format!("{locale}.csv")),
+                ModuleName::new(id),
+            ));
+        }
+
+        use rayon::prelude::*;
+        let parsed: Vec<Vec<(String, String, u32)>> = jobs
+            .par_iter()
+            .map(|(_, path, _)| {
+                std::fs::read_to_string(path)
+                    .map(|t| {
+                        parse::i18n_csv(&t)
+                            .into_iter()
+                            .filter(|(k, _, _)| k.to_lowercase().contains(&n))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let mut by_key: std::collections::HashMap<String, Vec<TranslationEntry>> =
+            std::collections::HashMap::new();
+        for ((layer, path, module), rows) in jobs.iter().zip(parsed) {
+            for (key, value, line) in rows {
+                by_key.entry(key.clone()).or_default().push(TranslationEntry {
+                    layer: layer.clone(),
+                    reset: key == value,
+                    value,
+                    store_id: None,
+                    source: Source {
+                        module: module.clone(),
+                        file: path.clone(),
+                        line,
+                        area: Area::Global,
+                    },
+                });
+            }
+        }
+
+        if include_db {
+            for (key, value, store_id) in self.fetch_translations(&locale, needle)? {
+                by_key.entry(key.clone()).or_default().push(TranslationEntry {
+                    layer: TranslationLayer::Db,
+                    reset: key == value,
+                    value,
+                    store_id: Some(store_id),
+                    source: Source {
+                        module: ModuleName::new("(db)"),
+                        file: std::path::PathBuf::from("translation"),
+                        line: 0,
+                        area: Area::Global,
+                    },
+                });
+            }
+        }
+
+        let mut out: Vec<TranslationMatch> = by_key
+            .into_iter()
+            .map(|(key, entries)| TranslationMatch { key, entries })
+            .collect();
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(out)
+    }
+
+    /// Language packs on disk for `locale`: `(name, sort_order, dir)` — composer packages
+    /// with a root `language.xml` plus `app/i18n/<vendor>/<pack>`.
+    fn discover_language_packs(&self, locale: &str) -> Vec<(String, i32, std::path::PathBuf)> {
+        let mut out = Vec::new();
+        let mut probe = |name: String, dir: &std::path::Path| {
+            let Ok(text) = std::fs::read_to_string(dir.join("language.xml")) else { return };
+            let (code, sort) = parse::language_xml(&text);
+            if code.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(locale)) {
+                out.push((name, sort.unwrap_or(0), dir.to_path_buf()));
+            }
+        };
+        for p in &self.index.packages {
+            probe(p.name.clone(), &p.root);
+        }
+        let base = self.index.root.join("app/i18n");
+        if let Ok(vendors) = std::fs::read_dir(&base) {
+            for vendor in vendors.flatten() {
+                if let Ok(packs) = std::fs::read_dir(vendor.path()) {
+                    for pack in packs.flatten() {
+                        let name = format!(
+                            "{}/{}",
+                            vendor.file_name().to_string_lossy(),
+                            pack.file_name().to_string_lossy()
+                        );
+                        probe(name, &pack.path());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(feature = "db")]
+    fn fetch_translations(&self, locale: &str, needle: &str) -> Result<Vec<(String, String, u32)>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        db::fetch_translations(conn, &cfg.table_prefix, locale, needle).map_err(Error::Db)
+    }
+
+    #[cfg(not(feature = "db"))]
+    fn fetch_translations(&self, _locale: &str, _needle: &str) -> Result<Vec<(String, String, u32)>> {
+        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
     }
 
     fn catalog_attr_index(&self) -> &breadth::CatalogAttrIndex {

@@ -1112,6 +1112,43 @@ pub struct AclResource {
     pub source: Source,
 }
 
+/// Where a translation row comes from, in Magento's precedence order: modules (the
+/// current request's controller module wins within this layer), then language packs,
+/// then themes (child over parent), then the `translation` DB table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslationLayer {
+    Module(ModuleName),
+    /// Language pack name (`vendor/package`).
+    Pack(String),
+    /// Theme id (`frontend/Magento/luma`).
+    Theme(String),
+    Db,
+}
+
+/// One dictionary row for a phrase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct TranslationEntry {
+    pub layer: TranslationLayer,
+    pub value: String,
+    /// `key == value`: Magento's loader *deletes* earlier translations of the key
+    /// (reset to untranslated), it does not set anything.
+    pub reset: bool,
+    /// DB rows only: the store the row applies to.
+    pub store_id: Option<u32>,
+    pub source: Source,
+}
+
+/// Every dictionary row matching a phrase, in precedence order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct TranslationMatch {
+    pub key: String,
+    pub entries: Vec<TranslationEntry>,
+}
+
 /// One attribute in a catalog attribute group, with the module that added it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

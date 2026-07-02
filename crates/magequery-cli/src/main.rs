@@ -54,6 +54,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("layout", "Layout handle: contributing files and what they do to the page"),
             ("widgets", "Widget types from widget.xml: block class, parameters"),
             ("email-templates", "Transactional email templates: file, theme overrides"),
+            ("translations", "Every dictionary row for a phrase, in precedence order"),
         ],
     ),
     (
@@ -253,6 +254,8 @@ enum Command {
     Widgets(WidgetsArgs),
     /// Transactional email templates: file, theme overrides.
     EmailTemplates(EmailTemplatesArgs),
+    /// Every dictionary row for a phrase, in precedence order.
+    Translations(TranslationsArgs),
 
     // ── Config & admin: where settings & permissions live ──
     /// Resolve a config path/section with its source (static, +--db).
@@ -424,6 +427,20 @@ struct CatalogAttrsArgs {
     /// A group name (`quote_item`) → its attributes; an attribute name → the groups
     /// containing it. Omit to list every group with counts.
     query: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct TranslationsArgs {
+    /// The phrase (or a substring of it; case-insensitive).
+    phrase: String,
+    /// Locale (default: the store's configured `general/locale/code`).
+    #[arg(long)]
+    locale: Option<String>,
+    /// Also read the `translation` DB table (the layer that beats everything).
+    #[arg(long)]
+    db: bool,
     #[arg(long)]
     json: bool,
 }
@@ -768,6 +785,7 @@ fn main() -> Result<()> {
         Command::Layout(args) => layout(&mage, &args, &cli.root),
         Command::Widgets(args) => widgets(&mage, &args, &cli.root),
         Command::EmailTemplates(args) => email_templates(&mage, &args, &cli.root),
+        Command::Translations(args) => translations(&mage, &args, &cli.root),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
         Command::Actions(args) => actions(&mage, &args, &cli.root),
@@ -1609,6 +1627,102 @@ fn catalog_attributes(mage: &Magento, args: &CatalogAttrsArgs, root: &Path) -> R
     }
     eprintln!("\n{} group(s)", groups.len());
     Ok(())
+}
+
+fn translations(mage: &Magento, args: &TranslationsArgs, root: &Path) -> Result<()> {
+    let matches = mage
+        .translations(&args.phrase, args.locale.as_deref(), args.db)
+        .map_err(|e| anyhow!(e))?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&matches)?);
+        return Ok(());
+    }
+    if matches.is_empty() {
+        println!("{}", style::dim("(no dictionary row matches — untranslated phrases have none)"));
+        return Ok(());
+    }
+
+    // Exactly one key (or an exact-key hit) → the layered detail; else list the keys.
+    let exact: Vec<&magequery_core::TranslationMatch> =
+        matches.iter().filter(|m| m.key == args.phrase).collect();
+    let detail: Vec<&magequery_core::TranslationMatch> = if !exact.is_empty() {
+        exact
+    } else if matches.len() == 1 {
+        matches.iter().collect()
+    } else {
+        let w = matches.iter().map(|m| m.key.len()).max().unwrap_or(0).min(60);
+        for m in &matches {
+            let key = if m.key.len() > 60 { format!("{}…", &m.key[..59]) } else { m.key.clone() };
+            let pad = " ".repeat(w.saturating_sub(key.len()));
+            println!(
+                "{}{pad}  {}",
+                style::string_lit(&format!("\"{key}\"")),
+                style::dim(&format!("{} row(s)", m.entries.len())),
+            );
+        }
+        eprintln!("\n{} phrase(s) — pass the exact phrase for the layered view", matches.len());
+        return Ok(());
+    };
+
+    for m in detail {
+        render_translation(m, root);
+    }
+    Ok(())
+}
+
+fn render_translation(m: &magequery_core::TranslationMatch, root: &Path) {
+    use magequery_core::TranslationLayer as L;
+    println!("{}", style::string_lit(&format!("\"{}\"", m.key)));
+
+    // Effective value per the loader: fold in order, identity rows delete.
+    let mut effective: Option<usize> = None;
+    for (i, e) in m.entries.iter().enumerate() {
+        if e.reset {
+            effective = None;
+        } else {
+            effective = Some(i);
+        }
+    }
+    let module_entries = m.entries.iter().filter(|e| matches!(e.layer, L::Module(_))).count();
+    let theme_entries = m.entries.iter().filter(|e| matches!(e.layer, L::Theme(_))).count();
+
+    for (i, e) in m.entries.iter().enumerate() {
+        let (tag, who) = match &e.layer {
+            L::Module(name) => ("module", style::module(name.as_str())),
+            L::Pack(name) => ("pack  ", style::area(name)),
+            L::Theme(id) => ("theme ", style::area(id)),
+            L::Db => ("db    ", style::dim(&format!("store {}", e.store_id.unwrap_or(0)))),
+        };
+        let value = if e.reset {
+            style::err("(identity row — deletes earlier translations)")
+        } else {
+            style::string_lit(&format!("\"{}\"", e.value))
+        };
+        let eff = if effective == Some(i) { format!("  {}", style::ok("← effective")) } else { String::new() };
+        let loc = if matches!(e.layer, L::Db) {
+            style::path("# translation table")
+        } else {
+            style::path(&short_loc(&e.source, root))
+        };
+        println!("  {} {who}  {value}{eff}   {loc}", style::kind(tag));
+    }
+
+    if effective.is_none() {
+        println!("  {}", style::dim("(untranslated — the phrase renders as-is)"));
+    }
+    if module_entries > 1 {
+        println!(
+            "  {}",
+            style::dim("note: within the module layer, the current request's controller module wins at runtime")
+        );
+    }
+    if theme_entries > 1 {
+        println!(
+            "  {}",
+            style::dim("note: which theme row applies depends on the active theme's ancestry")
+        );
+    }
 }
 
 fn email_templates(mage: &Magento, args: &EmailTemplatesArgs, root: &Path) -> Result<()> {
