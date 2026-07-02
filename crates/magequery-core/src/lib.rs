@@ -724,8 +724,12 @@ impl Magento {
         // The checkout stack: a curated map of the known solutions' packages, then a
         // generic "any non-core package named *checkout*" fallback (verbatim, so an
         // unlisted solution still surfaces). `None` = stock (Luma) checkout.
-        const CHECKOUT_PACKAGES: [(&str, &str); 5] = [
+        const CHECKOUT_PACKAGES: [(&str, &str); 7] = [
             ("hyva-themes/magento2-hyva-checkout", "Hyvä Checkout"),
+            // The core package first so the version is Loki's own, not an add-on's
+            // (`loki-checkout/magento2-mollie` etc. share the vendor prefix).
+            ("loki-checkout/magento2-core", "Loki Checkout"),
+            ("loki-checkout/", "Loki Checkout"),
             ("swissup/firecheckout", "Firecheckout"),
             ("mageplaza/module-one-step-checkout", "Mageplaza One Step Checkout"),
             ("onestepcheckout/", "OneStepCheckout"),

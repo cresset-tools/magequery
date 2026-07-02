@@ -620,9 +620,11 @@ one-liners (reusing the env.php extractors; an empty backend class renders as th
 `file` default), the **store hierarchy** (websites → stores/groups → store views, counted from the live
 DB when reachable — `db::fetch_scope_counts` — else from `config.php`'s `scopes` node when
 the config is dumped; the synthetic admin scopes are excluded either way; unknown levels
-are skipped, never guessed), the **checkout stack** (a curated package map — Hyvä Checkout,
-Firecheckout, Mageplaza OSC, OneStepCheckout, Bold — then a generic "any non-core package
-named *checkout*" fallback reported verbatim; nothing found renders as "default (Luma)"),
+are skipped, never guessed), the **checkout stack** (a curated package map — Hyvä Checkout, Loki
+Checkout (`loki-checkout/magento2-core` matched before the vendor prefix so the version is
+core's, not an add-on's), Firecheckout, Mageplaza OSC, OneStepCheckout, Bold — then a
+generic "any non-core package named *checkout*" fallback reported verbatim; nothing found
+renders as "default (Luma)"),
 **module counts split vendor / app/code**, the **composer package count**, and the
 **install date** (`env.php` `install/date`).
 
