@@ -80,6 +80,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("deps", "Module dependencies (sequence + composer), both directions"),
             ("doctor", "Cross-index lints: broken references, cycles, forgotten wiring"),
             ("whatis", "Everything about one class: identity, DI, every config reference"),
+            ("patches", "Setup patches on disk; applied/pending with --db"),
         ],
     ),
 ];
@@ -279,6 +280,22 @@ enum Command {
     Doctor(DoctorArgs),
     /// Everything about one class: identity, DI, every config reference.
     Whatis(WhatisArgs),
+    /// Setup patches on disk; applied/pending with --db.
+    Patches(PatchesArgs),
+}
+
+#[derive(clap::Args)]
+struct PatchesArgs {
+    /// Filter by a substring of the patch class or module name.
+    filter: Option<String>,
+    /// Mark each patch applied/pending per the `patch_list` table (needs a reachable DB).
+    #[arg(long)]
+    db: bool,
+    /// Only show pending (not-yet-applied) patches. Implies --db.
+    #[arg(long)]
+    pending: bool,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -674,6 +691,7 @@ fn main() -> Result<()> {
         Command::Deps(args) => deps(&mage, &args, &cli.root),
         Command::Doctor(args) => doctor(&mage, &args, &cli.root),
         Command::Whatis(args) => whatis(&mage, &args, &cli.root),
+        Command::Patches(args) => patches(&mage, &args, &cli.root),
         Command::Preference(args) => preference(&mage, &args, &cli.root),
         Command::Plugins(args) => plugins(&mage, &args, &cli.root),
         Command::Di(args) => di(&mage, &args, &cli.root),
@@ -3028,6 +3046,60 @@ fn render_dep_edges(label: &str, edges: &[magequery_core::DepEdge], root: &Path)
             style::path(&short_loc(&e.source, root)),
         );
     }
+}
+
+fn patches(mage: &Magento, args: &PatchesArgs, root: &Path) -> Result<()> {
+    let include_db = args.db || args.pending;
+    let set = mage.patches(args.filter.as_deref(), include_db).map_err(|e| anyhow!(e))?;
+
+    let shown: Vec<&magequery_core::Patch> = set
+        .patches
+        .iter()
+        .filter(|p| !args.pending || p.applied == Some(false))
+        .collect();
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&shown)?);
+        return Ok(());
+    }
+    if shown.is_empty() {
+        println!(
+            "{}",
+            style::dim(if args.pending { "(no pending patches)" } else { "(no patch matches)" })
+        );
+    }
+
+    for p in &shown {
+        let state = match p.applied {
+            Some(true) => format!("{}  ", style::ok("applied")),
+            Some(false) => format!("{}  ", style::err("PENDING")),
+            None => String::new(),
+        };
+        println!(
+            "{:<6} {}  {state} {}",
+            style::kind(&p.kind.to_string()),
+            style::class(p.class.as_str()),
+            style::path(&short_loc(&p.source, root)),
+        );
+    }
+
+    if include_db {
+        let applied = shown.iter().filter(|p| p.applied == Some(true)).count();
+        let pending = shown.iter().filter(|p| p.applied == Some(false)).count();
+        eprintln!("\n{} patch(es): {applied} applied, {pending} pending", shown.len());
+    } else {
+        eprintln!("\n{} patch(es) {}", shown.len(), style::dim("(apply state: --db)"));
+    }
+    if !set.orphaned_applied.is_empty() {
+        eprintln!(
+            "{}",
+            style::dim(&format!(
+                "note: {} applied patch(es) in patch_list have no class on disk (removed modules?)",
+                set.orphaned_applied.len()
+            ))
+        );
+    }
+    Ok(())
 }
 
 fn whatis(mage: &Magento, args: &WhatisArgs, root: &Path) -> Result<()> {

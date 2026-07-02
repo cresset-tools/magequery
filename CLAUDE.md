@@ -189,7 +189,7 @@ RUNTIME       (env.php config & live connections)
 PROJECT       (the codebase itself)
   info      mode   maintenance   base-url [--secure]   admin-url   (single-fact views of info)
   modules [--check] [--enabled|--disabled] [--source app|vendor]
-  deps <module>             doctor [--source]          whatis <class>   patches [--db] (backlog)
+  deps <module>             doctor [--source]          whatis <class>   patches [--db|--pending]
 ```
 
 ### Cross-cutting flag vocabulary (a flag means the same thing everywhere)
@@ -782,6 +782,20 @@ argument, the `ProductRenderSearchResultsInterface` preference to a nonexistent 
 (caught a real mage-os bug: crontab.xml references `Cron\UpdateRemoteTemplates`, the class
 on disk is `UpdateRemoteTemplateList`; plus genuine Hyvä-modules-not-in-config.php drift).
 A synthetic broken module exercises every lint in one run.
+
+### `patches` (setup patches, static + `--db`, done)
+
+`magequery patches [<filter>] [--db|--pending]` — every `Setup/Patch/Data|Schema` class of
+the enabled modules (what `setup:upgrade` runs). The scan reuses doctor's walker +
+PSR-4-verified class derivation, keeps only concrete classes whose ancestors include
+`DataPatchInterface`/`SchemaPatchInterface` (the dirs also hold helpers), and sorts by
+(module, class). `--db` marks each **applied/PENDING** per the `patch_list` table
+(`patch_name`, leading backslashes normalized; clean `Error::Db` when unreachable) and
+reports **orphaned** applied entries no on-disk class explains (patches of removed modules
+— never silently dropped, stderr note). `--pending` shows only unapplied ones (implies
+`--db`) — the pre-deploy question. `Magento::patches(filter?, include_db)` → `Patches`.
+Validated: 133 patches on mageos-lite / 196 on commerce-store, all applied on both (fully
+upgraded stores), filter and pending modes exact.
 
 ### `whatis` (everything about one class, done)
 

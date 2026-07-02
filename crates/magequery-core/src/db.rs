@@ -126,6 +126,18 @@ pub(crate) fn fetch_themes(
     .map_err(clean_err)
 }
 
+/// Applied patch class names from `patch_list` (leading backslashes normalized away).
+pub(crate) fn fetch_patch_list(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<Vec<String>, String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let rows: Vec<String> =
+        c.query(format!("SELECT patch_name FROM {table_prefix}patch_list")).map_err(clean_err)?;
+    Ok(rows.into_iter().map(|r| r.trim_start_matches('\\').to_string()).collect())
+}
+
 /// Seconds since the last *successful* cron job finished, per the DB server's own clock
 /// (`TIMESTAMPDIFF` — no client-side time needed). `None` = no successful runs recorded.
 pub(crate) fn fetch_cron_last_success(

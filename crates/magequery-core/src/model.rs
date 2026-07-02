@@ -1112,6 +1112,46 @@ pub struct AclResource {
     pub source: Source,
 }
 
+/// The kind of a setup patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatchKind {
+    Data,
+    Schema,
+}
+
+impl std::fmt::Display for PatchKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PatchKind::Data => "data",
+            PatchKind::Schema => "schema",
+        })
+    }
+}
+
+/// One setup patch class (`Setup/Patch/Data|Schema`), optionally with its applied state
+/// from the `patch_list` table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Patch {
+    pub class: ClassName,
+    pub kind: PatchKind,
+    pub module: ModuleName,
+    /// Whether `patch_list` records it as applied; `None` = the DB wasn't consulted.
+    pub applied: Option<bool>,
+    pub source: Source,
+}
+
+/// All patches on disk, plus (with the DB) the applied entries no class on disk explains
+/// — patches of removed modules, kept forever by `patch_list`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Patches {
+    pub patches: Vec<Patch>,
+    pub orphaned_applied: Vec<String>,
+}
+
 /// The auto-join a repository performs to load an extension attribute (`<join>`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

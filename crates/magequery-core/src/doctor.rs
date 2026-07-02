@@ -649,7 +649,7 @@ fn src(module: &Module, file: PathBuf) -> Source {
     Source { module: module.name.clone(), file, line: 0, area: Area::Global }
 }
 
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
     }
@@ -679,7 +679,7 @@ fn collect_arg_objects(value: &crate::model::ArgValue, out: &mut HashSet<ClassNa
 }
 
 /// Recursive `.php` walk, skipping test fixtures.
-fn walk_php(dir: &Path, depth: usize, f: &mut impl FnMut(&Path)) {
+pub(crate) fn walk_php(dir: &Path, depth: usize, f: &mut impl FnMut(&Path)) {
     if depth > 6 {
         return;
     }

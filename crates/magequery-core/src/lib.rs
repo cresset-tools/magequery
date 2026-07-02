@@ -47,7 +47,7 @@ pub use model::{
     DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, ExtendedType, ExtensionAttribute,
     ExtensionJoin, GqlArg, GqlField, GqlKind, GqlType,
     Indexer, InstanceInfo, InterceptKind,
-    MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps,
+    MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
     Resolution, Route, UnregisteredModule, WebapiRoute,
@@ -553,6 +553,112 @@ impl Magento {
     /// One indexer by exact id, with its full subscription list.
     pub fn indexer(&self, id: &str) -> Option<Indexer> {
         self.indexer_index().indexer(id)
+    }
+
+    /// Setup patches: every `Setup/Patch/Data|Schema` class of the enabled modules (the
+    /// classes `setup:upgrade` runs), filtered by a class/module substring. With
+    /// `include_db`, each is marked applied/pending per the `patch_list` table (clean
+    /// [`Error::Db`] when unreachable), and applied entries with no class on disk —
+    /// patches of removed modules — are returned in `orphaned_applied`.
+    pub fn patches(&self, filter: Option<&str>, include_db: bool) -> Result<Patches> {
+        let applied: Option<std::collections::HashSet<String>> = if include_db {
+            Some(self.fetch_patch_list()?.into_iter().collect())
+        } else {
+            None
+        };
+
+        let needle = filter.map(str::to_lowercase);
+        let mut patches = Vec::new();
+        for m in self.index.modules.iter().filter(|m| m.enabled) {
+            for (kind, sub) in
+                [(PatchKind::Data, "Setup/Patch/Data"), (PatchKind::Schema, "Setup/Patch/Schema")]
+            {
+                let base = m.path.join(sub);
+                if !base.is_dir() {
+                    continue;
+                }
+                let ns = m.name.as_str().replace('_', "\\");
+                doctor::walk_php(&base, 0, &mut |path| {
+                    let Ok(rel) = path.strip_prefix(&m.path) else { return };
+                    let stem = rel.with_extension("");
+                    let mut class = ns.clone();
+                    for part in stem.components() {
+                        class.push('\\');
+                        class.push_str(&part.as_os_str().to_string_lossy());
+                    }
+                    let class = ClassName::new(class);
+                    // Convention verified through PSR-4, like the doctor scans.
+                    match self.index.resolver.file_for(&class) {
+                        Some(resolved) if doctor::same_file(&resolved, path) => {}
+                        _ => return,
+                    }
+                    let Some(h) = self.index.resolver.header_of(&class) else { return };
+                    if h.is_interface || h.is_abstract {
+                        return;
+                    }
+                    // Only actual patches — Setup/Patch dirs also hold helper classes.
+                    let is_patch = self.index.resolver.ancestors(&class).iter().any(|a| {
+                        matches!(
+                            a.as_str(),
+                            "Magento\\Framework\\Setup\\Patch\\DataPatchInterface"
+                                | "Magento\\Framework\\Setup\\Patch\\SchemaPatchInterface"
+                        )
+                    });
+                    if !is_patch {
+                        return;
+                    }
+                    if let Some(n) = &needle {
+                        if !class.as_str().to_lowercase().contains(n)
+                            && !m.name.as_str().to_lowercase().contains(n)
+                        {
+                            return;
+                        }
+                    }
+                    patches.push(Patch {
+                        applied: applied.as_ref().map(|set| set.contains(class.as_str())),
+                        class,
+                        kind,
+                        module: m.name.clone(),
+                        source: Source {
+                            module: m.name.clone(),
+                            file: path.to_path_buf(),
+                            line: 0,
+                            area: Area::Global,
+                        },
+                    });
+                });
+            }
+        }
+        patches.sort_by(|a, b| {
+            a.module.cmp(&b.module).then_with(|| a.class.cmp(&b.class))
+        });
+
+        // Applied entries no on-disk class explains (patches of removed modules) — only
+        // meaningful unfiltered, and never silently dropped.
+        let mut orphaned_applied = Vec::new();
+        if let Some(applied) = &applied {
+            if filter.is_none() {
+                let on_disk: std::collections::HashSet<&str> =
+                    patches.iter().map(|p| p.class.as_str()).collect();
+                orphaned_applied =
+                    applied.iter().filter(|a| !on_disk.contains(a.as_str())).cloned().collect();
+                orphaned_applied.sort();
+            }
+        }
+
+        Ok(Patches { patches, orphaned_applied })
+    }
+
+    #[cfg(feature = "db")]
+    fn fetch_patch_list(&self) -> Result<Vec<String>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        db::fetch_patch_list(conn, &cfg.table_prefix).map_err(Error::Db)
+    }
+
+    #[cfg(not(feature = "db"))]
+    fn fetch_patch_list(&self) -> Result<Vec<String>> {
+        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
     }
 
     /// Everything known about one class (or virtual type) on one screen: identity (file,
