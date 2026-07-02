@@ -419,6 +419,10 @@ struct SchemaArgs {
     /// Exact table name → full definition; otherwise a name substring to list matching tables.
     /// Omit to list every table.
     table: Option<String>,
+    /// Compare against the live database: without a table, a schema-drift report; with
+    /// one, drift markers on that table (needs a reachable DB).
+    #[arg(long)]
+    db: bool,
     #[arg(long)]
     json: bool,
 }
@@ -1528,6 +1532,19 @@ fn render_menu_detail(mage: &Magento, item: &magequery_core::MenuItem, root: &Pa
 }
 
 fn schema(mage: &Magento, args: &SchemaArgs, root: &Path) -> Result<()> {
+    let drift = if args.db { Some(mage.schema_drift().map_err(|e| anyhow!(e))?) } else { None };
+
+    // `--db` without a table = the drift report itself.
+    if args.table.is_none() {
+        if let Some(d) = &drift {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(d)?);
+                return Ok(());
+            }
+            return render_schema_drift(d);
+        }
+    }
+
     // An exact table name shows the full definition; anything else is a substring filter.
     if let Some(name) = &args.table {
         if let Some(table) = mage.table(name) {
@@ -1536,6 +1553,9 @@ fn schema(mage: &Magento, args: &SchemaArgs, root: &Path) -> Result<()> {
                 return Ok(());
             }
             render_table(&table, root);
+            if let Some(d) = &drift {
+                render_table_drift(name, d);
+            }
             return Ok(());
         }
     }
@@ -1561,6 +1581,104 @@ fn schema(mage: &Magento, args: &SchemaArgs, root: &Path) -> Result<()> {
     }
     eprintln!("\n{} table(s)", tables.len());
     Ok(())
+}
+
+fn render_schema_drift(d: &magequery_core::SchemaDrift) -> Result<()> {
+    if d.is_clean() {
+        println!("{}", style::ok("OK — the live schema matches db_schema.xml (and its whitelist)"));
+    }
+    let section = |header: String, tables: &[String], cols: &[magequery_core::TableColumn]| {
+        if tables.is_empty() && cols.is_empty() {
+            return;
+        }
+        println!("{header}");
+        for t in tables {
+            println!("  table   {}", style::class(t));
+        }
+        for c in cols {
+            println!("  column  {}.{}", style::class(&c.table), style::name(&c.column));
+        }
+    };
+    section(
+        style::err(&format!(
+            "declared but missing live ({} table(s), {} column(s)) — setup:upgrade would create:",
+            d.missing_tables.len(),
+            d.missing_columns.len()
+        )),
+        &d.missing_tables,
+        &d.missing_columns,
+    );
+    section(
+        style::err(&format!(
+            "whitelisted but no longer declared ({} table(s), {} column(s)) — setup:upgrade would DROP:",
+            d.would_drop_tables.len(),
+            d.would_drop_columns.len()
+        )),
+        &d.would_drop_tables,
+        &d.would_drop_columns,
+    );
+    section(
+        style::area(&format!(
+            "declared but not in any db_schema_whitelist.json ({} table(s), {} column(s)) — run setup:db-declaration:generate-whitelist:",
+            d.not_whitelisted_tables.len(),
+            d.not_whitelisted_columns.len()
+        )),
+        &d.not_whitelisted_tables,
+        &d.not_whitelisted_columns,
+    );
+    section(
+        style::area(&format!(
+            "live but unmanaged ({} table(s), {} column(s)) — legacy install scripts or non-declarative modules:",
+            d.undeclared_tables.len(),
+            d.undeclared_columns.len()
+        )),
+        &d.undeclared_tables,
+        &d.undeclared_columns,
+    );
+    if d.runtime_tables_skipped > 0 {
+        eprintln!(
+            "\n{}",
+            style::dim(&format!(
+                "{} runtime-managed table(s) skipped (mview changelogs, flats, sequences, framework bookkeeping)",
+                d.runtime_tables_skipped
+            ))
+        );
+    }
+    Ok(())
+}
+
+/// Drift markers for one table, appended under its DDL view.
+fn render_table_drift(name: &str, d: &magequery_core::SchemaDrift) {
+    if d.missing_tables.iter().any(|t| t == name) {
+        println!("  {}", style::err("TABLE MISSING LIVE — setup:upgrade would create it"));
+        return;
+    }
+    let missing: Vec<&str> = d
+        .missing_columns
+        .iter()
+        .filter(|c| c.table == name)
+        .map(|c| c.column.as_str())
+        .collect();
+    let undeclared: Vec<&str> = d
+        .undeclared_columns
+        .iter()
+        .filter(|c| c.table == name)
+        .map(|c| c.column.as_str())
+        .collect();
+    if missing.is_empty() && undeclared.is_empty() {
+        println!("  {}", style::ok("live schema matches"));
+        return;
+    }
+    if !missing.is_empty() {
+        println!(
+            "  {} {}",
+            style::err("missing live (setup:upgrade would add):"),
+            missing.join(", ")
+        );
+    }
+    if !undeclared.is_empty() {
+        println!("  {} {}", style::area("live but undeclared:"), undeclared.join(", "));
+    }
 }
 
 fn render_table(t: &DbTable, root: &Path) {

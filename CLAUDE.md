@@ -198,7 +198,8 @@ PROJECT       (the codebase itself)
   `plugins`, `events`, `routes`, `actions`, `webapi`, `uses`). Default = collapsed diff.
   (`uses` has `--area` but no `--all-areas`: its default is already the merged union.)
 - **`--json`** and **`--color auto|always|never`** + **`--root <path>`** — global, every command.
-- **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config` today;
+- **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config`,
+  `schema`, `patches`;
   future `eav`, `indexers --status`, `patches`). Static by default; DB overlay when asked;
   clean `Error::Db` if unreachable. Pure-live commands (`db`/`redis` `ping`, `url-rewrites`)
   require the `db`/`redis` build feature instead.
@@ -483,6 +484,30 @@ full set (`code  type  ← Vendor_Module  # loc`, plus dim `acl:`/`join:` lines)
 → matching types with counts; no arg → all. Validated on commerce-store: 43 extended
 types; ProductInterface = 9 attributes from 6 modules, stock_item's ACL gate shown; the
 magento_bulk join renders.
+
+### `schema --db` (schema drift vs the live database, done)
+
+The schema half of "is this environment in sync with the code" (`patches --pending` is the
+other half): `magequery schema --db` compares the merged declarative schema **and the
+`db_schema_whitelist.json` union** against `information_schema`. Four sections, by
+severity:
+- **declared but missing live** (red) — what `setup:upgrade` would create;
+- **whitelisted but no longer declared** (red) — the declarative system owns these, so
+  `setup:upgrade` would **DROP** them: the pending-destructive-change detector;
+- **declared but not in any whitelist** (yellow) — `generate-whitelist` wasn't run, so a
+  future removal would be inert. Real upstream findings: mage-os's
+  `email_template.is_legacy` and the tfa_* columns ship unwhitelisted;
+- **live but unmanaged** (yellow) — legacy install scripts / non-declarative modules;
+  declarative schema won't touch these.
+
+Runtime-managed tables are excluded and counted (`is_runtime_table`): mview `*_cl`
+changelogs, `*_replica`, flats, `*_index_store*` dimension tables, `sequence_*`, and the
+framework's bookkeeping (`setup_module`, `patch_list`, `cache`, `cache_tag`, `flag`,
+`session`) — checked **before** the whitelist, mirroring Magento's diff ignore-list (MSI's
+whitelists infamously include `patch_list`; it still never gets dropped). Presence-level
+only by design — type/nullability comparison is where the false positives live.
+`Magento::schema_drift() -> SchemaDrift`; `schema <table> --db` appends per-table drift
+markers ("live schema matches" / missing / unmanaged columns) under the DDL view. ~45ms.
 
 ### `system-config` (admin settings map from `adminhtml/system.xml`, static, done)
 

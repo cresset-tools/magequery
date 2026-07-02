@@ -50,7 +50,7 @@ pub use model::{
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
-    Resolution, Route, UnregisteredModule, WebapiRoute,
+    Resolution, Route, SchemaDrift, TableColumn, UnregisteredModule, WebapiRoute,
 };
 pub use model::{
     CacheConfig, CacheFrontend, CacheType, InjectionSite, LockConfig, MqConsumer, MqHandler,
@@ -368,6 +368,153 @@ impl Magento {
     /// One table by exact name, with its full column/index/constraint set and provenance.
     pub fn table(&self, name: &str) -> Option<DbTable> {
         self.schema_index().table(name)
+    }
+
+    /// Presence-level drift between the declared schema (`db_schema.xml`) and the live
+    /// database: tables/columns declared but missing live (what `setup:upgrade` would
+    /// create) and live-but-undeclared ones (legacy install scripts, non-declarative
+    /// modules). Runtime-managed tables — mview `*_cl` changelogs, `sequence_*`, and the
+    /// setup framework's own bookkeeping — are excluded from the undeclared side and
+    /// counted instead. Requires the `db` feature and a reachable database.
+    pub fn schema_drift(&self) -> Result<SchemaDrift> {
+        let live = self.fetch_live_schema()?;
+        let declared = self.schema_index().tables(None);
+        let whitelist = self.schema_whitelist();
+
+        let mut drift = SchemaDrift {
+            missing_tables: Vec::new(),
+            missing_columns: Vec::new(),
+            would_drop_tables: Vec::new(),
+            would_drop_columns: Vec::new(),
+            not_whitelisted_tables: Vec::new(),
+            not_whitelisted_columns: Vec::new(),
+            undeclared_tables: Vec::new(),
+            undeclared_columns: Vec::new(),
+            runtime_tables_skipped: 0,
+        };
+
+        let declared_names: std::collections::HashSet<&str> =
+            declared.iter().map(|t| t.name.as_str()).collect();
+        let wl_cols = |table: &str| whitelist.get(table);
+
+        for t in &declared {
+            // Declared elements must be whitelisted, or their future removal is inert.
+            match wl_cols(&t.name) {
+                None => drift.not_whitelisted_tables.push(t.name.clone()),
+                Some(wl) => {
+                    for c in &t.columns {
+                        if !wl.contains(c.name.as_str()) {
+                            drift.not_whitelisted_columns.push(TableColumn {
+                                table: t.name.clone(),
+                                column: c.name.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            match live.get(&t.name) {
+                None => drift.missing_tables.push(t.name.clone()),
+                Some(live_cols) => {
+                    let live_set: std::collections::HashSet<&str> =
+                        live_cols.iter().map(String::as_str).collect();
+                    for c in &t.columns {
+                        if !live_set.contains(c.name.as_str()) {
+                            drift.missing_columns.push(TableColumn {
+                                table: t.name.clone(),
+                                column: c.name.clone(),
+                            });
+                        }
+                    }
+                    let declared_cols: std::collections::HashSet<&str> =
+                        t.columns.iter().map(|c| c.name.as_str()).collect();
+                    for c in live_cols {
+                        if declared_cols.contains(c.as_str()) {
+                            continue;
+                        }
+                        // Whitelisted = the declarative system owns it; no longer
+                        // declared + still live means setup:upgrade would drop it.
+                        if wl_cols(&t.name).is_some_and(|wl| wl.contains(c.as_str())) {
+                            drift.would_drop_columns.push(TableColumn {
+                                table: t.name.clone(),
+                                column: c.clone(),
+                            });
+                        } else {
+                            drift.undeclared_columns.push(TableColumn {
+                                table: t.name.clone(),
+                                column: c.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        for name in live.keys() {
+            if declared_names.contains(name.as_str()) {
+                continue;
+            }
+            // Runtime/bookkeeping tables first: Magento's declarative diff ignores these
+            // even when a whitelist names them (MSI's whitelists infamously include
+            // patch_list — it still never gets dropped).
+            if is_runtime_table(name) {
+                drift.runtime_tables_skipped += 1;
+            } else if whitelist.contains_key(name.as_str()) {
+                drift.would_drop_tables.push(name.clone());
+            } else {
+                drift.undeclared_tables.push(name.clone());
+            }
+        }
+
+        drift.missing_tables.sort();
+        drift.would_drop_tables.sort();
+        drift.not_whitelisted_tables.sort();
+        drift.undeclared_tables.sort();
+        for v in [
+            &mut drift.missing_columns,
+            &mut drift.would_drop_columns,
+            &mut drift.not_whitelisted_columns,
+            &mut drift.undeclared_columns,
+        ] {
+            v.sort_by(|a, b| (&a.table, &a.column).cmp(&(&b.table, &b.column)));
+        }
+        Ok(drift)
+    }
+
+    /// The union of every enabled module's `etc/db_schema_whitelist.json`: table → the
+    /// column names the declarative system is allowed to manage (drop/alter). Generated
+    /// by `setup:db-declaration:generate-whitelist`, one file per module.
+    fn schema_whitelist(
+        &self,
+    ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+        let mut out: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        for m in self.index.modules.iter().filter(|m| m.enabled) {
+            let Ok(text) = std::fs::read_to_string(m.path.join("etc/db_schema_whitelist.json"))
+            else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+            let Some(tables) = value.as_object() else { continue };
+            for (table, entry) in tables {
+                let cols = out.entry(table.clone()).or_default();
+                if let Some(columns) = entry.get("column").and_then(|c| c.as_object()) {
+                    cols.extend(columns.keys().cloned());
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg(feature = "db")]
+    fn fetch_live_schema(&self) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        db::fetch_live_schema(conn, &cfg.table_prefix).map_err(Error::Db)
+    }
+
+    #[cfg(not(feature = "db"))]
+    fn fetch_live_schema(&self) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
     }
 
     /// Admin configuration fields from `adminhtml/system.xml` (where each `Stores →
@@ -1605,6 +1752,23 @@ impl Magento {
         let _ = class;
         todo!()
     }
+}
+
+/// Tables the runtime creates and manages outside `db_schema.xml`: mview changelogs,
+/// per-store sequence and dimension-index tables, indexer flats/replicas, and the
+/// framework's own bootstrap/bookkeeping tables.
+fn is_runtime_table(name: &str) -> bool {
+    name.ends_with("_cl")
+        || name.ends_with("_replica")
+        || name.ends_with("_flat")
+        || name.contains("_index_store")
+        || name.starts_with("sequence_")
+        || name.starts_with("catalog_product_flat_")
+        || name.starts_with("catalog_category_flat_")
+        || matches!(
+            name,
+            "setup_module" | "patch_list" | "cache" | "cache_tag" | "flag" | "session"
+        )
 }
 
 /// The connection used for live introspection: `default`, else the first configured one.

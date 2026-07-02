@@ -126,6 +126,36 @@ pub(crate) fn fetch_themes(
     .map_err(clean_err)
 }
 
+/// The live database's tables and columns from `information_schema`, keyed by table name
+/// with the configured prefix stripped (tables not matching a non-empty prefix are
+/// skipped — they're not Magento's).
+pub(crate) fn fetch_live_schema(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let rows: Vec<(String, String)> = c
+        .query(
+            "SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS \
+             WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME, ORDINAL_POSITION",
+        )
+        .map_err(clean_err)?;
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (table, column) in rows {
+        let name = if table_prefix.is_empty() {
+            table
+        } else {
+            match table.strip_prefix(table_prefix) {
+                Some(stripped) => stripped.to_string(),
+                None => continue,
+            }
+        };
+        out.entry(name).or_default().push(column);
+    }
+    Ok(out)
+}
+
 /// Applied patch class names from `patch_list` (leading backslashes normalized away).
 pub(crate) fn fetch_patch_list(
     conn: &DbConnection,
