@@ -339,12 +339,14 @@ impl SchemaIndex {
         self.tables.get(name).cloned()
     }
 
-    /// All tables whose name contains `filter` (or all, when `None`), sorted by name.
+    /// All tables whose name contains `filter` (case-insensitive; all when `None`),
+    /// sorted by name.
     pub fn tables(&self, filter: Option<&str>) -> Vec<DbTable> {
+        let needle = filter.map(str::to_lowercase);
         let mut v: Vec<DbTable> = self
             .tables
             .values()
-            .filter(|t| filter.is_none_or(|f| t.name.contains(f)))
+            .filter(|t| needle.as_ref().is_none_or(|n| t.name.to_lowercase().contains(n)))
             .cloned()
             .collect();
         v.sort_by(|a, b| a.name.cmp(&b.name));

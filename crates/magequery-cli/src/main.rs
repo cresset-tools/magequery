@@ -1569,6 +1569,16 @@ fn schema(mage: &Magento, args: &SchemaArgs, root: &Path) -> Result<()> {
         println!("{}", style::dim("(no table matches)"));
         return Ok(());
     }
+    // A filter that narrows to a single table is clearly asking for that table.
+    if let [table] = tables.as_slice() {
+        if args.table.is_some() {
+            render_table(table, root);
+            if let Some(d) = &drift {
+                render_table_drift(&table.name, d);
+            }
+            return Ok(());
+        }
+    }
     let width = tables.iter().map(|t| t.name.len()).max().unwrap_or(0);
     for t in &tables {
         let pad = " ".repeat(width.saturating_sub(t.name.len()));
