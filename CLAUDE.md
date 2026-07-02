@@ -172,8 +172,8 @@ ENTRY POINTS  (how execution starts)
   commands [<filter>]                   graphql [<type>|<Type.field>]
 
 DATA          (persistence & model)
-  schema [<table>]       indexers [<id>]
-  extension-attributes [<type>]             eav [<attr>] (backlog, --db)
+  schema [<table>] [--db]       indexers [<id>]
+  extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>] (backlog, --db)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -509,6 +509,18 @@ whitelists infamously include `patch_list`; it still never gets dropped). Presen
 only by design — type/nullability comparison is where the false positives live.
 `Magento::schema_drift() -> SchemaDrift`; `schema <table> --db` appends per-table drift
 markers ("live schema matches" / missing / unmanaged columns) under the DDL view. ~45ms.
+
+### `catalog-attributes` (etc/catalog_attributes.xml, static, done)
+
+Which attributes Magento loads in each context group (`quote_item`, `wishlist_item`,
+`catalog_product`/`catalog_category` collections, `unassignable`, …) — the "why isn't my
+attribute available on the quote item" surface. A `CatalogAttrIndex` (lazy, `read_parse`),
+attributes unioned per group with the **adding** module's `Source` (Sales adds
+`special_price` to `quote_item`, extensions add their own). CLI
+`magequery catalog-attributes [<group>|<attribute>]`: no arg → groups with counts; an
+exact group → its attributes with `← module` provenance; anything else is an **attribute**
+search showing every group containing it (`catalog-attributes special_price` → 2
+occurrences with who added each).
 
 ### `system-config` (admin settings map from `adminhtml/system.xml`, static, done)
 

@@ -1341,6 +1341,45 @@ mod acl_tests {
     }
 }
 
+// ---------- catalog attribute groups (etc/catalog_attributes.xml) ----------
+
+pub(crate) struct RawCatalogAttr {
+    pub group: String,
+    pub attribute: String,
+    pub line: u32,
+}
+
+/// Parse `catalog_attributes.xml`: `<group name=…><attribute name=…/></group>`.
+pub(crate) fn catalog_attributes_xml(xml: &str) -> Vec<RawCatalogAttr> {
+    let lines = LineMap::new(xml);
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out = Vec::new();
+    let mut group = String::new();
+    loop {
+        let ev = reader.read_event_into(&mut buf);
+        let line = lines.line(reader.buffer_position() as usize);
+        match ev {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
+                "group" => group = attr(&e, b"name").unwrap_or_default(),
+                "attribute" => {
+                    if let Some(name) = attr(&e, b"name") {
+                        if !group.is_empty() {
+                            out.push(RawCatalogAttr { group: group.clone(), attribute: name, line });
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::End(e)) if e.name().as_ref() == b"group" => group.clear(),
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
 // ---------- email templates (etc/email_templates.xml) ----------
 
 pub(crate) struct RawEmailTemplate {

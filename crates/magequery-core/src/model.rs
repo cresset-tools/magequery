@@ -1112,6 +1112,26 @@ pub struct AclResource {
     pub source: Source,
 }
 
+/// One attribute in a catalog attribute group, with the module that added it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CatalogAttribute {
+    pub name: String,
+    pub source: Source,
+}
+
+/// A `catalog_attributes.xml` group — which attributes Magento loads in a given context
+/// (`quote_item`, `wishlist_item`, `catalog_product` collections, …), merged across
+/// modules (each attribute keeps the adding module's `Source`). The "why isn't my
+/// attribute available on the quote item" surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CatalogAttributeGroup {
+    pub name: String,
+    /// Sorted by attribute name.
+    pub attributes: Vec<CatalogAttribute>,
+}
+
 /// A theme's override of an email template file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

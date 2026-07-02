@@ -60,7 +60,7 @@ pub use model::{
     MqPublisher, MqRoute, MqTopic, MqTopicRoute, MqVia, QueueConfig, QueueConnection,
     SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses, Whatis,
 };
-pub use model::ClassRef;
+pub use model::{CatalogAttribute, CatalogAttributeGroup, ClassRef};
 pub use decrypt::Decryptor;
 pub use sysconfig::ConfigSet;
 pub use source::Source;
@@ -94,6 +94,7 @@ pub struct Magento {
     layout: OnceLock<breadth::LayoutIndex>,
     widgets: OnceLock<breadth::WidgetIndex>,
     email_templates: OnceLock<breadth::EmailTemplateIndex>,
+    catalog_attrs: OnceLock<breadth::CatalogAttrIndex>,
 }
 
 struct DiBuilt {
@@ -128,6 +129,7 @@ impl Magento {
             layout: OnceLock::new(),
             widgets: OnceLock::new(),
             email_templates: OnceLock::new(),
+            catalog_attrs: OnceLock::new(),
         })
     }
 
@@ -1313,6 +1315,21 @@ impl Magento {
 
     fn mq_index(&self) -> &breadth::MqIndex {
         self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
+    }
+
+    fn catalog_attr_index(&self) -> &breadth::CatalogAttrIndex {
+        self.catalog_attrs.get_or_init(|| breadth::CatalogAttrIndex::build(&self.index.modules))
+    }
+
+    /// The `catalog_attributes.xml` groups — which attributes load in each context
+    /// (`quote_item`, `wishlist_item`, …), each attribute with its adding module.
+    pub fn catalog_attribute_groups(&self) -> Vec<CatalogAttributeGroup> {
+        self.catalog_attr_index().groups()
+    }
+
+    /// One group by exact name.
+    pub fn catalog_attribute_group(&self, name: &str) -> Option<CatalogAttributeGroup> {
+        self.catalog_attr_index().group(name)
     }
 
     fn email_template_index(&self) -> &breadth::EmailTemplateIndex {

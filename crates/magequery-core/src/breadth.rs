@@ -11,7 +11,8 @@ use std::path::Path;
 
 use crate::ids::{Area, ClassName, EventName, ModuleName};
 use crate::model::{
-    AclResource, CronJob, DbColumn, DbConstraint, DbIndex, DbTable, EmailTemplate,
+    AclResource, CatalogAttribute, CatalogAttributeGroup, CronJob, DbColumn, DbConstraint,
+    DbIndex, DbTable, EmailTemplate,
     EmailTemplateOverride, ExtendedType,
     ExtensionAttribute, ExtensionJoin, GqlArg, GqlField, GqlKind,
     GqlType, Indexer, LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
@@ -412,6 +413,54 @@ fn merge_index(t: &mut DbTable, ri: parse::RawIndex, module: &ModuleName, path: 
     match t.indexes.iter_mut().find(|i| i.id == ri.id) {
         Some(existing) => *existing = idx,
         None => t.indexes.push(idx),
+    }
+}
+
+// ---------- catalog attribute groups (etc/catalog_attributes.xml) ----------
+
+pub(crate) struct CatalogAttrIndex {
+    groups: HashMap<String, CatalogAttributeGroup>,
+}
+
+impl CatalogAttrIndex {
+    pub fn build(modules: &[Module]) -> Self {
+        let mut groups: HashMap<String, CatalogAttributeGroup> = HashMap::new();
+        for (i, path, raws) in
+            read_parse(modules, Area::Global, "catalog_attributes.xml", parse::catalog_attributes_xml)
+        {
+            let module = &modules[i].name;
+            for r in raws {
+                let entry = groups
+                    .entry(r.group.clone())
+                    .or_insert_with(|| CatalogAttributeGroup { name: r.group, attributes: Vec::new() });
+                if !entry.attributes.iter().any(|a| a.name == r.attribute) {
+                    entry.attributes.push(CatalogAttribute {
+                        name: r.attribute,
+                        source: Source {
+                            module: module.clone(),
+                            file: path.clone(),
+                            line: r.line,
+                            area: Area::Global,
+                        },
+                    });
+                }
+            }
+        }
+        for g in groups.values_mut() {
+            g.attributes.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        Self { groups }
+    }
+
+    pub fn group(&self, name: &str) -> Option<CatalogAttributeGroup> {
+        self.groups.get(name).cloned()
+    }
+
+    /// All groups, sorted by name.
+    pub fn groups(&self) -> Vec<CatalogAttributeGroup> {
+        let mut v: Vec<CatalogAttributeGroup> = self.groups.values().cloned().collect();
+        v.sort_by(|a, b| a.name.cmp(&b.name));
+        v
     }
 }
 

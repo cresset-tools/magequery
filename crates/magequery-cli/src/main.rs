@@ -45,6 +45,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("schema", "Tables from db_schema.xml: a list, or one table's DDL"),
             ("indexers", "Indexers from indexer.xml + their mview subscriptions"),
             ("extension-attributes", "Who bolts what onto which API interface"),
+            ("catalog-attributes", "Attribute groups: what loads on quote items, wishlists, …"),
         ],
     ),
     (
@@ -242,6 +243,8 @@ enum Command {
     Indexers(IndexersArgs),
     /// Extension attributes: who bolts what onto which API interface.
     ExtensionAttributes(ExtAttrArgs),
+    /// Catalog attribute groups: what loads on quote items, wishlists, collections.
+    CatalogAttributes(CatalogAttrsArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -412,6 +415,15 @@ struct ExtAttrArgs {
     /// matching types. Omit to list every extended type.
     #[arg(value_name = "TYPE")]
     type_name: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct CatalogAttrsArgs {
+    /// A group name (`quote_item`) → its attributes; an attribute name → the groups
+    /// containing it. Omit to list every group with counts.
+    query: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -752,6 +764,7 @@ fn main() -> Result<()> {
         Command::Graphql(args) => graphql(&mage, &args, &cli.root),
         Command::Indexers(args) => indexers(&mage, &args, &cli.root),
         Command::ExtensionAttributes(args) => extension_attributes(&mage, &args, &cli.root),
+        Command::CatalogAttributes(args) => catalog_attributes(&mage, &args, &cli.root),
         Command::Layout(args) => layout(&mage, &args, &cli.root),
         Command::Widgets(args) => widgets(&mage, &args, &cli.root),
         Command::EmailTemplates(args) => email_templates(&mage, &args, &cli.root),
@@ -1512,6 +1525,90 @@ fn layout_op_line(op: &magequery_core::LayoutOp) -> String {
             format!("{} move {}{to}{}", style::kind("→"), style::name(&op.name), style::path(&line))
         }
     }
+}
+
+fn catalog_attributes(mage: &Magento, args: &CatalogAttrsArgs, root: &Path) -> Result<()> {
+    // Exact group → its attributes; otherwise treat the query as an attribute name and
+    // show which groups contain it.
+    if let Some(q) = &args.query {
+        if let Some(g) = mage.catalog_attribute_group(q) {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&g)?);
+                return Ok(());
+            }
+            println!(
+                "{}  {}",
+                style::name(&g.name),
+                style::dim(&format!("— {} attribute(s):", g.attributes.len())),
+            );
+            let w = g.attributes.iter().map(|a| a.name.len()).max().unwrap_or(0);
+            for a in &g.attributes {
+                let pad = " ".repeat(w - a.name.len());
+                println!(
+                    "  {}{pad}  {}   {}",
+                    style::name(&a.name),
+                    style::module(&format!("← {}", a.source.module.as_str())),
+                    style::path(&short_loc(&a.source, root)),
+                );
+            }
+            return Ok(());
+        }
+
+        let hits: Vec<(String, magequery_core::CatalogAttribute)> = mage
+            .catalog_attribute_groups()
+            .into_iter()
+            .flat_map(|g| {
+                let name = g.name;
+                g.attributes
+                    .into_iter()
+                    .filter(|a| a.name.contains(q.as_str()))
+                    .map(move |a| (name.clone(), a))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if args.json {
+            let arr: Vec<_> = hits
+                .iter()
+                .map(|(g, a)| serde_json::json!({"group": g, "attribute": a}))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&arr)?);
+            return Ok(());
+        }
+        if hits.is_empty() {
+            println!("{}", style::dim("(no group or attribute matches)"));
+            return Ok(());
+        }
+        let w = hits.iter().map(|(g, _)| g.len()).max().unwrap_or(0);
+        for (g, a) in &hits {
+            let pad = " ".repeat(w - g.len());
+            println!(
+                "{}{pad}  {}  {}   {}",
+                style::area(g),
+                style::name(&a.name),
+                style::module(&format!("← {}", a.source.module.as_str())),
+                style::path(&short_loc(&a.source, root)),
+            );
+        }
+        eprintln!("\n{} occurrence(s)", hits.len());
+        return Ok(());
+    }
+
+    let groups = mage.catalog_attribute_groups();
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&groups)?);
+        return Ok(());
+    }
+    let w = groups.iter().map(|g| g.name.len()).max().unwrap_or(0);
+    for g in &groups {
+        let pad = " ".repeat(w - g.name.len());
+        println!(
+            "{}{pad}  {}",
+            style::name(&g.name),
+            style::dim(&format!("{:>3} attribute(s)", g.attributes.len())),
+        );
+    }
+    eprintln!("\n{} group(s)", groups.len());
+    Ok(())
 }
 
 fn email_templates(mage: &Magento, args: &EmailTemplatesArgs, root: &Path) -> Result<()> {
