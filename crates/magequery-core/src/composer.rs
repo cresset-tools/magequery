@@ -4,8 +4,8 @@
 //! (registration.php paths) that pinpoint module roots — including packages that bundle
 //! several modules under `src/`.
 //!
-//! Parsing uses a typed `Deserialize` with only the three fields we need, so serde walks
-//! the 1.5MB document once and skips everything else without building a generic value tree.
+//! Parsing uses a typed `Deserialize` with only the fields we need, so serde walks the
+//! 1.5MB document once and skips everything else without building a generic value tree.
 //! Fields are `Cow<str>` borrowed from the input buffer (zero-copy in the common case,
 //! allocating only for the rare escaped string).
 
@@ -16,12 +16,16 @@ use std::path::{Component, Path, PathBuf};
 use serde::Deserialize;
 
 pub(crate) struct ComposerPackage {
+    /// Package name (`vendor/name`), when the entry has one.
+    pub name: Option<String>,
     /// Absolute package root directory.
     pub root: PathBuf,
     /// `autoload.files` entries (relative to `root`), typically `registration.php` paths.
     pub autoload_files: Vec<String>,
     /// `autoload.psr-4`: namespace prefix (e.g. `Magento\Catalog\`) -> absolute source dirs.
     pub psr4: Vec<(String, Vec<PathBuf>)>,
+    /// `require` package names (version constraints dropped), sorted.
+    pub require: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -38,6 +42,9 @@ struct PackageEntry<'a> {
     install_path: Option<Cow<'a, str>>,
     #[serde(default)]
     autoload: AutoloadEntry<'a>,
+    /// Only the keys (required package names) matter; constraints are skipped unparsed.
+    #[serde(default)]
+    require: HashMap<String, serde::de::IgnoredAny>,
 }
 
 #[derive(Deserialize, Default)]
@@ -71,15 +78,18 @@ pub(crate) fn installed_packages(vendor: &Path) -> Result<Vec<ComposerPackage>, 
 
     let mut out = Vec::with_capacity(entries.len());
     for p in entries {
+        let name: Option<String> = p.name.as_ref().map(|n| n.as_ref().to_owned());
         let root = match p.install_path {
             // install-path is relative to vendor/composer/.
             Some(ip) => normalize(&composer_dir.join(ip.as_ref())),
             // Fallback to the conventional vendor/<name> location.
-            None => match p.name {
-                Some(n) => vendor.join(n.as_ref()),
+            None => match &name {
+                Some(n) => vendor.join(n),
                 None => continue,
             },
         };
+        let mut require: Vec<String> = p.require.into_keys().collect();
+        require.sort();
         let autoload_files = p.autoload.files.iter().map(|f| f.as_ref().to_owned()).collect();
         let psr4 = p
             .autoload
@@ -94,7 +104,7 @@ pub(crate) fn installed_packages(vendor: &Path) -> Result<Vec<ComposerPackage>, 
                 (prefix, dirs)
             })
             .collect();
-        out.push(ComposerPackage { root, autoload_files, psr4 });
+        out.push(ComposerPackage { name, root, autoload_files, psr4, require });
     }
     Ok(out)
 }

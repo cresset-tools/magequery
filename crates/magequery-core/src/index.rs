@@ -19,6 +19,16 @@ pub(crate) struct Index {
     pub check: ModuleCheck,
     pub resolver: resolver::ClassResolver,
     pub diagnostics: Vec<Diagnostic>,
+    /// Named composer packages (root + `require`), retained for the `deps` graph.
+    pub packages: Vec<PackageMeta>,
+}
+
+/// The slice of a composer package `deps` needs: who it is, where it lives (to map modules
+/// to their owning package), and what it requires.
+pub(crate) struct PackageMeta {
+    pub name: String,
+    pub root: PathBuf,
+    pub require: Vec<String>,
 }
 
 struct Discovered {
@@ -115,12 +125,21 @@ impl Index {
         // only; PHP parsing is lazy), so it stays eager.
         let resolver = resolver::ClassResolver::build(&packages, &modules);
 
+        // Keep the slim package facts (already parsed) for the lazy `deps` graph.
+        let packages = packages
+            .into_iter()
+            .filter_map(|p| {
+                p.name.map(|name| PackageMeta { name, root: p.root, require: p.require })
+            })
+            .collect();
+
         Ok(Index {
             root: root.to_path_buf(),
             modules,
             check: ModuleCheck { on_disk_not_in_config, in_config_not_on_disk },
             resolver,
             diagnostics,
+            packages,
         })
     }
 }

@@ -57,6 +57,39 @@ impl ModuleCheck {
     }
 }
 
+/// One edge of a module's dependency graph: the neighbouring module and how the
+/// dependency is declared — `<sequence>` in module.xml (load order), the owning composer
+/// package's `require`, or both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct DepEdge {
+    pub module: ModuleName,
+    pub via_sequence: bool,
+    pub via_composer: bool,
+    /// False when the module is referenced but absent from `config.php` — common for a
+    /// `<sequence>` entry naming an optional module that isn't installed.
+    pub installed: bool,
+    pub enabled: bool,
+    /// The declaring file: the depending module's `etc/module.xml` or `composer.json`.
+    pub source: Source,
+}
+
+/// A module's dependency graph, both directions, from the two static sources
+/// (`<sequence>` + composer `require`). Composer edges carry composer's granularity: a
+/// required package that bundles several modules yields an edge per module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ModuleDeps {
+    pub module: ModuleName,
+    /// The composer package providing the module, when composer-managed.
+    pub package: Option<String>,
+    pub depends_on: Vec<DepEdge>,
+    pub depended_on_by: Vec<DepEdge>,
+    /// Composer requires that aren't Magento modules (framework, libraries, `php`/`ext-*`)
+    /// — listed so nothing is silently dropped.
+    pub other_requires: Vec<String>,
+}
+
 /// One hop in a preference chain. Preferences are followed to a fixpoint, so resolving an
 /// interface may pass through several `for -> type` redirects before reaching a concrete.
 #[derive(Debug, Clone, PartialEq, Eq)]

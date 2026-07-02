@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use crate::ids::ClassName;
+use crate::ids::{ClassName, ModuleName};
 use crate::source::Source;
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -39,6 +39,10 @@ pub enum Error {
     /// The requested class/interface is not declared anywhere we can see.
     #[error("class not found: {0}")]
     ClassNotFound(ClassName),
+
+    /// The requested module is not in `config.php`'s module list.
+    #[error("module not found: {0}")]
+    ModuleNotFound(ModuleName),
 
     /// The class exists in config but no PSR-4 autoload mapping resolves it to a file,
     /// so its inheritance chain (and thus inherited plugins) can't be determined.

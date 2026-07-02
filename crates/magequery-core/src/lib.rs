@@ -41,7 +41,8 @@ pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
     AclResource, ArgItem, ArgValue, Argument, ByArea, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ConsoleCommand, ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
-    DbTable, Indexer, InterceptKind, MethodChain, Module, ModuleCheck, MviewSubscription, Observer,
+    DbTable, DepEdge, Indexer, InterceptKind, MethodChain, Module, ModuleCheck, ModuleDeps,
+    MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
     Resolution, Route, UnregisteredModule, WebapiRoute,
 };
@@ -541,6 +542,124 @@ impl Magento {
         self.indexer_index().indexer(id)
     }
 
+    /// The dependency graph around one module, both directions, from the two static
+    /// sources: `<sequence>` in module.xml (load-order dependencies) and the owning
+    /// composer package's `require`, with each required package mapped back to the
+    /// module(s) it provides. Composer edges have composer's granularity — requiring a
+    /// package that bundles several modules yields an edge per module. Non-module requires
+    /// (framework, libraries, `php`/`ext-*`) are returned in `other_requires`.
+    pub fn deps(&self, module: &ModuleName) -> Result<ModuleDeps> {
+        let me = self
+            .index
+            .modules
+            .iter()
+            .position(|x| &x.name == module)
+            .ok_or_else(|| Error::ModuleNotFound(module.clone()))?;
+        let m = &self.index.modules[me];
+
+        // package root -> package, so a module finds its owner by walking its ancestors.
+        let root_of: std::collections::HashMap<&Path, &index::PackageMeta> =
+            self.index.packages.iter().map(|p| (p.root.as_path(), p)).collect();
+
+        // Every module's composer identity: package name + requires + the declaring
+        // composer.json. Vendor modules resolve through installed.json; app/code modules
+        // read their own composer.json (when they have one).
+        let infos: Vec<Option<DepPkgInfo>> = self
+            .index
+            .modules
+            .iter()
+            .map(|x| match x.path.ancestors().find_map(|a| root_of.get(a)) {
+                Some(p) => Some(DepPkgInfo {
+                    name: p.name.clone(),
+                    require: p.require.clone(),
+                    file: p.root.join("composer.json"),
+                }),
+                None => read_app_composer(&x.path),
+            })
+            .collect();
+
+        // package name -> the modules it provides.
+        let mut modules_of_pkg: std::collections::HashMap<&str, Vec<&ModuleName>> =
+            std::collections::HashMap::new();
+        for (i, info) in infos.iter().enumerate() {
+            if let Some(info) = info {
+                modules_of_pkg.entry(info.name.as_str()).or_default().push(&self.index.modules[i].name);
+            }
+        }
+        let by_name: std::collections::HashMap<&ModuleName, &Module> =
+            self.index.modules.iter().map(|x| (&x.name, x)).collect();
+
+        let my_info = &infos[me];
+
+        // Forward: sequence entries, then composer requires resolved to modules.
+        let mut depends_on: Vec<DepEdge> = Vec::new();
+        let seq_source = |x: &Module| Source {
+            module: x.name.clone(),
+            file: x.path.join("etc/module.xml"),
+            line: 0,
+            area: Area::Global,
+        };
+        for target in &m.sequence {
+            add_dep_edge(&mut depends_on, target, &by_name, true, false, seq_source(m));
+        }
+        let mut other_requires = Vec::new();
+        if let Some(info) = my_info {
+            let src = Source {
+                module: m.name.clone(),
+                file: info.file.clone(),
+                line: 0,
+                area: Area::Global,
+            };
+            for req in &info.require {
+                match modules_of_pkg.get(req.as_str()) {
+                    Some(mods) => {
+                        for t in mods {
+                            if *t != &m.name {
+                                add_dep_edge(&mut depends_on, t, &by_name, false, true, src.clone());
+                            }
+                        }
+                    }
+                    None => other_requires.push(req.clone()),
+                }
+            }
+        }
+
+        // Reverse: every module whose sequence names this one, or whose package requires
+        // this one's package.
+        let my_pkg = my_info.as_ref().map(|i| i.name.as_str());
+        let mut depended_on_by: Vec<DepEdge> = Vec::new();
+        for (i, other) in self.index.modules.iter().enumerate() {
+            if other.name == m.name {
+                continue;
+            }
+            if other.sequence.contains(&m.name) {
+                add_dep_edge(&mut depended_on_by, &other.name, &by_name, true, false, seq_source(other));
+            }
+            if let (Some(info), Some(mine)) = (&infos[i], my_pkg) {
+                // Siblings bundled in the same package don't require each other.
+                if info.name != mine && info.require.iter().any(|r| r == mine) {
+                    let src = Source {
+                        module: other.name.clone(),
+                        file: info.file.clone(),
+                        line: 0,
+                        area: Area::Global,
+                    };
+                    add_dep_edge(&mut depended_on_by, &other.name, &by_name, false, true, src);
+                }
+            }
+        }
+
+        depends_on.sort_by(|a, b| a.module.cmp(&b.module));
+        depended_on_by.sort_by(|a, b| a.module.cmp(&b.module));
+        Ok(ModuleDeps {
+            module: m.name.clone(),
+            package: my_pkg.map(str::to_string),
+            depends_on,
+            depended_on_by,
+            other_requires,
+        })
+    }
+
     fn mq_index(&self) -> &breadth::MqIndex {
         self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
     }
@@ -980,6 +1099,57 @@ fn scan_actions(
                 area: ctx.area,
                 module: ctx.module.clone(),
                 source: Source { module: ctx.module.clone(), file: path, line: 0, area: ctx.area },
+            });
+        }
+    }
+}
+
+/// A module's composer identity for the `deps` graph.
+struct DepPkgInfo {
+    name: String,
+    require: Vec<String>,
+    file: std::path::PathBuf,
+}
+
+/// Read an app/code module's own `composer.json` (they're not in installed.json).
+fn read_app_composer(dir: &Path) -> Option<DepPkgInfo> {
+    #[derive(serde::Deserialize)]
+    struct Cj {
+        name: Option<String>,
+        #[serde(default)]
+        require: std::collections::HashMap<String, serde::de::IgnoredAny>,
+    }
+    let file = dir.join("composer.json");
+    let cj: Cj = serde_json::from_str(&std::fs::read_to_string(&file).ok()?).ok()?;
+    let mut require: Vec<String> = cj.require.into_keys().collect();
+    require.sort();
+    Some(DepPkgInfo { name: cj.name.unwrap_or_default(), require, file })
+}
+
+/// Append (or merge into) an edge to `module`, OR-ing the `via_*` flags. The first source
+/// wins (sequence edges are added first, so a both-ways dependency cites module.xml).
+fn add_dep_edge(
+    edges: &mut Vec<DepEdge>,
+    module: &ModuleName,
+    by_name: &std::collections::HashMap<&ModuleName, &Module>,
+    via_sequence: bool,
+    via_composer: bool,
+    source: Source,
+) {
+    match edges.iter_mut().find(|e| &e.module == module) {
+        Some(e) => {
+            e.via_sequence |= via_sequence;
+            e.via_composer |= via_composer;
+        }
+        None => {
+            let target = by_name.get(module);
+            edges.push(DepEdge {
+                module: module.clone(),
+                via_sequence,
+                via_composer,
+                installed: target.is_some(),
+                enabled: target.is_some_and(|t| t.enabled),
+                source,
             });
         }
     }

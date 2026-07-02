@@ -188,7 +188,7 @@ RUNTIME       (env.php config & live connections)
 
 PROJECT       (the codebase itself)
   modules [--check] [--enabled|--disabled] [--source app|vendor]
-  deps <module> (backlog)   patches [--db] (backlog)   doctor (backlog)   whatis <class> (backlog)
+  deps <module>             patches [--db] (backlog)   doctor (backlog)   whatis <class> (backlog)
 ```
 
 ### Cross-cutting flag vocabulary (a flag means the same thing everywhere)
@@ -239,7 +239,8 @@ Discovery is parallel (rayon): each package's candidate roots are probed via a p
 merged sequentially so "first wins" stays deterministic. Phase timing is available behind
 `MQ_PROFILE=1`. Warm costs (~13ms wall): parallel module.xml reads ~5ms, app/code scan ~3ms,
 installed.json parse ~1.7ms, config.php ~0.1ms. `installed.json` is parsed with a typed
-zero-copy (`Cow`) `Deserialize` over only the 3 fields we use — not `serde_json::Value` —
+zero-copy (`Cow`) `Deserialize` over only the fields we use (name, install-path, autoload,
+require) — not `serde_json::Value` —
 which cut its parse from ~4.6ms to ~1.7ms. Remaining costs are I/O-bound (file reads + the
 app/code directory walk); parallel file reading pays off more in step 2's di.xml pass.
 
@@ -604,6 +605,29 @@ consumers, red flag when **no consumer reads a queue** or no route exists). Vali
 mageos-lite: sales_rule.codegenerator routes to queue `codegenerator` via both the direct
 publisher and its binding on exchange magento (amqp), consumer joined; ~3ms.
 
+### `deps` (module dependency graph, done)
+
+`magequery deps <Module>` — both directions, from the two static sources:
+- **`<sequence>`** (module.xml, load-order deps) — already on `Module.sequence`; reverse =
+  every module whose sequence names the target.
+- **composer `require`** — `installed.json` now also yields `name` + `require` per package
+  (`ComposerPackage` grew two fields; `Index` retains a slim `PackageMeta` list). A module
+  finds its owning package by walking its path's ancestors to a package root; each required
+  package maps back to the module(s) it provides. app/code modules aren't in installed.json,
+  so their own `composer.json` is read instead (`read_app_composer`).
+
+Edges dedup by module with `via_sequence`/`via_composer` OR-ed (source = the declaring
+file: module.xml wins when both). Composer edges have composer's granularity (a required
+package bundling several modules ⇒ one edge per module; same-package siblings are not
+edges). Each edge carries `installed`/`enabled` — a `<sequence>` entry naming an absent
+optional module is common and flagged `(not installed)`, never hidden; requires that no
+installed module provides go to `other_requires` (framework, libs, `php`/`ext-*`).
+`Error::ModuleNotFound` (new variant) for an unknown name; the CLI hints at
+`modules | grep -i`. CLI line: `Module  sequence, composer  [(not installed)]  # loc`.
+Validated on mageos-lite (`Magento_SalesRule`: 21 forward — 4 via both sources — 3
+reverse) and a synthetic app/code module (composer.json read, missing sequence target
+flagged). ~4ms; `modules` unaffected.
+
 ### `uses` (reverse DI, done)
 
 The flip side of `di`: `di Foo` = "when Magento builds Foo, what does it get"; `uses Foo` =
@@ -639,8 +663,6 @@ resolves its injector. ~19ms (di parse dominates).
 
 Ideas surfaced while scoping breadth, in rough priority. All but the GraphQL/DB ones are
 static breadth-projections in the same `read_parse` + merge shape.
-- **`deps <Module>`** — dependency graph from `<sequence>` + composer `require` (forward + who
-  depends on it).
 - **`graphql <Type>`** — map a `schema.graphqls` type/field to its resolver class via di
   (two-source join; bigger).
 - **DB-backed (phase-2 style, opt-in like `url-rewrites`):** `indexer:status` (`indexer_state`),

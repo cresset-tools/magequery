@@ -65,7 +65,13 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("url-rewrites", "URL rewrites from the DB (request → target)"),
         ],
     ),
-    ("Project", &[("modules", "Installed modules in load order")]),
+    (
+        "Project",
+        &[
+            ("modules", "Installed modules in load order"),
+            ("deps", "Module dependencies (sequence + composer), both directions"),
+        ],
+    ),
 ];
 
 /// Global options, for `print_help`: (flags, placeholder, description). Mirror the `Cli`
@@ -241,6 +247,16 @@ enum Command {
     // ── Project: the codebase itself ──
     /// Installed modules in load order.
     Modules(ModulesArgs),
+    /// Module dependencies from <sequence> + composer require, both directions.
+    Deps(DepsArgs),
+}
+
+#[derive(clap::Args)]
+struct DepsArgs {
+    /// The module, e.g. `Magento_SalesRule` (exact name).
+    module: String,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -552,6 +568,7 @@ fn main() -> Result<()> {
 
     let result = match cli.command {
         Command::Modules(args) => modules(&mage, &args),
+        Command::Deps(args) => deps(&mage, &args, &cli.root),
         Command::Preference(args) => preference(&mage, &args, &cli.root),
         Command::Plugins(args) => plugins(&mage, &args, &cli.root),
         Command::Di(args) => di(&mage, &args, &cli.root),
@@ -2160,6 +2177,74 @@ fn modules(mage: &Magento, args: &ModulesArgs) -> Result<()> {
     }
     eprintln!("\n{} module(s)", selected.len());
     Ok(())
+}
+
+fn deps(mage: &Magento, args: &DepsArgs, root: &Path) -> Result<()> {
+    let module = magequery_core::ModuleName::new(args.module.as_str());
+    let d = mage.deps(&module).map_err(|e| match e {
+        Error::ModuleNotFound(m) => anyhow!(
+            "module not found: {m}\n  Names are exact (`Vendor_Module`); try \
+             `magequery modules | grep -i {}`.",
+            args.module
+        ),
+        other => anyhow!(other),
+    })?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&d)?);
+        return Ok(());
+    }
+
+    let pkg = d.package.as_deref().filter(|p| !p.is_empty());
+    println!(
+        "{}{}",
+        style::module(d.module.as_str()),
+        pkg.map(|p| format!("  {}", style::dim(p))).unwrap_or_default(),
+    );
+    render_dep_edges("depends on", &d.depends_on, root);
+    render_dep_edges("depended on by", &d.depended_on_by, root);
+    if !d.other_requires.is_empty() {
+        println!(
+            "\n{} {}",
+            style::dim(&format!("other composer requires ({}):", d.other_requires.len())),
+            style::dim(&d.other_requires.join(", ")),
+        );
+    }
+    Ok(())
+}
+
+fn render_dep_edges(label: &str, edges: &[magequery_core::DepEdge], root: &Path) {
+    if edges.is_empty() {
+        println!("\n{} {}", style::dim(label), style::dim("(none)"));
+        return;
+    }
+    println!("\n{}", style::dim(&format!("{label} ({}):", edges.len())));
+    let w = edges.iter().map(|e| e.module.as_str().len()).max().unwrap_or(0);
+    for e in edges {
+        let mut via = Vec::new();
+        if e.via_sequence {
+            via.push("sequence");
+        }
+        if e.via_composer {
+            via.push("composer");
+        }
+        // A sequence entry naming a module that isn't installed is common (optional
+        // integrations); flag it rather than hiding it.
+        let state = if !e.installed {
+            format!("  {}", style::err("(not installed)"))
+        } else if !e.enabled {
+            format!("  {}", style::err("(disabled)"))
+        } else {
+            String::new()
+        };
+        let pad = " ".repeat(w.saturating_sub(e.module.as_str().len()));
+        println!(
+            "  {}{pad}  {}{state}   {}",
+            style::module(e.module.as_str()),
+            style::kind(&via.join(", ")),
+            style::path(&short_loc(&e.source, root)),
+        );
+    }
 }
 
 fn modules_check(mage: &Magento, json: bool) -> Result<()> {
