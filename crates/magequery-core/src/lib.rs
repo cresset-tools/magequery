@@ -572,6 +572,13 @@ impl Magento {
             .and_then(|v| v.as_str())
             .map(str::to_string);
 
+        let installed_at = env
+            .as_ref()
+            .and_then(|e| e.get("install"))
+            .and_then(|i| i.get("date"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
         let maintenance = self.index.root.join("var/.maintenance.flag").is_file();
         let maintenance_allowed_ips = std::fs::read_to_string(self.index.root.join("var/.maintenance.ip"))
             .map(|t| {
@@ -628,8 +635,70 @@ impl Magento {
             _ => None,
         };
 
+        // Deployment one-liners, from the existing env.php extractors (credentials
+        // deliberately left out of this casual, paste-into-a-ticket view).
+        let db_conn = self.db_config().ok().and_then(|c| {
+            c.connections
+                .iter()
+                .find(|x| x.name == "default")
+                .or_else(|| c.connections.first())
+                .map(|x| {
+                    let endpoint = match &x.unix_socket {
+                        Some(s) => s.clone(),
+                        None => match x.port {
+                            Some(p) => format!("{}:{p}", x.host),
+                            None => x.host.clone(),
+                        },
+                    };
+                    (x.dbname.clone(), endpoint, c.table_prefix.clone())
+                })
+        });
+        let cache = self.cache_config().ok();
+
+        // Website / store-view counts from config.php's `scopes` node (only present when
+        // the config is dumped); the synthetic `admin` website/store are excluded.
+        let scope_count = |section: &str| {
+            deploy::read_config_php(&self.index.root)
+                .ok()?
+                .get("scopes")?
+                .get(section)?
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|(k, _)| k.as_str() != Some("admin"))
+                        .count()
+                })
+        };
+
         InstanceInfo {
             db_error,
+            search_engine: get("catalog/search/engine"),
+            db_name: db_conn.as_ref().map(|(n, _, _)| n.clone()),
+            db_endpoint: db_conn.as_ref().map(|(_, e, _)| e.clone()),
+            table_prefix: db_conn.and_then(|(_, _, p)| (!p.is_empty()).then_some(p)),
+            session: self.session_config().ok(),
+            cache_frontends: cache.as_ref().map(|c| c.frontends.clone()).unwrap_or_default(),
+            cache_types_enabled: cache
+                .as_ref()
+                .map(|c| c.types.iter().filter(|t| t.enabled).count())
+                .unwrap_or(0),
+            cache_types_total: cache.as_ref().map(|c| c.types.len()).unwrap_or(0),
+            websites: scope_count("websites"),
+            store_views: scope_count("stores"),
+            installed_at,
+            modules_vendor: self
+                .index
+                .modules
+                .iter()
+                .filter(|m| m.source == model::ModuleSource::Vendor)
+                .count(),
+            modules_app: self
+                .index
+                .modules
+                .iter()
+                .filter(|m| m.source == model::ModuleSource::App)
+                .count(),
             version: version_pkg.and_then(|p| p.version.clone()),
             version_package: version_pkg.map(|p| p.name.clone()),
             mode,

@@ -87,8 +87,30 @@ pub struct InstanceInfo {
     pub admin_front_name: Option<String>,
     /// The admin URL: the (secure, else unsecure) base URL + frontName.
     pub admin_url: Option<String>,
+    /// `catalog/search/engine` (opensearch, elasticsearch7, …).
+    pub search_engine: Option<String>,
+    /// The default DB connection, credentials omitted: database name and endpoint
+    /// (`host:port` or a socket path).
+    pub db_name: Option<String>,
+    pub db_endpoint: Option<String>,
+    /// Table prefix, when one is configured (non-empty).
+    pub table_prefix: Option<String>,
+    /// Session storage (`env.php` `session`).
+    pub session: Option<SessionConfig>,
+    /// Cache frontends (`default`, `page_cache`) with their backends.
+    pub cache_frontends: Vec<CacheFrontend>,
+    pub cache_types_enabled: usize,
+    pub cache_types_total: usize,
+    /// Website / store-view counts from `config.php`'s `scopes` node (present on installs
+    /// with dumped config; the synthetic `admin` scopes are excluded).
+    pub websites: Option<usize>,
+    pub store_views: Option<usize>,
+    /// `env.php` `install/date`, verbatim.
+    pub installed_at: Option<String>,
     pub modules_total: usize,
     pub modules_enabled: usize,
+    pub modules_vendor: usize,
+    pub modules_app: usize,
 }
 
 /// One edge of a module's dependency graph: the neighbouring module and how the

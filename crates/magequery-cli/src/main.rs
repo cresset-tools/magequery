@@ -2480,13 +2480,79 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         (None, Some(f)) => println!("admin        frontName {}", style::name(f)),
         _ => println!("admin        {}", style::dim("(no backend/frontName in env.php)")),
     }
+    if let Some(s) = &i.search_engine {
+        println!("search       {}", style::ok(s));
+    }
+    if let (Some(n), Some(e)) = (&i.db_name, &i.db_endpoint) {
+        let prefix = i
+            .table_prefix
+            .as_deref()
+            .map(|p| format!("  {}", style::dim(&format!("(prefix \"{p}\")"))))
+            .unwrap_or_default();
+        let styled = if e.starts_with('/') { style::path(e) } else { style::class(e) };
+        println!("db           {} {} {styled}{prefix}", style::class(n), style::dim("@"));
+    }
+    if let Some(s) = &i.session {
+        let mut line = style::ok(&s.handler);
+        if let Some(loc) = &s.location {
+            let styled = if loc.starts_with('/') { style::path(loc) } else { style::class(loc) };
+            line.push_str(&format!(" ({styled}"));
+            if let Some(db) = &s.database {
+                line.push_str(&format!(" db{}", style::number(db)));
+            }
+            line.push(')');
+        }
+        println!("session      {line}");
+    }
+    if !i.cache_frontends.is_empty() {
+        let mut parts: Vec<String> = i
+            .cache_frontends
+            .iter()
+            .map(|f| {
+                // A short backend label: "redis db3" / the class's last segment / the
+                // implicit file backend when env.php names none.
+                let backend = if f.backend.contains("Redis") {
+                    "redis".to_string()
+                } else if f.backend.is_empty() {
+                    "file".to_string()
+                } else {
+                    f.backend.rsplit(['\\', '_']).next().unwrap_or(&f.backend).to_lowercase()
+                };
+                let db = f.database.as_deref().map(|d| format!(" db{d}")).unwrap_or_default();
+                format!("{}: {}{db}", style::area(&f.id), style::ok(&backend))
+            })
+            .collect();
+        if i.cache_types_total > 0 {
+            let flag = format!("{}/{} types on", i.cache_types_enabled, i.cache_types_total);
+            parts.push(if i.cache_types_enabled == i.cache_types_total {
+                style::ok(&flag)
+            } else {
+                style::err(&flag)
+            });
+        }
+        println!("cache        {}", parts.join(&style::dim(" · ")));
+    }
+    if let (Some(w), Some(s)) = (i.websites, i.store_views) {
+        println!(
+            "stores       {} website(s), {} store view(s)",
+            style::number(&w.to_string()),
+            style::number(&s.to_string()),
+        );
+    }
     let disabled = i.modules_total - i.modules_enabled;
     let dis = if disabled > 0 {
         format!(", {} disabled", disabled)
     } else {
         String::new()
     };
-    println!("modules      {}{dis}", style::number(&format!("{} enabled", i.modules_enabled)));
+    println!(
+        "modules      {}{dis}  {}",
+        style::number(&format!("{} enabled", i.modules_enabled)),
+        style::dim(&format!("({} vendor, {} app/code)", i.modules_vendor, i.modules_app)),
+    );
+    if let Some(d) = &i.installed_at {
+        println!("installed    {}", style::dim(d));
+    }
     if let Some(e) = &i.db_error {
         eprintln!("{}", style::dim(&format!("note: database unreachable, static values only ({e})")));
     }

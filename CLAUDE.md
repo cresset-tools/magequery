@@ -613,7 +613,14 @@ product package in `installed.json` — `*/product-enterprise-edition` →
 `*/product-community-edition` → `*/magento2-base`, first hit; the package name also tells
 the distribution apart), **deploy mode** (`env.php` `MAGE_MODE`; absent = "default"),
 **maintenance** (`var/.maintenance.flag` + exempt IPs from `var/.maintenance.ip`),
-**base URLs**, **admin URL**, and **module counts**. Unlike the `--db` commands, `info`
+**base URLs**, **admin URL**, and — the sys:info parity set — **search engine**
+(`catalog/search/engine`), **db** (dbname @ host/socket + table prefix, credentials
+deliberately omitted from this paste-into-a-ticket view), **session** and **cache**
+one-liners (reusing the env.php extractors; an empty backend class renders as the implicit
+`file` default), **websites/store views** (from `config.php`'s `scopes` node when the
+config is dumped, the synthetic `admin` scopes excluded; absent → line skipped),
+**module counts split vendor / app/code**, and the **install date** (`env.php`
+`install/date`). Unlike the `--db` commands, `info`
 **always tries the database** (base URLs usually live only in `core_config_data`) and
 degrades to the static sources when unreachable — `InstanceInfo.db_error` records why and
 the CLI prints a stderr note; the fail-fast TCP pre-check keeps the down-DB case at ~50ms.
