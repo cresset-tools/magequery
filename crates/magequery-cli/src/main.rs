@@ -2673,14 +2673,24 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
     if !scope_parts.is_empty() {
         info_row("stores", scope_parts.join(", "));
     }
-    let disabled = i.modules_total - i.modules_enabled;
+    // Magento's own semantics (module:status): disabled = on disk − enabled, so modules
+    // missing from config.php count as disabled — with the reason called out.
+    let disabled = i.modules_total - i.modules_enabled + i.modules_unregistered;
+    let unregistered = if i.modules_unregistered > 0 {
+        format!(" · {} not in config.php — run setup:upgrade", i.modules_unregistered)
+    } else {
+        String::new()
+    };
     info_row(
         "modules",
         format!(
             "{}, {}  {}",
             style::number(&format!("{} enabled", i.modules_enabled)),
             style::number(&format!("{disabled} disabled")),
-            style::dim(&format!("({} vendor, {} app/code)", i.modules_vendor, i.modules_app))
+            style::dim(&format!(
+                "({} vendor, {} app/code{unregistered})",
+                i.modules_vendor, i.modules_app
+            ))
         ),
     );
     if i.packages_total > 0 {

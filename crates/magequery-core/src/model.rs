@@ -197,8 +197,14 @@ pub struct InstanceInfo {
     pub store_views: Option<usize>,
     /// `env.php` `install/date`, verbatim.
     pub installed_at: Option<String>,
+    /// Modules in `config.php` (enabled + disabled).
     pub modules_total: usize,
     pub modules_enabled: usize,
+    /// Modules on disk but absent from `config.php` — Magento's `module:status` counts
+    /// these as *disabled* (they aren't enabled), `setup:upgrade` registers them.
+    pub modules_unregistered: usize,
+    /// Vendor/app split over everything seen on disk (config.php + unregistered), so the
+    /// two sum to enabled + disabled.
     pub modules_vendor: usize,
     pub modules_app: usize,
     /// Named composer packages in `installed.json`.

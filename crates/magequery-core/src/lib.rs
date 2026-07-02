@@ -548,6 +548,13 @@ impl Magento {
         self.indexer_index().indexer(id)
     }
 
+    /// Modules of one source across everything seen on disk: the config.php list plus the
+    /// unregistered ones (on disk, not in config.php) — so vendor + app = enabled + disabled.
+    fn count_modules(&self, source: model::ModuleSource) -> usize {
+        self.index.modules.iter().filter(|m| m.source == source).count()
+            + self.index.check.on_disk_not_in_config.iter().filter(|m| m.source == source).count()
+    }
+
     /// Cross-index lints: everything the merged configuration references that doesn't
     /// exist (classes, ACL resources), structural problems (preference/virtual-type/
     /// `<sequence>` cycles, module-set drift), and probably-forgotten wiring (command/
@@ -888,18 +895,9 @@ impl Magento {
             store_groups,
             store_views,
             installed_at,
-            modules_vendor: self
-                .index
-                .modules
-                .iter()
-                .filter(|m| m.source == model::ModuleSource::Vendor)
-                .count(),
-            modules_app: self
-                .index
-                .modules
-                .iter()
-                .filter(|m| m.source == model::ModuleSource::App)
-                .count(),
+            modules_unregistered: self.index.check.on_disk_not_in_config.len(),
+            modules_vendor: self.count_modules(model::ModuleSource::Vendor),
+            modules_app: self.count_modules(model::ModuleSource::App),
             packages_total: self.index.packages.len(),
             version: version_pkg.and_then(|p| p.version.clone()),
             version_package: version_pkg.map(|p| p.name.clone()),
