@@ -1271,9 +1271,9 @@ pub struct LayoutOp {
     pub source: Source,
 }
 
-/// Who provides a layout file: a module (merged in load order) or a theme (applied per
-/// the active theme's ancestry — reported, not resolved, since the active theme is
-/// runtime state).
+/// Who provides a layout or ui component file: a module (merged in load order) or a
+/// theme (applied per the active theme's ancestry — reported, not resolved, since the
+/// active theme is runtime state).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1304,6 +1304,55 @@ pub struct LayoutView {
     pub includes: Vec<String>,
     /// Handles that pull this one in.
     pub included_by: Vec<String>,
+}
+
+/// One node a ui component file declares or modifies. UI component XML is
+/// open-vocabulary — the element name IS the component type (`column`, `field`,
+/// `dataSource`, …) — and Magento merges same-name files by matching `(element, name)`,
+/// so each node is reported with both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct UiComponentOp {
+    pub element: String,
+    pub name: String,
+    /// PHP class (`class=`) — data providers, column/filter renderers.
+    pub class: Option<ClassName>,
+    /// JS component (`component=`).
+    pub component: Option<String>,
+    /// `<field formElement=>`.
+    pub form_element: Option<String>,
+    pub sort_order: Option<String>,
+    /// `<settings><label>` (or a button's direct `<label>`).
+    pub label: Option<String>,
+    /// `<settings><disabled>true</disabled>` — removes the node on merge.
+    pub disabled: bool,
+    /// `<settings><visible>` when stated.
+    pub visible: Option<bool>,
+    /// Nearest enclosing named node.
+    pub parent: Option<String>,
+    /// Nesting depth below the root element (captured ancestors; for tree rendering).
+    pub depth: u16,
+    pub source: Source,
+}
+
+/// One file's contribution to a ui component (module files in load order, then themes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct UiComponentContribution {
+    pub layer: LayoutLayer,
+    pub file: std::path::PathBuf,
+    pub ops: Vec<UiComponentOp>,
+}
+
+/// Everything contributing to one ui component (an admin grid, form, …) in one area.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct UiComponentView {
+    pub name: String,
+    /// The root element of the first declaring file (`listing`, `form`, …).
+    pub kind: String,
+    pub area: Area,
+    pub contributions: Vec<UiComponentContribution>,
 }
 
 /// A `(table, column)` pair in a schema drift report.

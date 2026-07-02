@@ -53,7 +53,8 @@ pub use model::{
     MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
     Resolution, Route, SchemaDrift, TableColumn, TranslationEntry, TranslationLayer,
-    TranslationMatch, Translations, UnregisteredModule, WebapiRoute, Widget,
+    TranslationMatch, Translations, UiComponentContribution, UiComponentOp, UiComponentView,
+    UnregisteredModule, WebapiRoute, Widget,
     WidgetParam,
 };
 pub use model::{
@@ -93,6 +94,7 @@ pub struct Magento {
     menu: OnceLock<breadth::MenuIndex>,
     ext_attrs: OnceLock<breadth::ExtAttrIndex>,
     layout: OnceLock<breadth::LayoutIndex>,
+    ui_components: OnceLock<breadth::UiComponentIndex>,
     widgets: OnceLock<breadth::WidgetIndex>,
     email_templates: OnceLock<breadth::EmailTemplateIndex>,
     catalog_attrs: OnceLock<breadth::CatalogAttrIndex>,
@@ -128,6 +130,7 @@ impl Magento {
             menu: OnceLock::new(),
             ext_attrs: OnceLock::new(),
             layout: OnceLock::new(),
+            ui_components: OnceLock::new(),
             widgets: OnceLock::new(),
             email_templates: OnceLock::new(),
             catalog_attrs: OnceLock::new(),
@@ -1599,6 +1602,25 @@ impl Magento {
     /// graph around it.
     pub fn layout(&self, handle: &str, area: Area) -> Option<LayoutView> {
         self.layout_index().view(handle, area)
+    }
+
+    fn ui_component_index(&self) -> &breadth::UiComponentIndex {
+        self.ui_components.get_or_init(|| {
+            breadth::UiComponentIndex::build(&self.index.modules, &self.discover_themes())
+        })
+    }
+
+    /// UI components (admin grids, forms, …) in `area` as `(name, kind, contributing
+    /// files)`, sorted by name. Kind = the first declaring file's root element.
+    pub fn ui_components(&self, area: Area) -> Vec<(String, String, usize)> {
+        self.ui_component_index().list(area)
+    }
+
+    /// Everything contributing to one ui component in `area`: each file's component
+    /// nodes (module files in load order, then theme files — theme *application* order
+    /// depends on the active theme's ancestry, which is runtime state).
+    pub fn ui_component(&self, name: &str, area: Area) -> Option<UiComponentView> {
+        self.ui_component_index().view(name, area)
     }
 
     fn ext_attr_index(&self) -> &breadth::ExtAttrIndex {

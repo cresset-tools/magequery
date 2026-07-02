@@ -16,7 +16,7 @@ use crate::model::{
     EmailTemplateOverride, ExtendedType,
     ExtensionAttribute, ExtensionJoin, GqlArg, GqlField, GqlKind,
     GqlType, Indexer, LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
-    MenuItem, Module, Widget, WidgetParam,
+    MenuItem, Module, UiComponentContribution, UiComponentOp, UiComponentView, Widget, WidgetParam,
     MqConsumer, MqHandler, MqPublisher, MqRoute, MqTopic, MqTopicRoute, MqVia,
     MviewSubscription, Observer, Route, SystemField, WebapiRoute,
 };
@@ -787,6 +787,145 @@ fn layout_kind(k: parse::RawLayoutOpKind) -> LayoutOpKind {
         R::ReferenceContainer => LayoutOpKind::ReferenceContainer,
         R::Update => LayoutOpKind::Update,
         R::Move => LayoutOpKind::Move,
+    }
+}
+
+// ---------- ui components (view/<area>/ui_component + theme <Module>/ui_component) ----------
+
+pub(crate) struct UiComponentIndex {
+    /// (area, component name) -> (kind from the first declaring file, contributions:
+    /// module files in load order, then theme files).
+    components: HashMap<(Area, String), (String, Vec<UiComponentContribution>)>,
+}
+
+impl UiComponentIndex {
+    /// `themes` as in [`LayoutIndex::build`]. Component name = file stem; `view/base`
+    /// applies to both areas. Only direct children of `ui_component/` are components
+    /// (Magento_Ui's `ui_component/etc/definition/` holds component *type* definitions).
+    pub fn build(modules: &[Module], themes: &[(String, PathBuf)]) -> Self {
+        struct Job {
+            layer: LayoutLayer,
+            areas: Vec<Area>,
+            name: String,
+            path: PathBuf,
+        }
+        let mut jobs: Vec<Job> = Vec::new();
+        let mut push_dir = |layer: &LayoutLayer, areas: &[Area], dir: PathBuf| {
+            let Ok(entries) = std::fs::read_dir(&dir) else { return };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("xml") {
+                    continue;
+                }
+                let Some(name) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+                jobs.push(Job {
+                    layer: layer.clone(),
+                    areas: areas.to_vec(),
+                    name: name.to_string(),
+                    path,
+                });
+            }
+        };
+
+        for m in modules.iter().filter(|m| m.enabled) {
+            let layer = LayoutLayer::Module(m.name.clone());
+            for (sub, areas) in [
+                ("view/base/ui_component", vec![Area::Frontend, Area::Adminhtml]),
+                ("view/frontend/ui_component", vec![Area::Frontend]),
+                ("view/adminhtml/ui_component", vec![Area::Adminhtml]),
+            ] {
+                push_dir(&layer, &areas, m.path.join(sub));
+            }
+        }
+        for (id, dir) in themes {
+            let area = if id.starts_with("adminhtml/") { Area::Adminhtml } else { Area::Frontend };
+            let layer = LayoutLayer::Theme(id.clone());
+            // Theme overrides live under `<theme>/<Vendor_Module>/ui_component/`.
+            let Ok(entries) = std::fs::read_dir(dir) else { continue };
+            for entry in entries.flatten() {
+                let sub = entry.path().join("ui_component");
+                if sub.is_dir() {
+                    push_dir(&layer, &[area], sub);
+                }
+            }
+        }
+
+        let parsed: Vec<parse::RawUiComponent> = jobs
+            .par_iter()
+            .map(|j| {
+                std::fs::read_to_string(&j.path)
+                    .map(|t| parse::ui_component_xml(&t))
+                    .unwrap_or(parse::RawUiComponent { kind: None, ops: Vec::new() })
+            })
+            .collect();
+
+        let mut components: HashMap<(Area, String), (String, Vec<UiComponentContribution>)> =
+            HashMap::new();
+        for (job, raw) in jobs.iter().zip(parsed) {
+            for &area in &job.areas {
+                let module = match &job.layer {
+                    LayoutLayer::Module(m) => m.clone(),
+                    LayoutLayer::Theme(t) => ModuleName::new(t.as_str()),
+                };
+                let ops: Vec<UiComponentOp> = raw
+                    .ops
+                    .iter()
+                    .map(|r| UiComponentOp {
+                        element: r.element.clone(),
+                        name: r.name.clone(),
+                        class: r.class.clone(),
+                        component: r.component.clone(),
+                        form_element: r.form_element.clone(),
+                        sort_order: r.sort_order.clone(),
+                        label: r.label.clone(),
+                        disabled: r.disabled,
+                        visible: r.visible,
+                        parent: r.parent.clone(),
+                        depth: r.depth,
+                        source: Source {
+                            module: module.clone(),
+                            file: job.path.clone(),
+                            line: r.line,
+                            area,
+                        },
+                    })
+                    .collect();
+                let entry = components
+                    .entry((area, job.name.clone()))
+                    .or_insert_with(|| (String::new(), Vec::new()));
+                // Kind = the first declaring file's root element (load order).
+                if entry.0.is_empty() {
+                    if let Some(k) = &raw.kind {
+                        entry.0 = k.clone();
+                    }
+                }
+                entry.1.push(UiComponentContribution {
+                    layer: job.layer.clone(),
+                    file: job.path.clone(),
+                    ops,
+                });
+            }
+        }
+
+        Self { components }
+    }
+
+    /// Every component in `area` as `(name, kind, contributing files)`, sorted by name.
+    pub fn list(&self, area: Area) -> Vec<(String, String, usize)> {
+        let mut v: Vec<(String, String, usize)> = self
+            .components
+            .iter()
+            .filter(|((a, _), _)| *a == area)
+            .map(|((_, n), (kind, c))| (n.clone(), kind.clone(), c.len()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// One component's full view.
+    pub fn view(&self, name: &str, area: Area) -> Option<UiComponentView> {
+        let (kind, contributions) = self.components.get(&(area, name.to_string()))?.clone();
+        Some(UiComponentView { name: name.to_string(), kind, area, contributions })
     }
 }
 

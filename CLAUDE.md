@@ -181,7 +181,7 @@ CONFIG & ADMIN (where settings & permissions live)
 
 FRONTEND      (presentation)
   layout [<handle>] [--area]    widgets [<id>]    email-templates [<id>]
-  translations <str> [--locale] [--db]   ui-components (backlog)
+  translations <str> [--locale] [--db]   ui-components [<name>] [--area]
 
 RUNTIME       (env.php config & live connections)
   db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
@@ -983,6 +983,42 @@ unit-tested). Locale defaults to the configured `general/locale/code`. Exact phr
 single substring hit) → the layered view with `← effective`; multiple hits → key list.
 Validated synthetically: module load-order layering, theme override winning, and an
 identity row deleting an earlier module's translation.
+
+### `ui-components` (admin grids & forms, static, done — completes the FRONTEND group)
+
+`magequery ui-components [<name>] [--area]` — the "which module added this column to
+sales_order_grid" surface: every `view/{base,frontend,adminhtml}/ui_component/<name>.xml`
+of the enabled modules (base applies to both areas) plus theme overrides
+(`<theme>/<Vendor_Module>/ui_component/`, via the shared `discover_themes` — reported
+after modules, application depends on the active theme). Component name = file stem; only
+*direct* children of `ui_component/` count (Magento_Ui's `ui_component/etc/definition/`
+holds component *type* definitions, excluded by the non-recursive listing; magento2-base
+test fixtures never appear because only enabled modules are scanned). A `UiComponentIndex`
+in `breadth.rs` (lazy `OnceLock`, parallel parse), shaped like `LayoutIndex`: per (area,
+name) → contributions per file, honest per-file streams rather than a synthetic merge.
+
+`parse::ui_component_xml` exploits that the XML is **open-vocabulary** — the element name
+IS the component type and Magento merges by `(element, name)` — so any element with a
+`name` attribute is a node, EXCEPT inside `<argument>` (config-data trees; `<item name=>`
+is a key) and inside `<settings>` (semantic config; `<param>`/`<option>`/`<link>` all
+carry `name`), where only `<button>` is still real. `<settings>` children
+`label`/`disabled`/`visible` are routed to the enclosing node through at most one
+`<settings>` hop (a button's `<label>` is direct; an `<option><label>` is correctly NOT —
+unit-tested). Captured per node: element, name, `class=` (PHP), `component=` (JS),
+`formElement=`, `sortOrder=`, nesting depth + parent. Root element = the component kind
+(`listing`/`form`).
+
+CLI: list = `name  kind  N file(s)` (default area adminhtml, `--area frontend` for the
+widget grids); exact name or single-match substring → per-file node **tree** (indented by
+depth, mirroring the XML): `element name  "label"  \Class  formElement=  js=  so=` with
+red `✕ disabled` (removed on merge), yellow `[hidden]` (`visible=false`), per-node
+`#line`. Validated on mageos-lite (50 adminhtml components; sales_order_grid's full
+toolbar/massaction/columns tree with hidden flags exact; product_form = 4 modules,
+CatalogInventory's dynamicRows nesting + disabled template fields exact) and
+commerce-store (116 components, ~30ms; product_listing = 6 modules — InventorySalesAdminUi's
+`salable_quantity` column attributed with class/js/sortOrder). Known limitation: no
+cross-file merge resolution (a later file re-stating a node isn't diffed against the
+earlier one — each file's stream is shown with provenance instead).
 
 ## Future query tools (backlog — not yet built)
 

@@ -55,6 +55,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("widgets", "Widget types from widget.xml: block class, parameters"),
             ("email-templates", "Transactional email templates: file, theme overrides"),
             ("translations", "Every dictionary row for a phrase, in precedence order"),
+            ("ui-components", "Admin grids & forms: columns, fields, data providers per module"),
         ],
     ),
     (
@@ -256,6 +257,8 @@ enum Command {
     EmailTemplates(EmailTemplatesArgs),
     /// Every dictionary row for a phrase, in precedence order.
     Translations(TranslationsArgs),
+    /// UI components (admin grids & forms): columns, fields, data providers per module.
+    UiComponents(UiComponentsArgs),
 
     // ── Config & admin: where settings & permissions live ──
     /// Resolve a config path/section with its source (static, +--db).
@@ -441,6 +444,18 @@ struct TranslationsArgs {
     /// Also read the `translation` DB table (the layer that beats everything).
     #[arg(long)]
     db: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct UiComponentsArgs {
+    /// The component name (`sales_order_grid`) → every contributing file's nodes;
+    /// a substring filters the list. Omit to list every component.
+    name: Option<String>,
+    /// Area: adminhtml (default) or frontend.
+    #[arg(long)]
+    area: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -786,6 +801,7 @@ fn main() -> Result<()> {
         Command::Widgets(args) => widgets(&mage, &args, &cli.root),
         Command::EmailTemplates(args) => email_templates(&mage, &args, &cli.root),
         Command::Translations(args) => translations(&mage, &args, &cli.root),
+        Command::UiComponents(args) => ui_components(&mage, &args, &cli.root),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
         Command::Actions(args) => actions(&mage, &args, &cli.root),
@@ -1543,6 +1559,126 @@ fn layout_op_line(op: &magequery_core::LayoutOp) -> String {
             format!("{} move {}{to}{}", style::kind("→"), style::name(&op.name), style::path(&line))
         }
     }
+}
+
+fn ui_components(mage: &Magento, args: &UiComponentsArgs, root: &Path) -> Result<()> {
+    let area = match &args.area {
+        Some(a) => a.parse::<Area>().map_err(|e| anyhow!("{e}"))?,
+        None => Area::Adminhtml,
+    };
+
+    // Exact name → detail; otherwise a substring filters the list (single match → detail).
+    if let Some(name) = &args.name {
+        if let Some(view) = mage.ui_component(name, area) {
+            return render_ui_component(&view, args.json, root);
+        }
+        let needle = name.to_lowercase();
+        let matches: Vec<_> = mage
+            .ui_components(area)
+            .into_iter()
+            .filter(|(n, _, _)| n.to_lowercase().contains(&needle))
+            .collect();
+        if matches.len() == 1 {
+            let view = mage.ui_component(&matches[0].0, area).expect("listed component");
+            return render_ui_component(&view, args.json, root);
+        }
+        if matches.is_empty() {
+            return Err(anyhow!(
+                "no ui component matches `{name}` in {area}\n  \
+                 List components with `magequery ui-components --area {area}`."
+            ));
+        }
+        return render_ui_list(&matches, area, args.json);
+    }
+    render_ui_list(&mage.ui_components(area), area, args.json)
+}
+
+fn render_ui_list(list: &[(String, String, usize)], area: Area, json: bool) -> Result<()> {
+    if json {
+        let arr: Vec<_> = list
+            .iter()
+            .map(|(n, k, c)| serde_json::json!({"name": n, "kind": k, "files": c}))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+        return Ok(());
+    }
+    let wn = list.iter().map(|(n, _, _)| n.len()).max().unwrap_or(0);
+    let wk = list.iter().map(|(_, k, _)| k.len()).max().unwrap_or(0);
+    for (n, k, c) in list {
+        println!(
+            "{}{}  {}{}  {}",
+            style::name(n),
+            " ".repeat(wn - n.len()),
+            style::kind(k),
+            " ".repeat(wk - k.len()),
+            style::dim(&format!("{c} file(s)")),
+        );
+    }
+    eprintln!("\n{} component(s) ({area})", list.len());
+    Ok(())
+}
+
+fn render_ui_component(
+    view: &magequery_core::UiComponentView,
+    json: bool,
+    root: &Path,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(view)?);
+        return Ok(());
+    }
+    println!(
+        "{}  ({}, {})  {}",
+        style::name(&view.name),
+        style::kind(&view.kind),
+        style::area(&view.area.to_string()),
+        style::dim(&format!("— {} contributing file(s)", view.contributions.len())),
+    );
+    for c in &view.contributions {
+        let layer = match &c.layer {
+            magequery_core::LayoutLayer::Module(m) => style::module(m.as_str()),
+            magequery_core::LayoutLayer::Theme(t) => {
+                format!("{} {}", style::dim("theme"), style::area(t))
+            }
+        };
+        let rel = c.file.strip_prefix(root).unwrap_or(&c.file);
+        println!("\n{layer}   {}", style::path(&format!("# {}", rel.display())));
+        for op in &c.ops {
+            println!("  {}{}", "  ".repeat(op.depth as usize), ui_op_line(op));
+        }
+        if c.ops.is_empty() {
+            println!("  {}", style::dim("(no named nodes — arguments/settings only)"));
+        }
+    }
+    Ok(())
+}
+
+/// One ui component node, compact: element + name + only the details it states.
+fn ui_op_line(op: &magequery_core::UiComponentOp) -> String {
+    let mut s = format!("{} {}", style::kind(&op.element), style::name(&op.name));
+    if let Some(l) = &op.label {
+        s.push_str(&format!("  {}", style::string_lit(&format!("\"{l}\""))));
+    }
+    if let Some(c) = &op.class {
+        s.push_str(&format!("  {}", style::class(c.as_str())));
+    }
+    if let Some(f) = &op.form_element {
+        s.push_str(&format!("  {}", style::dim(&format!("formElement={f}"))));
+    }
+    if let Some(j) = &op.component {
+        s.push_str(&format!("  {}", style::dim(&format!("js={j}"))));
+    }
+    if let Some(so) = &op.sort_order {
+        s.push_str(&format!("  {}", style::dim(&format!("so={so}"))));
+    }
+    if op.disabled {
+        s.push_str(&format!("  {}", style::err("✕ disabled")));
+    }
+    if op.visible == Some(false) {
+        s.push_str(&format!("  {}", style::number("[hidden]")));
+    }
+    s.push_str(&style::path(&format!("   #{}", op.source.line)));
+    s
 }
 
 fn catalog_attributes(mage: &Magento, args: &CatalogAttrsArgs, root: &Path) -> Result<()> {
