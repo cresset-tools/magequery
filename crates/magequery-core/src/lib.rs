@@ -37,6 +37,7 @@ mod phparray;
 mod redis;
 mod resolver;
 mod sysconfig;
+mod whatis;
 
 pub use error::{Diagnostic, Error, Result, Severity};
 pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
@@ -53,8 +54,9 @@ pub use model::{
 pub use model::{
     CacheConfig, CacheFrontend, CacheType, InjectionSite, LockConfig, MqConsumer, MqHandler,
     MqPublisher, MqRoute, MqTopic, MqTopicRoute, MqVia, QueueConfig, QueueConnection,
-    SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses,
+    SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses, Whatis,
 };
+pub use model::ClassRef;
 pub use decrypt::Decryptor;
 pub use sysconfig::ConfigSet;
 pub use source::Source;
@@ -546,6 +548,16 @@ impl Magento {
     /// One indexer by exact id, with its full subscription list.
     pub fn indexer(&self, id: &str) -> Option<Indexer> {
         self.indexer_index().indexer(id)
+    }
+
+    /// Everything known about one class (or virtual type) on one screen: identity (file,
+    /// module, package, hierarchy), a compressed DI summary (forward + reverse), and every
+    /// configuration reference — events it observes, cron jobs, webapi routes, console
+    /// command, GraphQL resolvers, queue handlers, controller URLs. The aggregate view;
+    /// `di` and `uses` stay the focused drill-downs. A file with no references at all is
+    /// the interesting negative: candidate dead code.
+    pub fn whatis(&self, class: &ClassName) -> Result<Whatis> {
+        whatis::run(self, class)
     }
 
     /// Modules of one source across everything seen on disk: the config.php list plus the

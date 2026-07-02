@@ -189,7 +189,7 @@ RUNTIME       (env.php config & live connections)
 PROJECT       (the codebase itself)
   info      mode   maintenance   base-url [--secure]   admin-url   (single-fact views of info)
   modules [--check] [--enabled|--disabled] [--source app|vendor]
-  deps <module>             doctor [--source]          patches [--db] (backlog)   whatis <class> (backlog)
+  deps <module>             doctor [--source]          whatis <class>   patches [--db] (backlog)
 ```
 
 ### Cross-cutting flag vocabulary (a flag means the same thing everywhere)
@@ -746,6 +746,26 @@ argument, the `ProductRenderSearchResultsInterface` preference to a nonexistent 
 (caught a real mage-os bug: crontab.xml references `Cron\UpdateRemoteTemplates`, the class
 on disk is `UpdateRemoteTemplateList`; plus genuine Hyvä-modules-not-in-config.php drift).
 A synthetic broken module exercises every lint in one run.
+
+### `whatis` (everything about one class, done)
+
+`magequery whatis <Class>` — the aggregate view for "what IS this thing": pure composition
+(`whatis.rs`) of existing queries plus the doctor-style cross-index sweep scoped to one
+class. Sections (empty ones omitted): **identity** — file, kind (class/abstract/interface
+from the header; "virtual type" flagged), owning module (longest module-path prefix of the
+file) + composer package/version (root-ancestor walk over `PackageMeta`), direct
+extends/implements; **DI summary** — `resolves to` (preference redirect), `instantiates`
+(vtype base), plugin/argument counts with a `→ magequery di X` pointer, and the inlined
+`Uses` counts with `→ magequery uses X` (whatis stays scannable; the focused commands are
+the drill-downs); **the sweep** — events it observes, cron jobs, webapi routes, the
+`bin/magento` command name, GraphQL `@resolver`/`@typeResolver` fields, mq topic handlers
++ consumers, and controller URLs (the directory scan only runs when the name contains
+`\Controller\`). Works on virtual types. A real file with **zero references** prints the
+interesting negative: "(no configuration references this class — candidate dead code, or
+wired only in PHP)". Unknown name + no references = `ClassNotFound`. ~30ms warm on lite.
+Validated across every role: mq handler class, preference target, console command,
+observer, controller (URL resolved), virtual type, GraphQL resolver, dead code
+(`CouponUsagesDecrement`).
 
 ### `deps` (module dependency graph, done)
 

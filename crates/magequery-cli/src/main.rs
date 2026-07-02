@@ -77,6 +77,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("modules", "Installed modules in load order"),
             ("deps", "Module dependencies (sequence + composer), both directions"),
             ("doctor", "Cross-index lints: broken references, cycles, forgotten wiring"),
+            ("whatis", "Everything about one class: identity, DI, every config reference"),
         ],
     ),
 ];
@@ -270,6 +271,16 @@ enum Command {
     Deps(DepsArgs),
     /// Cross-index lints: broken references, cycles, forgotten wiring.
     Doctor(DoctorArgs),
+    /// Everything about one class: identity, DI, every config reference.
+    Whatis(WhatisArgs),
+}
+
+#[derive(clap::Args)]
+struct WhatisArgs {
+    /// The class or virtual type (leading backslash optional).
+    class: String,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -637,6 +648,7 @@ fn main() -> Result<()> {
         Command::Modules(args) => modules(&mage, &args),
         Command::Deps(args) => deps(&mage, &args, &cli.root),
         Command::Doctor(args) => doctor(&mage, &args, &cli.root),
+        Command::Whatis(args) => whatis(&mage, &args, &cli.root),
         Command::Preference(args) => preference(&mage, &args, &cli.root),
         Command::Plugins(args) => plugins(&mage, &args, &cli.root),
         Command::Di(args) => di(&mage, &args, &cli.root),
@@ -2438,7 +2450,7 @@ fn modules(mage: &Magento, args: &ModulesArgs) -> Result<()> {
 /// One aligned `info` row. Labels stay plain — only parenthetical annotations
 /// ("comments") are dimmed, by their producers.
 fn info_row(label: &str, value: impl AsRef<str>) {
-    println!("{label:<11}  {}", value.as_ref());
+    println!("{label:<12}  {}", value.as_ref());
 }
 
 /// `93s` → `1m`, `7305s` → `2h` — coarse on purpose; this is a health glance.
@@ -2808,6 +2820,158 @@ fn render_dep_edges(label: &str, edges: &[magequery_core::DepEdge], root: &Path)
             style::path(&short_loc(&e.source, root)),
         );
     }
+}
+
+fn whatis(mage: &Magento, args: &WhatisArgs, root: &Path) -> Result<()> {
+    let class = ClassName::new(args.class.as_str());
+    let w = mage.whatis(&class).map_err(|e| match e {
+        Error::ClassNotFound(c) => anyhow!(
+            "class not found: {c}\n  No source file resolves it and nothing in any \
+             configuration references it. Check the namespace and spelling."
+        ),
+        other => anyhow!(other),
+    })?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&w)?);
+        return Ok(());
+    }
+
+    // ── identity ──
+    let loc = w
+        .file
+        .as_deref()
+        .map(|f| style::path(&format!("# {}", f.strip_prefix(root).unwrap_or(f).display())))
+        .unwrap_or_else(|| {
+            if w.is_virtual_type {
+                style::dim("(virtual type — no source file)")
+            } else {
+                style::dim("(no source file — generated?)")
+            }
+        });
+    println!("{}   {loc}", style::class(w.class.as_str()));
+    let mut kind_parts = Vec::new();
+    if let Some(k) = &w.kind {
+        kind_parts.push(k.clone());
+    }
+    if w.is_virtual_type {
+        kind_parts.push("virtual type".to_string());
+    }
+    if !kind_parts.is_empty() {
+        info_row("kind", style::kind(&kind_parts.join(" · ")));
+    }
+    if let Some(m) = &w.module {
+        let pkg = w
+            .package
+            .as_deref()
+            .map(|p| {
+                let v = w.package_version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
+                format!("  {}", style::dim(&format!("({p}{v})")))
+            })
+            .unwrap_or_default();
+        info_row("module", format!("{}{pkg}", style::module(m.as_str())));
+    }
+    if !w.parents.is_empty() {
+        let list: Vec<String> = w.parents.iter().map(|c| style::class(c.as_str())).collect();
+        info_row("extends", list.join(", "));
+    }
+    if !w.interfaces.is_empty() {
+        let list: Vec<String> = w.interfaces.iter().map(|c| style::class(c.as_str())).collect();
+        info_row("implements", list.join(", "));
+    }
+
+    // ── DI summary ──
+    if let Some(to) = &w.resolves_to {
+        info_row("resolves to", format!("{}  {}", style::class(to.as_str()), style::dim("(preference)")));
+    }
+    if let Some(base) = &w.instantiates {
+        info_row("instantiates", style::class(base.as_str()));
+    }
+    if w.plugin_count > 0 || w.argument_count > 0 {
+        info_row(
+            "di",
+            format!(
+                "{} plugin(s), {} configured argument(s)  {}",
+                style::number(&w.plugin_count.to_string()),
+                style::number(&w.argument_count.to_string()),
+                style::dim(&format!("→ magequery di {}", w.class)),
+            ),
+        );
+    }
+    let u = &w.uses;
+    if !u.preferred_for.is_empty() || !u.virtual_types.is_empty() || !u.injections.is_empty() {
+        info_row(
+            "used by",
+            format!(
+                "{} preference(s), {} virtual type(s), {} injection(s)  {}",
+                style::number(&u.preferred_for.len().to_string()),
+                style::number(&u.virtual_types.len().to_string()),
+                style::number(&u.injections.len().to_string()),
+                style::dim(&format!("→ magequery uses {}", w.class)),
+            ),
+        );
+    }
+
+    // ── the cross-index sweep ──
+    for o in &w.observes {
+        let dis = if o.disabled { format!("  {}", style::err("[DISABLED]")) } else { String::new() };
+        info_row(
+            "observes",
+            format!(
+                "{} {}{dis}   {}",
+                style::name(o.event.as_str()),
+                style::dim(&format!("(observer `{}`)", o.name)),
+                style::path(&short_loc(&o.source, root)),
+            ),
+        );
+    }
+    for j in &w.cron_jobs {
+        info_row(
+            "cron",
+            format!(
+                "{}/{}::{}   {}",
+                style::area(&j.group),
+                style::name(&j.name),
+                j.method,
+                style::path(&short_loc(&j.source, root)),
+            ),
+        );
+    }
+    for r in &w.webapi {
+        info_row(
+            "webapi",
+            format!(
+                "{} {}   {}",
+                style::kind(&r.method),
+                r.url,
+                style::path(&short_loc(&r.source, root)),
+            ),
+        );
+    }
+    if let Some(c) = &w.command {
+        let name = c.name.as_deref().unwrap_or(&c.item_key);
+        info_row(
+            "command",
+            format!("bin/magento {}   {}", style::name(name), style::path(&short_loc(&c.source, root))),
+        );
+    }
+    for g in &w.graphql {
+        info_row("graphql", format!("{}   {}", g.role, style::path(&short_loc(&g.source, root))));
+    }
+    for m in &w.mq {
+        info_row("queue", format!("{}   {}", m.role, style::path(&short_loc(&m.source, root))));
+    }
+    for a in &w.action_urls {
+        info_row("url", format!("{}  {}", a.url, style::dim(&format!("({})", a.area))));
+    }
+
+    if !w.is_referenced() {
+        println!(
+            "\n{}",
+            style::dim("(no configuration references this class — candidate dead code, or wired only in PHP)")
+        );
+    }
+    Ok(())
 }
 
 fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {

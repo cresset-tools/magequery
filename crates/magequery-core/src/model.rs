@@ -57,6 +57,58 @@ impl ModuleCheck {
     }
 }
 
+/// One cross-index reference to a class (`whatis`): the role it plays and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ClassRef {
+    /// e.g. `@resolver of Query.products`, `consumer \`x\` of queue y`.
+    pub role: String,
+    pub source: Source,
+}
+
+/// Everything magequery knows about one class: identity, a compressed DI summary
+/// (forward + reverse), and every configuration reference to it. The aggregate view —
+/// `di`/`uses` remain the focused drill-downs.
+#[derive(Debug, Clone)]
+#[derive(serde::Serialize)]
+pub struct Whatis {
+    pub class: ClassName,
+    /// The PSR-4/PSR-0 source file; `None` for virtual types and generated classes.
+    pub file: Option<std::path::PathBuf>,
+    /// `class` / `abstract class` / `interface`, from the header parse.
+    pub kind: Option<String>,
+    pub is_virtual_type: bool,
+    /// The module whose directory contains the file.
+    pub module: Option<ModuleName>,
+    /// The composer package owning the file, and its version.
+    pub package: Option<String>,
+    pub package_version: Option<String>,
+    /// Direct parents/interfaces (full ancestry via `di`).
+    pub parents: Vec<ClassName>,
+    pub interfaces: Vec<ClassName>,
+    /// The concrete type a preference redirects this to (global area), when it differs.
+    pub resolves_to: Option<ClassName>,
+    /// For a virtual type: the real class it instantiates.
+    pub instantiates: Option<ClassName>,
+    /// Plugins that fire on it / configured constructor arguments (global area).
+    pub plugin_count: usize,
+    pub argument_count: usize,
+    /// The full reverse-DI result (see [`Uses`]).
+    pub uses: Uses,
+    /// Events it observes, cron jobs it runs, webapi routes it serves.
+    pub observes: Vec<Observer>,
+    pub cron_jobs: Vec<CronJob>,
+    pub webapi: Vec<WebapiRoute>,
+    /// The registered console command, when it is one.
+    pub command: Option<ConsoleCommand>,
+    /// GraphQL fields/types it resolves.
+    pub graphql: Vec<ClassRef>,
+    /// Message-queue handlers/consumers it backs.
+    pub mq: Vec<ClassRef>,
+    /// Controller URLs it serves, when it's an action.
+    pub action_urls: Vec<ControllerAction>,
+}
+
 /// A `doctor` lint identifier — what kind of problem a finding is.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
