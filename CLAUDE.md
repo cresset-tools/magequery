@@ -247,13 +247,18 @@ Only genuine parse/read failures remain as `Diagnostic`s.
 ## DI index (step 2, done)
 
 `di.rs` builds the merged DI config per area, mirroring Magento: merge Magento's **primary
-config `app/etc/di.xml` first** (it's where framework-level preferences live —
-`CommandListInterface → CommandList`, `ScopeConfigInterface → App\Config`, ~230 preferences
-on a real install; `Source.module` is the synthetic `(primary)`, module load orders shift
-by 1), then every module's `etc/di.xml` in load order → `global`; then each real area =
-`global.clone()` overlaid by that area's `etc/<area>/di.xml` in load order. Files are
-read+parsed in parallel (rayon), merged sequentially in load order so last-wins is
-deterministic.
+config first** (it's where framework-level preferences live — `CommandListInterface →
+CommandList`, `ScopeConfigInterface → App\Config`, ~230 preferences on a real install;
+`Source.module` is the synthetic `(primary)`, module load orders shift by 1), then every
+module's `etc/di.xml` in load order → `global`; then each real area = `global.clone()`
+overlaid by that area's `etc/<area>/di.xml` in load order. The primary file set is
+Magento's exact bootstrap glob (`App\Arguments\FileResolver\Primary`): `{*di.xml,
+*/*di.xml}` under `app/etc` — any file *ending in* `di.xml`, top level + one subdirectory
+level, in glob order (so a project's `app/etc/zz_di.xml` overrides `app/etc/di.xml`) —
+matching Magento's real sequence `extend(primary)` → `configure(global)` →
+`configure(<area>)`, verified against `ObjectManagerFactory`/`Environment\Developer`
+source. Files are read+parsed in parallel (rayon), merged sequentially in load order so
+last-wins is deterministic.
 
 - `parse::di_xml` extracts preferences, plugins, and virtualTypes with **exact line
   provenance** (`LineMap`: byte offset → 1-based line via binary search over newline

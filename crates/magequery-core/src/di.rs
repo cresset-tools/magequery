@@ -94,18 +94,18 @@ struct Parsed {
 }
 
 pub(crate) fn build(root: &Path, modules: &[Module], diags: &mut Vec<Diagnostic>) -> DiIndex {
-    // Enumerate di.xml files: Magento's "primary" config (`app/etc/di.xml` — where the
-    // framework-level preferences live, e.g. CommandListInterface → CommandList) merged
-    // first, then each module's global `etc/di.xml` plus `etc/<area>/di.xml`. Module load
-    // orders are shifted by 1 so the primary file sorts before every module.
+    // Enumerate di.xml files: Magento's "primary" config (where the framework-level
+    // preferences live, e.g. CommandListInterface → CommandList) merged first, then each
+    // module's global `etc/di.xml` plus `etc/<area>/di.xml`. Module load orders are
+    // shifted by 1 so every primary file sorts before every module (they all share load
+    // order 0; the sort is stable, so their glob order is preserved).
     let mut jobs: Vec<Job> = Vec::new();
-    let primary = root.join("app/etc/di.xml");
-    if primary.is_file() {
+    for path in primary_di_files(root) {
         jobs.push(Job {
             load_order: 0,
             area: Area::Global,
             module: ModuleName::new("(primary)"),
-            path: primary,
+            path,
         });
     }
     for m in modules {
@@ -157,6 +157,32 @@ pub(crate) fn build(root: &Path, modules: &[Module], diags: &mut Vec<Diagnostic>
     }
 
     DiIndex { global, areas }
+}
+
+/// The primary DI config files, exactly as Magento's bootstrap resolves them
+/// (`App\Arguments\FileResolver\Primary`): the glob `{*di.xml,*/*di.xml}` under `app/etc` —
+/// any file *ending in* `di.xml` directly in `app/etc/` plus one directory level below —
+/// in glob order (top-level matches sorted, then subdirectory matches sorted), so e.g. a
+/// project's `app/etc/zz_di.xml` merges after (and can override) `app/etc/di.xml`.
+fn primary_di_files(root: &Path) -> Vec<PathBuf> {
+    let etc = root.join("app/etc");
+    let entries = |dir: &Path| -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> =
+            std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
+        v.sort();
+        v
+    };
+    let is_di_file = |p: &PathBuf| {
+        p.is_file()
+            && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("di.xml"))
+    };
+
+    let top = entries(&etc);
+    let mut files: Vec<PathBuf> = top.iter().filter(|p| is_di_file(p)).cloned().collect();
+    for dir in top.iter().filter(|p| p.is_dir()) {
+        files.extend(entries(dir).into_iter().filter(|p| is_di_file(p)));
+    }
+    files
 }
 
 /// Merge every parsed file for `area` into `base`, in module load order.
