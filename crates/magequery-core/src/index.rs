@@ -124,7 +124,7 @@ impl Index {
         // The di.xml index is built lazily (see `Magento`) — it's the expensive part and
         // commands like `modules`/`events` don't need it. The resolver is cheap (PSR-4 maps
         // only; PHP parsing is lazy), so it stays eager.
-        let resolver = resolver::ClassResolver::build(&packages, &modules);
+        let resolver = resolver::ClassResolver::build(&packages, &modules, root);
 
         // Keep the slim package facts (already parsed) for the lazy `deps` graph.
         let packages = packages

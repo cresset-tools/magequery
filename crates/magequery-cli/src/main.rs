@@ -76,6 +76,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("admin-url", "Admin URL (bare value)"),
             ("modules", "Installed modules in load order"),
             ("deps", "Module dependencies (sequence + composer), both directions"),
+            ("doctor", "Cross-index lints: broken references, cycles, forgotten wiring"),
         ],
     ),
 ];
@@ -267,6 +268,19 @@ enum Command {
     Modules(ModulesArgs),
     /// Module dependencies from <sequence> + composer require, both directions.
     Deps(DepsArgs),
+    /// Cross-index lints: broken references, cycles, forgotten wiring.
+    Doctor(DoctorArgs),
+}
+
+#[derive(clap::Args)]
+struct DoctorArgs {
+    /// Restrict the unregistered-code scans (commands/observers/plugins that exist on
+    /// disk but are wired nowhere) to app or vendor modules. The reference checks always
+    /// cover the whole merged configuration.
+    #[arg(long, value_enum)]
+    source: Option<SourceFilter>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -622,6 +636,7 @@ fn main() -> Result<()> {
         Command::AdminUrl => admin_url(&mage),
         Command::Modules(args) => modules(&mage, &args),
         Command::Deps(args) => deps(&mage, &args, &cli.root),
+        Command::Doctor(args) => doctor(&mage, &args, &cli.root),
         Command::Preference(args) => preference(&mage, &args, &cli.root),
         Command::Plugins(args) => plugins(&mage, &args, &cli.root),
         Command::Di(args) => di(&mage, &args, &cli.root),
@@ -2787,6 +2802,46 @@ fn render_dep_edges(label: &str, edges: &[magequery_core::DepEdge], root: &Path)
             style::path(&short_loc(&e.source, root)),
         );
     }
+}
+
+fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
+    let source = args.source.map(|s| match s {
+        SourceFilter::App => ModuleSource::App,
+        SourceFilter::Vendor => ModuleSource::Vendor,
+    });
+    let report = mage.doctor(source);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if report.findings.is_empty() {
+        println!("{}", style::ok("OK — nothing to report"));
+    } else {
+        for f in &report.findings {
+            let tag = match f.severity {
+                magequery_core::Severity::Error => style::err("error"),
+                magequery_core::Severity::Warning => style::area("warn "),
+            };
+            let loc = f
+                .source
+                .as_ref()
+                .map(|s| format!("   {}", style::path(&short_loc(s, root))))
+                .unwrap_or_default();
+            println!("{tag}  {}{loc}", f.message);
+        }
+        eprintln!(
+            "\n{} error(s), {} warning(s)",
+            report.errors(),
+            report.warnings(),
+        );
+    }
+
+    // Errors fail the run (CI-able); warnings alone don't.
+    use std::io::Write;
+    std::io::stdout().flush().ok();
+    if report.errors() > 0 {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 fn modules_check(mage: &Magento, json: bool) -> Result<()> {

@@ -26,6 +26,9 @@ pub(crate) struct ComposerPackage {
     pub autoload_files: Vec<String>,
     /// `autoload.psr-4`: namespace prefix (e.g. `Magento\Catalog\`) -> absolute source dirs.
     pub psr4: Vec<(String, Vec<PathBuf>)>,
+    /// `autoload.psr-0` (e.g. `Cm\RedisSession\` -> `src/`); the prefix is *not* stripped
+    /// from the path.
+    pub psr0: Vec<(String, Vec<PathBuf>)>,
     /// `require` package names (version constraints dropped), sorted.
     pub require: Vec<String>,
 }
@@ -58,6 +61,8 @@ struct AutoloadEntry<'a> {
     /// Each value is a single path or a list of paths.
     #[serde(default, rename = "psr-4")]
     psr4: HashMap<String, StringOrVec>,
+    #[serde(default, rename = "psr-0")]
+    psr0: HashMap<String, StringOrVec>,
 }
 
 #[derive(Deserialize)]
@@ -96,22 +101,46 @@ pub(crate) fn installed_packages(vendor: &Path) -> Result<Vec<ComposerPackage>, 
         let mut require: Vec<String> = p.require.into_keys().collect();
         require.sort();
         let autoload_files = p.autoload.files.iter().map(|f| f.as_ref().to_owned()).collect();
-        let psr4 = p
-            .autoload
-            .psr4
-            .into_iter()
-            .map(|(prefix, v)| {
-                let rels = match v {
-                    StringOrVec::One(s) => vec![s],
-                    StringOrVec::Many(m) => m,
-                };
-                let dirs = rels.into_iter().map(|r| normalize(&root.join(r))).collect();
-                (prefix, dirs)
-            })
-            .collect();
-        out.push(ComposerPackage { name, version, root, autoload_files, psr4, require });
+        let psr4 = prefix_map(p.autoload.psr4, &root);
+        let psr0 = prefix_map(p.autoload.psr0, &root);
+        out.push(ComposerPackage { name, version, root, autoload_files, psr4, psr0, require });
     }
     Ok(out)
+}
+
+/// `namespace prefix -> source dirs`, the shape of a PSR-4/PSR-0 autoload map.
+pub(crate) type PrefixMap = Vec<(String, Vec<PathBuf>)>;
+
+fn prefix_map(map: HashMap<String, StringOrVec>, root: &Path) -> PrefixMap {
+    map.into_iter()
+        .map(|(prefix, v)| {
+            let rels = match v {
+                StringOrVec::One(s) => vec![s],
+                StringOrVec::Many(m) => m,
+            };
+            let dirs = rels.into_iter().map(|r| normalize(&root.join(r))).collect();
+            (prefix, dirs)
+        })
+        .collect()
+}
+
+/// The ROOT project's own `composer.json` autoload maps — not in `installed.json`, but
+/// load-bearing: `Magento\Setup\` (setup/src/…) and, on git checkouts,
+/// `Magento\Framework\`/`Magento\` live here. Returns `(psr-4, psr-0)`; empty when there
+/// is no readable root composer.json.
+pub(crate) fn root_autoload(root: &Path) -> (PrefixMap, PrefixMap) {
+    #[derive(Deserialize, Default)]
+    struct RootComposer<'a> {
+        #[serde(default, borrow)]
+        autoload: AutoloadEntry<'a>,
+    }
+    let Ok(text) = std::fs::read_to_string(root.join("composer.json")) else {
+        return (Vec::new(), Vec::new());
+    };
+    let Ok(rc) = serde_json::from_str::<RootComposer>(&text) else {
+        return (Vec::new(), Vec::new());
+    };
+    (prefix_map(rc.autoload.psr4, root), prefix_map(rc.autoload.psr0, root))
 }
 
 /// Lexically resolve `.`/`..` so paths read cleanly (e.g. `vendor/composer/../magento/x`

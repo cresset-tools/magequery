@@ -26,23 +26,41 @@ fn is_action_base(c: &ClassName) -> bool {
 }
 
 pub(crate) struct ClassResolver {
-    /// `(namespace prefix ending in '\', source dirs)`, sorted longest-prefix-first so PSR-4
-    /// longest-match wins.
+    /// PSR-4: `(namespace prefix ending in '\', source dirs)`, sorted longest-prefix-first
+    /// so longest-match wins. The prefix is stripped from the path.
     prefixes: Vec<(String, Vec<PathBuf>)>,
+    /// PSR-0: the prefix stays part of the path (`Cm\RedisSession\X` under `src/` is
+    /// `src/Cm/RedisSession/X.php`). (Underscore-as-separator in the class name is not
+    /// modeled — no Magento-adjacent PSR-0 package needs it.)
+    psr0: Vec<(String, Vec<PathBuf>)>,
     /// Lazily parsed PHP headers, keyed by class name (`None` = file missing/unparseable).
     headers: Mutex<HashMap<ClassName, Option<Arc<PhpClass>>>>,
 }
 
 impl ClassResolver {
-    pub fn build(packages: &[ComposerPackage], modules: &[Module]) -> Self {
+    pub fn build(
+        packages: &[ComposerPackage],
+        modules: &[Module],
+        root: &std::path::Path,
+    ) -> Self {
         let mut prefixes: Vec<(String, Vec<PathBuf>)> = Vec::new();
+        let mut psr0: Vec<(String, Vec<PathBuf>)> = Vec::new();
 
-        // Vendor PSR-4 from composer metadata.
+        // Vendor PSR-4/PSR-0 from composer metadata.
         for pkg in packages {
             for (prefix, dirs) in &pkg.psr4 {
                 prefixes.push((prefix.clone(), dirs.clone()));
             }
+            for (prefix, dirs) in &pkg.psr0 {
+                psr0.push((prefix.clone(), dirs.clone()));
+            }
         }
+
+        // The root project's own composer.json autoload (not in installed.json): this is
+        // where `Magento\Setup\` — and on git checkouts the whole framework — lives.
+        let (root_psr4, root_psr0) = crate::composer::root_autoload(root);
+        prefixes.extend(root_psr4);
+        psr0.extend(root_psr0);
 
         // app/code is not composer-managed; synthesize the Magento convention
         // `Vendor_Module` -> namespace `Vendor\Module\` rooted at the module dir.
@@ -51,12 +69,14 @@ impl ClassResolver {
             prefixes.push((ns, vec![m.path.clone()]));
         }
 
-        prefixes.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-        Self { prefixes, headers: Mutex::new(HashMap::new()) }
+        prefixes.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
+        psr0.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
+        Self { prefixes, psr0, headers: Mutex::new(HashMap::new()) }
     }
 
-    /// The on-disk file a class maps to, if any PSR-4 prefix resolves it to an existing
-    /// `.php`. Scans matching prefixes longest-first and returns the first file that exists.
+    /// The on-disk file a class maps to, if any PSR-4/PSR-0 prefix resolves it to an
+    /// existing `.php`. Scans matching prefixes longest-first and returns the first file
+    /// that exists.
     pub fn file_for(&self, class: &ClassName) -> Option<PathBuf> {
         let name = class.as_str();
         for (prefix, dirs) in &self.prefixes {
@@ -70,7 +90,27 @@ impl ClassResolver {
                 }
             }
         }
+        for (prefix, dirs) in &self.psr0 {
+            if name.starts_with(prefix.as_str()) {
+                let rel = format!("{}.php", name.replace('\\', "/"));
+                for dir in dirs {
+                    let candidate = dir.join(&rel);
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
         None
+    }
+
+    /// Whether any autoload prefix covers this class name at all. When none does, the
+    /// class may still exist via a classmap (which installed.json only names as dirs) —
+    /// i.e. "not found" is only meaningful for classes this returns `true` for.
+    pub fn has_prefix_for(&self, class: &ClassName) -> bool {
+        let name = class.as_str();
+        self.prefixes.iter().any(|(p, _)| name.starts_with(p.as_str()))
+            || self.psr0.iter().any(|(p, _)| name.starts_with(p.as_str()))
     }
 
     /// Whether the class resolves to an existing source file.
@@ -87,6 +127,11 @@ impl ClassResolver {
             }
             _ => false,
         }
+    }
+
+    /// The parsed header for `class` (crate-internal; `doctor` checks interface/abstract).
+    pub(crate) fn header_of(&self, class: &ClassName) -> Option<Arc<PhpClass>> {
+        self.header(class)
     }
 
     /// The parsed header for `class`, reading + parsing on first request and caching.

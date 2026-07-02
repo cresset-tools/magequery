@@ -189,7 +189,7 @@ RUNTIME       (env.php config & live connections)
 PROJECT       (the codebase itself)
   info      mode   maintenance   base-url [--secure]   admin-url   (single-fact views of info)
   modules [--check] [--enabled|--disabled] [--source app|vendor]
-  deps <module>             patches [--db] (backlog)   doctor (backlog)   whatis <class> (backlog)
+  deps <module>             doctor [--source]          patches [--db] (backlog)   whatis <class> (backlog)
 ```
 
 ### Cross-cutting flag vocabulary (a flag means the same thing everywhere)
@@ -707,6 +707,45 @@ reading the schema alone. Validated on mageos-additive-boot (45 schema files, 41
 fields incl. Inventory/GiftMessage additions; the `extend type ShippingCartAddress` case
 merges; enum/union/field views exact. List ~10ms; type detail ~23ms (builds the DI index
 for the preference join).
+
+### `doctor` (cross-index lints, done)
+
+`magequery doctor [--source app|vendor]` — everything the merged config references that
+doesn't exist, structural breakage, and probably-forgotten wiring. Pure projection over the
+existing indexes (~90–140ms); exits 1 on **errors** only, so warnings can't fail CI.
+`doctor.rs` in core, `Magento::doctor(source?) -> DoctorReport` (typed `DoctorLint` +
+`Severity` per finding, provenance where there is one).
+
+**Errors** (break at runtime): preference targets / virtualType bases / plugin classes /
+di argument objects / observer instances / cron instances / webapi services / console
+commands / mq handlers+consumers / GraphQL resolvers referencing **missing classes**;
+webapi `<resource>` ids no acl.xml declares; preference/virtualType/`<sequence>` cycles;
+`in_config_not_on_disk` modules. **Warnings**: `on_disk_not_in_config` modules
+(setup:upgrade drift), queues no consumer reads, and the **unregistered-code** lints —
+classes under `Console/`/`Observer/`/`Plugin/` that are concrete, match their base type
+(Symfony Command / ObserverInterface / has `before*`/`around*`/`after*` methods) and are
+wired **nowhere**. `--source` restricts only these scans; candidates are verified by
+resolving the conventional class name back through PSR-4 to the same file (namespace-
+diverging modules are skipped, never misreported).
+
+The false-positive war is the design (doctor must not cry wolf) — `class_known` accepts:
+global-namespace names (PHP built-ins like `DateTime`), virtual types, generated code
+(`\Proxy`/`\Interceptor`/`…Factory` verified against their base; `…Extension[Interface]`
+as-is), and **namespaces no autoload prefix covers** (classmap packages are unverifiable
+from installed.json). "Registered" sets are widened by virtual-type bases (Sales registers
+grid observers as virtualTypes), ancestors of registered classes, and **any class
+referenced anywhere in DI** (preference targets — how Elgentos swaps in its
+GenerateVclCommand — and argument objects). Building doctor also drove two resolver fixes:
+**PSR-0 support** (`Cm\RedisSession` — session save handler classes) and the **root
+composer.json autoload** (`Magento\Setup\`, and the whole framework on git checkouts).
+
+Validated on mageos-lite (down to 2 errors + 2 warnings, all four *genuine upstream
+Magento bugs/dead code*: the dangling `Magento\Indexer\Model\Handler\DefaultHandler` di
+argument, the `ProductRenderSearchResultsInterface` preference to a nonexistent class,
+`MaxHeapTableSizeProcessorOnFullReindex`, `CouponUsagesDecrement`) and commerce-store
+(caught a real mage-os bug: crontab.xml references `Cron\UpdateRemoteTemplates`, the class
+on disk is `UpdateRemoteTemplateList`; plus genuine Hyvä-modules-not-in-config.php drift).
+A synthetic broken module exercises every lint in one run.
 
 ### `deps` (module dependency graph, done)
 

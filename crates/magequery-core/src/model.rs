@@ -57,6 +57,63 @@ impl ModuleCheck {
     }
 }
 
+/// A `doctor` lint identifier — what kind of problem a finding is.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DoctorLint {
+    ModuleMissingOnDisk,
+    ModuleNotRegistered,
+    SequenceCycle,
+    PreferenceTargetMissing,
+    PreferenceCycle,
+    VirtualTypeBaseMissing,
+    VirtualTypeCycle,
+    PluginClassMissing,
+    DiArgumentClassMissing,
+    ObserverClassMissing,
+    CronInstanceMissing,
+    WebapiServiceMissing,
+    AclResourceUnknown,
+    CommandClassMissing,
+    MqHandlerMissing,
+    QueueNoConsumer,
+    GraphqlResolverMissing,
+    CommandUnregistered,
+    ObserverUnregistered,
+    PluginUnregistered,
+}
+
+/// One `doctor` finding. Errors are things that break at runtime (dangling references,
+/// cycles, module-set drift); warnings are probably-forgotten wiring (unregistered
+/// commands/observers/plugins, unconsumed queues) that may be intentional.
+#[derive(Debug, Clone)]
+#[derive(serde::Serialize)]
+pub struct DoctorFinding {
+    pub lint: DoctorLint,
+    pub severity: crate::error::Severity,
+    pub message: String,
+    /// The declaring file, when the finding has one.
+    pub source: Option<Source>,
+}
+
+/// The `doctor` result: findings sorted errors-first.
+#[derive(Debug, Clone)]
+#[derive(serde::Serialize)]
+pub struct DoctorReport {
+    pub findings: Vec<DoctorFinding>,
+}
+
+impl DoctorReport {
+    pub fn errors(&self) -> usize {
+        self.findings.iter().filter(|f| f.severity == crate::error::Severity::Error).count()
+    }
+    pub fn warnings(&self) -> usize {
+        self.findings.len() - self.errors()
+    }
+}
+
 /// The everyday facts about an installation, on one screen: what/where it is and how it's
 /// deployed. Config values always *try* the database (base URLs usually live only there)
 /// and fall back to the static sources; every env-derived field degrades to `None` on a

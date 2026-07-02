@@ -28,6 +28,7 @@ mod db;
 mod decrypt;
 mod deploy;
 mod di;
+mod doctor;
 mod graphql;
 mod index;
 mod parse;
@@ -42,7 +43,8 @@ pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
     AclResource, ArgItem, ArgValue, Argument, ByArea, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ConsoleCommand, ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
-    DbTable, DepEdge, GqlArg, GqlField, GqlKind, GqlType, Indexer, InstanceInfo, InterceptKind,
+    DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, GqlArg, GqlField, GqlKind, GqlType,
+    Indexer, InstanceInfo, InterceptKind,
     MethodChain, Module, ModuleCheck, ModuleDeps,
     MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
@@ -544,6 +546,16 @@ impl Magento {
     /// One indexer by exact id, with its full subscription list.
     pub fn indexer(&self, id: &str) -> Option<Indexer> {
         self.indexer_index().indexer(id)
+    }
+
+    /// Cross-index lints: everything the merged configuration references that doesn't
+    /// exist (classes, ACL resources), structural problems (preference/virtual-type/
+    /// `<sequence>` cycles, module-set drift), and probably-forgotten wiring (command/
+    /// observer/plugin classes registered nowhere, queues nothing consumes). Errors break
+    /// at runtime; warnings may be intentional. `source` restricts the *unregistered-code*
+    /// scans to app or vendor modules (the reference checks always cover everything).
+    pub fn doctor(&self, source: Option<model::ModuleSource>) -> DoctorReport {
+        doctor::run(self, source)
     }
 
     /// The everyday facts, on one screen: version/distribution, deploy mode, maintenance
