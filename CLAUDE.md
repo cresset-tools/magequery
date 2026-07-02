@@ -613,14 +613,27 @@ product package in `installed.json` — `*/product-enterprise-edition` →
 `*/product-community-edition` → `*/magento2-base`, first hit; the package name also tells
 the distribution apart), **deploy mode** (`env.php` `MAGE_MODE`; absent = "default"),
 **maintenance** (`var/.maintenance.flag` + exempt IPs from `var/.maintenance.ip`),
-**base URLs**, **admin URL**, and — the sys:info parity set — **search engine**
+**base URLs**, **admin URL**, the **frontend stack**, and — the sys:info parity set — **search engine**
 (`catalog/search/engine`), **db** (dbname @ host/socket + table prefix, credentials
 deliberately omitted from this paste-into-a-ticket view), **session** and **cache**
 one-liners (reusing the env.php extractors; an empty backend class renders as the implicit
 `file` default), **websites/store views** (from `config.php`'s `scopes` node when the
 config is dumped, the synthetic `admin` scopes excluded; absent → line skipped),
-**module counts split vendor / app/code**, and the **install date** (`env.php`
-`install/date`). Unlike the `--db` commands, `info`
+**module counts split vendor / app/code**, the **composer package count**, and the
+**install date** (`env.php` `install/date`).
+
+Frontend detection (`theme`/`frontend`/`frontend_version`): the active theme =
+`design/theme/theme_id` (default scope; a numeric id is resolved — and its ancestry
+walked — via the DB `theme` table through `db::fetch_themes`; a path string works without
+it), falling back to the DI default (`Magento\Theme\Model\View\Design`'s
+`themes['frontend']` argument — what Magento itself uses when nothing is configured). The
+chain is classified: any `Hyva/*` ancestor → Hyvä (version from the
+`hyva-themes/magento2-default-theme` package), `*breeze*` → Breeze (swissup packages),
+`Magento/luma`/`Magento/blank` → Luma/Blank; an unclassified path renders as "(custom
+theme)". Two honesty rules: when only packages identify the stack (active theme
+unresolvable) the CLI says "(installed; active theme unknown)", and the DI default is NOT
+trusted when the DB is unreachable while Hyvä/Breeze packages are installed — the real
+theme row is invisible and "Luma" would be a confident wrong answer on a Hyvä shop. Unlike the `--db` commands, `info`
 **always tries the database** (base URLs usually live only in `core_config_data`) and
 degrades to the static sources when unreachable — `InstanceInfo.db_error` records why and
 the CLI prints a stderr note; the fail-fast TCP pre-check keeps the down-DB case at ~50ms.

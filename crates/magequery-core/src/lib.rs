@@ -635,6 +635,92 @@ impl Magento {
             _ => None,
         };
 
+        let has_pkg = |prefix: &str| self.index.packages.iter().any(|p| p.name.starts_with(prefix));
+        let frontend_pkgs_installed =
+            has_pkg("hyva-themes/") || has_pkg("swissup/breeze") || has_pkg("swissup/module-breeze");
+
+        // The active frontend theme: config `design/theme/theme_id` (default scope) —
+        // a numeric id (needs the `theme` table) or a path string — falling back to the
+        // DI default (`Magento\Theme\Model\View\Design`'s `themes['frontend']` argument,
+        // the same fallback Magento itself uses when nothing is configured). The DI
+        // default is only trusted when the DB was consulted (or no installed frontend
+        // package contradicts it): with the DB unreachable, the real theme row is
+        // invisible and "Magento/luma" would be a confident wrong answer on a Hyvä shop.
+        let theme_value = get("design/theme/theme_id").or_else(|| {
+            if db_error.is_some() && frontend_pkgs_installed {
+                return None;
+            }
+            let design = ClassName::new("Magento\\Theme\\Model\\View\\Design");
+            let args = self.args_of(&design, Area::Global, &mut std::collections::HashSet::new());
+            let (ArgValue::Array(items), _) = args.get("themes")? else { return None };
+            items.iter().find(|i| i.key == "frontend").and_then(|i| match &i.value {
+                ArgValue::Scalar { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+        });
+        // Resolve to a path + ancestor chain via the theme table when reachable; a path
+        // string works without it (single-element chain).
+        let theme_rows = if db_error.is_none() { self.fetch_theme_rows().ok() } else { None };
+        let mut theme_chain: Vec<String> = Vec::new();
+        if let Some(v) = &theme_value {
+            let start_id = match v.parse::<u32>() {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    theme_chain.push(v.clone());
+                    theme_rows.as_ref().and_then(|rows| {
+                        rows.iter()
+                            .find(|(_, _, p, area)| area == "frontend" && p.as_deref() == Some(v))
+                            .map(|(_, parent, _, _)| *parent)
+                            .flatten()
+                    })
+                }
+            };
+            if let (Some(rows), Some(mut id)) = (&theme_rows, start_id) {
+                let mut seen = std::collections::HashSet::new();
+                while seen.insert(id) {
+                    let Some((_, parent, path, _)) = rows.iter().find(|(tid, ..)| *tid == id)
+                    else {
+                        break;
+                    };
+                    if let Some(p) = path {
+                        if !theme_chain.contains(p) {
+                            theme_chain.push(p.clone());
+                        }
+                    }
+                    match parent {
+                        Some(p) => id = *p,
+                        None => break,
+                    }
+                }
+            }
+        }
+        let theme = theme_chain.first().cloned();
+        // Classify the stack by ancestry; when the active theme is unknown, fall back to
+        // "which frontend packages are installed" (honest but weaker — the CLI says so).
+        let pkg_version = |exact: &str, prefix: &str| {
+            self.index
+                .packages
+                .iter()
+                .find(|p| p.name == exact)
+                .or_else(|| self.index.packages.iter().find(|p| p.name.starts_with(prefix)))
+                .and_then(|p| p.version.clone())
+        };
+        let (frontend, frontend_version) = if theme_chain.iter().any(|p| p.starts_with("Hyva/")) {
+            (Some("Hyvä".to_string()), pkg_version("hyva-themes/magento2-default-theme", "hyva-themes/"))
+        } else if theme_chain.iter().any(|p| p.to_lowercase().contains("breeze")) {
+            (Some("Breeze".to_string()), pkg_version("swissup/module-breeze", "swissup/breeze"))
+        } else if theme_chain.iter().any(|p| p == "Magento/luma") {
+            (Some("Luma".to_string()), None)
+        } else if theme_chain.iter().any(|p| p == "Magento/blank") {
+            (Some("Blank".to_string()), None)
+        } else if theme.is_none() && has_pkg("hyva-themes/") {
+            (Some("Hyvä".to_string()), pkg_version("hyva-themes/magento2-default-theme", "hyva-themes/"))
+        } else if theme.is_none() && (has_pkg("swissup/breeze") || has_pkg("swissup/module-breeze")) {
+            (Some("Breeze".to_string()), pkg_version("swissup/module-breeze", "swissup/breeze"))
+        } else {
+            (None, None)
+        };
+
         // Deployment one-liners, from the existing env.php extractors (credentials
         // deliberately left out of this casual, paste-into-a-ticket view).
         let db_conn = self.db_config().ok().and_then(|c| {
@@ -674,6 +760,9 @@ impl Magento {
         InstanceInfo {
             db_error,
             search_engine: get("catalog/search/engine"),
+            theme,
+            frontend,
+            frontend_version,
             db_name: db_conn.as_ref().map(|(n, _, _)| n.clone()),
             db_endpoint: db_conn.as_ref().map(|(_, e, _)| e.clone()),
             table_prefix: db_conn.and_then(|(_, _, p)| (!p.is_empty()).then_some(p)),
@@ -699,6 +788,7 @@ impl Magento {
                 .iter()
                 .filter(|m| m.source == model::ModuleSource::App)
                 .count(),
+            packages_total: self.index.packages.len(),
             version: version_pkg.and_then(|p| p.version.clone()),
             version_package: version_pkg.map(|p| p.name.clone()),
             mode,
@@ -955,6 +1045,19 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         db::fetch_config(conn, &cfg.table_prefix).map_err(Error::Db)
+    }
+
+    /// `(theme_id, parent_id, theme_path, area)` rows from the `theme` table.
+    #[cfg(feature = "db")]
+    fn fetch_theme_rows(&self) -> Result<Vec<(u32, Option<u32>, Option<String>, String)>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        db::fetch_themes(conn, &cfg.table_prefix).map_err(Error::Db)
+    }
+
+    #[cfg(not(feature = "db"))]
+    fn fetch_theme_rows(&self) -> Result<Vec<(u32, Option<u32>, Option<String>, String)>> {
+        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
     }
 
     #[cfg(not(feature = "db"))]

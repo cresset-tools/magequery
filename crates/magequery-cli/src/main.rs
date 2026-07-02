@@ -2451,12 +2451,10 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
     } else {
         println!("maintenance  {}", style::ok("off"));
     }
-    // A `{{base_url}}`-style value is the config.xml placeholder: auto-detect from the
-    // request — i.e. not configured in any reachable source.
+    // A `{{base_url}}`-style value is the config.xml placeholder (auto-detect from the
+    // request); the text speaks for itself, dimmed.
     let url = |u: &Option<String>| match u {
-        Some(u) if u.contains("{{") => {
-            format!("{}  {}", style::dim(u), style::dim("(auto-detected per request)"))
-        }
+        Some(u) if u.contains("{{") => style::dim(u),
         Some(u) => style::class(u),
         None => style::dim("(not set)"),
     };
@@ -2474,11 +2472,27 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
     println!("base url     {}{overrides}", url(&i.base_url));
     println!("secure       {}", url(&i.base_url_secure));
     match (&i.admin_url, &i.admin_front_name) {
-        (Some(u), Some(f)) => {
-            println!("admin        {}  {}", style::class(u), style::dim(&format!("(frontName {f})")))
-        }
+        (Some(u), _) => println!("admin        {}", style::class(u)),
         (None, Some(f)) => println!("admin        frontName {}", style::name(f)),
         _ => println!("admin        {}", style::dim("(no backend/frontName in env.php)")),
+    }
+    // The frontend stack: classification (+ package version) and the active theme path.
+    match (&i.frontend, &i.theme) {
+        (Some(f), theme) => {
+            let version = i
+                .frontend_version
+                .as_deref()
+                .map(|v| format!(" {}", style::number(v)))
+                .unwrap_or_default();
+            let detail = match theme {
+                Some(t) => style::dim(&format!("(theme {t})")),
+                // Classified from installed packages only — say the active theme is unknown.
+                None => style::dim("(installed; active theme unknown)"),
+            };
+            println!("frontend     {}{version}  {detail}", style::ok(f));
+        }
+        (None, Some(t)) => println!("frontend     {}  {}", style::class(t), style::dim("(custom theme)")),
+        (None, None) => {}
     }
     if let Some(s) = &i.search_engine {
         println!("search       {}", style::ok(s));
@@ -2550,6 +2564,9 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         style::number(&format!("{} enabled", i.modules_enabled)),
         style::dim(&format!("({} vendor, {} app/code)", i.modules_vendor, i.modules_app)),
     );
+    if i.packages_total > 0 {
+        println!("packages     {}", style::number(&i.packages_total.to_string()));
+    }
     if let Some(d) = &i.installed_at {
         println!("installed    {}", style::dim(d));
     }

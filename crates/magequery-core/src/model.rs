@@ -89,6 +89,15 @@ pub struct InstanceInfo {
     pub admin_url: Option<String>,
     /// `catalog/search/engine` (opensearch, elasticsearch7, …).
     pub search_engine: Option<String>,
+    /// The active frontend theme path (default scope), e.g. `Hyva/default` — from
+    /// `design/theme/theme_id` (resolved via the `theme` table when it's a numeric id),
+    /// falling back to the DI default (`Magento\Theme\Model\View\Design` `themes` arg).
+    pub theme: Option<String>,
+    /// The frontend stack, classified from the theme's ancestry (or, when the active theme
+    /// is unknown, from installed packages): `Hyvä`, `Breeze`, `Luma`, `Blank`.
+    pub frontend: Option<String>,
+    /// The frontend package's version (Hyvä/Breeze; stock themes ship with Magento).
+    pub frontend_version: Option<String>,
     /// The default DB connection, credentials omitted: database name and endpoint
     /// (`host:port` or a socket path).
     pub db_name: Option<String>,
@@ -111,6 +120,8 @@ pub struct InstanceInfo {
     pub modules_enabled: usize,
     pub modules_vendor: usize,
     pub modules_app: usize,
+    /// Named composer packages in `installed.json`.
+    pub packages_total: usize,
 }
 
 /// One edge of a module's dependency graph: the neighbouring module and how the

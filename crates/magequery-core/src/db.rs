@@ -111,6 +111,21 @@ pub(crate) fn fetch_config(
     Ok(out)
 }
 
+/// Read the `theme` table: registered themes with their parent links, for resolving the
+/// active `design/theme/theme_id` (a numeric id) to a theme path and its ancestry.
+/// Returns `(theme_id, parent_id, theme_path, area)`; virtual themes have no path.
+pub(crate) fn fetch_themes(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<Vec<(u32, Option<u32>, Option<String>, String)>, String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    c.query(format!(
+        "SELECT theme_id, parent_id, theme_path, area FROM {table_prefix}theme"
+    ))
+    .map_err(clean_err)
+}
+
 /// Read the `url_rewrite` table, resolving each row's `store_id` to a store code. Filters
 /// (path substring on request/target, store code, redirects-only) are applied **in SQL** —
 /// the table is often huge. Fetches `limit + 1` rows to detect truncation; returns
