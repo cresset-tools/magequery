@@ -69,6 +69,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
     (
         "Project",
         &[
+            ("info", "The everyday facts: version, mode, maintenance, base/admin URLs"),
             ("modules", "Installed modules in load order"),
             ("deps", "Module dependencies (sequence + composer), both directions"),
         ],
@@ -248,10 +249,22 @@ enum Command {
     UrlRewrites(UrlRewritesArgs),
 
     // ── Project: the codebase itself ──
+    /// The everyday facts: version, mode, maintenance, base/admin URLs, module counts.
+    Info(InfoCmdArgs),
     /// Installed modules in load order.
     Modules(ModulesArgs),
     /// Module dependencies from <sequence> + composer require, both directions.
     Deps(DepsArgs),
+}
+
+#[derive(clap::Args)]
+struct InfoCmdArgs {
+    /// Also read `core_config_data` for the base URLs (they usually live in the DB;
+    /// needs a reachable database).
+    #[arg(long)]
+    db: bool,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Args)]
@@ -580,6 +593,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("opening Magento installation at {}", cli.root.display()))?;
 
     let result = match cli.command {
+        Command::Info(args) => info(&mage, &args),
         Command::Modules(args) => modules(&mage, &args),
         Command::Deps(args) => deps(&mage, &args, &cli.root),
         Command::Preference(args) => preference(&mage, &args, &cli.root),
@@ -2377,6 +2391,76 @@ fn modules(mage: &Magento, args: &ModulesArgs) -> Result<()> {
         );
     }
     eprintln!("\n{} module(s)", selected.len());
+    Ok(())
+}
+
+fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
+    let i = mage.info(args.db).map_err(|e| anyhow!(e))?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&i)?);
+        return Ok(());
+    }
+
+    match (&i.version, &i.version_package) {
+        (Some(v), Some(p)) => {
+            println!("magento      {}  {}", style::number(v), style::dim(&format!("({p})")))
+        }
+        _ => println!("magento      {}", style::dim("(version unknown — no product package found)")),
+    }
+    // Absent MAGE_MODE = Magento's "default" mode; no env.php at all = not installed.
+    match &i.mode {
+        Some(m) => {
+            let styled = if m == "production" { style::ok(m) } else { style::area(m) };
+            println!("mode         {styled}");
+        }
+        None => println!("mode         {}", style::dim("default (no MAGE_MODE in env.php)")),
+    }
+    if i.maintenance {
+        let ips = if i.maintenance_allowed_ips.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", style::dim(&format!("(allowed: {})", i.maintenance_allowed_ips.join(", "))))
+        };
+        println!("maintenance  {}{ips}  {}", style::err("ON"), style::path("# var/.maintenance.flag"));
+    } else {
+        println!("maintenance  {}", style::ok("off"));
+    }
+    // A `{{base_url}}`-style value is the config.xml placeholder: auto-detect from the
+    // request — i.e. not configured statically; the real value usually lives in the DB.
+    let url = |u: &Option<String>| match u {
+        Some(u) if u.contains("{{") => {
+            format!("{}  {}", style::dim(u), style::dim("(auto — usually set in the DB; try --db)"))
+        }
+        Some(u) => style::class(u),
+        None => style::dim("(not set)"),
+    };
+    let overrides = if i.base_url_overrides > 0 {
+        format!(
+            "  {}",
+            style::dim(&format!(
+                "(+{} store/website overrides — see `config web/unsecure/base_url`)",
+                i.base_url_overrides
+            ))
+        )
+    } else {
+        String::new()
+    };
+    println!("base url     {}{overrides}", url(&i.base_url));
+    println!("secure       {}", url(&i.base_url_secure));
+    match (&i.admin_url, &i.admin_front_name) {
+        (Some(u), Some(f)) => {
+            println!("admin        {}  {}", style::class(u), style::dim(&format!("(frontName {f})")))
+        }
+        (None, Some(f)) => println!("admin        frontName {}", style::name(f)),
+        _ => println!("admin        {}", style::dim("(no backend/frontName in env.php)")),
+    }
+    let disabled = i.modules_total - i.modules_enabled;
+    let dis = if disabled > 0 {
+        format!(", {} disabled", disabled)
+    } else {
+        String::new()
+    };
+    println!("modules      {}{dis}", style::number(&format!("{} enabled", i.modules_enabled)));
     Ok(())
 }
 

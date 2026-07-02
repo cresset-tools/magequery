@@ -57,6 +57,37 @@ impl ModuleCheck {
     }
 }
 
+/// The everyday facts about an installation, on one screen: what/where it is and how it's
+/// deployed. All static (env.php + config sources + composer metadata + `var/` flags);
+/// every field degrades to `None` on a fresh checkout that has no `env.php` yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct InstanceInfo {
+    /// Magento version, from the product package in `installed.json`.
+    pub version: Option<String>,
+    /// The package the version came from (`magento/product-community-edition`,
+    /// `mage-os/magento2-base`, …) — also tells the distribution apart.
+    pub version_package: Option<String>,
+    /// Deploy mode from `env.php` `MAGE_MODE`; absent = Magento's "default" mode.
+    pub mode: Option<String>,
+    /// `var/.maintenance.flag` exists.
+    pub maintenance: bool,
+    /// Exempt IPs from `var/.maintenance.ip`.
+    pub maintenance_allowed_ips: Vec<String>,
+    /// `web/unsecure/base_url` / `web/secure/base_url` at the `default` scope (static
+    /// sources; `{{base_url}}` means auto-detect and is shown verbatim).
+    pub base_url: Option<String>,
+    pub base_url_secure: Option<String>,
+    /// How many non-default scopes (websites/stores) override either base URL.
+    pub base_url_overrides: usize,
+    /// The admin path from `env.php` `backend/frontName`.
+    pub admin_front_name: Option<String>,
+    /// The admin URL: the (secure, else unsecure) base URL + frontName.
+    pub admin_url: Option<String>,
+    pub modules_total: usize,
+    pub modules_enabled: usize,
+}
+
 /// One edge of a module's dependency graph: the neighbouring module and how the
 /// dependency is declared — `<sequence>` in module.xml (load order), the owning composer
 /// package's `require`, or both.

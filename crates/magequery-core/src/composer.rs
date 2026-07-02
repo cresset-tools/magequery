@@ -18,6 +18,8 @@ use serde::Deserialize;
 pub(crate) struct ComposerPackage {
     /// Package name (`vendor/name`), when the entry has one.
     pub name: Option<String>,
+    /// Package version, e.g. `2.4.7-p3`.
+    pub version: Option<String>,
     /// Absolute package root directory.
     pub root: PathBuf,
     /// `autoload.files` entries (relative to `root`), typically `registration.php` paths.
@@ -38,6 +40,8 @@ struct InstalledFile<'a> {
 struct PackageEntry<'a> {
     #[serde(default, borrow)]
     name: Option<Cow<'a, str>>,
+    #[serde(default, borrow)]
+    version: Option<Cow<'a, str>>,
     #[serde(rename = "install-path", default, borrow)]
     install_path: Option<Cow<'a, str>>,
     #[serde(default)]
@@ -79,6 +83,7 @@ pub(crate) fn installed_packages(vendor: &Path) -> Result<Vec<ComposerPackage>, 
     let mut out = Vec::with_capacity(entries.len());
     for p in entries {
         let name: Option<String> = p.name.as_ref().map(|n| n.as_ref().to_owned());
+        let version: Option<String> = p.version.as_ref().map(|v| v.as_ref().to_owned());
         let root = match p.install_path {
             // install-path is relative to vendor/composer/.
             Some(ip) => normalize(&composer_dir.join(ip.as_ref())),
@@ -104,7 +109,7 @@ pub(crate) fn installed_packages(vendor: &Path) -> Result<Vec<ComposerPackage>, 
                 (prefix, dirs)
             })
             .collect();
-        out.push(ComposerPackage { name, root, autoload_files, psr4, require });
+        out.push(ComposerPackage { name, version, root, autoload_files, psr4, require });
     }
     Ok(out)
 }

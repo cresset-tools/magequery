@@ -23,10 +23,11 @@ pub(crate) struct Index {
     pub packages: Vec<PackageMeta>,
 }
 
-/// The slice of a composer package `deps` needs: who it is, where it lives (to map modules
-/// to their owning package), and what it requires.
+/// The slice of a composer package `deps`/`info` need: who it is, where it lives (to map
+/// modules to their owning package), its version, and what it requires.
 pub(crate) struct PackageMeta {
     pub name: String,
+    pub version: Option<String>,
     pub root: PathBuf,
     pub require: Vec<String>,
 }
@@ -129,7 +130,12 @@ impl Index {
         let packages = packages
             .into_iter()
             .filter_map(|p| {
-                p.name.map(|name| PackageMeta { name, root: p.root, require: p.require })
+                p.name.map(|name| PackageMeta {
+                    name,
+                    version: p.version,
+                    root: p.root,
+                    require: p.require,
+                })
             })
             .collect();
 

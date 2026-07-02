@@ -187,7 +187,7 @@ RUNTIME       (env.php config & live connections)
   queue [info]|topology [<topic>]      session   cache   lock   (info-only)
 
 PROJECT       (the codebase itself)
-  modules [--check] [--enabled|--disabled] [--source app|vendor]
+  info [--db]               modules [--check] [--enabled|--disabled] [--source app|vendor]
   deps <module>             patches [--db] (backlog)   doctor (backlog)   whatis <class> (backlog)
 ```
 
@@ -197,7 +197,7 @@ PROJECT       (the codebase itself)
   `plugins`, `events`, `routes`, `actions`, `webapi`, `uses`). Default = collapsed diff.
   (`uses` has `--area` but no `--all-areas`: its default is already the merged union.)
 - **`--json`** and **`--color auto|always|never`** + **`--root <path>`** — global, every command.
-- **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config` today;
+- **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config`, `info`;
   future `eav`, `indexers --status`, `patches`). Static by default; DB overlay when asked;
   clean `Error::Db` if unreachable. Pure-live commands (`db`/`redis` `ping`, `url-rewrites`)
   require the `db`/`redis` build feature instead.
@@ -604,6 +604,24 @@ queue_publisher.xml still routes (stub topic, empty handlers). CLI: `queue topol
 consumers, red flag when **no consumer reads a queue** or no route exists). Validated on
 mageos-lite: sales_rule.codegenerator routes to queue `codegenerator` via both the direct
 publisher and its binding on exchange magento (amqp), consumer joined; ~3ms.
+
+### `info` (the everyday facts, done)
+
+`magequery info [--db]` — one screen for "what am I looking at": Magento **version** (from
+the product package in `installed.json` — `*/product-enterprise-edition` →
+`*/product-community-edition` → `*/magento2-base`, first hit; the package name also tells
+the distribution apart), **deploy mode** (`env.php` `MAGE_MODE`; absent = "default"),
+**maintenance** (`var/.maintenance.flag` + exempt IPs from `var/.maintenance.ip`),
+**base URLs** (`web/{unsecure,secure}/base_url` at default scope via `ConfigSet`, plus an
+override count for other scopes), **admin URL** (`env.php` `backend/frontName` joined onto
+the first *concrete* base URL — never onto a `{{base_url}}` placeholder, which means
+auto-detect; the CLI explains the placeholder and hints `--db`), and **module counts**.
+`InstanceInfo` in core (`Magento::info(include_db)`); `installed.json` parsing also
+extracts each package's `version` now (kept on `PackageMeta`). Every env-derived field
+degrades to `None` on a fresh checkout with no `env.php` — the no-bootstrap promise. With
+`--db` the base URLs resolve from `core_config_data` (where they usually live). Validated
+on mageos-lite: static shows the placeholders honestly; `--db` resolves the real base URL
+and full admin URL against the live MariaDB.
 
 ### `graphql` (schema types → resolvers, static, done)
 
