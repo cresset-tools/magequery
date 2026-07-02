@@ -52,6 +52,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("layout", "Layout handle: contributing files and what they do to the page"),
             ("widgets", "Widget types from widget.xml: block class, parameters"),
+            ("email-templates", "Transactional email templates: file, theme overrides"),
         ],
     ),
     (
@@ -247,6 +248,8 @@ enum Command {
     Layout(LayoutArgs),
     /// Widget types from widget.xml: block class, parameters.
     Widgets(WidgetsArgs),
+    /// Transactional email templates: file, theme overrides.
+    EmailTemplates(EmailTemplatesArgs),
 
     // ── Config & admin: where settings & permissions live ──
     /// Resolve a config path/section with its source (static, +--db).
@@ -409,6 +412,15 @@ struct ExtAttrArgs {
     /// matching types. Omit to list every extended type.
     #[arg(value_name = "TYPE")]
     type_name: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct EmailTemplatesArgs {
+    /// An exact template id → detail with the resolved file and theme overrides;
+    /// otherwise a substring matched against id or label. Omit to list every template.
+    template: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -742,6 +754,7 @@ fn main() -> Result<()> {
         Command::ExtensionAttributes(args) => extension_attributes(&mage, &args, &cli.root),
         Command::Layout(args) => layout(&mage, &args, &cli.root),
         Command::Widgets(args) => widgets(&mage, &args, &cli.root),
+        Command::EmailTemplates(args) => email_templates(&mage, &args, &cli.root),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
         Command::Actions(args) => actions(&mage, &args, &cli.root),
@@ -1497,6 +1510,99 @@ fn layout_op_line(op: &magequery_core::LayoutOp) -> String {
                 .map(|p| format!(" {} {}", style::dim("to"), style::name(p)))
                 .unwrap_or_default();
             format!("{} move {}{to}{}", style::kind("→"), style::name(&op.name), style::path(&line))
+        }
+    }
+}
+
+fn email_templates(mage: &Magento, args: &EmailTemplatesArgs, root: &Path) -> Result<()> {
+    if let Some(id) = &args.template {
+        if let Some(t) = mage.email_template(id) {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&t)?);
+                return Ok(());
+            }
+            render_email_template(&t, root);
+            return Ok(());
+        }
+    }
+
+    let list = mage.email_templates(args.template.as_deref());
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+    if list.is_empty() {
+        println!("{}", style::dim("(no email template matches)"));
+        return Ok(());
+    }
+    if let [t] = list.as_slice() {
+        if args.template.is_some() {
+            render_email_template(t, root);
+            return Ok(());
+        }
+    }
+    let iw = list.iter().map(|t| t.id.len()).max().unwrap_or(0);
+    let lw = list.iter().map(|t| t.label.len()).max().unwrap_or(0);
+    for t in &list {
+        let ipad = " ".repeat(iw - t.id.len());
+        let lpad = " ".repeat(lw.saturating_sub(t.label.len()));
+        let broken = if t.path.is_none() { format!("  {}", style::err("[file missing]")) } else { String::new() };
+        let themed = if t.theme_overrides.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", style::area(&format!("themed×{}", t.theme_overrides.len())))
+        };
+        println!(
+            "{}{ipad}  {}{lpad}  {}{themed}{broken}   {}",
+            style::name(&t.id),
+            style::target(&t.label),
+            style::dim(&t.file),
+            style::path(&short_loc(&t.source, root)),
+        );
+    }
+    eprintln!("\n{} template(s)", list.len());
+    Ok(())
+}
+
+fn render_email_template(t: &magequery_core::EmailTemplate, root: &Path) {
+    println!(
+        "{}  {}   {}",
+        style::name(&t.id),
+        style::target(&t.label),
+        style::path(&short_loc(&t.source, root)),
+    );
+    println!(
+        "  {} {} · {} {} · {} {}",
+        style::dim("type"),
+        style::kind(&t.kind),
+        style::dim("area"),
+        style::area(&t.area.to_string()),
+        style::dim("module"),
+        style::module(t.module.as_str()),
+    );
+    match &t.path {
+        Some(p) => {
+            let rel = p.strip_prefix(root).unwrap_or(p);
+            println!("  {} {}", style::dim("file"), style::path(&rel.display().to_string()));
+        }
+        None => println!(
+            "  {} {}  {}",
+            style::dim("file"),
+            t.file,
+            style::err("(missing — declared but not on disk)"),
+        ),
+    }
+    if t.theme_overrides.is_empty() {
+        println!("  {}", style::dim("(no theme overrides)"));
+    } else {
+        println!("  {}", style::dim(&format!("theme overrides ({}):", t.theme_overrides.len())));
+        for o in &t.theme_overrides {
+            let rel = o.file.strip_prefix(root).unwrap_or(&o.file);
+            println!(
+                "    {}  {}",
+                style::area(&o.theme),
+                style::path(&rel.display().to_string()),
+            );
         }
     }
 }

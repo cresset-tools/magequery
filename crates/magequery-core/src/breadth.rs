@@ -11,7 +11,8 @@ use std::path::Path;
 
 use crate::ids::{Area, ClassName, EventName, ModuleName};
 use crate::model::{
-    AclResource, CronJob, DbColumn, DbConstraint, DbIndex, DbTable, ExtendedType,
+    AclResource, CronJob, DbColumn, DbConstraint, DbIndex, DbTable, EmailTemplate,
+    EmailTemplateOverride, ExtendedType,
     ExtensionAttribute, ExtensionJoin, GqlArg, GqlField, GqlKind,
     GqlType, Indexer, LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, Module, Widget, WidgetParam,
@@ -411,6 +412,90 @@ fn merge_index(t: &mut DbTable, ri: parse::RawIndex, module: &ModuleName, path: 
     match t.indexes.iter_mut().find(|i| i.id == ri.id) {
         Some(existing) => *existing = idx,
         None => t.indexes.push(idx),
+    }
+}
+
+// ---------- email templates (etc/email_templates.xml) ----------
+
+pub(crate) struct EmailTemplateIndex {
+    by_id: HashMap<String, EmailTemplate>,
+}
+
+impl EmailTemplateIndex {
+    /// `themes` as in [`LayoutIndex::build`].
+    pub fn build(modules: &[Module], themes: &[(String, PathBuf)]) -> Self {
+        let paths: HashMap<&str, &Path> =
+            modules.iter().map(|m| (m.name.as_str(), m.path.as_path())).collect();
+
+        let mut by_id: HashMap<String, EmailTemplate> = HashMap::new();
+        for (i, path, raws) in
+            read_parse(modules, Area::Global, "email_templates.xml", parse::email_templates_xml)
+        {
+            let declaring = &modules[i].name;
+            for r in raws {
+                let area = r.area.parse::<Area>().unwrap_or(Area::Frontend);
+                // The declared file lives in the *referenced* module's view dir.
+                let resolved = paths.get(r.module.as_str()).and_then(|mp| {
+                    let p = mp
+                        .join("view")
+                        .join(area.dir().unwrap_or("frontend"))
+                        .join("email")
+                        .join(&r.file);
+                    p.is_file().then_some(p)
+                });
+                // Theme overrides: `<theme>/<Module>/email/<file>`, themes of the same area.
+                let theme_overrides: Vec<EmailTemplateOverride> = themes
+                    .iter()
+                    .filter(|(id, _)| id.starts_with(&format!("{area}/")))
+                    .filter_map(|(id, dir)| {
+                        let p = dir.join(&r.module).join("email").join(&r.file);
+                        p.is_file()
+                            .then(|| EmailTemplateOverride { theme: id.clone(), file: p })
+                    })
+                    .collect();
+                // Last declaration wins (a module can re-register another's template id).
+                by_id.insert(
+                    r.id.clone(),
+                    EmailTemplate {
+                        id: r.id,
+                        label: r.label,
+                        file: r.file,
+                        kind: r.kind,
+                        module: ModuleName::new(r.module),
+                        area,
+                        path: resolved,
+                        theme_overrides,
+                        source: Source {
+                            module: declaring.clone(),
+                            file: path.clone(),
+                            line: r.line,
+                            area,
+                        },
+                    },
+                );
+            }
+        }
+        Self { by_id }
+    }
+
+    pub fn template(&self, id: &str) -> Option<EmailTemplate> {
+        self.by_id.get(id).cloned()
+    }
+
+    /// Templates whose id or label contains `filter` (case-insensitive), sorted by id.
+    pub fn templates(&self, filter: Option<&str>) -> Vec<EmailTemplate> {
+        let needle = filter.map(str::to_lowercase);
+        let mut v: Vec<EmailTemplate> = self
+            .by_id
+            .values()
+            .filter(|t| match &needle {
+                Some(n) => t.id.to_lowercase().contains(n) || t.label.to_lowercase().contains(n),
+                None => true,
+            })
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
     }
 }
 

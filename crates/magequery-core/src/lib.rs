@@ -44,7 +44,8 @@ pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
     AclResource, ArgItem, ArgValue, Argument, ByArea, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ConsoleCommand, ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
-    DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, ExtendedType, ExtensionAttribute,
+    DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, EmailTemplate,
+    EmailTemplateOverride, ExtendedType, ExtensionAttribute,
     ExtensionJoin, GqlArg, GqlField, GqlKind, GqlType,
     Indexer, InstanceInfo, InterceptKind,
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
@@ -92,6 +93,7 @@ pub struct Magento {
     ext_attrs: OnceLock<breadth::ExtAttrIndex>,
     layout: OnceLock<breadth::LayoutIndex>,
     widgets: OnceLock<breadth::WidgetIndex>,
+    email_templates: OnceLock<breadth::EmailTemplateIndex>,
 }
 
 struct DiBuilt {
@@ -125,6 +127,7 @@ impl Magento {
             ext_attrs: OnceLock::new(),
             layout: OnceLock::new(),
             widgets: OnceLock::new(),
+            email_templates: OnceLock::new(),
         })
     }
 
@@ -1310,6 +1313,24 @@ impl Magento {
 
     fn mq_index(&self) -> &breadth::MqIndex {
         self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
+    }
+
+    fn email_template_index(&self) -> &breadth::EmailTemplateIndex {
+        self.email_templates.get_or_init(|| {
+            breadth::EmailTemplateIndex::build(&self.index.modules, &self.discover_themes())
+        })
+    }
+
+    /// Transactional email templates from `etc/email_templates.xml`, each with its
+    /// resolved module file (`None` = declared but missing) and any theme overrides.
+    /// Filtered by an id/label substring, sorted by id.
+    pub fn email_templates(&self, filter: Option<&str>) -> Vec<EmailTemplate> {
+        self.email_template_index().templates(filter)
+    }
+
+    /// One email template by exact id.
+    pub fn email_template(&self, id: &str) -> Option<EmailTemplate> {
+        self.email_template_index().template(id)
     }
 
     fn widget_index(&self) -> &breadth::WidgetIndex {

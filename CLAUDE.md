@@ -180,8 +180,8 @@ CONFIG & ADMIN (where settings & permissions live)
   acl [<resource>]                              menu [<item>]
 
 FRONTEND      (presentation)
-  layout [<handle>] [--area]    widgets [<id>]
-  email-templates (backlog)   translations <str> (backlog)   ui-components (backlog)
+  layout [<handle>] [--area]    widgets [<id>]    email-templates [<id>]
+  translations <str> (backlog)   ui-components (backlog)
 
 RUNTIME       (env.php config & live connections)
   db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
@@ -935,6 +935,21 @@ Label  class  # loc`), exact id or single-match substring → detail with the al
 parameter table (`name[*] type  Label  source_model  default=`). Validated on mageos-lite
 (9 widgets; products_list = 7 params with requireds, defaults, and Yesno source model
 exact). Unit test locks the depends/options traps.
+
+### `email-templates` (etc/email_templates.xml, static, done)
+
+Transactional templates as data: id (= the value config stores when a template is
+selected), label, type, area, and — the payoff — the **resolved file** and **theme
+overrides**. The declared `file` lives in the *referenced* module's `view/<area>/email/`
+(the `module` attribute may differ from the declaring module; last declaration per id
+wins, since modules re-register each other's templates). Every discovered theme
+(`discover_themes`, shared with `layout`) is probed for `<theme>/<Module>/email/<file>`;
+matches are listed as overrides — which one applies depends on the active theme, so
+reported, not resolved. A declared-but-missing file renders a red `[file missing]`.
+CLI `magequery email-templates [<id>]`: list (`id  Label  file  # loc`, `themed×N` tag),
+exact/single-match → detail with the resolved path and per-theme override files.
+Validated on mageos-lite: 32 templates; `customer_create_account_email_template` resolves
+its module file and Luma's override.
 
 ## Future query tools (backlog — not yet built)
 

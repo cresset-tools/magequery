@@ -1341,6 +1341,51 @@ mod acl_tests {
     }
 }
 
+// ---------- email templates (etc/email_templates.xml) ----------
+
+pub(crate) struct RawEmailTemplate {
+    /// The id is also the value stored in config when the template is selected.
+    pub id: String,
+    pub label: String,
+    /// File name relative to `<module>/view/<area>/email/`.
+    pub file: String,
+    /// `html` or `text`.
+    pub kind: String,
+    /// The module whose view dir holds the file (may differ from the declaring module).
+    pub module: String,
+    pub area: String,
+    pub line: u32,
+}
+
+/// Parse `email_templates.xml`: flat `<template id= label= file= type= module= area=/>`.
+pub(crate) fn email_templates_xml(xml: &str) -> Vec<RawEmailTemplate> {
+    let lines = LineMap::new(xml);
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out = Vec::new();
+    loop {
+        let ev = reader.read_event_into(&mut buf);
+        let line = lines.line(reader.buffer_position() as usize);
+        match ev {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if local_name(&e) == "template" => {
+                out.push(RawEmailTemplate {
+                    id: attr(&e, b"id").unwrap_or_default(),
+                    label: attr(&e, b"label").unwrap_or_default(),
+                    file: attr(&e, b"file").unwrap_or_default(),
+                    kind: attr(&e, b"type").unwrap_or_default(),
+                    module: attr(&e, b"module").unwrap_or_default(),
+                    area: attr(&e, b"area").unwrap_or_else(|| "frontend".to_string()),
+                    line,
+                });
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
 // ---------- widgets (etc/widget.xml) ----------
 
 pub(crate) struct RawWidgetParam {

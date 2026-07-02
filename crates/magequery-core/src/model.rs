@@ -1112,6 +1112,36 @@ pub struct AclResource {
     pub source: Source,
 }
 
+/// A theme's override of an email template file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct EmailTemplateOverride {
+    /// Theme id, e.g. `frontend/Magento/luma`.
+    pub theme: String,
+    pub file: std::path::PathBuf,
+}
+
+/// A transactional email template registered in `etc/email_templates.xml`. The `id` is
+/// also the value config stores when the template is selected in the admin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct EmailTemplate {
+    pub id: String,
+    pub label: String,
+    /// File name as declared, relative to `<module>/view/<area>/email/`.
+    pub file: String,
+    /// `html` or `text`.
+    pub kind: String,
+    /// The module whose view dir holds the file (may differ from the declaring module).
+    pub module: ModuleName,
+    pub area: Area,
+    /// The resolved module file; `None` = declared but missing on disk (broken).
+    pub path: Option<std::path::PathBuf>,
+    /// Theme files that override it (which one applies depends on the active theme).
+    pub theme_overrides: Vec<EmailTemplateOverride>,
+    pub source: Source,
+}
+
 /// One admin-configurable parameter of a widget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
