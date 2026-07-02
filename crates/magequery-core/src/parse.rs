@@ -1341,6 +1341,188 @@ mod acl_tests {
     }
 }
 
+// ---------- widgets (etc/widget.xml) ----------
+
+pub(crate) struct RawWidgetParam {
+    pub name: String,
+    /// The `xsi:type` (`text`, `select`, `block`, …).
+    pub param_type: String,
+    pub required: bool,
+    pub label: String,
+    pub source_model: Option<ClassName>,
+    /// `<value>` default.
+    pub default: Option<String>,
+}
+
+pub(crate) struct RawWidget {
+    pub id: String,
+    pub class: Option<ClassName>,
+    pub label: String,
+    pub description: Option<String>,
+    pub parameters: Vec<RawWidgetParam>,
+    pub containers: Vec<String>,
+    pub line: u32,
+}
+
+/// Parse `widget.xml`. The subtleties: a `<parameter>` inside `<depends>` is a
+/// *reference* to another parameter (never a definition — the db_schema column-reference
+/// pattern), and `<label>` occurs at widget, parameter, and option level — routed to the
+/// innermost open context, with option labels ignored.
+pub(crate) fn widget_xml(xml: &str) -> Vec<RawWidget> {
+    let lines = LineMap::new(xml);
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out: Vec<RawWidget> = Vec::new();
+    let mut cur: Option<usize> = None;
+    let mut cur_param: Option<usize> = None;
+    let mut in_depends = false;
+    let mut in_options = false;
+    let mut text_into: Option<&'static str> = None; // "label" | "description" | "value"
+
+    loop {
+        let ev = reader.read_event_into(&mut buf);
+        let line = lines.line(reader.buffer_position() as usize);
+        match ev {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                match local_name(&e).as_str() {
+                    "depends" => in_depends = true,
+                    "options" => in_options = true,
+                    _ => {}
+                }
+                widget_element(&e, line, in_depends, in_options, &mut out, &mut cur, &mut cur_param, &mut text_into);
+            }
+            Ok(Event::Empty(e)) => widget_element(
+                &e, line, in_depends, in_options, &mut out, &mut cur, &mut cur_param, &mut text_into,
+            ),
+            Ok(Event::Text(e)) => {
+                let (Some(field), Some(i)) = (text_into, cur) else { continue };
+                let t = e.unescape().unwrap_or_default().trim().to_string();
+                if t.is_empty() {
+                    continue;
+                }
+                match (field, cur_param) {
+                    ("label", Some(p)) => out[i].parameters[p].label = t,
+                    ("label", None) => out[i].label = t,
+                    ("description", _) => out[i].description = Some(t),
+                    ("value", Some(p)) => out[i].parameters[p].default = Some(t),
+                    _ => {}
+                }
+            }
+            Ok(Event::End(e)) => match e.name().as_ref() {
+                b"widget" => {
+                    cur = None;
+                    cur_param = None;
+                }
+                b"parameter" if !in_depends => cur_param = None,
+                b"depends" => in_depends = false,
+                b"options" => in_options = false,
+                b"label" | b"description" | b"value" => text_into = None,
+                _ => {}
+            },
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn widget_element(
+    e: &BytesStart,
+    line: u32,
+    in_depends: bool,
+    in_options: bool,
+    out: &mut Vec<RawWidget>,
+    cur: &mut Option<usize>,
+    cur_param: &mut Option<usize>,
+    text_into: &mut Option<&'static str>,
+) {
+    match local_name(e).as_str() {
+        "widget" => {
+            out.push(RawWidget {
+                id: attr(e, b"id").unwrap_or_default(),
+                class: attr(e, b"class").map(ClassName::new),
+                label: String::new(),
+                description: None,
+                parameters: Vec::new(),
+                containers: Vec::new(),
+                line,
+            });
+            *cur = Some(out.len() - 1);
+        }
+        "parameter" if !in_depends => {
+            if let Some(i) = *cur {
+                out[i].parameters.push(RawWidgetParam {
+                    name: attr(e, b"name").unwrap_or_default(),
+                    param_type: xsi_type(e).unwrap_or_default(),
+                    required: attr_true(e, b"required"),
+                    label: String::new(),
+                    source_model: attr(e, b"source_model").map(ClassName::new),
+                    default: None,
+                });
+                *cur_param = Some(out[i].parameters.len() - 1);
+            }
+        }
+        "container" => {
+            if let (Some(i), Some(name)) = (*cur, attr(e, b"name")) {
+                if !out[i].containers.contains(&name) {
+                    out[i].containers.push(name);
+                }
+            }
+        }
+        // Text leaves — option labels are ignored (in_options).
+        "label" if !in_options => *text_into = Some("label"),
+        "description" => *text_into = Some("description"),
+        "value" if !in_options => *text_into = Some("value"),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod widget_tests {
+    use super::widget_xml;
+
+    #[test]
+    fn params_depends_and_options() {
+        let xml = r#"<widgets>
+            <widget id="products_list" class="Magento\CatalogWidget\Block\Product\ProductsList">
+                <label>Catalog Products List</label>
+                <description>List of Products</description>
+                <parameters>
+                    <parameter name="title" xsi:type="text" required="false"><label>Title</label></parameter>
+                    <parameter name="products_per_page" xsi:type="text" required="true">
+                        <label>Per Page</label>
+                        <depends><parameter name="show_pager" value="1"/></depends>
+                        <value>5</value>
+                    </parameter>
+                    <parameter name="template" xsi:type="select" required="true">
+                        <label>Template</label>
+                        <options>
+                            <option name="default" value="grid.phtml" selected="true"><label>Grid</label></option>
+                        </options>
+                    </parameter>
+                </parameters>
+                <containers><container name="sidebar.main"><template name="default" value="g"/></container></containers>
+            </widget>
+        </widgets>"#;
+        let widgets = widget_xml(xml);
+        assert_eq!(widgets.len(), 1);
+        let w = &widgets[0];
+        assert_eq!(w.id, "products_list");
+        assert_eq!(w.label, "Catalog Products List");
+        assert_eq!(w.description.as_deref(), Some("List of Products"));
+        // The <parameter> inside <depends> must not become a definition.
+        assert_eq!(w.parameters.len(), 3);
+        assert_eq!(w.parameters[1].name, "products_per_page");
+        assert!(w.parameters[1].required);
+        assert_eq!(w.parameters[1].default.as_deref(), Some("5"));
+        // The option's label must not overwrite the parameter's.
+        assert_eq!(w.parameters[2].label, "Template");
+        assert_eq!(w.containers, ["sidebar.main"]);
+    }
+}
+
 // ---------- layout (view/<area>/layout/<handle>.xml) ----------
 
 #[derive(Clone, Copy, PartialEq, Eq)]

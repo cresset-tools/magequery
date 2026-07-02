@@ -49,7 +49,10 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ),
     (
         "Frontend",
-        &[("layout", "Layout handle: contributing files and what they do to the page")],
+        &[
+            ("layout", "Layout handle: contributing files and what they do to the page"),
+            ("widgets", "Widget types from widget.xml: block class, parameters"),
+        ],
     ),
     (
         "Config & admin",
@@ -242,6 +245,8 @@ enum Command {
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
     Layout(LayoutArgs),
+    /// Widget types from widget.xml: block class, parameters.
+    Widgets(WidgetsArgs),
 
     // ── Config & admin: where settings & permissions live ──
     /// Resolve a config path/section with its source (static, +--db).
@@ -404,6 +409,15 @@ struct ExtAttrArgs {
     /// matching types. Omit to list every extended type.
     #[arg(value_name = "TYPE")]
     type_name: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct WidgetsArgs {
+    /// An exact widget id (`products_list`) → detail with parameters; otherwise a
+    /// substring matched against id or label. Omit to list every widget.
+    widget: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -727,6 +741,7 @@ fn main() -> Result<()> {
         Command::Indexers(args) => indexers(&mage, &args, &cli.root),
         Command::ExtensionAttributes(args) => extension_attributes(&mage, &args, &cli.root),
         Command::Layout(args) => layout(&mage, &args, &cli.root),
+        Command::Widgets(args) => widgets(&mage, &args, &cli.root),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
         Command::Actions(args) => actions(&mage, &args, &cli.root),
@@ -1483,6 +1498,96 @@ fn layout_op_line(op: &magequery_core::LayoutOp) -> String {
                 .unwrap_or_default();
             format!("{} move {}{to}{}", style::kind("→"), style::name(&op.name), style::path(&line))
         }
+    }
+}
+
+fn widgets(mage: &Magento, args: &WidgetsArgs, root: &Path) -> Result<()> {
+    // An exact widget id → detail; otherwise a substring list (single match → detail too).
+    if let Some(id) = &args.widget {
+        if let Some(w) = mage.widget(id) {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&w)?);
+                return Ok(());
+            }
+            render_widget(&w, root);
+            return Ok(());
+        }
+    }
+
+    let list = mage.widgets(args.widget.as_deref());
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+    if list.is_empty() {
+        println!("{}", style::dim("(no widget matches)"));
+        return Ok(());
+    }
+    if let [w] = list.as_slice() {
+        if args.widget.is_some() {
+            render_widget(w, root);
+            return Ok(());
+        }
+    }
+    let iw = list.iter().map(|w| w.id.len()).max().unwrap_or(0);
+    let lw = list.iter().map(|w| w.label.len()).max().unwrap_or(0);
+    for w in &list {
+        let ipad = " ".repeat(iw - w.id.len());
+        let lpad = " ".repeat(lw.saturating_sub(w.label.len()));
+        println!(
+            "{}{ipad}  {}{lpad}  {}   {}",
+            style::name(&w.id),
+            style::target(&w.label),
+            style::class(w.class.as_str()),
+            style::path(&short_loc(&w.source, root)),
+        );
+    }
+    eprintln!("\n{} widget(s)", list.len());
+    Ok(())
+}
+
+fn render_widget(w: &magequery_core::Widget, root: &Path) {
+    println!(
+        "{}  {}   {}",
+        style::name(&w.id),
+        style::target(&w.label),
+        style::path(&short_loc(&w.source, root)),
+    );
+    if let Some(d) = &w.description {
+        println!("  {}", style::dim(d));
+    }
+    println!("  class  {}", style::class(w.class.as_str()));
+    if !w.containers.is_empty() {
+        println!("  {} {}", style::dim("containers:"), w.containers.join(", "));
+    }
+    if w.parameters.is_empty() {
+        println!("  {}", style::dim("(no parameters)"));
+        return;
+    }
+    println!("  {}", style::dim(&format!("parameters ({}):", w.parameters.len())));
+    let nw = w.parameters.iter().map(|p| p.name.len()).max().unwrap_or(0);
+    let tw = w.parameters.iter().map(|p| p.param_type.len()).max().unwrap_or(0);
+    for p in &w.parameters {
+        let npad = " ".repeat(nw - p.name.len());
+        let tpad = " ".repeat(tw - p.param_type.len());
+        // `*` marks required, aligned so optional rows keep the column.
+        let req = if p.required { style::err("*") } else { " ".to_string() };
+        let source_model = p
+            .source_model
+            .as_ref()
+            .map(|s| format!("  {}", style::class(s.as_str())))
+            .unwrap_or_default();
+        let default = p
+            .default
+            .as_deref()
+            .map(|d| format!("  {}", style::dim(&format!("default={d}"))))
+            .unwrap_or_default();
+        println!(
+            "    {}{npad}{req} {}{tpad}  {}{source_model}{default}",
+            style::name(&p.name),
+            style::kind(&p.param_type),
+            p.label,
+        );
     }
 }
 

@@ -51,7 +51,8 @@ pub use model::{
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
-    Resolution, Route, SchemaDrift, TableColumn, UnregisteredModule, WebapiRoute,
+    Resolution, Route, SchemaDrift, TableColumn, UnregisteredModule, WebapiRoute, Widget,
+    WidgetParam,
 };
 pub use model::{
     CacheConfig, CacheFrontend, CacheType, InjectionSite, LockConfig, MqConsumer, MqHandler,
@@ -90,6 +91,7 @@ pub struct Magento {
     menu: OnceLock<breadth::MenuIndex>,
     ext_attrs: OnceLock<breadth::ExtAttrIndex>,
     layout: OnceLock<breadth::LayoutIndex>,
+    widgets: OnceLock<breadth::WidgetIndex>,
 }
 
 struct DiBuilt {
@@ -122,6 +124,7 @@ impl Magento {
             menu: OnceLock::new(),
             ext_attrs: OnceLock::new(),
             layout: OnceLock::new(),
+            widgets: OnceLock::new(),
         })
     }
 
@@ -1307,6 +1310,21 @@ impl Magento {
 
     fn mq_index(&self) -> &breadth::MqIndex {
         self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
+    }
+
+    fn widget_index(&self) -> &breadth::WidgetIndex {
+        self.widgets.get_or_init(|| breadth::WidgetIndex::build(&self.index.modules))
+    }
+
+    /// Widget types declared in `etc/widget.xml` (what the admin's "Insert Widget"
+    /// offers), merged across modules. Filtered by an id/label substring, sorted by id.
+    pub fn widgets(&self, filter: Option<&str>) -> Vec<Widget> {
+        self.widget_index().widgets(filter)
+    }
+
+    /// One widget by exact id, with its full parameter set.
+    pub fn widget(&self, id: &str) -> Option<Widget> {
+        self.widget_index().widget(id)
     }
 
     fn layout_index(&self) -> &breadth::LayoutIndex {

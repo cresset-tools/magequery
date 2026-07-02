@@ -14,7 +14,7 @@ use crate::model::{
     AclResource, CronJob, DbColumn, DbConstraint, DbIndex, DbTable, ExtendedType,
     ExtensionAttribute, ExtensionJoin, GqlArg, GqlField, GqlKind,
     GqlType, Indexer, LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
-    MenuItem, Module,
+    MenuItem, Module, Widget, WidgetParam,
     MqConsumer, MqHandler, MqPublisher, MqRoute, MqTopic, MqTopicRoute, MqVia,
     MviewSubscription, Observer, Route, SystemField, WebapiRoute,
 };
@@ -411,6 +411,88 @@ fn merge_index(t: &mut DbTable, ri: parse::RawIndex, module: &ModuleName, path: 
     match t.indexes.iter_mut().find(|i| i.id == ri.id) {
         Some(existing) => *existing = idx,
         None => t.indexes.push(idx),
+    }
+}
+
+// ---------- widgets (etc/widget.xml) ----------
+
+pub(crate) struct WidgetIndex {
+    by_id: HashMap<String, Widget>,
+}
+
+impl WidgetIndex {
+    pub fn build(modules: &[Module]) -> Self {
+        let mut by_id: HashMap<String, Widget> = HashMap::new();
+        for (i, path, raws) in read_parse(modules, Area::Global, "widget.xml", parse::widget_xml) {
+            let module = &modules[i].name;
+            for r in raws {
+                let source = Source {
+                    module: module.clone(),
+                    file: path.clone(),
+                    line: r.line,
+                    area: Area::Global,
+                };
+                let entry = by_id.entry(r.id.clone()).or_insert_with(|| Widget {
+                    id: r.id.clone(),
+                    label: String::new(),
+                    description: None,
+                    class: ClassName::new(String::new()),
+                    parameters: Vec::new(),
+                    containers: Vec::new(),
+                    source,
+                });
+                // Merge non-empty; parameters by name, last declaration wins.
+                if let Some(c) = r.class {
+                    entry.class = c;
+                }
+                if !r.label.is_empty() {
+                    entry.label = r.label;
+                }
+                if r.description.is_some() {
+                    entry.description = r.description;
+                }
+                for p in r.parameters {
+                    let param = WidgetParam {
+                        name: p.name,
+                        param_type: p.param_type,
+                        required: p.required,
+                        label: p.label,
+                        source_model: p.source_model,
+                        default: p.default,
+                    };
+                    match entry.parameters.iter_mut().find(|x| x.name == param.name) {
+                        Some(existing) => *existing = param,
+                        None => entry.parameters.push(param),
+                    }
+                }
+                for c in r.containers {
+                    if !entry.containers.contains(&c) {
+                        entry.containers.push(c);
+                    }
+                }
+            }
+        }
+        Self { by_id }
+    }
+
+    pub fn widget(&self, id: &str) -> Option<Widget> {
+        self.by_id.get(id).cloned()
+    }
+
+    /// Widgets whose id or label contains `filter` (case-insensitive), sorted by id.
+    pub fn widgets(&self, filter: Option<&str>) -> Vec<Widget> {
+        let needle = filter.map(str::to_lowercase);
+        let mut v: Vec<Widget> = self
+            .by_id
+            .values()
+            .filter(|w| match &needle {
+                Some(n) => w.id.to_lowercase().contains(n) || w.label.to_lowercase().contains(n),
+                None => true,
+            })
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.id.cmp(&b.id));
+        v
     }
 }
 

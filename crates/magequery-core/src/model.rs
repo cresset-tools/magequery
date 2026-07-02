@@ -1112,6 +1112,34 @@ pub struct AclResource {
     pub source: Source,
 }
 
+/// One admin-configurable parameter of a widget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct WidgetParam {
+    pub name: String,
+    /// The `xsi:type` (`text`, `select`, `block`, `conditions`, …).
+    pub param_type: String,
+    pub required: bool,
+    pub label: String,
+    pub source_model: Option<ClassName>,
+    pub default: Option<String>,
+}
+
+/// A widget type declared in `etc/widget.xml` — what the admin's "Insert Widget" offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Widget {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+    /// The block class that renders it.
+    pub class: ClassName,
+    pub parameters: Vec<WidgetParam>,
+    /// Layout containers it declares templates for.
+    pub containers: Vec<String>,
+    pub source: Source,
+}
+
 /// The kind of a layout operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[derive(serde::Serialize)]

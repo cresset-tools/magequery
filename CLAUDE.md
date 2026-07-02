@@ -180,8 +180,8 @@ CONFIG & ADMIN (where settings & permissions live)
   acl [<resource>]                              menu [<item>]
 
 FRONTEND      (presentation)
-  layout [<handle>] [--area]
-  widgets (backlog)   email-templates (backlog)   translations <str> (backlog)   ui-components (backlog)
+  layout [<handle>] [--area]    widgets [<id>]
+  email-templates (backlog)   translations <str> (backlog)   ui-components (backlog)
 
 RUNTIME       (env.php config & live connections)
   db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
@@ -920,6 +920,21 @@ handles on lite); `<handle>` → per-file op stream with per-op `#line`. Known l
 theme `layout/override/` replacement semantics not modeled. Validated: Luma's
 catalog_product_view `<move>`s render under the theme layer; commerce-store's `default`
 handle = 53 files, 12ms.
+
+### `widgets` (widget types from `etc/widget.xml`, static, done)
+
+What the admin's "Insert Widget" dropdown offers, as data: id, label, the **block class**
+that renders it, and the full parameter set. A `WidgetIndex` (lazy, `read_parse` over
+`etc/widget.xml`, widgets merged by id / parameters by name). `parse::widget_xml` handles
+the two traps: a `<parameter>` inside `<depends>` is a *reference* (the db_schema
+column-reference pattern — never a definition), and `<label>` occurs at widget, parameter,
+AND option level — routed to the innermost open context, option labels ignored. Captured
+per parameter: name, `xsi:type`, `required`, label, `source_model`, `<value>` default;
+plus the widget's `<container>` placements. CLI `magequery widgets [<id>]`: list (`id
+Label  class  # loc`), exact id or single-match substring → detail with the aligned
+parameter table (`name[*] type  Label  source_model  default=`). Validated on mageos-lite
+(9 widgets; products_list = 7 params with requireds, defaults, and Yesno source model
+exact). Unit test locks the depends/options traps.
 
 ## Future query tools (backlog — not yet built)
 
