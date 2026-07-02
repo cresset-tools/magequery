@@ -560,6 +560,82 @@ pub struct QueueConfig {
     pub consumers_wait_for_messages: Option<String>,
 }
 
+/// The kind of a GraphQL schema type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GqlKind {
+    Object,
+    Interface,
+    Input,
+    Enum,
+    Union,
+    Scalar,
+}
+
+impl std::fmt::Display for GqlKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            GqlKind::Object => "type",
+            GqlKind::Interface => "interface",
+            GqlKind::Input => "input",
+            GqlKind::Enum => "enum",
+            GqlKind::Union => "union",
+            GqlKind::Scalar => "scalar",
+        })
+    }
+}
+
+/// One argument of a GraphQL field, as written (`pageSize: Int`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct GqlArg {
+    pub name: String,
+    pub ty: String,
+}
+
+/// One field of a GraphQL type, with its resolver and the module that declared it — the
+/// per-field provenance is the point: `Query` is assembled from dozens of modules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct GqlField {
+    pub name: String,
+    pub args: Vec<GqlArg>,
+    /// Return type as written, e.g. `[ProductInterface!]!`.
+    pub ty: String,
+    /// `@resolver(class:)` — the class that computes the field. `None` for plain data
+    /// fields served from the parent's output array.
+    pub resolver: Option<ClassName>,
+    /// `@doc(description:)`, or the SDL description string.
+    pub description: Option<String>,
+    /// `@deprecated` — the reason (possibly empty).
+    pub deprecated: Option<String>,
+    /// `@cache(cacheable:)`, when stated.
+    pub cacheable: Option<bool>,
+    pub source: Source,
+}
+
+/// A GraphQL schema type merged from every module's `schema.graphqls` (fields union by
+/// name across modules, matching Magento's schema stitching).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct GqlType {
+    pub name: String,
+    pub kind: GqlKind,
+    pub implements: Vec<String>,
+    /// `@typeResolver(class:)` on interfaces/types — maps a runtime value to its concrete
+    /// schema type.
+    pub type_resolver: Option<ClassName>,
+    pub description: Option<String>,
+    pub fields: Vec<GqlField>,
+    /// Enum values.
+    pub values: Vec<String>,
+    /// Union member types.
+    pub members: Vec<String>,
+    /// Where the type was first declared.
+    pub source: Source,
+}
+
 /// A message-queue topic from `communication.xml`, with its handlers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

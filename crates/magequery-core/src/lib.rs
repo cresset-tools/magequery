@@ -28,6 +28,7 @@ mod db;
 mod decrypt;
 mod deploy;
 mod di;
+mod graphql;
 mod index;
 mod parse;
 mod php;
@@ -41,7 +42,8 @@ pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
     AclResource, ArgItem, ArgValue, Argument, ByArea, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ConsoleCommand, ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
-    DbTable, DepEdge, Indexer, InterceptKind, MethodChain, Module, ModuleCheck, ModuleDeps,
+    DbTable, DepEdge, GqlArg, GqlField, GqlKind, GqlType, Indexer, InterceptKind, MethodChain,
+    Module, ModuleCheck, ModuleDeps,
     MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
     Resolution, Route, UnregisteredModule, WebapiRoute,
@@ -78,6 +80,7 @@ pub struct Magento {
     acl: OnceLock<breadth::AclIndex>,
     indexers: OnceLock<breadth::IndexerIndex>,
     mq: OnceLock<breadth::MqIndex>,
+    gql: OnceLock<breadth::GqlIndex>,
 }
 
 struct DiBuilt {
@@ -106,6 +109,7 @@ impl Magento {
             acl: OnceLock::new(),
             indexers: OnceLock::new(),
             mq: OnceLock::new(),
+            gql: OnceLock::new(),
         })
     }
 
@@ -662,6 +666,23 @@ impl Magento {
 
     fn mq_index(&self) -> &breadth::MqIndex {
         self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
+    }
+
+    fn gql_index(&self) -> &breadth::GqlIndex {
+        self.gql.get_or_init(|| breadth::GqlIndex::build(&self.index.modules))
+    }
+
+    /// GraphQL schema types merged from every module's `schema.graphqls` (fields union by
+    /// name across modules, matching Magento's schema stitching — `Query` is assembled
+    /// from dozens of modules, each field tagged with its declaring module). Filtered by a
+    /// case-insensitive name substring, sorted by name. Static.
+    pub fn graphql_types(&self, filter: Option<&str>) -> Vec<GqlType> {
+        self.gql_index().types(filter)
+    }
+
+    /// One GraphQL type by exact name, fully merged.
+    pub fn graphql_type(&self, name: &str) -> Option<GqlType> {
+        self.gql_index().type_(name)
     }
 
     /// Message-queue topics from `communication.xml` (with handlers), optionally filtered

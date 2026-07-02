@@ -36,6 +36,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("webapi", "REST endpoints from webapi.xml"),
             ("cron", "Cron jobs, optionally by group"),
             ("commands", "Console (bin/magento) commands registered via di.xml"),
+            ("graphql", "GraphQL schema types → resolver classes, merged across modules"),
         ],
     ),
     (
@@ -213,6 +214,8 @@ enum Command {
     Cron(CronArgs),
     /// Console (bin/magento) commands registered via di.xml.
     Commands(CommandsArgs),
+    /// GraphQL schema types → resolver classes, merged across modules.
+    Graphql(GraphqlArgs),
 
     // ── Data: persistence & model ──
     /// Tables from db_schema.xml: a list, or one table's DDL.
@@ -285,6 +288,16 @@ struct UsesArgs {
     /// declarations, merged (each hit tagged with the area it's declared in).
     #[arg(long)]
     area: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct GraphqlArgs {
+    /// Exact type name (`Query`) → full detail; `Type.field` (`Query.products`) → one
+    /// field; otherwise a name substring to list matching types. Omit to list every type.
+    #[arg(value_name = "TYPE")]
+    type_name: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -576,6 +589,7 @@ fn main() -> Result<()> {
         Command::Uses(args) => uses(&mage, &args, &cli.root),
         Command::Cron(args) => cron(&mage, &args, &cli.root),
         Command::Commands(args) => commands(&mage, &args, &cli.root),
+        Command::Graphql(args) => graphql(&mage, &args, &cli.root),
         Command::Indexers(args) => indexers(&mage, &args, &cli.root),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
@@ -1622,6 +1636,193 @@ fn uses(mage: &Magento, args: &UsesArgs, root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn graphql(mage: &Magento, args: &GraphqlArgs, root: &Path) -> Result<()> {
+    if let Some(q) = &args.type_name {
+        // Exact type name → full detail.
+        if let Some(t) = mage.graphql_type(q) {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&t)?);
+                return Ok(());
+            }
+            render_gql_type(mage, &t, root);
+            return Ok(());
+        }
+        // `Type.field` → one field.
+        if let Some((tn, fname)) = q.rsplit_once('.') {
+            if let Some(t) = mage.graphql_type(tn) {
+                if let Some(f) = t.fields.iter().find(|f| f.name == *fname) {
+                    if args.json {
+                        println!("{}", serde_json::to_string_pretty(f)?);
+                        return Ok(());
+                    }
+                    render_gql_field_detail(mage, &t, f, root);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    let list = mage.graphql_types(args.type_name.as_deref());
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+    if list.is_empty() {
+        println!("{}", style::dim("(no GraphQL type matches — from the modules' schema.graphqls)"));
+        return Ok(());
+    }
+    let w = list.iter().map(|t| t.name.len()).max().unwrap_or(0);
+    for t in &list {
+        let count = match t.kind {
+            magequery_core::GqlKind::Enum => format!("{:>3} values", t.values.len()),
+            magequery_core::GqlKind::Union => format!("{:>3} members", t.members.len()),
+            magequery_core::GqlKind::Scalar => "         —".to_string(),
+            _ => format!("{:>3} fields", t.fields.len()),
+        };
+        let pad = " ".repeat(w.saturating_sub(t.name.len()));
+        println!(
+            "{}{pad}  {:<9}  {}  {}",
+            style::class(&t.name),
+            style::kind(&t.kind.to_string()),
+            style::dim(&count),
+            style::path(&short_loc(&t.source, root)),
+        );
+    }
+    eprintln!("\n{} type(s)", list.len());
+    Ok(())
+}
+
+/// The compact field signature: arg *names* only (`products(search, filter, …): Products`)
+/// — full arg types live in the `Type.field` view.
+fn gql_signature(f: &magequery_core::GqlField) -> String {
+    let args = if f.args.is_empty() {
+        String::new()
+    } else {
+        format!("({})", f.args.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", "))
+    };
+    format!("{}{args}: {}", style::name(&f.name), style::class(&f.ty))
+}
+
+/// `@resolver` line trailer: the concrete class if a DI preference redirects the declared
+/// resolver (rare but exactly what you'd miss by reading the schema alone).
+fn gql_resolver_pref(mage: &Magento, resolver: &ClassName) -> String {
+    match mage.preference(resolver, Area::Global) {
+        Ok(p) if p.concrete != *resolver => {
+            format!("  {} {}", style::dim("→ preference"), style::class(p.concrete.as_str()))
+        }
+        _ => String::new(),
+    }
+}
+
+fn gql_field_tags(f: &magequery_core::GqlField) -> String {
+    let mut tags = String::new();
+    if let Some(reason) = &f.deprecated {
+        let r = if reason.is_empty() { String::new() } else { format!(": {reason}") };
+        tags.push_str(&format!("  {}", style::err(&format!("[deprecated{r}]"))));
+    }
+    if f.cacheable == Some(false) {
+        tags.push_str(&format!("  {}", style::dim("[not cacheable]")));
+    }
+    tags
+}
+
+fn render_gql_type(mage: &Magento, t: &magequery_core::GqlType, root: &Path) {
+    println!(
+        "{} {}   {}",
+        style::kind(&t.kind.to_string()),
+        style::class(&t.name),
+        style::path(&short_loc(&t.source, root)),
+    );
+    if let Some(d) = &t.description {
+        println!("  {}", style::dim(d));
+    }
+    if !t.implements.is_empty() {
+        let list: Vec<String> = t.implements.iter().map(|i| style::class(i)).collect();
+        println!("  {} {}", style::dim("implements"), list.join(", "));
+    }
+    if let Some(tr) = &t.type_resolver {
+        println!("  {} {}", style::dim("@typeResolver"), style::class(tr.as_str()));
+    }
+    if !t.values.is_empty() {
+        println!("  {} {}", style::dim("values:"), t.values.join(", "));
+    }
+    if !t.members.is_empty() {
+        let list: Vec<String> = t.members.iter().map(|m| style::class(m)).collect();
+        println!("  {} {}", style::dim("members:"), list.join(" | "));
+    }
+    if t.fields.is_empty() {
+        return;
+    }
+    println!("  {}", style::dim(&format!("fields ({}):", t.fields.len())));
+    let type_module = t.source.module.as_str();
+    for f in &t.fields {
+        // Fields added by a *different* module than the type's declarer get a `←` tag —
+        // Query/Mutation are assembled from dozens of modules; this shows who owns what.
+        let from = if f.source.module.as_str() != type_module {
+            format!("  {}", style::module(&format!("← {}", f.source.module.as_str())))
+        } else {
+            String::new()
+        };
+        match &f.resolver {
+            Some(r) => {
+                println!("    {}{}", gql_signature(f), gql_field_tags(f));
+                println!(
+                    "        {} {}{}{from}   {}",
+                    style::dim("@resolver"),
+                    style::class(r.as_str()),
+                    gql_resolver_pref(mage, r),
+                    style::path(&short_loc(&f.source, root)),
+                );
+            }
+            None => println!(
+                "    {}{}{from}   {}",
+                gql_signature(f),
+                gql_field_tags(f),
+                style::path(&short_loc(&f.source, root)),
+            ),
+        }
+    }
+}
+
+fn render_gql_field_detail(
+    mage: &Magento,
+    t: &magequery_core::GqlType,
+    f: &magequery_core::GqlField,
+    root: &Path,
+) {
+    println!(
+        "{}.{}: {}{}   {}",
+        style::class(&t.name),
+        style::name(&f.name),
+        style::class(&f.ty),
+        gql_field_tags(f),
+        style::path(&short_loc(&f.source, root)),
+    );
+    if let Some(d) = &f.description {
+        println!("  {}", style::dim(d));
+    }
+    if !f.args.is_empty() {
+        println!("  {}", style::dim(&format!("args ({}):", f.args.len())));
+        let w = f.args.iter().map(|a| a.name.len()).max().unwrap_or(0);
+        for a in &f.args {
+            let pad = " ".repeat(w.saturating_sub(a.name.len()));
+            println!("    {}{pad}  {}", style::name(&a.name), style::class(&a.ty));
+        }
+    }
+    match &f.resolver {
+        Some(r) => println!(
+            "  {} {}{}",
+            style::dim("@resolver"),
+            style::class(r.as_str()),
+            gql_resolver_pref(mage, r),
+        ),
+        None => println!(
+            "  {}",
+            style::dim("(no @resolver — served from the parent resolver's output)")
+        ),
+    }
 }
 
 fn commands(mage: &Magento, args: &CommandsArgs, root: &Path) -> Result<()> {

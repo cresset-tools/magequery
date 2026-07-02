@@ -169,7 +169,7 @@ WIRING        (object manager — how a class is assembled)
 
 ENTRY POINTS  (how execution starts)
   routes [--area]    actions [<url>]    webapi [<url>]    cron [<group>]
-  commands [<filter>]                   graphql <type>   (backlog)
+  commands [<filter>]                   graphql [<type>|<Type.field>]
 
 DATA          (persistence & model)
   schema [<table>]       indexers [<id>]
@@ -605,6 +605,40 @@ consumers, red flag when **no consumer reads a queue** or no route exists). Vali
 mageos-lite: sales_rule.codegenerator routes to queue `codegenerator` via both the direct
 publisher and its binding on exchange magento (amqp), consumer joined; ~3ms.
 
+### `graphql` (schema types → resolvers, static, done)
+
+`magequery graphql [<Type>|<Type.field>]` — the GraphQL schema as Magento actually
+assembles it, with every field mapped to its `@resolver` class. `graphql.rs` is a focused
+hand-written SDL parser (own module, like `php.rs` — no parser crate): a lexer (commas =
+whitespace per spec, `#` comments, `"…"`/`"""…"""` strings unescaped — the `\\Magento…`
+FQCNs in directive strings become real backslashes, then `ClassName::new` normalizes the
+leading one) + tolerant recursive descent over type/interface/input/enum/union/scalar
+definitions, field args with defaults, and directives. `extend type X` is treated as a
+plain re-declaration (the merge unions it — also how Magento's stitching reader treats
+re-declared types); `schema {}` and `directive @x on …` *definitions* are skipped. The
+subtle bugs are greedy name lists: `union A = B | C` members and `implements A & B` names
+are only consumed behind an explicit `|`/`&`, else a bodiless definition would swallow the
+next definition's keyword. Unit test locks all of it.
+
+`GqlIndex` (lazy, parallel `read_parse` over `etc/schema.graphqls`, `Source.area` tagged
+Graphql): types merge by name — implements/enum-values/union-members union, `@typeResolver`
+and `@doc` overwrite-when-present, **fields union by name** (a re-declaration replaces,
+last module wins, and keeps the declaring module's provenance — the point: `Query` is
+assembled from dozens of modules). Extracted per field: `@resolver(class:)`, `@doc`,
+`@deprecated(reason:)`, `@cache(cacheable:)`. `Magento::graphql_types(filter?)` +
+`graphql_type(name)`.
+
+CLI: list = `Name  kind  N fields  # loc`; exact type → detail (description, implements,
+`@typeResolver`, then fields as `name(arg, names): Type` with the `@resolver` line,
+cross-module `← Vendor_Module` tags, red `[deprecated: reason]`, dim `[not cacheable]`);
+`Type.field` → one field with fully-typed args. The di join: each shown resolver is run
+through `preference()` and a redirect renders as `→ preference Concrete` — what you'd miss
+reading the schema alone. Validated on mageos-additive-boot (45 schema files, 415 types):
+`Query` = 36 fields from ~15 modules each correctly attributed; `ProductInterface` = 53
+fields incl. Inventory/GiftMessage additions; the `extend type ShippingCartAddress` case
+merges; enum/union/field views exact. List ~10ms; type detail ~23ms (builds the DI index
+for the preference join).
+
 ### `deps` (module dependency graph, done)
 
 `magequery deps <Module>` — both directions, from the two static sources:
@@ -661,10 +695,8 @@ resolves its injector. ~19ms (di parse dominates).
 
 ## Future query tools (backlog — not yet built)
 
-Ideas surfaced while scoping breadth, in rough priority. All but the GraphQL/DB ones are
+Ideas surfaced while scoping breadth, in rough priority. All but the DB ones are
 static breadth-projections in the same `read_parse` + merge shape.
-- **`graphql <Type>`** — map a `schema.graphqls` type/field to its resolver class via di
-  (two-source join; bigger).
 - **DB-backed (phase-2 style, opt-in like `url-rewrites`):** `indexer:status` (`indexer_state`),
   `eav`/attributes (`eav_attribute` + `eav_entity_type`), admin users/roles, cron history
   (`cron_schedule`), queue backlog.
