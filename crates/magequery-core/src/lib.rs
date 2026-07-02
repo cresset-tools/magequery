@@ -666,10 +666,13 @@ impl Magento {
             let start_id = match v.parse::<u32>() {
                 Ok(id) => Some(id),
                 Err(_) => {
-                    theme_chain.push(v.clone());
+                    // Config may store the full-path form (`frontend/Hyva/default`);
+                    // normalize to the theme table's area-less `theme_path`.
+                    let vn = v.strip_prefix("frontend/").unwrap_or(v);
+                    theme_chain.push(vn.to_string());
                     theme_rows.as_ref().and_then(|rows| {
                         rows.iter()
-                            .find(|(_, _, p, area)| area == "frontend" && p.as_deref() == Some(v))
+                            .find(|(_, _, p, area)| area == "frontend" && p.as_deref() == Some(vn))
                             .map(|(_, parent, _, _)| *parent)
                             .flatten()
                     })
@@ -758,6 +761,15 @@ impl Magento {
             })
             .unwrap_or((None, None));
 
+        // Hyvä Checkout is installed alongside the checkout it replaces and exposes which
+        // one is selected (`hyva_themes_checkout/general/checkout`; `default` = the
+        // Magento/Luma original) — read it so "installed" isn't reported as "active".
+        let checkout_selected = if checkout.as_deref() == Some("Hyvä Checkout") {
+            get("hyva_themes_checkout/general/checkout")
+        } else {
+            None
+        };
+
         // Deployment one-liners, from the existing env.php extractors (credentials
         // deliberately left out of this casual, paste-into-a-ticket view).
         let db_conn = self.db_config().ok().and_then(|c| {
@@ -815,6 +827,7 @@ impl Magento {
             frontend_version,
             checkout,
             checkout_version,
+            checkout_selected,
             db_name: db_conn.as_ref().map(|(n, _, _)| n.clone()),
             db_endpoint: db_conn.as_ref().map(|(_, e, _)| e.clone()),
             table_prefix: db_conn.and_then(|(_, _, p)| (!p.is_empty()).then_some(p)),

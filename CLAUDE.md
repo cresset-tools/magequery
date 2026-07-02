@@ -624,7 +624,13 @@ are skipped, never guessed), the **checkout stack** (a curated package map — H
 Checkout (`loki-checkout/magento2-core` matched before the vendor prefix so the version is
 core's, not an add-on's), Firecheckout, Mageplaza OSC, OneStepCheckout, Bold — then a
 generic "any non-core package named *checkout*" fallback reported verbatim; nothing found
-renders as "default (Luma)"),
+renders as "default (Luma)". Hyvä Checkout additionally exposes *which* checkout is
+selected — `hyva_themes_checkout/general/checkout`, read through the same ConfigSet:
+`default` = the Magento/Luma original is still active, rendered "installed, not selected";
+any other value is the chosen namespace, shown verbatim as "(active: …)" — installed ≠
+selected. Theme values may be stored in the full-path form (`frontend/Hyva/default`, as
+found live on commerce-store); the leading area segment is normalized away before
+classification/ancestry matching),
 **module counts split vendor / app/code**, the **composer package count**, and the
 **install date** (`env.php` `install/date`).
 

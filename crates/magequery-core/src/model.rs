@@ -103,6 +103,10 @@ pub struct InstanceInfo {
     /// "checkout". `None` = nothing beyond the stock (Luma) checkout found.
     pub checkout: Option<String>,
     pub checkout_version: Option<String>,
+    /// The installed solution's own selection setting, when it has one (Hyvä Checkout's
+    /// `hyva_themes_checkout/general/checkout`): `default` = the Magento/Luma original is
+    /// still selected; anything else is the chosen checkout namespace, verbatim.
+    pub checkout_selected: Option<String>,
     /// The default DB connection, credentials omitted: database name and endpoint
     /// (`host:port` or a socket path).
     pub db_name: Option<String>,

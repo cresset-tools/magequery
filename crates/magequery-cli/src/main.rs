@@ -2502,7 +2502,24 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
                 .as_deref()
                 .map(|v| format!(" {}", style::number(v)))
                 .unwrap_or_default();
-            println!("checkout     {}{version}", style::ok(c));
+            match i.checkout_selected.as_deref() {
+                // The solution's own selection setting says the Magento original is
+                // still active — installed is not the same as selected.
+                Some("default") => {
+                    let plain_version =
+                        i.checkout_version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
+                    println!(
+                        "checkout     default (Luma)  {}",
+                        style::dim(&format!("({c}{plain_version} installed, not selected)")),
+                    );
+                }
+                Some(sel) => println!(
+                    "checkout     {}{version}  {}",
+                    style::ok(c),
+                    style::dim(&format!("(active: {sel})")),
+                ),
+                None => println!("checkout     {}{version}", style::ok(c)),
+            }
         }
         None => println!("checkout     {}", style::dim("default (Luma)")),
     }
