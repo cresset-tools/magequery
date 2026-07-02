@@ -1341,6 +1341,162 @@ mod acl_tests {
     }
 }
 
+// ---------- layout (view/<area>/layout/<handle>.xml) ----------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RawLayoutOpKind {
+    Block,
+    Container,
+    ReferenceBlock,
+    ReferenceContainer,
+    Update,
+    Move,
+}
+
+/// One operation a layout file performs, flattened (nesting recorded via `parent`).
+pub(crate) struct RawLayoutOp {
+    pub kind: RawLayoutOpKind,
+    /// Block/container name; the target handle for `Update`; the element for `Move`.
+    pub name: String,
+    pub class: Option<ClassName>,
+    pub template: Option<String>,
+    /// The enclosing named element (or `Move`'s destination).
+    pub parent: Option<String>,
+    /// `remove="true"` on a reference.
+    pub remove: bool,
+    pub line: u32,
+}
+
+/// Parse one layout XML: blocks/containers declared, references modified or removed,
+/// `<update handle=>` includes, and `<move>`s — each with its enclosing element.
+pub(crate) fn layout_xml(xml: &str) -> Vec<RawLayoutOp> {
+    let lines = LineMap::new(xml);
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out: Vec<RawLayoutOp> = Vec::new();
+    // Names of the enclosing block/container/reference elements.
+    let mut stack: Vec<String> = Vec::new();
+
+    loop {
+        let ev = reader.read_event_into(&mut buf);
+        let line = lines.line(reader.buffer_position() as usize);
+        match ev {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                if let Some(op) = layout_op(&e, line, &stack) {
+                    let named = matches!(
+                        op.kind,
+                        RawLayoutOpKind::Block
+                            | RawLayoutOpKind::Container
+                            | RawLayoutOpKind::ReferenceBlock
+                            | RawLayoutOpKind::ReferenceContainer
+                    );
+                    if named {
+                        stack.push(op.name.clone());
+                    }
+                    out.push(op);
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if let Some(op) = layout_op(&e, line, &stack) {
+                    out.push(op);
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = e.name();
+                let raw = name.as_ref();
+                let local = raw.rsplit(|&b| b == b':').next().unwrap_or(raw);
+                if matches!(local, b"block" | b"container" | b"referenceBlock" | b"referenceContainer")
+                {
+                    stack.pop();
+                }
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+fn layout_op(e: &BytesStart, line: u32, stack: &[String]) -> Option<RawLayoutOp> {
+    let parent = stack.last().cloned();
+    let kind = match local_name(e).as_str() {
+        "block" => RawLayoutOpKind::Block,
+        "container" => RawLayoutOpKind::Container,
+        "referenceBlock" => RawLayoutOpKind::ReferenceBlock,
+        "referenceContainer" => RawLayoutOpKind::ReferenceContainer,
+        "update" => {
+            return Some(RawLayoutOp {
+                kind: RawLayoutOpKind::Update,
+                name: attr(e, b"handle").unwrap_or_default(),
+                class: None,
+                template: None,
+                parent,
+                remove: false,
+                line,
+            })
+        }
+        "move" => {
+            return Some(RawLayoutOp {
+                kind: RawLayoutOpKind::Move,
+                name: attr(e, b"element").unwrap_or_default(),
+                class: None,
+                template: None,
+                parent: attr(e, b"destination"),
+                remove: false,
+                line,
+            })
+        }
+        _ => return None,
+    };
+    Some(RawLayoutOp {
+        kind,
+        name: attr(e, b"name").unwrap_or_default(),
+        class: attr(e, b"class").map(ClassName::new),
+        template: attr(e, b"template"),
+        parent,
+        remove: attr(e, b"remove").as_deref() == Some("true"),
+        line,
+    })
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::{layout_xml, RawLayoutOpKind};
+
+    #[test]
+    fn ops_nesting_and_removal() {
+        let xml = r#"<page>
+            <update handle="catalog_product_opengraph"/>
+            <body>
+                <referenceBlock name="head.components">
+                    <block class="A\B" name="child" template="M::t.phtml"/>
+                </referenceBlock>
+                <referenceBlock name="gone" remove="true"/>
+                <referenceContainer name="content">
+                    <container name="wrap">
+                        <block class="C\D" name="deep"/>
+                    </container>
+                </referenceContainer>
+                <move element="child" destination="wrap" after="-"/>
+            </body>
+        </page>"#;
+        let ops = layout_xml(xml);
+        let by = |n: &str| ops.iter().find(|o| o.name == n).unwrap();
+
+        assert!(matches!(by("catalog_product_opengraph").kind, RawLayoutOpKind::Update));
+        assert_eq!(by("child").parent.as_deref(), Some("head.components"));
+        assert_eq!(by("child").template.as_deref(), Some("M::t.phtml"));
+        assert!(by("gone").remove);
+        assert_eq!(by("deep").parent.as_deref(), Some("wrap"));
+        assert_eq!(by("wrap").parent.as_deref(), Some("content"));
+        let mv = ops.iter().find(|o| matches!(o.kind, RawLayoutOpKind::Move)).unwrap();
+        assert_eq!((mv.name.as_str(), mv.parent.as_deref()), ("child", Some("wrap")));
+        // update, 2 referenceBlocks, referenceContainer, container, 2 blocks, move.
+        assert_eq!(ops.len(), 8);
+    }
+}
+
 // ---------- extension attributes (extension_attributes.xml) ----------
 
 pub(crate) struct RawExtJoin {

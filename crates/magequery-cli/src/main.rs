@@ -48,6 +48,10 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "Frontend",
+        &[("layout", "Layout handle: contributing files and what they do to the page")],
+    ),
+    (
         "Config & admin",
         &[
             ("config", "Resolve a config path/section with its source (static, +--db)"),
@@ -235,6 +239,10 @@ enum Command {
     /// Extension attributes: who bolts what onto which API interface.
     ExtensionAttributes(ExtAttrArgs),
 
+    // ── Frontend: presentation ──
+    /// Layout handle: contributing files and what they do to the page.
+    Layout(LayoutArgs),
+
     // ── Config & admin: where settings & permissions live ──
     /// Resolve a config path/section with its source (static, +--db).
     Config(ConfigArgs),
@@ -374,6 +382,18 @@ struct GraphqlArgs {
     /// field; otherwise a name substring to list matching types. Omit to list every type.
     #[arg(value_name = "TYPE")]
     type_name: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct LayoutArgs {
+    /// The layout handle (`catalog_product_view`). Omit to list every handle with its
+    /// contributing-file count.
+    handle: Option<String>,
+    /// Area: frontend (default) or adminhtml.
+    #[arg(long)]
+    area: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -706,6 +726,7 @@ fn main() -> Result<()> {
         Command::Graphql(args) => graphql(&mage, &args, &cli.root),
         Command::Indexers(args) => indexers(&mage, &args, &cli.root),
         Command::ExtensionAttributes(args) => extension_attributes(&mage, &args, &cli.root),
+        Command::Layout(args) => layout(&mage, &args, &cli.root),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
         Command::Actions(args) => actions(&mage, &args, &cli.root),
@@ -1346,6 +1367,121 @@ fn render_acl_detail(mage: &Magento, res: &AclResource, root: &Path) {
         for c in &children {
             let pad = " ".repeat(w - c.id.len());
             println!("    {}{pad}  {}", style::name(&c.id), acl_title_loc(c, root));
+        }
+    }
+}
+
+fn layout(mage: &Magento, args: &LayoutArgs, root: &Path) -> Result<()> {
+    let area = match &args.area {
+        Some(a) => a.parse::<Area>().map_err(|e| anyhow!("{e}"))?,
+        None => Area::Frontend,
+    };
+
+    let Some(handle) = &args.handle else {
+        let handles = mage.layout_handles(area);
+        if args.json {
+            let arr: Vec<_> = handles
+                .iter()
+                .map(|(h, n)| serde_json::json!({"handle": h, "files": n}))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&arr)?);
+            return Ok(());
+        }
+        let w = handles.iter().map(|(h, _)| h.len()).max().unwrap_or(0);
+        for (h, n) in &handles {
+            let pad = " ".repeat(w - h.len());
+            println!("{}{pad}  {}", style::name(h), style::dim(&format!("{n} file(s)")));
+        }
+        eprintln!("\n{} handle(s) ({area})", handles.len());
+        return Ok(());
+    };
+
+    let Some(view) = mage.layout(handle, area) else {
+        return Err(anyhow!(
+            "no layout file declares handle `{handle}` in {area}\n  \
+             List handles with `magequery layout --area {area}`."
+        ));
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+        return Ok(());
+    }
+
+    println!(
+        "{}  ({})  {}",
+        style::name(&view.handle),
+        style::area(&area.to_string()),
+        style::dim(&format!("— {} contributing file(s)", view.contributions.len())),
+    );
+    for c in &view.contributions {
+        let layer = match &c.layer {
+            magequery_core::LayoutLayer::Module(m) => style::module(m.as_str()),
+            magequery_core::LayoutLayer::Theme(t) => {
+                format!("{} {}", style::dim("theme"), style::area(t))
+            }
+        };
+        let rel = c.file.strip_prefix(root).unwrap_or(&c.file);
+        println!("\n{layer}   {}", style::path(&format!("# {}", rel.display())));
+        for op in &c.ops {
+            println!("  {}", layout_op_line(op));
+        }
+        if c.ops.is_empty() {
+            println!("  {}", style::dim("(no structural operations — arguments/head only)"));
+        }
+    }
+    if !view.includes.is_empty() {
+        let list: Vec<String> = view.includes.iter().map(|h| style::name(h)).collect();
+        println!("\n{} {}", style::dim("includes:"), list.join(", "));
+    }
+    if !view.included_by.is_empty() {
+        let list: Vec<String> = view.included_by.iter().map(|h| style::name(h)).collect();
+        println!("{} {}", style::dim("included by:"), list.join(", "));
+    }
+    Ok(())
+}
+
+/// One layout operation, compact: symbol + name + the details that matter for its kind.
+fn layout_op_line(op: &magequery_core::LayoutOp) -> String {
+    use magequery_core::LayoutOpKind as K;
+    let line = format!("   #{}", op.source.line);
+    match op.kind {
+        K::Block | K::Container => {
+            let kind = if op.kind == K::Block { "block" } else { "container" };
+            let class = op
+                .class
+                .as_ref()
+                .map(|c| format!("  {}", style::class(c.as_str())))
+                .unwrap_or_default();
+            let tpl = op
+                .template
+                .as_deref()
+                .map(|t| format!("  {}", style::dim(&format!("template={t}"))))
+                .unwrap_or_default();
+            let parent = op
+                .parent
+                .as_deref()
+                .map(|p| format!("  {}", style::dim(&format!("(in {p})"))))
+                .unwrap_or_default();
+            format!("{} {kind} {}{class}{tpl}{parent}{}", style::ok("+"), style::name(&op.name), style::path(&line))
+        }
+        K::ReferenceBlock | K::ReferenceContainer if op.remove => {
+            format!("{} {}{}", style::err("✕ remove"), style::name(&op.name), style::path(&line))
+        }
+        K::ReferenceBlock | K::ReferenceContainer => {
+            let kind =
+                if op.kind == K::ReferenceBlock { "referenceBlock" } else { "referenceContainer" };
+            format!("{} {kind} {}{}", style::kind("~"), style::name(&op.name), style::path(&line))
+        }
+        K::Update => {
+            format!("{} update {}{}", style::kind("←"), style::name(&op.name), style::path(&line))
+        }
+        K::Move => {
+            let to = op
+                .parent
+                .as_deref()
+                .map(|p| format!(" {} {}", style::dim("to"), style::name(p)))
+                .unwrap_or_default();
+            format!("{} move {}{to}{}", style::kind("→"), style::name(&op.name), style::path(&line))
         }
     }
 }

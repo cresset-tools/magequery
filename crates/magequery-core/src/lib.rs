@@ -47,6 +47,7 @@ pub use model::{
     DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, ExtendedType, ExtensionAttribute,
     ExtensionJoin, GqlArg, GqlField, GqlKind, GqlType,
     Indexer, InstanceInfo, InterceptKind,
+    LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
     Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
@@ -88,6 +89,7 @@ pub struct Magento {
     gql: OnceLock<breadth::GqlIndex>,
     menu: OnceLock<breadth::MenuIndex>,
     ext_attrs: OnceLock<breadth::ExtAttrIndex>,
+    layout: OnceLock<breadth::LayoutIndex>,
 }
 
 struct DiBuilt {
@@ -119,6 +121,7 @@ impl Magento {
             gql: OnceLock::new(),
             menu: OnceLock::new(),
             ext_attrs: OnceLock::new(),
+            layout: OnceLock::new(),
         })
     }
 
@@ -1304,6 +1307,66 @@ impl Magento {
 
     fn mq_index(&self) -> &breadth::MqIndex {
         self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
+    }
+
+    fn layout_index(&self) -> &breadth::LayoutIndex {
+        self.layout.get_or_init(|| {
+            breadth::LayoutIndex::build(&self.index.modules, &self.discover_themes())
+        })
+    }
+
+    /// Themes on disk as `(id, dir)`: composer packages whose root holds a `theme.xml`
+    /// (id read from `registration.php`) plus `app/design/<area>/<Vendor>/<theme>`.
+    fn discover_themes(&self) -> Vec<(String, std::path::PathBuf)> {
+        let mut out = Vec::new();
+        for p in &self.index.packages {
+            if !p.root.join("theme.xml").is_file() {
+                continue;
+            }
+            let Ok(reg) = std::fs::read_to_string(p.root.join("registration.php")) else {
+                continue;
+            };
+            // ComponentRegistrar::register(THEME, 'frontend/Vendor/name', __DIR__)
+            if let Some(id) = reg
+                .split('\'')
+                .chain(reg.split('"'))
+                .find(|s| s.starts_with("frontend/") || s.starts_with("adminhtml/"))
+            {
+                out.push((id.to_string(), p.root.clone()));
+            }
+        }
+        for area in ["frontend", "adminhtml"] {
+            let base = self.index.root.join("app/design").join(area);
+            let Ok(vendors) = std::fs::read_dir(&base) else { continue };
+            for vendor in vendors.flatten() {
+                let Ok(themes) = std::fs::read_dir(vendor.path()) else { continue };
+                for theme in themes.flatten() {
+                    if theme.path().join("theme.xml").is_file() {
+                        let id = format!(
+                            "{area}/{}/{}",
+                            vendor.file_name().to_string_lossy(),
+                            theme.file_name().to_string_lossy()
+                        );
+                        out.push((id, theme.path()));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Layout handles in `area` with their contributing-file counts (modules + themes).
+    pub fn layout_handles(&self, area: Area) -> Vec<(String, usize)> {
+        self.layout_index().handles(area)
+    }
+
+    /// Everything contributing to one layout handle in `area`: each file's operations
+    /// (module files in load order, then theme files — theme *application* order depends
+    /// on the active theme's ancestry, which is runtime state), plus the handle-inclusion
+    /// graph around it.
+    pub fn layout(&self, handle: &str, area: Area) -> Option<LayoutView> {
+        self.layout_index().view(handle, area)
     }
 
     fn ext_attr_index(&self) -> &breadth::ExtAttrIndex {

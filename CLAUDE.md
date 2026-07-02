@@ -179,8 +179,9 @@ CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
   acl [<resource>]                              menu [<item>]
 
-FRONTEND      (presentation)                    -- all backlog
-  layout <handle>   widgets   email-templates   translations <str>   view   ui-components
+FRONTEND      (presentation)
+  layout [<handle>] [--area]
+  widgets (backlog)   email-templates (backlog)   translations <str> (backlog)   ui-components (backlog)
 
 RUNTIME       (env.php config & live connections)
   db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
@@ -895,6 +896,30 @@ Validated on mageos-lite: `Cms\Controller\Router` → `$routerList['cms']['class
 string, area=frontend; `Session\Storage` → 1 reverse preference + 8 vtypes (incl. per-area
 declarations, each with its own source); a vtype target (`Backend\Model\Session\Storage`)
 resolves its injector. ~19ms (di parse dominates).
+
+### `layout` (layout handles, static, done — first of the FRONTEND group)
+
+`magequery layout [<handle>] [--area]` — which files contribute to a layout handle and
+what they do to the page: the "where does this block come from" question. A `LayoutIndex`
+in `breadth.rs` over **two layers**: every enabled module's `view/{base,frontend,
+adminhtml}/layout/*.xml` (base applies to both areas; merged in load order — Magento's
+real base merge) and every **theme**'s `<theme>/<Vendor_Module>/layout/*.xml`. Themes are
+discovered statically (`discover_themes`): composer packages whose root holds `theme.xml`
+(id read from `registration.php`'s `'frontend/Vendor/name'` literal) plus
+`app/design/<area>/<Vendor>/<theme>`. Theme files are listed after modules tagged
+`theme <id>` — theme *application* order depends on the active theme's ancestry (runtime
+state), so it's reported, not resolved. Handle = file stem; all files parsed in parallel.
+
+`parse::layout_xml` flattens each file into **ops** with an enclosing-element stack (only
+`Start` pushes, so self-closing references can't corrupt nesting — unit-tested): `+ block`
+(class, template, `(in parent)`), `+ container`, `~ referenceBlock/Container`,
+`✕ remove` (`remove="true"`), `← update <handle>`, `→ move X to Y`. The index also builds
+the **handle-inclusion graph**: each view lists `includes:` (its `<update>`s) and
+`included by:` (who pulls it in). CLI: no arg → handle list with file counts (102 frontend
+handles on lite); `<handle>` → per-file op stream with per-op `#line`. Known limitation:
+theme `layout/override/` replacement semantics not modeled. Validated: Luma's
+catalog_product_view `<move>`s render under the theme layer; commerce-store's `default`
+handle = 53 files, 12ms.
 
 ## Future query tools (backlog — not yet built)
 

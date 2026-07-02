@@ -1112,6 +1112,70 @@ pub struct AclResource {
     pub source: Source,
 }
 
+/// The kind of a layout operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutOpKind {
+    Block,
+    Container,
+    ReferenceBlock,
+    ReferenceContainer,
+    Update,
+    Move,
+}
+
+/// One operation a layout file performs on the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct LayoutOp {
+    pub kind: LayoutOpKind,
+    /// Block/container name; the target handle for `Update`; the element for `Move`.
+    pub name: String,
+    pub class: Option<ClassName>,
+    pub template: Option<String>,
+    /// The enclosing named element (or `Move`'s destination).
+    pub parent: Option<String>,
+    /// `remove="true"` on a reference.
+    pub remove: bool,
+    pub source: Source,
+}
+
+/// Who provides a layout file: a module (merged in load order) or a theme (applied per
+/// the active theme's ancestry — reported, not resolved, since the active theme is
+/// runtime state).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutLayer {
+    Module(ModuleName),
+    /// Theme id, e.g. `frontend/Magento/luma`.
+    Theme(String),
+}
+
+/// One layout file's contribution to a handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct LayoutContribution {
+    pub layer: LayoutLayer,
+    pub file: std::path::PathBuf,
+    pub ops: Vec<LayoutOp>,
+}
+
+/// Everything contributing to one layout handle in one area: module files (in load
+/// order), then theme files, plus the handle-inclusion graph around it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct LayoutView {
+    pub handle: String,
+    pub area: Area,
+    pub contributions: Vec<LayoutContribution>,
+    /// Handles this one pulls in (`<update handle=…>`).
+    pub includes: Vec<String>,
+    /// Handles that pull this one in.
+    pub included_by: Vec<String>,
+}
+
 /// A `(table, column)` pair in a schema drift report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
