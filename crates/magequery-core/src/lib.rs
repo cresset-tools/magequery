@@ -44,7 +44,8 @@ pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
     AclResource, ArgItem, ArgValue, Argument, ByArea, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ConsoleCommand, ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
-    DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, GqlArg, GqlField, GqlKind, GqlType,
+    DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, ExtendedType, ExtensionAttribute,
+    ExtensionJoin, GqlArg, GqlField, GqlKind, GqlType,
     Indexer, InstanceInfo, InterceptKind,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps,
     MviewSubscription, Observer,
@@ -86,6 +87,7 @@ pub struct Magento {
     mq: OnceLock<breadth::MqIndex>,
     gql: OnceLock<breadth::GqlIndex>,
     menu: OnceLock<breadth::MenuIndex>,
+    ext_attrs: OnceLock<breadth::ExtAttrIndex>,
 }
 
 struct DiBuilt {
@@ -116,6 +118,7 @@ impl Magento {
             mq: OnceLock::new(),
             gql: OnceLock::new(),
             menu: OnceLock::new(),
+            ext_attrs: OnceLock::new(),
         })
     }
 
@@ -1048,6 +1051,22 @@ impl Magento {
 
     fn mq_index(&self) -> &breadth::MqIndex {
         self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
+    }
+
+    fn ext_attr_index(&self) -> &breadth::ExtAttrIndex {
+        self.ext_attrs.get_or_init(|| breadth::ExtAttrIndex::build(&self.index.modules))
+    }
+
+    /// API data interfaces extended via `extension_attributes.xml`, each with every
+    /// attribute modules bolt on (keyed by code, last wins, per-attribute provenance).
+    /// Filtered by a type-name substring, sorted by type. Static.
+    pub fn extension_attributes(&self, filter: Option<&str>) -> Vec<ExtendedType> {
+        self.ext_attr_index().types(filter)
+    }
+
+    /// One extended type by exact name.
+    pub fn extended_type(&self, name: &ClassName) -> Option<ExtendedType> {
+        self.ext_attr_index().extended_type(name)
     }
 
     fn menu_index(&self) -> &breadth::MenuIndex {

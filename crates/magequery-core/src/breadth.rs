@@ -11,7 +11,8 @@ use std::path::Path;
 
 use crate::ids::{Area, ClassName, EventName, ModuleName};
 use crate::model::{
-    AclResource, CronJob, DbColumn, DbConstraint, DbIndex, DbTable, GqlArg, GqlField, GqlKind,
+    AclResource, CronJob, DbColumn, DbConstraint, DbIndex, DbTable, ExtendedType,
+    ExtensionAttribute, ExtensionJoin, GqlArg, GqlField, GqlKind,
     GqlType, Indexer, MenuItem, Module,
     MqConsumer, MqHandler, MqPublisher, MqRoute, MqTopic, MqTopicRoute, MqVia,
     MviewSubscription, Observer, Route, SystemField, WebapiRoute,
@@ -407,6 +408,74 @@ fn merge_index(t: &mut DbTable, ri: parse::RawIndex, module: &ModuleName, path: 
     match t.indexes.iter_mut().find(|i| i.id == ri.id) {
         Some(existing) => *existing = idx,
         None => t.indexes.push(idx),
+    }
+}
+
+// ---------- extension attributes (extension_attributes.xml) ----------
+
+pub(crate) struct ExtAttrIndex {
+    by_type: HashMap<ClassName, ExtendedType>,
+}
+
+impl ExtAttrIndex {
+    pub fn build(modules: &[Module]) -> Self {
+        let mut by_type: HashMap<ClassName, ExtendedType> = HashMap::new();
+        for (i, path, raws) in
+            read_parse(modules, Area::Global, "extension_attributes.xml", parse::extension_attributes_xml)
+        {
+            let module = &modules[i].name;
+            for r in raws {
+                let source = Source {
+                    module: module.clone(),
+                    file: path.clone(),
+                    line: r.line,
+                    area: Area::Global,
+                };
+                let attr = ExtensionAttribute {
+                    code: r.code,
+                    ty: r.ty,
+                    resources: r.resources,
+                    join: r.join.map(|j| ExtensionJoin {
+                        reference_table: j.reference_table,
+                        reference_field: j.reference_field,
+                        join_on_field: j.join_on_field,
+                        fields: j.fields,
+                    }),
+                    source,
+                };
+                let entry = by_type
+                    .entry(r.for_type.clone())
+                    .or_insert_with(|| ExtendedType { for_type: r.for_type, attributes: Vec::new() });
+                match entry.attributes.iter_mut().find(|a| a.code == attr.code) {
+                    Some(existing) => *existing = attr, // last declaration wins wholesale
+                    None => entry.attributes.push(attr),
+                }
+            }
+        }
+        for t in by_type.values_mut() {
+            t.attributes.sort_by(|a, b| a.code.cmp(&b.code));
+        }
+        Self { by_type }
+    }
+
+    /// One extended type by exact name.
+    pub fn extended_type(&self, name: &ClassName) -> Option<ExtendedType> {
+        self.by_type.get(name).cloned()
+    }
+
+    /// All extended types whose name contains `filter` (case-insensitive), by name.
+    pub fn types(&self, filter: Option<&str>) -> Vec<ExtendedType> {
+        let needle = filter.map(str::to_lowercase);
+        let mut v: Vec<ExtendedType> = self
+            .by_type
+            .values()
+            .filter(|t| {
+                needle.as_ref().is_none_or(|n| t.for_type.as_str().to_lowercase().contains(n))
+            })
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.for_type.cmp(&b.for_type));
+        v
     }
 }
 

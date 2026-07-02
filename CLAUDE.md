@@ -173,7 +173,7 @@ ENTRY POINTS  (how execution starts)
 
 DATA          (persistence & model)
   schema [<table>]       indexers [<id>]
-  extension-attributes <type> (backlog)     eav [<attr>] (backlog, --db)
+  extension-attributes [<type>]             eav [<attr>] (backlog, --db)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -467,6 +467,22 @@ the shared `read_parse`, merged in load order.
   tables; `sales_order` shows 152 columns merged from 8 module files, each third-party
   extension column attributed (`← Magento_Paypal`, `← Billink_Billink`, …); FKs/indexes/types
   exact; ~20ms.
+
+### `extension-attributes` (extension_attributes.xml, static, done)
+
+Who bolts what onto which API data interface — the mechanism behind the generated
+`…Extension` classes. An `ExtAttrIndex` in `breadth.rs` (lazy, parallel `read_parse` over
+`etc/extension_attributes.xml`). `parse::extension_attributes_xml` captures per attribute:
+`code`, declared `type` (class or `[]`-suffixed scalar), the gating ACL `<resources>`, and
+the `<join>` spec (reference table/fields — the auto-join repositories perform). Merge:
+keyed `(for, code)`, last declaration wins wholesale, each attribute keeps the **adding**
+module's `Source` — the point: `ProductInterface` is extended by inventory, bundle,
+downloadable, configurable, sales-rule, … . `Magento::extension_attributes(filter?)` +
+`extended_type(name)`. CLI `magequery extension-attributes [<type>]`: exact type → the
+full set (`code  type  ← Vendor_Module  # loc`, plus dim `acl:`/`join:` lines); substring
+→ matching types with counts; no arg → all. Validated on commerce-store: 43 extended
+types; ProductInterface = 9 attributes from 6 modules, stock_item's ACL gate shown; the
+magento_bulk join renders.
 
 ### `system-config` (admin settings map from `adminhtml/system.xml`, static, done)
 

@@ -1112,6 +1112,41 @@ pub struct AclResource {
     pub source: Source,
 }
 
+/// The auto-join a repository performs to load an extension attribute (`<join>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ExtensionJoin {
+    pub reference_table: String,
+    pub reference_field: Option<String>,
+    pub join_on_field: Option<String>,
+    pub fields: Vec<String>,
+}
+
+/// One extension attribute bolted onto an API data interface via
+/// `extension_attributes.xml` — the mechanism behind the generated `…Extension` classes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ExtensionAttribute {
+    pub code: String,
+    /// Declared type: a class/interface or a scalar, possibly `[]`-suffixed.
+    pub ty: String,
+    /// ACL resources gating the attribute in webapi responses.
+    pub resources: Vec<String>,
+    pub join: Option<ExtensionJoin>,
+    pub source: Source,
+}
+
+/// An API data interface with every extension attribute modules add to it, merged in load
+/// order (attributes keyed by code, last wins; each keeps the adding module's `Source` —
+/// the point: `ProductInterface` is extended by inventory, gift-message, bundling, …).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ExtendedType {
+    pub for_type: ClassName,
+    /// Sorted by code.
+    pub attributes: Vec<ExtensionAttribute>,
+}
+
 /// One admin menu item from `adminhtml/menu.xml`, merged across modules in load order
 /// (`<add>`/`<update>` upsert attribute-level; `<remove>` deletes). The tree the admin
 /// sidebar renders — parents come from the `parent` attribute.

@@ -44,6 +44,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("schema", "Tables from db_schema.xml: a list, or one table's DDL"),
             ("indexers", "Indexers from indexer.xml + their mview subscriptions"),
+            ("extension-attributes", "Who bolts what onto which API interface"),
         ],
     ),
     (
@@ -230,6 +231,8 @@ enum Command {
     Schema(SchemaArgs),
     /// Indexers from indexer.xml + their mview subscriptions.
     Indexers(IndexersArgs),
+    /// Extension attributes: who bolts what onto which API interface.
+    ExtensionAttributes(ExtAttrArgs),
 
     // ── Config & admin: where settings & permissions live ──
     /// Resolve a config path/section with its source (static, +--db).
@@ -352,6 +355,16 @@ struct UsesArgs {
 struct GraphqlArgs {
     /// Exact type name (`Query`) → full detail; `Type.field` (`Query.products`) → one
     /// field; otherwise a name substring to list matching types. Omit to list every type.
+    #[arg(value_name = "TYPE")]
+    type_name: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct ExtAttrArgs {
+    /// Exact interface name → its attributes in full; otherwise a name substring to list
+    /// matching types. Omit to list every extended type.
     #[arg(value_name = "TYPE")]
     type_name: Option<String>,
     #[arg(long)]
@@ -670,6 +683,7 @@ fn main() -> Result<()> {
         Command::Commands(args) => commands(&mage, &args, &cli.root),
         Command::Graphql(args) => graphql(&mage, &args, &cli.root),
         Command::Indexers(args) => indexers(&mage, &args, &cli.root),
+        Command::ExtensionAttributes(args) => extension_attributes(&mage, &args, &cli.root),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
         Command::Actions(args) => actions(&mage, &args, &cli.root),
@@ -1310,6 +1324,77 @@ fn render_acl_detail(mage: &Magento, res: &AclResource, root: &Path) {
         for c in &children {
             let pad = " ".repeat(w - c.id.len());
             println!("    {}{pad}  {}", style::name(&c.id), acl_title_loc(c, root));
+        }
+    }
+}
+
+fn extension_attributes(mage: &Magento, args: &ExtAttrArgs, root: &Path) -> Result<()> {
+    // An exact type name → its full attribute set; anything else is a substring filter.
+    if let Some(name) = &args.type_name {
+        let class = ClassName::new(name.as_str());
+        if let Some(t) = mage.extended_type(&class) {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&t)?);
+                return Ok(());
+            }
+            render_extended_type(&t, root);
+            return Ok(());
+        }
+    }
+
+    let list = mage.extension_attributes(args.type_name.as_deref());
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+    if list.is_empty() {
+        println!("{}", style::dim("(no extended type matches)"));
+        return Ok(());
+    }
+    let w = list.iter().map(|t| t.for_type.as_str().len()).max().unwrap_or(0);
+    for t in &list {
+        let pad = " ".repeat(w.saturating_sub(t.for_type.as_str().len()));
+        println!(
+            "{}{pad}  {}",
+            style::class(t.for_type.as_str()),
+            style::dim(&format!("{:>2} attribute(s)", t.attributes.len())),
+        );
+    }
+    eprintln!("\n{} extended type(s)", list.len());
+    Ok(())
+}
+
+fn render_extended_type(t: &magequery_core::ExtendedType, root: &Path) {
+    println!(
+        "{}  {}",
+        style::class(t.for_type.as_str()),
+        style::dim(&format!("— extension attributes ({}):", t.attributes.len())),
+    );
+    let w = t.attributes.iter().map(|a| a.code.len()).max().unwrap_or(0);
+    for a in &t.attributes {
+        let pad = " ".repeat(w.saturating_sub(a.code.len()));
+        println!(
+            "  {}{pad}  {}  {}   {}",
+            style::name(&a.code),
+            style::class(&a.ty),
+            style::module(&format!("← {}", a.source.module.as_str())),
+            style::path(&short_loc(&a.source, root)),
+        );
+        if !a.resources.is_empty() {
+            println!("      {} {}", style::dim("acl:"), a.resources.join(", "));
+        }
+        if let Some(j) = &a.join {
+            let on = match (&j.join_on_field, &j.reference_field) {
+                (Some(on), Some(rf)) => format!(" ON {on} = {rf}"),
+                _ => String::new(),
+            };
+            println!(
+                "      {} {}{}  {}",
+                style::dim("join:"),
+                style::class(&j.reference_table),
+                style::dim(&on),
+                style::dim(&format!("→ {}", j.fields.join(", "))),
+            );
         }
     }
 }
