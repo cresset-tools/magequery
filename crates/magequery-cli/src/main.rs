@@ -2420,6 +2420,23 @@ fn modules(mage: &Magento, args: &ModulesArgs) -> Result<()> {
     Ok(())
 }
 
+/// One aligned `info` row: pad the *plain* label, then dim it (escape codes don't count
+/// toward format width).
+fn info_row(label: &str, value: impl AsRef<str>) {
+    println!("{}  {}", style::dim(&format!("{label:<11}")), value.as_ref());
+}
+
+/// `93s` → `1m`, `7305s` → `2h` — coarse on purpose; this is a health glance.
+fn humanize_secs(secs: i64) -> String {
+    let secs = secs.max(0);
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
+}
+
 fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
     let i = mage.info();
     if args.json {
@@ -2427,19 +2444,20 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         return Ok(());
     }
 
+    // ── identity ──
     match (&i.version, &i.version_package) {
         (Some(v), Some(p)) => {
-            println!("magento      {}  {}", style::number(v), style::dim(&format!("({p})")))
+            info_row("magento", format!("{}  {}", style::number(v), style::dim(&format!("({p})"))))
         }
-        _ => println!("magento      {}", style::dim("(version unknown — no product package found)")),
+        _ => info_row("magento", style::dim("(version unknown — no product package found)")),
     }
     // Absent MAGE_MODE = Magento's "default" mode; no env.php at all = not installed.
     match &i.mode {
         Some(m) => {
             let styled = if m == "production" { style::ok(m) } else { style::area(m) };
-            println!("mode         {styled}");
+            info_row("mode", styled);
         }
-        None => println!("mode         {}", style::dim("default (no MAGE_MODE in env.php)")),
+        None => info_row("mode", style::dim("default (no MAGE_MODE in env.php)")),
     }
     if i.maintenance {
         let ips = if i.maintenance_allowed_ips.is_empty() {
@@ -2447,10 +2465,24 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         } else {
             format!("  {}", style::dim(&format!("(allowed: {})", i.maintenance_allowed_ips.join(", "))))
         };
-        println!("maintenance  {}{ips}  {}", style::err("ON"), style::path("# var/.maintenance.flag"));
+        info_row(
+            "maintenance",
+            format!("{}{ips}  {}", style::err("ON"), style::path("# var/.maintenance.flag")),
+        );
     } else {
-        println!("maintenance  {}", style::ok("off"));
+        info_row("maintenance", style::ok("off"));
     }
+    if let Some(d) = &i.installed_at {
+        info_row("installed", style::dim(d));
+    }
+    let locale_parts: Vec<String> =
+        [&i.locale, &i.currency, &i.timezone].into_iter().flatten().cloned().collect();
+    if !locale_parts.is_empty() {
+        info_row("locale", locale_parts.join(&style::dim(" · ")));
+    }
+
+    // ── web ──
+    println!();
     // A `{{base_url}}`-style value is the config.xml placeholder (auto-detect from the
     // request); the text speaks for itself, dimmed.
     let url = |u: &Option<String>| match u {
@@ -2469,13 +2501,16 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
     } else {
         String::new()
     };
-    println!("base url     {}{overrides}", url(&i.base_url));
-    println!("secure       {}", url(&i.base_url_secure));
+    info_row("base url", format!("{}{overrides}", url(&i.base_url)));
+    info_row("secure", url(&i.base_url_secure));
     match (&i.admin_url, &i.admin_front_name) {
-        (Some(u), _) => println!("admin        {}", style::class(u)),
-        (None, Some(f)) => println!("admin        frontName {}", style::name(f)),
-        _ => println!("admin        {}", style::dim("(no backend/frontName in env.php)")),
+        (Some(u), _) => info_row("admin", style::class(u)),
+        (None, Some(f)) => info_row("admin", format!("frontName {}", style::name(f))),
+        _ => info_row("admin", style::dim("(no backend/frontName in env.php)")),
     }
+
+    // ── stack ──
+    println!();
     // The frontend stack: classification (+ package version) and the active theme path.
     match (&i.frontend, &i.theme) {
         (Some(f), theme) => {
@@ -2489,9 +2524,11 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
                 // Classified from installed packages only — say the active theme is unknown.
                 None => style::dim("(installed; active theme unknown)"),
             };
-            println!("frontend     {}{version}  {detail}", style::ok(f));
+            info_row("frontend", format!("{}{version}  {detail}", style::ok(f)));
         }
-        (None, Some(t)) => println!("frontend     {}  {}", style::class(t), style::dim("(custom theme)")),
+        (None, Some(t)) => {
+            info_row("frontend", format!("{}  {}", style::class(t), style::dim("(custom theme)")))
+        }
         (None, None) => {}
     }
     // The checkout stack; nothing beyond stock found = the default (Luma) checkout.
@@ -2508,24 +2545,34 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
                 Some("default") => {
                     let plain_version =
                         i.checkout_version.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
-                    println!(
-                        "checkout     default (Luma)  {}",
-                        style::dim(&format!("({c}{plain_version} installed, not selected)")),
+                    info_row(
+                        "checkout",
+                        format!(
+                            "default (Luma)  {}",
+                            style::dim(&format!("({c}{plain_version} installed, not selected)"))
+                        ),
                     );
                 }
-                Some(sel) => println!(
-                    "checkout     {}{version}  {}",
-                    style::ok(c),
-                    style::dim(&format!("(active: {sel})")),
+                Some(sel) => info_row(
+                    "checkout",
+                    format!("{}{version}  {}", style::ok(c), style::dim(&format!("(active: {sel})"))),
                 ),
-                None => println!("checkout     {}{version}", style::ok(c)),
+                None => info_row("checkout", format!("{}{version}", style::ok(c))),
             }
         }
-        None => println!("checkout     {}", style::dim("default (Luma)")),
+        None => info_row("checkout", style::dim("default (Luma)")),
     }
     if let Some(s) = &i.search_engine {
-        println!("search       {}", style::ok(s));
+        let host = i
+            .search_host
+            .as_deref()
+            .map(|h| format!(" {} {}", style::dim("@"), style::class(h)))
+            .unwrap_or_default();
+        info_row("search", format!("{}{host}", style::ok(s)));
     }
+
+    // ── infra ──
+    println!();
     if let (Some(n), Some(e)) = (&i.db_name, &i.db_endpoint) {
         let prefix = i
             .table_prefix
@@ -2533,7 +2580,7 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
             .map(|p| format!("  {}", style::dim(&format!("(prefix \"{p}\")"))))
             .unwrap_or_default();
         let styled = if e.starts_with('/') { style::path(e) } else { style::class(e) };
-        println!("db           {} {} {styled}{prefix}", style::class(n), style::dim("@"));
+        info_row("db", format!("{} {} {styled}{prefix}", style::class(n), style::dim("@")));
     }
     if let Some(s) = &i.session {
         let mut line = style::ok(&s.handler);
@@ -2545,7 +2592,7 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
             }
             line.push(')');
         }
-        println!("session      {line}");
+        info_row("session", line);
     }
     if !i.cache_frontends.is_empty() {
         let mut parts: Vec<String> = i
@@ -2565,6 +2612,9 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
                 format!("{}: {}{db}", style::area(&f.id), style::ok(&backend))
             })
             .collect();
+        if let Some(f) = &i.fpc {
+            parts.push(format!("{}: {}", style::area("fpc"), style::ok(f)));
+        }
         if i.cache_types_total > 0 {
             let flag = format!("{}/{} types on", i.cache_types_enabled, i.cache_types_total);
             parts.push(if i.cache_types_enabled == i.cache_types_total {
@@ -2573,8 +2623,29 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
                 style::err(&flag)
             });
         }
-        println!("cache        {}", parts.join(&style::dim(" · ")));
+        info_row("cache", parts.join(&style::dim(" · ")));
     }
+    if let Some(q) = &i.queue_endpoint {
+        info_row("queue", style::class(q));
+    }
+    // Cron health, per the DB's own clock. 15 minutes of silence is already unusual for a
+    // healthy install (cron runs every minute).
+    match (&i.cron_last_success_ago, &i.db_error) {
+        (Some(secs), _) if *secs <= 900 => {
+            info_row("cron", style::ok(&format!("last success {} ago", humanize_secs(*secs))));
+        }
+        (Some(secs), _) => info_row(
+            "cron",
+            style::err(&format!("STALE — last success {} ago", humanize_secs(*secs))),
+        ),
+        (None, None) => {
+            info_row("cron", style::err("(no successful runs recorded — is cron running?)"))
+        }
+        (None, Some(_)) => {} // DB unreachable: unknown, not alarming
+    }
+
+    // ── content ──
+    println!();
     // The full hierarchy: websites → stores (groups) → store views.
     let scope_parts: Vec<String> = [
         (i.websites, "website(s)"),
@@ -2585,7 +2656,7 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
     .filter_map(|(n, label)| n.map(|n| format!("{} {label}", style::number(&n.to_string()))))
     .collect();
     if !scope_parts.is_empty() {
-        println!("stores       {}", scope_parts.join(", "));
+        info_row("stores", scope_parts.join(", "));
     }
     let disabled = i.modules_total - i.modules_enabled;
     let dis = if disabled > 0 {
@@ -2593,16 +2664,16 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
     } else {
         String::new()
     };
-    println!(
-        "modules      {}{dis}  {}",
-        style::number(&format!("{} enabled", i.modules_enabled)),
-        style::dim(&format!("({} vendor, {} app/code)", i.modules_vendor, i.modules_app)),
+    info_row(
+        "modules",
+        format!(
+            "{}{dis}  {}",
+            style::number(&format!("{} enabled", i.modules_enabled)),
+            style::dim(&format!("({} vendor, {} app/code)", i.modules_vendor, i.modules_app))
+        ),
     );
     if i.packages_total > 0 {
-        println!("packages     {}", style::number(&i.packages_total.to_string()));
-    }
-    if let Some(d) = &i.installed_at {
-        println!("installed    {}", style::dim(d));
+        info_row("packages", style::number(&i.packages_total.to_string()));
     }
     if let Some(e) = &i.db_error {
         eprintln!("{}", style::dim(&format!("note: database unreachable, static values only ({e})")));

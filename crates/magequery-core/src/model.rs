@@ -89,6 +89,19 @@ pub struct InstanceInfo {
     pub admin_url: Option<String>,
     /// `catalog/search/engine` (opensearch, elasticsearch7, …).
     pub search_engine: Option<String>,
+    /// The engine's configured endpoint (`catalog/search/<engine>_server_hostname[:port]`).
+    pub search_host: Option<String>,
+    /// Full-page cache application: `built-in`, `varnish`, or the raw value.
+    pub fpc: Option<String>,
+    /// The first message-queue connection as `name @ host:port` (usually amqp).
+    pub queue_endpoint: Option<String>,
+    /// `general/locale/code` / `currency/options/base` / `general/locale/timezone`.
+    pub locale: Option<String>,
+    pub currency: Option<String>,
+    pub timezone: Option<String>,
+    /// Seconds since the last successful cron job finished (DB clock). `None` with
+    /// `db_error` unset = no successful runs recorded — cron is likely not set up.
+    pub cron_last_success_ago: Option<i64>,
     /// The active frontend theme path (default scope), e.g. `Hyva/default` — from
     /// `design/theme/theme_id` (resolved via the `theme` table when it's a numeric id),
     /// falling back to the DI default (`Magento\Theme\Model\View\Design` `themes` arg).

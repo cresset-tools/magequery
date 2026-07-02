@@ -126,6 +126,22 @@ pub(crate) fn fetch_themes(
     .map_err(clean_err)
 }
 
+/// Seconds since the last *successful* cron job finished, per the DB server's own clock
+/// (`TIMESTAMPDIFF` — no client-side time needed). `None` = no successful runs recorded.
+pub(crate) fn fetch_cron_last_success(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<Option<i64>, String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    c.query_first(format!(
+        "SELECT TIMESTAMPDIFF(SECOND, MAX(finished_at), NOW()) FROM {table_prefix}cron_schedule \
+         WHERE status = 'success'"
+    ))
+    .map_err(clean_err)
+    .map(Option::flatten)
+}
+
 /// Count the store hierarchy — `(websites, store groups, store views)` — excluding the
 /// synthetic admin scopes (id 0).
 pub(crate) fn fetch_scope_counts(

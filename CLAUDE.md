@@ -631,8 +631,19 @@ any other value is the chosen namespace, shown verbatim as "(active: …)" — i
 selected. Theme values may be stored in the full-path form (`frontend/Hyva/default`, as
 found live on commerce-store); the leading area segment is normalized away before
 classification/ancestry matching),
-**module counts split vendor / app/code**, the **composer package count**, and the
-**install date** (`env.php` `install/date`).
+**module counts split vendor / app/code**, the **composer package count**, the
+**install date** (`env.php` `install/date`), **locale · currency · timezone**, the
+**search host** (`catalog/search/<engine>_server_hostname`), the **FPC application**
+(built-in vs varnish, on the cache line), the **queue endpoint**, and **cron health** —
+seconds since the last successful `cron_schedule` run, computed with the DB server's own
+clock (`TIMESTAMPDIFF`, no client-side time): green under 15 minutes, red "STALE" beyond,
+red "no successful runs recorded" when the table has none; the line is skipped when the DB
+is unreachable (unknown ≠ alarming).
+
+Rendering: rows go through `info_row` (labels padded *plain* then dimmed, so escape codes
+don't break alignment; values carry the color), grouped into blank-line-separated blocks —
+identity / web / stack (frontend, checkout, search) / infra (db, session, cache, queue,
+cron) / content (stores, modules, packages).
 
 Frontend detection (`theme`/`frontend`/`frontend_version`): the active theme =
 `design/theme/theme_id` (default scope; a numeric id is resolved — and its ancestry

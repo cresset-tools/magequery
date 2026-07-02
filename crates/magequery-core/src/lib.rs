@@ -770,6 +770,33 @@ impl Magento {
             None
         };
 
+        // Search engine + its endpoint (the host path is engine-specific:
+        // `catalog/search/<engine>_server_hostname`).
+        let search_engine = get("catalog/search/engine");
+        let search_host = search_engine.as_ref().and_then(|e| {
+            let host = get(&format!("catalog/search/{e}_server_hostname"))?;
+            Some(match get(&format!("catalog/search/{e}_server_port")) {
+                Some(port) if !port.is_empty() => format!("{host}:{port}"),
+                _ => host,
+            })
+        });
+
+        // Full-page cache application: 1 = built-in, 2 = Varnish.
+        let fpc = get("system/full_page_cache/caching_application").map(|v| match v.as_str() {
+            "1" => "built-in".to_string(),
+            "2" => "varnish".to_string(),
+            other => other.to_string(),
+        });
+
+        let queue_endpoint = self.queue_config().ok().and_then(|q| {
+            q.connections.first().map(|c| {
+                format!("{} @ {}:{}", c.name, c.host, c.port.unwrap_or(5672))
+            })
+        });
+
+        let cron_last_success_ago =
+            if db_error.is_none() { self.fetch_cron_last_success().ok().flatten() } else { None };
+
         // Deployment one-liners, from the existing env.php extractors (credentials
         // deliberately left out of this casual, paste-into-a-ticket view).
         let db_conn = self.db_config().ok().and_then(|c| {
@@ -821,7 +848,14 @@ impl Magento {
 
         InstanceInfo {
             db_error,
-            search_engine: get("catalog/search/engine"),
+            search_engine,
+            search_host,
+            fpc,
+            queue_endpoint,
+            locale: get("general/locale/code"),
+            currency: get("currency/options/base"),
+            timezone: get("general/locale/timezone"),
+            cron_last_success_ago,
             theme,
             frontend,
             frontend_version,
@@ -1111,6 +1145,19 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         db::fetch_config(conn, &cfg.table_prefix).map_err(Error::Db)
+    }
+
+    /// Seconds since the last successful cron job finished (DB clock).
+    #[cfg(feature = "db")]
+    fn fetch_cron_last_success(&self) -> Result<Option<i64>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        db::fetch_cron_last_success(conn, &cfg.table_prefix).map_err(Error::Db)
+    }
+
+    #[cfg(not(feature = "db"))]
+    fn fetch_cron_last_success(&self) -> Result<Option<i64>> {
+        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
     }
 
     /// `(websites, store groups, store views)` counts, admin scopes excluded.
