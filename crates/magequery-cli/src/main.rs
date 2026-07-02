@@ -2674,16 +2674,12 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         info_row("stores", scope_parts.join(", "));
     }
     let disabled = i.modules_total - i.modules_enabled;
-    let dis = if disabled > 0 {
-        format!(", {} disabled", disabled)
-    } else {
-        String::new()
-    };
     info_row(
         "modules",
         format!(
-            "{}{dis}  {}",
+            "{}, {}  {}",
             style::number(&format!("{} enabled", i.modules_enabled)),
+            style::number(&format!("{disabled} disabled")),
             style::dim(&format!("({} vendor, {} app/code)", i.modules_vendor, i.modules_app))
         ),
     );
