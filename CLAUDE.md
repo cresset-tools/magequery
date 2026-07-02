@@ -83,7 +83,12 @@ from the same computation.
 ## Type design (`magequery-core`)
 
 - **Typed identifiers, never stringly-typed**: `ClassName`, `ModuleName`, `EventName`,
-  `ConfigPath`, `Area` (enum).
+  `ConfigPath`, `Area` (enum). `ClassName::new` **strips a leading backslash** (`\Foo\Bar`
+  ≡ `Foo\Bar`) — the invariant is enforced at construction, not at call sites, mirroring
+  Magento's `ltrim($type, '\\')` at every config read. Both spellings occur in real di.xml
+  (core module-elasticsearch writes `type="\Magento\…"`) and must merge/compare as one
+  name; before this was enforced, `uses` missed backslash-declared virtualTypes and their
+  arg inheritance silently failed to merge.
 - **Provenance everywhere**: `Source { module, file, line, area }` on every returned fact;
   `.location()` → clickable `file:42`. This is the whole point — answers jump to source.
 - **Errors vs diagnostics split** (the key, hard-to-retrofit decision):

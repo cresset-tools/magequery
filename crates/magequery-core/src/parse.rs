@@ -285,7 +285,7 @@ fn push_item(stack: &mut [ArgFrame], key: String, value: RawArg, line: u32) {
 /// Build a non-array value from an xsi:type and text.
 fn scalar(xsi: &str, text: &str) -> RawArg {
     match xsi {
-        "object" => RawArg::Object(ClassName::new(text.trim_start_matches('\\'))),
+        "object" => RawArg::Object(ClassName::new(text)),
         "null" => RawArg::Null,
         _ if text.is_empty() && xsi.is_empty() => RawArg::Null,
         _ => RawArg::Scalar { xsi_type: xsi.to_string(), text: text.to_string() },

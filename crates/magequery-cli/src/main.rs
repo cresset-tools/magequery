@@ -1331,7 +1331,7 @@ fn cron(mage: &Magento, args: &CronArgs, root: &Path) -> Result<()> {
 }
 
 fn uses(mage: &Magento, args: &UsesArgs, root: &Path) -> Result<()> {
-    let class = ClassName::new(args.class.trim_start_matches('\\'));
+    let class = ClassName::new(args.class.as_str());
     let area = args
         .area
         .as_deref()
@@ -1615,7 +1615,7 @@ fn webapi(mage: &Magento, args: &WebapiArgs, root: &Path) -> Result<()> {
 }
 
 fn di(mage: &Magento, args: &DiArgs, root: &Path) -> Result<()> {
-    let class = ClassName::new(args.class.trim_start_matches('\\'));
+    let class = ClassName::new(args.class.as_str());
     let area = match &args.area {
         Some(a) => a.parse::<Area>().map_err(|e| anyhow!("{e}"))?,
         None => Area::Global,
@@ -1734,7 +1734,7 @@ fn render_scalar(xsi_type: &str, text: &str) -> String {
 }
 
 fn plugins(mage: &Magento, args: &PluginsArgs, root: &Path) -> Result<()> {
-    let class = ClassName::new(args.class.trim_start_matches('\\'));
+    let class = ClassName::new(args.class.as_str());
 
     // The area whose preference resolves the concrete (and validates a not-found class).
     // For --all-areas we merge across areas but resolve the concrete from global.
@@ -1834,7 +1834,7 @@ fn short_loc(s: &Source, root: &Path) -> String {
 }
 
 fn preference(mage: &Magento, args: &PreferenceArgs, root: &Path) -> Result<()> {
-    let class = ClassName::new(args.class.trim_start_matches('\\'));
+    let class = ClassName::new(args.class.as_str());
 
     // Decide which areas to report.
     let results: Vec<Preference> = if let Some(a) = &args.area {
