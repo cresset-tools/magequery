@@ -35,9 +35,15 @@ fn lex(src: &str) -> Vec<(Tok, u32)> {
                 let start_line = line;
                 let mut bytes = Vec::new();
                 if b[i..].starts_with(b"\"\"\"") {
-                    // Block string: raw until the closing triple quote.
+                    // Block string: raw until the closing triple quote; `\"""` is the one
+                    // escape block strings have.
                     i += 3;
                     while i < b.len() && !b[i..].starts_with(b"\"\"\"") {
+                        if b[i] == b'\\' && b[i + 1..].starts_with(b"\"\"\"") {
+                            bytes.extend_from_slice(b"\"\"\"");
+                            i += 4;
+                            continue;
+                        }
                         if b[i] == b'\n' {
                             line += 1;
                         }
@@ -197,6 +203,16 @@ pub(crate) fn schema_graphqls(src: &str) -> Vec<RawGqlType> {
     out
 }
 
+/// The keywords that can start a new definition — the boundary bare-name lists (the
+/// legacy comma `implements` form) must never consume across.
+fn is_definition_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "type" | "interface" | "input" | "enum" | "union" | "scalar" | "extend" | "schema"
+            | "directive"
+    )
+}
+
 struct Parser {
     toks: Vec<(Tok, u32)>,
     i: usize,
@@ -232,19 +248,21 @@ impl Parser {
         let line = self.line();
         self.i += 1; // keyword
         let name = self.name()?;
-        // `implements A & B` — the first name, then more only behind an explicit `&`
-        // (requiring the separator keeps a bodiless type from swallowing the next
-        // definition's keyword as an interface name).
+        // `implements A & B` — also the legacy comma form `implements A, B` (commas are
+        // whitespace to the lexer, so it reads as bare consecutive names). A bare name is
+        // accepted only when it isn't a definition keyword, so a bodiless type can't
+        // swallow the next definition.
         let mut implements = Vec::new();
         if matches!(self.peek(), Some(Tok::Name(k)) if k == "implements") {
             self.i += 1;
-            if let Some(n) = self.name() {
-                implements.push(n);
-                while self.punct('&') {
-                    match self.name() {
-                        Some(n) => implements.push(n),
-                        None => break,
-                    }
+            loop {
+                if !self.punct('&') && !matches!(self.peek(), Some(Tok::Name(n)) if !is_definition_keyword(n))
+                {
+                    break;
+                }
+                match self.name() {
+                    Some(n) => implements.push(n),
+                    None => break,
                 }
             }
         }
@@ -593,5 +611,57 @@ directive @cache(cacheIdentity: String="" cacheable: Boolean=true) on QUERY
         // schema {} and the directive definition produce no types: Query ×2 (base +
         // extend), ProductInterface, Simple, Mode, Result, Money.
         assert_eq!(types.len(), 7);
+    }
+
+    #[test]
+    fn legacy_comma_implements_keeps_fields() {
+        // Pre-June-2018 SDL (still accepted by graphql-php): commas separate interfaces.
+        // The commas are whitespace to the lexer; the names must still be collected and,
+        // crucially, the `{…}` body must not be lost.
+        let sdl = r#"
+type Legacy implements A, B, C {
+    x: Int
+}
+type Bodiless implements A
+type Next {
+    y: Int
+}
+"#;
+        let types = schema_graphqls(sdl);
+        let legacy = types.iter().find(|t| t.name == "Legacy").unwrap();
+        assert_eq!(legacy.implements, ["A", "B", "C"]);
+        assert_eq!(legacy.fields.len(), 1);
+        // A bodiless type must not swallow the next definition's keyword.
+        let bodiless = types.iter().find(|t| t.name == "Bodiless").unwrap();
+        assert_eq!(bodiless.implements, ["A"]);
+        let next = types.iter().find(|t| t.name == "Next").unwrap();
+        assert_eq!(next.fields.len(), 1);
+    }
+
+    #[test]
+    fn block_string_escape_and_junk_recovery() {
+        let sdl = r#"
+"""Contains \""" inside."""
+type Documented { x: Int }
+%%% ??? !!!
+type AfterJunk { y: Int @resolver(class: "A\\B") }
+"#;
+        let types = schema_graphqls(sdl);
+        let doc = types.iter().find(|t| t.name == "Documented").unwrap();
+        assert_eq!(doc.description.as_deref(), Some("Contains \"\"\" inside."));
+        // Garbage between definitions is skipped; parsing resumes at the next keyword.
+        let after = types.iter().find(|t| t.name == "AfterJunk").unwrap();
+        assert_eq!(after.fields[0].name, "y");
+    }
+
+    #[test]
+    fn every_prefix_parses_without_panic() {
+        // Truncation fuzz: any prefix of a real-looking document must parse (possibly to
+        // less data), never panic or hang — the tolerant-parser guarantee.
+        for n in 0..SDL.len() {
+            if SDL.is_char_boundary(n) {
+                let _ = schema_graphqls(&SDL[..n]);
+            }
+        }
     }
 }
