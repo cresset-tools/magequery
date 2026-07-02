@@ -2420,10 +2420,10 @@ fn modules(mage: &Magento, args: &ModulesArgs) -> Result<()> {
     Ok(())
 }
 
-/// One aligned `info` row: pad the *plain* label, then dim it (escape codes don't count
-/// toward format width).
+/// One aligned `info` row. Labels stay plain — only parenthetical annotations
+/// ("comments") are dimmed, by their producers.
 fn info_row(label: &str, value: impl AsRef<str>) {
-    println!("{}  {}", style::dim(&format!("{label:<11}")), value.as_ref());
+    println!("{label:<11}  {}", value.as_ref());
 }
 
 /// `93s` → `1m`, `7305s` → `2h` — coarse on purpose; this is a health glance.
@@ -2457,7 +2457,7 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
             let styled = if m == "production" { style::ok(m) } else { style::area(m) };
             info_row("mode", styled);
         }
-        None => info_row("mode", style::dim("default (no MAGE_MODE in env.php)")),
+        None => info_row("mode", format!("default  {}", style::dim("(no MAGE_MODE in env.php)"))),
     }
     if i.maintenance {
         let ips = if i.maintenance_allowed_ips.is_empty() {
@@ -2473,7 +2473,7 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         info_row("maintenance", style::ok("off"));
     }
     if let Some(d) = &i.installed_at {
-        info_row("installed", style::dim(d));
+        info_row("installed", d);
     }
     let locale_parts: Vec<String> =
         [&i.locale, &i.currency, &i.timezone].into_iter().flatten().cloned().collect();
@@ -2548,8 +2548,8 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
                     info_row(
                         "checkout",
                         format!(
-                            "default (Luma)  {}",
-                            style::dim(&format!("({c}{plain_version} installed, not selected)"))
+                            "default  {}",
+                            style::dim(&format!("(Luma; {c}{plain_version} installed, not selected)"))
                         ),
                     );
                 }
@@ -2560,7 +2560,7 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
                 None => info_row("checkout", format!("{}{version}", style::ok(c))),
             }
         }
-        None => info_row("checkout", style::dim("default (Luma)")),
+        None => info_row("checkout", format!("default  {}", style::dim("(Luma)"))),
     }
     if let Some(s) = &i.search_engine {
         let host = i
