@@ -46,6 +46,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("indexers", "Indexers from indexer.xml + their mview subscriptions"),
             ("extension-attributes", "Who bolts what onto which API interface"),
             ("catalog-attributes", "Attribute groups: what loads on quote items, wishlists, …"),
+            ("eav", "EAV attributes: type, models, flags, sets, creator patch (--db)"),
         ],
     ),
     (
@@ -247,6 +248,8 @@ enum Command {
     ExtensionAttributes(ExtAttrArgs),
     /// Catalog attribute groups: what loads on quote items, wishlists, collections.
     CatalogAttributes(CatalogAttrsArgs),
+    /// EAV attributes: type, models, flags, sets, creator patch (live rows via --db).
+    Eav(EavArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -442,6 +445,20 @@ struct TranslationsArgs {
     #[arg(long)]
     locale: Option<String>,
     /// Also read the `translation` DB table (the layer that beats everything).
+    #[arg(long)]
+    db: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct EavArgs {
+    /// An attribute code (`color`) → the full card; an entity type (`product`,
+    /// `catalog_product`, `customer`, …) → its attributes; anything else filters codes.
+    /// Omit to list entity types with counts. Without --db only the setup-script scan
+    /// (who creates/modifies which attribute) is shown.
+    query: Option<String>,
+    /// Read the live attribute rows from the database.
     #[arg(long)]
     db: bool,
     #[arg(long)]
@@ -802,6 +819,7 @@ fn main() -> Result<()> {
         Command::EmailTemplates(args) => email_templates(&mage, &args, &cli.root),
         Command::Translations(args) => translations(&mage, &args, &cli.root),
         Command::UiComponents(args) => ui_components(&mage, &args, &cli.root),
+        Command::Eav(args) => eav(&mage, &args, &cli.root),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
         Command::Actions(args) => actions(&mage, &args, &cli.root),
@@ -1559,6 +1577,367 @@ fn layout_op_line(op: &magequery_core::LayoutOp) -> String {
             format!("{} move {}{to}{}", style::kind("→"), style::name(&op.name), style::path(&line))
         }
     }
+}
+
+fn eav(mage: &Magento, args: &EavArgs, root: &Path) -> Result<()> {
+    if !args.db {
+        return eav_static(mage, args, root);
+    }
+
+    let Some(q) = &args.query else {
+        let entities = mage.eav_entity_types()?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&entities)?);
+            return Ok(());
+        }
+        let w = entities.iter().map(|e| e.code.len()).max().unwrap_or(0);
+        for e in &entities {
+            let pad = " ".repeat(w - e.code.len());
+            let table = e
+                .entity_table
+                .as_deref()
+                .map(|t| format!("  {}", style::dim(t)))
+                .unwrap_or_default();
+            println!("{}{pad}  {:>3} attribute(s){table}", style::name(&e.code), e.attributes);
+        }
+        eprintln!("\n{} entity type(s)", entities.len());
+        return Ok(());
+    };
+
+    // Exact attribute code → card(s, one per entity type declaring it).
+    let cards = mage.eav_attribute_cards(q)?;
+    if !cards.is_empty() {
+        return render_eav_cards(mage, &cards, args.json, root);
+    }
+    // An entity type (aliases accepted) → its attribute list.
+    let attrs = mage.eav_attributes(Some(q))?;
+    if !attrs.is_empty() {
+        let what = format!("attribute(s) on {}", attrs[0].entity_type);
+        return render_eav_list(&attrs, args.json, &what);
+    }
+    // Substring over codes and labels.
+    let needle = q.to_lowercase();
+    let matches: Vec<_> = mage
+        .eav_attributes(None)?
+        .into_iter()
+        .filter(|a| {
+            a.code.to_lowercase().contains(&needle)
+                || a.label.as_deref().is_some_and(|l| l.to_lowercase().contains(&needle))
+        })
+        .collect();
+    match matches.len() {
+        0 => Err(anyhow!("no EAV attribute or entity type matches `{q}`")),
+        1 => {
+            let cards = mage.eav_attribute_cards(&matches[0].code)?;
+            render_eav_cards(mage, &cards, args.json, root)
+        }
+        _ => render_eav_list(&matches, args.json, "matching attribute(s)"),
+    }
+}
+
+fn render_eav_list(
+    attrs: &[magequery_core::EavAttribute],
+    json: bool,
+    what: &str,
+) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(attrs)?);
+        return Ok(());
+    }
+    let wc = attrs.iter().map(|a| a.code.len()).max().unwrap_or(0);
+    let ty = |a: &magequery_core::EavAttribute| match &a.frontend_input {
+        Some(i) => format!("{}({i})", a.backend_type),
+        None => a.backend_type.clone(),
+    };
+    let we = attrs.iter().map(|a| a.entity_type.len()).max().unwrap_or(0);
+    let wt = attrs.iter().map(|a| ty(a).len()).max().unwrap_or(0);
+    for a in attrs {
+        let t = ty(a);
+        let user = if a.user_defined {
+            format!("  {}", style::number("[user-defined]"))
+        } else {
+            String::new()
+        };
+        println!(
+            "{}{}  {}{}  {}{}  {}{user}",
+            style::name(&a.code),
+            " ".repeat(wc - a.code.len()),
+            style::kind(&a.entity_type),
+            " ".repeat(we - a.entity_type.len()),
+            style::number(&t),
+            " ".repeat(wt - t.len()),
+            a.label.as_deref().unwrap_or(""),
+        );
+    }
+    eprintln!("\n{} {what}", attrs.len());
+    Ok(())
+}
+
+fn render_eav_cards(
+    mage: &Magento,
+    cards: &[magequery_core::EavAttributeCard],
+    json: bool,
+    root: &Path,
+) -> Result<()> {
+    use magequery_core::EavSetupKind;
+    if json {
+        println!("{}", serde_json::to_string_pretty(cards)?);
+        return Ok(());
+    }
+    for (i, card) in cards.iter().enumerate() {
+        if i > 0 {
+            println!("\n{}", style::dim("────"));
+        }
+        let a = &card.attribute;
+        let user = if a.user_defined {
+            format!("  {}", style::number("[user-defined]"))
+        } else {
+            String::new()
+        };
+        println!(
+            "{}  ({}, attribute_id {}){user}",
+            style::name(&a.code),
+            style::kind(&a.entity_type),
+            a.attribute_id,
+        );
+        println!();
+        info_row("label", a.label.clone().unwrap_or_else(|| style::dim("(none)")));
+        let ty = match &a.value_table {
+            Some(t) => format!(
+                "{}  {}  {}",
+                style::number(&a.backend_type),
+                style::dim("→"),
+                style::name(t)
+            ),
+            None if a.backend_type == "static" => format!(
+                "{}  {}",
+                style::number("static"),
+                style::dim(&format!(
+                    "(column on {})",
+                    card.entity_table.as_deref().unwrap_or("the entity table")
+                ))
+            ),
+            None => style::number(&a.backend_type),
+        };
+        info_row("type", ty);
+        if let Some(input) = &a.frontend_input {
+            info_row("input", style::number(input));
+        }
+        if let Some(c) = &a.catalog {
+            info_row("scope", style::area(&c.scope.to_string()));
+        }
+        let yn = |b: bool| if b { style::ok("yes") } else { style::dim("no") };
+        info_row("required", format!("{}     unique  {}", yn(a.required), yn(a.unique)));
+        if let Some(d) = &a.default_value {
+            info_row("default", style::string_lit(&format!("\"{d}\"")));
+        }
+        println!();
+        info_row("source", eav_model_line(mage, &a.source_model));
+        info_row("backend", eav_model_line(mage, &a.backend_model));
+        info_row("frontend", eav_model_line(mage, &a.frontend_model));
+        if let Some(c) = &a.catalog {
+            println!();
+            let flag = |label: &str, on: bool| {
+                if on {
+                    format!("{label} {}", style::ok("✓"))
+                } else {
+                    style::dim(&format!("{label} ✗"))
+                }
+            };
+            let flags = [
+                flag("searchable", c.searchable),
+                flag("filterable", c.filterable),
+                flag("comparable", c.comparable),
+                flag("in listing", c.used_in_listing),
+                flag("sort by", c.used_for_sort_by),
+                flag("visible on front", c.visible_on_front),
+            ];
+            info_row("flags", flags.join("  "));
+            if !c.apply_to.is_empty() {
+                info_row("apply_to", c.apply_to.join(", "));
+            }
+        }
+        if card.total_sets > 0 || !card.sets.is_empty() {
+            println!();
+            if card.sets.is_empty() {
+                info_row(
+                    "sets",
+                    style::err(&format!(
+                        "in none of the {} attribute set(s)",
+                        card.total_sets
+                    )),
+                );
+            } else {
+                let groups: std::collections::BTreeSet<&str> =
+                    card.sets.iter().map(|s| s.group.as_str()).collect();
+                let names: Vec<&str> = card.sets.iter().map(|s| s.set.as_str()).collect();
+                let tail = if groups.len() == 1 {
+                    format!(
+                        "({} of {} sets · group \"{}\")",
+                        card.sets.len(),
+                        card.total_sets,
+                        groups.iter().next().unwrap()
+                    )
+                } else {
+                    format!("({} of {} sets)", card.sets.len(), card.total_sets)
+                };
+                info_row("sets", format!("{}  {}", names.join(", "), style::dim(&tail)));
+            }
+        }
+        if !card.options.is_empty() {
+            let shown: Vec<String> =
+                card.options.iter().take(12).map(|o| style::string_lit(o)).collect();
+            let more = if card.options.len() > 12 {
+                style::dim(&format!("  … +{} more", card.options.len() - 12))
+            } else {
+                String::new()
+            };
+            info_row("options", format!("{}: {}{more}", card.options.len(), shown.join(", ")));
+        }
+        if !card.setup_refs.is_empty() {
+            println!();
+            for r in &card.setup_refs {
+                let verb = match r.kind {
+                    EavSetupKind::Add => "created by",
+                    EavSetupKind::Update => "modified by",
+                    EavSetupKind::Remove => "removed by",
+                };
+                info_row(
+                    verb,
+                    format!(
+                        "{}  {}",
+                        style::module(r.source.module.as_str()),
+                        style::path(&short_loc(&r.source, root))
+                    ),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A source/backend/frontend model line: the class, plus what DI does to it — a
+/// preference redirect, or red when the class doesn't exist (the classic broken-extension
+/// symptom: the attribute edit page 500s).
+fn eav_model_line(mage: &Magento, class: &Option<ClassName>) -> String {
+    let Some(c) = class else { return style::dim("(default)") };
+    let mut s = style::class(c.as_str());
+    match mage.preference(c, Area::Global) {
+        Ok(p) if p.concrete != *c => s.push_str(&format!(
+            "  {} {}",
+            style::dim("→ preference"),
+            style::class(p.concrete.as_str())
+        )),
+        Err(Error::ClassNotFound(_)) => {
+            s.push_str(&format!("  {}", style::err("(class not found)")));
+        }
+        _ => {}
+    }
+    s
+}
+
+/// The static half: setup-script attribute calls, no DB needed.
+fn eav_static(mage: &Magento, args: &EavArgs, root: &Path) -> Result<()> {
+    use magequery_core::{EavSetupKind, EavValueKind};
+    let all = mage.eav_setup_refs(None);
+    let (refs, exact) = match &args.query {
+        None => (all, false),
+        Some(q) => {
+            let exact: Vec<_> = all.iter().filter(|r| r.code == *q).cloned().collect();
+            if exact.is_empty() {
+                let needle = q.to_lowercase();
+                let subs: Vec<_> = all
+                    .iter()
+                    .filter(|r| {
+                        r.code.to_lowercase().contains(&needle)
+                            || r.entity.to_lowercase().contains(&needle)
+                    })
+                    .cloned()
+                    .collect();
+                (subs, false)
+            } else {
+                (exact, true)
+            }
+        }
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&refs)?);
+        return Ok(());
+    }
+    if refs.is_empty() {
+        return match &args.query {
+            Some(q) => Err(anyhow!(
+                "no setup script adds or modifies an attribute matching `{q}`\n  \
+                 Core attributes are installed from data arrays, not addAttribute — \
+                 the live row: `magequery eav {q} --db`."
+            )),
+            None => {
+                println!(
+                    "{}",
+                    style::dim("(no literal addAttribute/updateAttribute calls in any enabled module's Setup/)")
+                );
+                eprintln!("live attribute data: `magequery eav --db`");
+                Ok(())
+            }
+        };
+    }
+
+    if exact {
+        for (i, r) in refs.iter().enumerate() {
+            if i > 0 {
+                println!();
+            }
+            let verb = match r.kind {
+                EavSetupKind::Add => style::ok("+ addAttribute"),
+                EavSetupKind::Update => style::kind("~ updateAttribute"),
+                EavSetupKind::Remove => style::err("✕ removeAttribute"),
+            };
+            println!(
+                "{verb} {} {}  {}  {}",
+                style::kind(&r.entity),
+                style::name(&r.code),
+                style::module(r.source.module.as_str()),
+                style::path(&short_loc(&r.source, root)),
+            );
+            for p in &r.props {
+                let value = match p.kind {
+                    EavValueKind::Str => style::string_lit(&format!("'{}'", p.value)),
+                    EavValueKind::Num => style::number(&p.value),
+                    EavValueKind::Bool | EavValueKind::Null => style::keyword(&p.value),
+                    EavValueKind::Class => style::class(&format!("\\{}::class", p.value)),
+                    EavValueKind::Other => style::dim(&p.value),
+                };
+                println!("    {} => {value}", style::string_lit(&format!("'{}'", p.key)));
+            }
+        }
+        eprintln!("\n(setup-script view — the live attribute row: `magequery eav {} --db`)", refs[0].code);
+        return Ok(());
+    }
+
+    let we = refs.iter().map(|r| r.entity.len()).max().unwrap_or(0);
+    let wc = refs.iter().map(|r| r.code.len()).max().unwrap_or(0);
+    for r in &refs {
+        let kind = match r.kind {
+            EavSetupKind::Add => style::ok("+"),
+            EavSetupKind::Update => style::kind("~"),
+            EavSetupKind::Remove => style::err("✕"),
+        };
+        println!(
+            "{kind} {}{}  {}{}  {} {}  {}",
+            style::kind(&r.entity),
+            " ".repeat(we - r.entity.len()),
+            style::name(&r.code),
+            " ".repeat(wc - r.code.len()),
+            style::dim("←"),
+            style::module(r.source.module.as_str()),
+            style::path(&short_loc(&r.source, root)),
+        );
+    }
+    eprintln!(
+        "\n{} setup call(s) — static view; live attribute data: `magequery eav --db`",
+        refs.len()
+    );
+    Ok(())
 }
 
 fn ui_components(mage: &Magento, args: &UiComponentsArgs, root: &Path) -> Result<()> {

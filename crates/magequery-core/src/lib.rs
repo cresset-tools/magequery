@@ -29,6 +29,7 @@ mod decrypt;
 mod deploy;
 mod di;
 mod doctor;
+mod eav;
 mod graphql;
 mod index;
 mod parse;
@@ -44,7 +45,9 @@ pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
     AclResource, ArgItem, ArgValue, Argument, ByArea, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ConsoleCommand, ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
-    DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, EmailTemplate,
+    DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, EavAttribute, EavAttributeCard,
+    EavCatalogFlags, EavEntityType, EavScope, EavSetMembership, EavSetupKind, EavSetupProp,
+    EavSetupRef, EavValueKind, EmailTemplate,
     EmailTemplateOverride, ExtendedType, ExtensionAttribute,
     ExtensionJoin, GqlArg, GqlField, GqlKind, GqlType,
     Indexer, InstanceInfo, InterceptKind,
@@ -95,6 +98,7 @@ pub struct Magento {
     ext_attrs: OnceLock<breadth::ExtAttrIndex>,
     layout: OnceLock<breadth::LayoutIndex>,
     ui_components: OnceLock<breadth::UiComponentIndex>,
+    eav_setup: OnceLock<eav::EavSetupIndex>,
     widgets: OnceLock<breadth::WidgetIndex>,
     email_templates: OnceLock<breadth::EmailTemplateIndex>,
     catalog_attrs: OnceLock<breadth::CatalogAttrIndex>,
@@ -131,6 +135,7 @@ impl Magento {
             ext_attrs: OnceLock::new(),
             layout: OnceLock::new(),
             ui_components: OnceLock::new(),
+            eav_setup: OnceLock::new(),
             widgets: OnceLock::new(),
             email_templates: OnceLock::new(),
             catalog_attrs: OnceLock::new(),
@@ -809,6 +814,111 @@ impl Magento {
         }
 
         Ok(Patches { patches, orphaned_applied })
+    }
+
+    fn eav_setup_index(&self) -> &eav::EavSetupIndex {
+        self.eav_setup.get_or_init(|| eav::EavSetupIndex::build(&self.index.modules))
+    }
+
+    /// Setup-script attribute calls (`addAttribute`/`updateAttribute`/`removeAttribute`
+    /// with literal arguments) across the enabled modules — the static "who created this
+    /// attribute" half of `eav`. Optionally filtered by exact attribute code. Core
+    /// catalog attributes won't appear (Magento installs them from data arrays, not
+    /// `addAttribute`); the value is third-party and project attributes.
+    pub fn eav_setup_refs(&self, code: Option<&str>) -> Vec<EavSetupRef> {
+        let refs = &self.eav_setup_index().refs;
+        match code {
+            Some(c) => refs.iter().filter(|r| r.code == c).cloned().collect(),
+            None => refs.clone(),
+        }
+    }
+
+    /// The `eav_entity_type` rows with attribute counts. Live DB (clean [`Error::Db`]
+    /// when unreachable).
+    #[cfg(feature = "db")]
+    pub fn eav_entity_types(&self) -> Result<Vec<EavEntityType>> {
+        Ok(self
+            .eav_fetch_entities()?
+            .into_iter()
+            .map(|e| EavEntityType {
+                code: e.code,
+                entity_table: e.entity_table,
+                attributes: e.attributes,
+            })
+            .collect())
+    }
+
+    /// Live attributes, optionally restricted to one entity type (aliases accepted:
+    /// `product` → `catalog_product`). Sorted by (entity, code).
+    #[cfg(feature = "db")]
+    pub fn eav_attributes(&self, entity: Option<&str>) -> Result<Vec<EavAttribute>> {
+        let entities = self.eav_fetch_entities()?;
+        let wanted = entity.map(|e| eav::resolve_entity_alias(e));
+        let rows = self.eav_fetch_attributes()?;
+        Ok(rows
+            .into_iter()
+            .filter(|r| wanted.as_deref().map_or(true, |w| r.entity_code == w))
+            .map(|r| to_eav_attribute(r, &entities))
+            .collect())
+    }
+
+    /// The full card(s) for an exact attribute code — one per entity type declaring it
+    /// (`name` exists on both products and categories): the live row plus set
+    /// memberships, options, and the static setup-script join.
+    #[cfg(feature = "db")]
+    pub fn eav_attribute_cards(&self, code: &str) -> Result<Vec<EavAttributeCard>> {
+        let entities = self.eav_fetch_entities()?;
+        let rows: Vec<db::DbEavAttribute> = self
+            .eav_fetch_attributes()?
+            .into_iter()
+            .filter(|r| r.code == code)
+            .collect();
+
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let refs = self.eav_setup_refs(Some(code));
+        let mut cards = Vec::new();
+        for row in rows {
+            let (sets, total_sets) =
+                db::fetch_eav_sets(conn, &cfg.table_prefix, row.attribute_id, &row.entity_code)
+                    .map_err(Error::Db)?;
+            let options = db::fetch_eav_options(conn, &cfg.table_prefix, row.attribute_id)
+                .map_err(Error::Db)?;
+            // Setup calls naming this entity, plus ones whose entity we couldn't resolve.
+            let setup_refs: Vec<EavSetupRef> = refs
+                .iter()
+                .filter(|r| !r.entity_known || r.entity == row.entity_code)
+                .cloned()
+                .collect();
+            let entity_table =
+                entities.iter().find(|e| e.code == row.entity_code).and_then(|e| e.entity_table.clone());
+            cards.push(EavAttributeCard {
+                attribute: to_eav_attribute(row, &entities),
+                entity_table,
+                sets: sets
+                    .into_iter()
+                    .map(|(set, group)| EavSetMembership { set, group })
+                    .collect(),
+                total_sets,
+                options,
+                setup_refs,
+            });
+        }
+        Ok(cards)
+    }
+
+    #[cfg(feature = "db")]
+    fn eav_fetch_entities(&self) -> Result<Vec<db::DbEavEntity>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        db::fetch_eav_entities(conn, &cfg.table_prefix).map_err(Error::Db)
+    }
+
+    #[cfg(feature = "db")]
+    fn eav_fetch_attributes(&self) -> Result<Vec<db::DbEavAttribute>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        db::fetch_eav_attributes(conn, &cfg.table_prefix).map_err(Error::Db)
     }
 
     #[cfg(feature = "db")]
@@ -2096,6 +2206,61 @@ fn default_connection(cfg: &DbConfig) -> Result<&DbConnection> {
         .find(|c| c.name == "default")
         .or_else(|| cfg.connections.first())
         .ok_or_else(|| Error::Db("no db connection configured in env.php".to_string()))
+}
+
+/// Map a raw DB attribute row to the public type: decode `is_global`, split `apply_to`,
+/// and derive the value table (`<entity_table>_<backend_type>`, honoring the rare
+/// `value_table_prefix`; `static` attributes live on the entity table itself).
+#[cfg(feature = "db")]
+fn to_eav_attribute(r: db::DbEavAttribute, entities: &[db::DbEavEntity]) -> EavAttribute {
+    let entity = entities.iter().find(|e| e.code == r.entity_code);
+    let value_table = if r.backend_type == "static" {
+        None
+    } else {
+        entity.and_then(|e| {
+            let base = e.value_table_prefix.clone().or_else(|| e.entity_table.clone())?;
+            Some(format!("{base}_{}", r.backend_type))
+        })
+    };
+    EavAttribute {
+        code: r.code,
+        entity_type: r.entity_code,
+        attribute_id: r.attribute_id,
+        label: r.label,
+        backend_type: r.backend_type,
+        frontend_input: r.frontend_input,
+        required: r.required,
+        unique: r.unique,
+        user_defined: r.user_defined,
+        default_value: r.default_value,
+        source_model: r.source_model.map(ClassName::new),
+        backend_model: r.backend_model.map(ClassName::new),
+        frontend_model: r.frontend_model.map(ClassName::new),
+        catalog: r.catalog.map(|c| EavCatalogFlags {
+            scope: match c.is_global {
+                1 => EavScope::Global,
+                2 => EavScope::Website,
+                _ => EavScope::Store,
+            },
+            searchable: c.searchable,
+            filterable: c.filterable,
+            filterable_in_search: c.filterable_in_search,
+            comparable: c.comparable,
+            used_in_listing: c.used_in_listing,
+            used_for_sort_by: c.used_for_sort_by,
+            visible_on_front: c.visible_on_front,
+            apply_to: c
+                .apply_to
+                .map(|a| {
+                    a.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }),
+        value_table,
+    }
 }
 
 /// Build the execution chain (onion) per intercepted method from a run-ordered plugin list:

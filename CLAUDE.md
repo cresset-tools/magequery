@@ -173,7 +173,7 @@ ENTRY POINTS  (how execution starts)
 
 DATA          (persistence & model)
   schema [<table>] [--db]       indexers [<id>]
-  extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>] (backlog, --db)
+  extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>|<entity>] [--db]
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -200,8 +200,8 @@ PROJECT       (the codebase itself)
   (`uses` has `--area` but no `--all-areas`: its default is already the merged union.)
 - **`--json`** and **`--color auto|always|never`** + **`--root <path>`** — global, every command.
 - **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config`,
-  `schema`, `patches`;
-  future `eav`, `indexers --status`, `patches`). Static by default; DB overlay when asked;
+  `schema`, `patches`, `eav`;
+  future `indexers --status`). Static by default; DB overlay when asked;
   clean `Error::Db` if unreachable. Pure-live commands (`db`/`redis` `ping`, `url-rewrites`)
   require the `db`/`redis` build feature instead.
 - **`--source app|vendor`** — listing commands, "only my code" (today `modules`; generalize).
@@ -1020,13 +1020,59 @@ commerce-store (116 components, ~30ms; product_listing = 6 modules — Inventory
 cross-file merge resolution (a later file re-stating a node isn't diffed against the
 earlier one — each file's stream is shown with provenance instead).
 
+### `eav` (attributes: live rows + creator-patch join, static + `--db`, done)
+
+`magequery eav [<attr>|<entity>] [--db]` — "what IS this attribute". EAV attributes are
+runtime rows (`eav_attribute` + friends), so the live data needs `--db`; the hybrid twist
+is the **static join**: an `EavSetupIndex` (`eav.rs`, lazy `OnceLock`, parallel over
+enabled modules' `Setup/` trees via doctor's `walk_php`) scans for literal
+`addAttribute`/`updateAttribute`/`removeAttribute` calls — `php.rs::eav_setup_calls`, a
+token scan (the tokenizer grew a positional variant, `tokenize_at`, for line provenance).
+Entity arg: string literal or a mapped `Class::CONST` (`Product::ENTITY`,
+`ProductAttributeInterface::ENTITY_TYPE_CODE`, customer metadata consts …); attribute code
+must be literal; the props array is parsed shallowly into typed scalars
+(str/num/bool/null/`::class`/other — nested arrays survive as `[…]`). Guards against
+same-named methods (SimpleXML's `addAttribute(name, value)`): adds require an array third
+arg, update/remove a recognizable entity; method *definitions* (EavSetup itself) are
+skipped by a `function` look-back. Unit-tested. Core catalog attributes won't appear —
+Magento installs them from data arrays (`getDefaultEntities`), not `addAttribute`; the
+scan's value is third-party/project attributes (and core patch-era ones: `tax_class_id`,
+gift-message).
+
+DB side (`db.rs`): `fetch_eav_entities` (+counts), `fetch_eav_attributes` (all rows joined
+with entity code + `catalog_eav_attribute`, columns taken by index — 23 cols beat the
+tuple limit), `fetch_eav_sets` (memberships + the entity's total-set denominator),
+`fetch_eav_options` (admin-store labels). `Magento::eav_setup_refs(code?)` (static),
+`eav_entity_types()`, `eav_attributes(entity?)` (aliases: `product`→`catalog_product`, …),
+`eav_attribute_cards(code)` — one card per entity type declaring the code (`name` = 2:
+product + category), each with sets/options/setup-refs; `value_table` computed
+(`<entity_table>_<backend_type>`, honoring `value_table_prefix`; `static` → column on the
+entity table).
+
+CLI dispatch: no query + `--db` → entity types with counts; entity/alias → attribute list
+(`code  entity  type(input)  Label  [user-defined]`); exact code (or single
+substring/label match) → the card: label, `type → value_table` (or "static — column on
+…"), input, scope (`is_global` decoded), required/unique/default, the three **models**
+each run through `preference()` (redirect rendered `→ preference X`; missing class = red
+"(class not found)" — the attribute-page-500 symptom), catalog **flags** (✓ green/✗ dim),
+apply_to, **sets** ("Default (1 of 5 sets · group …)"; red "in none of the N sets" — often
+the whole bug), options (first 12), and `created by`/`modified by` lines from the setup
+join. Without `--db`: the setup-call view alone — list (`+/~/✕ entity code ← module #
+loc`) or per-call detail with the full literal props rendered PHP-style; empty results
+point at `--db`. Validated on mageos-lite (51 product attributes; `tax_class_id` card
+shows scope website, default "2", source model, created-by AddTaxAttributeAndTaxClasses:64
++ modified-by UpdateTaxClassAttributeVisibility:55; `sku` static→entity-table note; vanilla
+`color` correctly flagged red as in-no-set) and commerce-store (66 product attrs; label
+search "tax class" resolves; `gift` single-match → GiftMessage card; unregistered Hyvä
+module's attribute honestly absent from both halves — its patch never ran). ~25ms static,
+~75ms with DB.
+
 ## Future query tools (backlog — not yet built)
 
 Ideas surfaced while scoping breadth, in rough priority. All but the DB ones are
 static breadth-projections in the same `read_parse` + merge shape.
 - **DB-backed (phase-2 style, opt-in like `url-rewrites`):** `indexer:status` (`indexer_state`),
-  `eav`/attributes (`eav_attribute` + `eav_entity_type`), admin users/roles, cron history
-  (`cron_schedule`), queue backlog.
+  admin users/roles, cron history (`cron_schedule`), queue backlog.
 
 ## Build order
 

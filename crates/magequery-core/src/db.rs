@@ -223,6 +223,197 @@ pub(crate) fn fetch_scope_counts(
     Ok((websites, groups, stores))
 }
 
+/// One `eav_entity_type` row with its attribute count.
+pub(crate) struct DbEavEntity {
+    pub code: String,
+    pub entity_table: Option<String>,
+    pub value_table_prefix: Option<String>,
+    pub attributes: usize,
+}
+
+pub(crate) fn fetch_eav_entities(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<Vec<DbEavEntity>, String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let rows: Vec<(String, Option<String>, Option<String>, u64)> = c
+        .query(format!(
+            "SELECT t.entity_type_code, t.entity_table, t.value_table_prefix, \
+             COUNT(a.attribute_id) \
+             FROM {p}eav_entity_type t \
+             LEFT JOIN {p}eav_attribute a ON a.entity_type_id = t.entity_type_id \
+             GROUP BY t.entity_type_id, t.entity_type_code, t.entity_table, \
+             t.value_table_prefix ORDER BY t.entity_type_code"
+        ))
+        .map_err(clean_err)?;
+    Ok(rows
+        .into_iter()
+        .map(|(code, entity_table, value_table_prefix, n)| DbEavEntity {
+            code,
+            entity_table: entity_table.filter(|t| !t.is_empty()),
+            value_table_prefix: value_table_prefix.filter(|t| !t.is_empty()),
+            attributes: n as usize,
+        })
+        .collect())
+}
+
+/// Catalog-specific flags (`catalog_eav_attribute`), raw.
+pub(crate) struct DbCatalogFlags {
+    pub is_global: i64,
+    pub searchable: bool,
+    pub filterable: bool,
+    pub filterable_in_search: bool,
+    pub comparable: bool,
+    pub used_in_listing: bool,
+    pub used_for_sort_by: bool,
+    pub visible_on_front: bool,
+    pub apply_to: Option<String>,
+}
+
+/// One `eav_attribute` row, joined with its entity-type code and catalog flags.
+pub(crate) struct DbEavAttribute {
+    pub entity_code: String,
+    pub attribute_id: u32,
+    pub code: String,
+    pub label: Option<String>,
+    pub backend_type: String,
+    pub frontend_input: Option<String>,
+    pub required: bool,
+    pub unique: bool,
+    pub user_defined: bool,
+    pub default_value: Option<String>,
+    pub source_model: Option<String>,
+    pub backend_model: Option<String>,
+    pub frontend_model: Option<String>,
+    pub catalog: Option<DbCatalogFlags>,
+}
+
+/// Every attribute across all entity types (a few hundred rows — filtering happens in
+/// Rust). The row is too wide for a tuple, so columns are taken by index.
+pub(crate) fn fetch_eav_attributes(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<Vec<DbEavAttribute>, String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let rows: Vec<mysql::Row> = c
+        .query(format!(
+            "SELECT t.entity_type_code, a.attribute_id, a.attribute_code, a.frontend_label, \
+             a.backend_type, a.frontend_input, a.is_required, a.is_unique, a.is_user_defined, \
+             a.default_value, a.source_model, a.backend_model, a.frontend_model, \
+             c.attribute_id, c.is_global, c.is_searchable, c.is_filterable, \
+             c.is_filterable_in_search, c.is_comparable, c.used_in_product_listing, \
+             c.used_for_sort_by, c.is_visible_on_front, c.apply_to \
+             FROM {p}eav_attribute a \
+             JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
+             LEFT JOIN {p}catalog_eav_attribute c ON c.attribute_id = a.attribute_id \
+             ORDER BY t.entity_type_code, a.attribute_code"
+        ))
+        .map_err(clean_err)?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for mut row in rows {
+        let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
+        let n = |r: &mut mysql::Row, i: usize| {
+            r.take::<Option<i64>, _>(i).flatten().unwrap_or(0)
+        };
+        let catalog = row
+            .take::<Option<u32>, _>(13)
+            .flatten()
+            .is_some()
+            .then(|| DbCatalogFlags {
+                is_global: n(&mut row, 14),
+                searchable: n(&mut row, 15) != 0,
+                filterable: n(&mut row, 16) != 0,
+                filterable_in_search: n(&mut row, 17) != 0,
+                comparable: n(&mut row, 18) != 0,
+                used_in_listing: n(&mut row, 19) != 0,
+                used_for_sort_by: n(&mut row, 20) != 0,
+                visible_on_front: n(&mut row, 21) != 0,
+                apply_to: s(&mut row, 22).filter(|a| !a.is_empty()),
+            });
+        out.push(DbEavAttribute {
+            entity_code: s(&mut row, 0).unwrap_or_default(),
+            attribute_id: n(&mut row, 1) as u32,
+            code: s(&mut row, 2).unwrap_or_default(),
+            label: s(&mut row, 3).filter(|l| !l.is_empty()),
+            backend_type: s(&mut row, 4).unwrap_or_default(),
+            frontend_input: s(&mut row, 5).filter(|i| !i.is_empty()),
+            required: n(&mut row, 6) != 0,
+            unique: n(&mut row, 7) != 0,
+            user_defined: n(&mut row, 8) != 0,
+            default_value: s(&mut row, 9).filter(|d| !d.is_empty()),
+            source_model: s(&mut row, 10).filter(|m| !m.is_empty()),
+            backend_model: s(&mut row, 11).filter(|m| !m.is_empty()),
+            frontend_model: s(&mut row, 12).filter(|m| !m.is_empty()),
+            catalog,
+        });
+    }
+    Ok(out)
+}
+
+/// An attribute's set memberships as `(set name, group name)`, plus the entity's total
+/// set count (the "in 3 of 5 sets" denominator).
+pub(crate) fn fetch_eav_sets(
+    conn: &DbConnection,
+    table_prefix: &str,
+    attribute_id: u32,
+    entity_code: &str,
+) -> Result<(Vec<(String, String)>, usize), String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let sets: Vec<(String, String)> = c
+        .exec(
+            format!(
+                "SELECT s.attribute_set_name, g.attribute_group_name \
+                 FROM {p}eav_entity_attribute ea \
+                 JOIN {p}eav_attribute_set s ON s.attribute_set_id = ea.attribute_set_id \
+                 JOIN {p}eav_attribute_group g ON g.attribute_group_id = ea.attribute_group_id \
+                 WHERE ea.attribute_id = :id ORDER BY s.attribute_set_name"
+            ),
+            params! { "id" => attribute_id },
+        )
+        .map_err(clean_err)?;
+    let total: Option<u64> = c
+        .exec_first(
+            format!(
+                "SELECT COUNT(*) FROM {p}eav_attribute_set s \
+                 JOIN {p}eav_entity_type t ON t.entity_type_id = s.entity_type_id \
+                 WHERE t.entity_type_code = :code"
+            ),
+            params! { "code" => entity_code },
+        )
+        .map_err(clean_err)?;
+    Ok((sets, total.unwrap_or(0) as usize))
+}
+
+/// Admin-scope (store 0) option labels of a table-source attribute, in sort order.
+pub(crate) fn fetch_eav_options(
+    conn: &DbConnection,
+    table_prefix: &str,
+    attribute_id: u32,
+) -> Result<Vec<String>, String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    c.exec(
+        format!(
+            "SELECT v.value FROM {p}eav_attribute_option o \
+             JOIN {p}eav_attribute_option_value v \
+             ON v.option_id = o.option_id AND v.store_id = 0 \
+             WHERE o.attribute_id = :id ORDER BY o.sort_order, v.value"
+        ),
+        params! { "id" => attribute_id },
+    )
+    .map_err(clean_err)
+}
+
 /// Read the `url_rewrite` table, resolving each row's `store_id` to a store code. Filters
 /// (path substring on request/target, store code, redirects-only) are applied **in SQL** —
 /// the table is often huge. Fetches `limit + 1` rows to detect truncation; returns
