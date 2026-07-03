@@ -545,7 +545,7 @@ struct CategoryArgs {
 #[derive(clap::Args)]
 struct OrderArgs {
     /// An increment id (exact). A number with no matching increment is an entity_id;
-    /// anything else searches increment ids and customer emails.
+    /// anything else searches increment ids, customer emails, and PSP transaction refs.
     query: Option<String>,
     /// Look up by entity_id.
     #[arg(long)]

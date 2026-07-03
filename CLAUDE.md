@@ -1241,8 +1241,10 @@ diagnostics it doesn't show. Sales tables are flat (no EAV), so this is one
 `db::fetch_order` over `sales_order` + satellites (items, addresses, payment,
 `sales_payment_transaction`, invoices, shipments + tracks, creditmemos, status history,
 `sales_order_status` label). Lookup: exact increment_id → numeric falls back to
-entity_id (header note) → substring over increment ids AND customer emails (newest
-first, LIMIT+1 truncation) — `order jelle@` lists a customer's orders.
+entity_id (header note) → substring over increment ids, customer emails, AND **PSP
+transaction refs** (`sales_order_payment.last_trans_id` + `sales_payment_transaction.
+txn_id`, DISTINCT-joined) — `order jelle@` lists a customer's orders, `order tr_abc123`
+resolves a Mollie/Adyen reference straight to its order.
 
 The card: status colored by *state* (state shown too — custom statuses explained), the
 **grid-drift check** (`sales_order` row missing from `sales_order_grid` = red "invisible
@@ -1393,9 +1395,7 @@ role, and seeding one into a live DB was deliberately not done.
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
 `queue backlog`, `product`). New ideas go here.
-- **Small entities, in build order:** extend `order` search to match PSP transaction refs
-  (`sales_order_payment.last_trans_id` + `sales_payment_transaction.txn_id`),
-  `cms-page`/`cms-block <identifier>`, `catalog-rule`, `tax`,
+- **Small entities, in build order:** `cms-page`/`cms-block <identifier>`, `catalog-rule`, `tax`,
   `integrations`. Backlog: reviews, wishlists, search terms.
 
 ## Build order

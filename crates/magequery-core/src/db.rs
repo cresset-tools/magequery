@@ -1659,7 +1659,9 @@ pub(crate) fn fetch_order(
     }))
 }
 
-/// Order search by increment_id or customer email substring, newest first;
+/// Order search by increment_id, customer email, or **PSP transaction reference**
+/// (`sales_order_payment.last_trans_id` / `sales_payment_transaction.txn_id` — the
+/// workflow is "the PSP gives you a ref, find the order"), newest first;
 /// `limit + 1` fetched to flag truncation.
 #[allow(clippy::type_complexity)]
 pub(crate) fn fetch_orders_like(
@@ -1678,11 +1680,15 @@ pub(crate) fn fetch_orders_like(
     let rows: Vec<(u32, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> =
         c.exec(
             format!(
-                "SELECT entity_id, increment_id, status, CAST(grand_total AS CHAR), \
-                 order_currency_code, customer_email, CAST(created_at AS CHAR) \
-                 FROM {p}sales_order \
-                 WHERE increment_id LIKE :pat OR customer_email LIKE :pat \
-                 ORDER BY entity_id DESC LIMIT {}",
+                "SELECT DISTINCT o.entity_id, o.increment_id, o.status, \
+                 CAST(o.grand_total AS CHAR), o.order_currency_code, o.customer_email, \
+                 CAST(o.created_at AS CHAR) \
+                 FROM {p}sales_order o \
+                 LEFT JOIN {p}sales_order_payment pay ON pay.parent_id = o.entity_id \
+                 LEFT JOIN {p}sales_payment_transaction t ON t.order_id = o.entity_id \
+                 WHERE o.increment_id LIKE :pat OR o.customer_email LIKE :pat \
+                 OR pay.last_trans_id LIKE :pat OR t.txn_id LIKE :pat \
+                 ORDER BY o.entity_id DESC LIMIT {}",
                 limit + 1
             ),
             params! { "pat" => format!("%{needle}%") },
