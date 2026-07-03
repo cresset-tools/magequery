@@ -427,6 +427,39 @@ pub(crate) fn fetch_integrations(
         .collect())
 }
 
+/// All four OAuth credentials for one integration, by integration id. Returns
+/// `(consumer_key, consumer_secret, access_token, access_secret, revoked)` — the access
+/// pair is `None` until the integration is activated. `None` = no consumer at all. This
+/// is the ONLY code path that selects the token secrets — kept separate so they can't
+/// leak into the normal listing.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_integration_secrets(
+    conn: &DbConnection,
+    table_prefix: &str,
+    integration_id: u32,
+) -> Result<Option<(String, String, Option<String>, Option<String>, bool)>, String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    // `key` is reserved — backtick it. oauth_token is LEFT-joined: consumer key/secret
+    // exist at creation, the access token/secret only after activation.
+    let row: Option<(String, String, Option<String>, Option<String>, Option<i64>)> = c
+        .exec_first(
+            format!(
+                "SELECT c.`key`, c.secret, t.token, t.secret, t.revoked \
+                 FROM {p}integration i \
+                 JOIN {p}oauth_consumer c ON c.entity_id = i.consumer_id \
+                 LEFT JOIN {p}oauth_token t \
+                   ON t.consumer_id = i.consumer_id AND t.type = 'access' \
+                 WHERE i.integration_id = :v"
+            ),
+            params! { "v" => integration_id },
+        )
+        .map_err(clean_err)?;
+    Ok(row.map(|(ck, cs, tok, tsec, rev)| (ck, cs, tok, tsec, rev.unwrap_or(0) != 0)))
+}
+
 /// The tax configuration, raw.
 #[allow(clippy::type_complexity)]
 pub(crate) struct DbTaxInfo {

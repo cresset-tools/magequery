@@ -664,6 +664,12 @@ struct SalesDocArgs {
 struct IntegrationsArgs {
     /// A name substring → single match shows the full grant list. Omit to list all.
     name: Option<String>,
+    /// Print ONLY a bare OAuth credential of a single named integration (for scripting).
+    /// `--token` alone gives the access token; pass one of `access-token`,
+    /// `access-secret`, `consumer-key`, `consumer-secret`, or `all` (tab-separated).
+    /// Requires an unambiguous match.
+    #[arg(long, num_args = 0..=1, default_missing_value = "access-token", value_name = "WHICH")]
+    token: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -4523,6 +4529,64 @@ fn product_value(v: &magequery_core::ProductValue, s: &magequery_core::ProductSc
 
 fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
     let list = mage.integrations(args.name.as_deref())?;
+
+    // --token: bare stdout, the scripting escape hatch. Must name exactly one integration;
+    // the secrets are printed nowhere else. Warnings go to stderr so a pipe stays clean.
+    if let Some(which) = &args.token {
+        let name = args
+            .name
+            .as_deref()
+            .ok_or_else(|| anyhow!("--token needs an integration name (which one?)"))?;
+        let i = match list.as_slice() {
+            [] => return Err(anyhow!("no integration matches `{name}`")),
+            [only] => only,
+            many => {
+                let names: Vec<_> = many.iter().map(|i| i.name.as_str()).collect();
+                return Err(anyhow!(
+                    "`{name}` matches {} integrations ({}) — name one",
+                    many.len(),
+                    names.join(", ")
+                ));
+            }
+        };
+        let creds = mage
+            .integration_credentials(i.id)?
+            .ok_or_else(|| anyhow!("`{}` has no OAuth consumer", i.name))?;
+        // The access pair only exists after activation; warn (on stderr) if it's revoked
+        // and the caller is asking for an access credential.
+        let need_access = matches!(which.as_str(), "access-token" | "access-secret" | "all");
+        if need_access && creds.access_token.is_some() && creds.revoked {
+            eprintln!(
+                "{}",
+                style::err(&format!(
+                    "warning: `{}`'s access token is revoked — it won't authenticate",
+                    i.name
+                ))
+            );
+        }
+        let access = |v: &Option<String>| -> Result<String> {
+            v.clone().ok_or_else(|| anyhow!("`{}` has no access token (never activated)", i.name))
+        };
+        match which.as_str() {
+            "access-token" => println!("{}", access(&creds.access_token)?),
+            "access-secret" => println!("{}", access(&creds.access_secret)?),
+            "consumer-key" => println!("{}", creds.consumer_key),
+            "consumer-secret" => println!("{}", creds.consumer_secret),
+            "all" => {
+                println!("consumer-key\t{}", creds.consumer_key);
+                println!("consumer-secret\t{}", creds.consumer_secret);
+                println!("access-token\t{}", creds.access_token.as_deref().unwrap_or(""));
+                println!("access-secret\t{}", creds.access_secret.as_deref().unwrap_or(""));
+            }
+            other => {
+                return Err(anyhow!(
+                    "unknown credential `{other}` — expected access-token, access-secret, \
+                     consumer-key, consumer-secret, or all"
+                ));
+            }
+        }
+        return Ok(());
+    }
     if args.json {
         println!("{}", serde_json::to_string_pretty(&list)?);
         return Ok(());

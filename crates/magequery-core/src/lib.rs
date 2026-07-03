@@ -128,6 +128,20 @@ struct DiBuilt {
     diagnostics: Vec<Diagnostic>,
 }
 
+/// The four OAuth 1.0a credentials of an integration, returned only by
+/// [`Magento::integration_credentials`]. Deliberately **not** `Serialize` (unlike every
+/// other public type here): these are live secrets and must never reach a `--json` path.
+/// The access pair is `None` until the integration is activated.
+#[cfg(feature = "db")]
+#[non_exhaustive]
+pub struct IntegrationCredentials {
+    pub consumer_key: String,
+    pub consumer_secret: String,
+    pub access_token: Option<String>,
+    pub access_secret: Option<String>,
+    pub revoked: bool,
+}
+
 impl Magento {
     /// Build the index for the installation rooted at `root`.
     ///
@@ -1175,9 +1189,37 @@ impl Magento {
         ))
     }
 
+    /// All four OAuth credentials for one integration, by integration id. `None` = the
+    /// integration has no consumer. This is the ONLY method that returns the secrets — an
+    /// explicit, opt-in escape hatch for scripting (the owner already has DB access);
+    /// [`Self::integrations`] never exposes them. Deliberately **not** `Serialize`, so no
+    /// `--json` path can carry a secret. Live DB.
+    #[cfg(feature = "db")]
+    pub fn integration_credentials(
+        &self,
+        integration_id: u32,
+    ) -> Result<Option<IntegrationCredentials>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_integration_secrets(conn, &cfg.table_prefix, integration_id)
+            .map_err(Error::Db)?;
+        Ok(raw.map(
+            |(consumer_key, consumer_secret, access_token, access_secret, revoked)| {
+                IntegrationCredentials {
+                    consumer_key,
+                    consumer_secret,
+                    access_token,
+                    access_secret,
+                    revoked,
+                }
+            },
+        ))
+    }
+
     /// API integrations with their token state and granted ACL resources (titled from
     /// the static acl.xml index — a missing title flags a stale grant). Filtered by a
-    /// name substring. Token secrets are never returned. Live DB.
+    /// name substring. Token secrets are never returned (use [`Self::integration_token`]
+    /// for the explicit opt-in). Live DB.
     #[cfg(feature = "db")]
     pub fn integrations(&self, filter: Option<&str>) -> Result<Vec<Integration>> {
         let cfg = self.db_config()?;

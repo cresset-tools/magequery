@@ -1328,6 +1328,21 @@ the fake root ships no acl.xml; on a real store only genuinely-gone modules do).
 Red flags: `full access (Magento_Backend::all)`, revoked tokens; dim honesty for
 never-activated integrations and zero-grant ones ("the API rejects it").
 
+**`--token [WHICH]`** — the explicit scripting escape hatch for the four OAuth 1.0a
+credentials a live integration holds (`oauth_consumer.key`/`.secret` + `oauth_token.token`/
+`.secret` for `type='access'`). Bare-stdout, single value, requires an unambiguous named
+match (errors listing candidates otherwise — never emits a secret for an ambiguous query),
+mirroring `cms --content` and the `db info` "show the real password" precedent (the owner
+already has DB access). `--token` alone = the access token (the bearer case); pass
+`access-token`/`access-secret`/`consumer-key`/`consumer-secret` for a specific one, or `all`
+for tab-separated `kind\tvalue` lines. Revoked access token → the value still prints, with a
+`revoked — it won't authenticate` warning on **stderr** (pipe stays clean); never-activated
+→ non-zero exit ("no access token"). This is the ONLY path that selects a secret: a dedicated
+`db::fetch_integration_secrets` + `Magento::integration_credentials` returning a **non-`Serialize`**
+`IntegrationCredentials` (so no `--json` path can carry it) — the default list/card/`--json`
+still select only presence/revocation, re-verified: zero secret *values* in `--json` (the 3
+grep hits are the `"token": "active"/"revoked"/"none"` state field).
+
 ### `order-statuses` + `sequences` (small sales views, live DB, done)
 
 `magequery order-statuses [<filter>]` — every status with its `sales_order_status_state`
