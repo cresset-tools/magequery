@@ -67,6 +67,7 @@ pub use model::{
     PluginMethod, Product,
     ProductCategory, ProductChild, Quote, QuoteAddress, QuoteHit, QuoteItem,
     SalesDocKind, SalesDocument, SalesDocumentHit, SalesDocumentItem,
+    StoreGroupNode, StoreTree, StoreViewNode, WebsiteNode,
     ProductHit, ProductLegacyStock, ProductPrices, ProductRewrite, ProductScopeValue,
     ProductSourceStock, ProductValue,
     RedisConfig, RedisInstance, RedisPing, RulePrice, TierPrice,
@@ -1072,6 +1073,50 @@ impl Magento {
             db::fetch_category_card(conn, &cfg.table_prefix, id, include_products, indexed_store)
                 .map_err(Error::Db)?;
         Ok(raw.map(to_category))
+    }
+
+    /// The scope tree — websites → store groups → store views (admin scopes excluded),
+    /// root categories named, plus the currency rate table. Live DB.
+    #[cfg(feature = "db")]
+    pub fn store_tree(&self) -> Result<StoreTree> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_store_tree(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let websites = raw
+            .websites
+            .into_iter()
+            .map(|(id, code, name, is_default, default_group)| WebsiteNode {
+                groups: raw
+                    .groups
+                    .iter()
+                    .filter(|(_, wid, ..)| *wid == id)
+                    .map(|(gid, _, gname, root, default_store)| StoreGroupNode {
+                        id: *gid,
+                        name: gname.clone(),
+                        root_category_id: *root,
+                        root_category: raw.category_names.get(root).cloned(),
+                        is_default: *gid == default_group,
+                        views: raw
+                            .views
+                            .iter()
+                            .filter(|(_, _, _, _, vgid, _)| vgid == gid)
+                            .map(|(vid, vcode, vname, _, _, active)| StoreViewNode {
+                                id: *vid,
+                                code: vcode.clone(),
+                                name: vname.clone(),
+                                active: *active,
+                                is_default: vid == default_store,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+                id,
+                code,
+                name,
+                is_default,
+            })
+            .collect();
+        Ok(StoreTree { websites, currency_rates: raw.currency_rates })
     }
 
     /// Every order status with its state mapping(s), filtered by a status/label/state

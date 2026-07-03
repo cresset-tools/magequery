@@ -1664,6 +1664,52 @@ pub struct ProductPrices {
     pub matched_by_id: bool,
 }
 
+/// One store view in the scope tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct StoreViewNode {
+    pub id: u32,
+    pub code: String,
+    pub name: String,
+    pub active: bool,
+    /// The group's default view.
+    pub is_default: bool,
+}
+
+/// One store group in the scope tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct StoreGroupNode {
+    pub id: u32,
+    pub name: String,
+    pub root_category_id: u32,
+    pub root_category: Option<String>,
+    /// The website's default group.
+    pub is_default: bool,
+    pub views: Vec<StoreViewNode>,
+}
+
+/// One website in the scope tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct WebsiteNode {
+    pub id: u32,
+    pub code: String,
+    pub name: String,
+    pub is_default: bool,
+    pub groups: Vec<StoreGroupNode>,
+}
+
+/// The full scope tree (websites → groups → views, admin scopes excluded) plus the
+/// currency rate table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct StoreTree {
+    pub websites: Vec<WebsiteNode>,
+    /// `(from, to, rate)` from `directory_currency_rate`.
+    pub currency_rates: Vec<(String, String, String)>,
+}
+
 /// One state assignment of an order status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

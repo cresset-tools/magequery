@@ -191,6 +191,7 @@ FRONTEND      (presentation)
 RUNTIME       (env.php config & live connections)
   db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
   queue [info]|topology [<topic>]|backlog      session   cache   lock   (info-only)
+  stores   (the scope tree, live DB)
 
 PROJECT       (the codebase itself)
   info      mode   maintenance   base-url [--secure]   admin-url   (single-fact views of info)
@@ -1326,6 +1327,18 @@ patterns honestly footnoted as not modeled), red `[inactive profile]` and
 next". Validated on the scratchpad DB: prefix rendering (`2000000151`), the past-warning
 flag, unmapped custom status.
 
+### `stores` (the scope tree, live DB, done)
+
+`magequery stores` — websites → store groups → store views in one tree (admin scopes
+excluded), the backbone every `--store <code>` flag assumes you know: ids, codes, names,
+**default-website/group/view flags**, each group's root category (named via the category
+`name` attribute; falls back to the id), red `[inactive]` on disabled views, and red
+"unusable" notes for websites without groups / groups without views (real broken-scope
+states). Footer: the `directory_currency_rate` table. `Magento::store_tree()`. Validated
+on the synthetic DB (two websites, an inactive default view, unnamed root) AND live on
+mageos-lite (real tree + real currency rates — the first entity command validated against
+a genuine database).
+
 ### `admin-users` / `admin-roles` (live DB, done)
 
 Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
@@ -1361,9 +1374,8 @@ role, and seeding one into a live DB was deliberately not done.
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
 `queue backlog`, `product`). New ideas go here.
-- **Small entities, in build order:** `stores` (the scope tree with codes/roots —
-  feeds every `--store` flag), `coupon`/`sales-rule` (the why-doesn't-my-coupon-work
-  card), extend `order` search to match PSP transaction refs
+- **Small entities, in build order:** `coupon`/`sales-rule` (the
+  why-doesn't-my-coupon-work card), extend `order` search to match PSP transaction refs
   (`sales_order_payment.last_trans_id` + `sales_payment_transaction.txn_id`),
   `cms-page`/`cms-block <identifier>`, `catalog-rule`, `tax`,
   `integrations`. Backlog: reviews, wishlists, search terms.

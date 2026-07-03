@@ -91,6 +91,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("lock", "Locking backend from env.php"),
             ("queue", "Message queues: connections (env.php); topology; live backlog"),
             ("url-rewrites", "URL rewrites from the DB (request → target)"),
+            ("stores", "The scope tree: websites → groups → store views, currency rates"),
         ],
     ),
     (
@@ -327,6 +328,8 @@ enum Command {
     Queue(QueueArgs),
     /// URL rewrites from the DB (request → target).
     UrlRewrites(UrlRewritesArgs),
+    /// The scope tree: websites → store groups → store views, plus currency rates.
+    Stores(StoresArgs),
 
     // ── Project: the codebase itself ──
     /// The everyday facts: version, mode, maintenance, base/admin URLs, module counts.
@@ -564,6 +567,12 @@ struct QuoteArgs {
     /// A quote entity_id; anything else searches customer emails (active carts first
     /// by recency).
     query: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct StoresArgs {
     #[arg(long)]
     json: bool,
 }
@@ -1029,6 +1038,7 @@ fn main() -> Result<()> {
         Command::Menu(args) => menu(&mage, &args, &cli.root),
         Command::Schema(args) => schema(&mage, &args, &cli.root),
         Command::UrlRewrites(args) => url_rewrites(&mage, &args),
+        Command::Stores(args) => stores(&mage, &args),
         Command::Config(args) => config(&mage, &args, &cli.root),
     };
 
@@ -2185,6 +2195,81 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
             }
         }
     }
+    Ok(())
+}
+
+fn stores(mage: &Magento, args: &StoresArgs) -> Result<()> {
+    let tree = mage.store_tree()?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&tree)?);
+        return Ok(());
+    }
+    if tree.websites.is_empty() {
+        println!("{}", style::dim("(no websites)"));
+        return Ok(());
+    }
+    for w in &tree.websites {
+        let default = if w.is_default {
+            format!("  {}", style::ok("[default website]"))
+        } else {
+            String::new()
+        };
+        println!(
+            "{}  {}  {}{default}",
+            style::area(&w.code),
+            style::target(&w.name),
+            style::dim(&format!("(website {})", w.id)),
+        );
+        for g in &w.groups {
+            let default = if g.is_default {
+                format!("  {}", style::ok("[default group]"))
+            } else {
+                String::new()
+            };
+            let root = match &g.root_category {
+                Some(n) => format!("{n} (id {})", g.root_category_id),
+                None => format!("id {}", g.root_category_id),
+            };
+            println!(
+                "  {}  {}{default}",
+                style::target(&g.name),
+                style::dim(&format!("(group {}, root: {root})", g.id)),
+            );
+            for v in &g.views {
+                let mut tags = String::new();
+                if v.is_default {
+                    tags.push_str(&format!("  {}", style::ok("[default view]")));
+                }
+                if !v.active {
+                    tags.push_str(&format!("  {}", style::err("[inactive]")));
+                }
+                println!(
+                    "    {}  {}  {}{tags}",
+                    style::area(&v.code),
+                    v.name,
+                    style::dim(&format!("(store {})", v.id)),
+                );
+            }
+            if g.views.is_empty() {
+                println!("    {}", style::err("(no store views — group unusable)"));
+            }
+        }
+        if w.groups.is_empty() {
+            println!("  {}", style::err("(no store groups — website unusable)"));
+        }
+    }
+    if !tree.currency_rates.is_empty() {
+        println!("\n{}", style::dim("currency rates:"));
+        for (from, to, rate) in &tree.currency_rates {
+            println!("  {from} → {to}  {}", style::number(rate));
+        }
+    }
+    let views: usize = tree.websites.iter().flat_map(|w| &w.groups).map(|g| g.views.len()).sum();
+    eprintln!(
+        "\n{} website(s), {} group(s), {views} store view(s)",
+        tree.websites.len(),
+        tree.websites.iter().map(|w| w.groups.len()).sum::<usize>(),
+    );
     Ok(())
 }
 
