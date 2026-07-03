@@ -59,7 +59,8 @@ pub use model::{
     BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount,
     CategoryIndexedProduct, CategoryProduct,
     CategoryTreeNode, CategoryVisibilityIssue,
-    ChildPrice, Customer, CustomerAddress, CustomerHit, CustomerNewsletter, CustomerOrders,
+    ChildPrice, CmsEntry, CmsHit, CmsKind, Customer, CustomerAddress, CustomerHit,
+    CustomerNewsletter, CustomerOrders,
     IndexedPrice, Order, OrderAddress, OrderComment, OrderDocument, OrderHit,
     OrderItem, OrderPayment, OrderShipment, OrderStatus, OrderStatusState, OrderTotal,
     OrderTransaction, SalesSequence,
@@ -1073,6 +1074,77 @@ impl Magento {
             db::fetch_category_card(conn, &cfg.table_prefix, id, include_products, indexed_store)
                 .map_err(Error::Db)?;
         Ok(raw.map(to_category))
+    }
+
+    /// Every CMS page/block row matching an exact identifier (several rows can share
+    /// one, scoped to different stores), or all rows with `None`. `include_content`
+    /// keeps the full content on each entry. Live DB.
+    #[cfg(feature = "db")]
+    pub fn cms_entries(
+        &self,
+        kind: CmsKind,
+        ident: Option<&str>,
+        include_content: bool,
+    ) -> Result<Vec<CmsEntry>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raws =
+            db::fetch_cms_entries(conn, &cfg.table_prefix, kind, ident).map_err(Error::Db)?;
+        Ok(raws
+            .into_iter()
+            .map(|r| {
+                let content = r.content.unwrap_or_default();
+                let preview: String = content
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .chars()
+                    .take(160)
+                    .collect();
+                CmsEntry {
+                    kind,
+                    id: r.id,
+                    identifier: r.identifier,
+                    title: r.title,
+                    active: r.active,
+                    stores: r.stores,
+                    created: r.created,
+                    updated: r.updated,
+                    page_layout: r.page_layout,
+                    meta_title: r.meta_title,
+                    has_layout_update: r.has_layout_update,
+                    content_len: content.chars().count(),
+                    content_preview: preview,
+                    content: include_content.then_some(content),
+                }
+            })
+            .collect())
+    }
+
+    /// CMS search by identifier/title substring.
+    #[cfg(feature = "db")]
+    pub fn cms_like(
+        &self,
+        kind: CmsKind,
+        needle: &str,
+        limit: usize,
+    ) -> Result<(Vec<CmsHit>, bool)> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (rows, truncated) =
+            db::fetch_cms_like(conn, &cfg.table_prefix, kind, needle, limit).map_err(Error::Db)?;
+        Ok((
+            rows.into_iter()
+                .map(|(id, identifier, title, active)| CmsHit {
+                    id,
+                    identifier,
+                    title,
+                    active,
+                    stores: Vec::new(),
+                })
+                .collect(),
+            truncated,
+        ))
     }
 
     /// One cart price rule by rule_id. Live DB.

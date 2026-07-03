@@ -189,6 +189,146 @@ pub(crate) fn fetch_patch_list(
     Ok(rows.into_iter().map(|r| r.trim_start_matches('\\').to_string()).collect())
 }
 
+/// One CMS row, raw.
+pub(crate) struct DbCmsEntry {
+    pub id: u32,
+    pub identifier: String,
+    pub title: String,
+    pub active: bool,
+    pub created: Option<String>,
+    pub updated: Option<String>,
+    pub page_layout: Option<String>,
+    pub meta_title: Option<String>,
+    pub has_layout_update: bool,
+    pub content: Option<String>,
+    /// Store codes, `(all stores)` for store 0.
+    pub stores: Vec<String>,
+}
+
+/// CMS pages/blocks: every row matching the exact identifier (several rows can share
+/// one identifier, scoped to different stores), or all rows when `ident` is `None`.
+pub(crate) fn fetch_cms_entries(
+    conn: &DbConnection,
+    table_prefix: &str,
+    kind: crate::model::CmsKind,
+    ident: Option<&str>,
+) -> Result<Vec<DbCmsEntry>, String> {
+    use crate::model::CmsKind as K;
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    use std::collections::HashMap;
+
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let (select, table, id_col) = match kind {
+        K::Page => (
+            format!(
+                "SELECT page_id, identifier, title, is_active, \
+                 CAST(creation_time AS CHAR), CAST(update_time AS CHAR), page_layout, \
+                 meta_title, (COALESCE(layout_update_xml, '') <> '' \
+                 OR COALESCE(custom_layout_update_xml, '') <> ''), content \
+                 FROM {p}cms_page"
+            ),
+            "cms_page_store",
+            "page_id",
+        ),
+        K::Block => (
+            format!(
+                "SELECT block_id, identifier, title, is_active, \
+                 CAST(creation_time AS CHAR), CAST(update_time AS CHAR), NULL, NULL, 0, \
+                 content FROM {p}cms_block"
+            ),
+            "cms_block_store",
+            "block_id",
+        ),
+    };
+    let rows: Vec<mysql::Row> = match ident {
+        Some(i) => c
+            .exec(format!("{select} WHERE identifier = :v ORDER BY 1"), params! { "v" => i })
+            .map_err(clean_err)?,
+        None => c.query(format!("{select} ORDER BY identifier, 1")).map_err(clean_err)?,
+    };
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let stores: HashMap<u32, String> =
+        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?
+            .into_iter()
+            .collect();
+    let mut entries: Vec<DbCmsEntry> = Vec::with_capacity(rows.len());
+    for mut r in rows {
+        let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
+        let n = |r: &mut mysql::Row, i: usize| r.take::<Option<i64>, _>(i).flatten().unwrap_or(0);
+        entries.push(DbCmsEntry {
+            id: n(&mut r, 0) as u32,
+            identifier: s(&mut r, 1).unwrap_or_default(),
+            title: s(&mut r, 2).unwrap_or_default(),
+            active: n(&mut r, 3) != 0,
+            created: s(&mut r, 4),
+            updated: s(&mut r, 5),
+            page_layout: s(&mut r, 6),
+            meta_title: s(&mut r, 7).filter(|m| !m.is_empty()),
+            has_layout_update: n(&mut r, 8) != 0,
+            content: s(&mut r, 9),
+            stores: Vec::new(),
+        });
+    }
+    let ids = entries.iter().map(|e| e.id.to_string()).collect::<Vec<_>>().join(",");
+    let links: Vec<(u32, u32)> = c
+        .query(format!("SELECT {id_col}, store_id FROM {p}{table} WHERE {id_col} IN ({ids})"))
+        .map_err(clean_err)?;
+    for e in &mut entries {
+        e.stores = links
+            .iter()
+            .filter(|(id, _)| *id == e.id)
+            .map(|(_, sid)| {
+                if *sid == 0 {
+                    "(all stores)".to_string()
+                } else {
+                    stores.get(sid).cloned().unwrap_or_else(|| format!("store/{sid}"))
+                }
+            })
+            .collect();
+    }
+    Ok(entries)
+}
+
+/// CMS search by identifier/title substring: `(id, identifier, title, active)`.
+pub(crate) fn fetch_cms_like(
+    conn: &DbConnection,
+    table_prefix: &str,
+    kind: crate::model::CmsKind,
+    needle: &str,
+    limit: usize,
+) -> Result<(Vec<(u32, String, String, bool)>, bool), String> {
+    use crate::model::CmsKind as K;
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let (table, id_col) = match kind {
+        K::Page => ("cms_page", "page_id"),
+        K::Block => ("cms_block", "block_id"),
+    };
+    let rows: Vec<(u32, String, String, i64)> = c
+        .exec(
+            format!(
+                "SELECT {id_col}, identifier, title, is_active FROM {p}{table} \
+                 WHERE identifier LIKE :pat OR title LIKE :pat \
+                 ORDER BY identifier, {id_col} LIMIT {}",
+                limit + 1
+            ),
+            params! { "pat" => format!("%{needle}%") },
+        )
+        .map_err(clean_err)?;
+    let truncated = rows.len() > limit;
+    Ok((
+        rows.into_iter().take(limit).map(|(id, i, t, a)| (id, i, t, a != 0)).collect(),
+        truncated,
+    ))
+}
+
 /// How to look a sales rule up.
 pub(crate) enum RuleIdent<'a> {
     Id(u32),

@@ -188,6 +188,7 @@ CONFIG & ADMIN (where settings & permissions live)
 FRONTEND      (presentation)
   layout [<handle>] [--area]    widgets [<id>]    email-templates [<id>]
   translations <str> [--locale] [--db]   ui-components [<name>] [--area]
+  cms-page|cms-block [<identifier>] [--content]   (live DB)
 
 RUNTIME       (env.php config & live connections)
   db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
@@ -1360,6 +1361,21 @@ the rule's coupon list (COUNT + first 10 — auto-generated rules have thousands
 Validated on the scratchpad DB: healthy coupon, window+expiry double blocker, exhausted
 limit, disabled rule, name search.
 
+### `cms-page` / `cms-block` (live DB, done)
+
+One shared implementation (`CmsKind`): no arg → the full list (`identifier  id  title
+stores  [disabled] [layout XML]`); exact identifier → the card — and since **the same
+identifier can exist as several rows scoped to different stores**, every matching row
+renders with a "N rows share this identifier (per-store scoping)" header, never a silent
+pick (the classic "why is this page different/404 on store X"). Substring → list, single
+match → card. The card: title, **store assignment** (`(all stores)` for store 0; red
+"(no store assignment — invisible everywhere)"), page layout, meta title, a yellow
+**"custom layout update attached"** for pages carrying `layout_update_xml` (invisible
+behavior source), timestamps, and a whitespace-collapsed 160-char content preview with
+the char count — `--content` prints the full body. List widths use char counts, not byte
+lengths (Über/café titles mis-padded otherwise). Validated on the scratchpad DB: the
+about-us per-store collision pair, layout-XML + disabled tags, --content, substring.
+
 ### `admin-users` / `admin-roles` (live DB, done)
 
 Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
@@ -1395,7 +1411,7 @@ role, and seeding one into a live DB was deliberately not done.
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
 `queue backlog`, `product`). New ideas go here.
-- **Small entities, in build order:** `cms-page`/`cms-block <identifier>`, `catalog-rule`, `tax`,
+- **Small entities, in build order:** `catalog-rule`, `tax`,
   `integrations`. Backlog: reviews, wishlists, search terms.
 
 ## Build order

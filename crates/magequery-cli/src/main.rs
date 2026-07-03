@@ -69,6 +69,8 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("email-templates", "Transactional email templates: file, theme overrides"),
             ("translations", "Every dictionary row for a phrase, in precedence order"),
             ("ui-components", "Admin grids & forms: columns, fields, data providers per module"),
+            ("cms-page", "One CMS page: store assignment, layout, content (live DB)"),
+            ("cms-block", "One CMS block: store assignment, content (live DB)"),
         ],
     ),
     (
@@ -302,6 +304,10 @@ enum Command {
     Translations(TranslationsArgs),
     /// UI components (admin grids & forms): columns, fields, data providers per module.
     UiComponents(UiComponentsArgs),
+    /// One CMS page by identifier: store assignment, layout, content.
+    CmsPage(CmsArgs),
+    /// One CMS block by identifier: store assignment, content.
+    CmsBlock(CmsArgs),
 
     // ── Config & admin: where settings & permissions live ──
     /// Resolve a config path/section with its source (static, +--db).
@@ -571,6 +577,18 @@ struct QuoteArgs {
     /// A quote entity_id; anything else searches customer emails (active carts first
     /// by recency).
     query: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct CmsArgs {
+    /// An identifier (exact — every store-scoped row is shown); a substring lists
+    /// matches. Omit to list all.
+    identifier: Option<String>,
+    /// Print the full content.
+    #[arg(long)]
+    content: bool,
     #[arg(long)]
     json: bool,
 }
@@ -1025,6 +1043,8 @@ fn main() -> Result<()> {
         Command::OrderStatuses(args) => order_statuses(&mage, &args),
         Command::Sequences(args) => sequences(&mage, &args),
         Command::SalesRule(args) => sales_rule(&mage, &args),
+        Command::CmsPage(args) => cms(&mage, magequery_core::CmsKind::Page, &args),
+        Command::CmsBlock(args) => cms(&mage, magequery_core::CmsKind::Block, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
         Command::AdminRoles(args) => admin_roles(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
@@ -2376,6 +2396,170 @@ fn sequences(mage: &Magento, args: &SequencesArgs) -> Result<()> {
         seqs.len()
     );
     Ok(())
+}
+
+fn cms(mage: &Magento, kind: magequery_core::CmsKind, args: &CmsArgs) -> Result<()> {
+    let Some(ident) = &args.identifier else {
+        // Everything, as a list.
+        let entries = mage.cms_entries(kind, None, false)?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&entries)?);
+            return Ok(());
+        }
+        render_cms_list(&entries);
+        return Ok(());
+    };
+
+    let entries = mage.cms_entries(kind, Some(ident), args.content)?;
+    if !entries.is_empty() {
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&entries)?);
+            return Ok(());
+        }
+        if entries.len() > 1 {
+            println!(
+                "{}",
+                style::number(&format!(
+                    "{} rows share this identifier (per-store scoping):",
+                    entries.len()
+                ))
+            );
+            println!();
+        }
+        for (i, e) in entries.iter().enumerate() {
+            if i > 0 {
+                println!("\n{}", style::dim("────"));
+            }
+            render_cms_entry(e);
+        }
+        return Ok(());
+    }
+
+    // Substring → list; single hit → its card(s).
+    let (hits, truncated) = mage.cms_like(kind, ident, 50)?;
+    match hits.len() {
+        0 => Err(anyhow!("no {kind} matches `{ident}`")),
+        1 => {
+            let entries = mage.cms_entries(kind, Some(&hits[0].identifier), args.content)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+                return Ok(());
+            }
+            for e in &entries {
+                render_cms_entry(e);
+            }
+            Ok(())
+        }
+        _ => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+                return Ok(());
+            }
+            let wi = hits.iter().map(|h| h.identifier.len()).max().unwrap_or(0);
+            for h in &hits {
+                let inactive = if h.active {
+                    String::new()
+                } else {
+                    format!("  {}", style::err("[disabled]"))
+                };
+                println!(
+                    "{}{}  {:>4}  {}{inactive}",
+                    style::name(&h.identifier),
+                    " ".repeat(wi - h.identifier.len()),
+                    h.id,
+                    h.title,
+                );
+            }
+            if truncated {
+                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+            }
+            eprintln!("\n{} match(es)", hits.len());
+            Ok(())
+        }
+    }
+}
+
+fn render_cms_list(entries: &[magequery_core::CmsEntry]) {
+    if entries.is_empty() {
+        println!("{}", style::dim("(none)"));
+        return;
+    }
+    // Char counts, not byte lengths — titles carry accents (Über, café) routinely.
+    let chars = |s: &str| s.chars().count();
+    let wi = entries.iter().map(|e| chars(&e.identifier)).max().unwrap_or(0);
+    let wt = entries.iter().map(|e| chars(&e.title)).max().unwrap_or(0);
+    for e in entries {
+        let mut tags = String::new();
+        if !e.active {
+            tags.push_str(&format!("  {}", style::err("[disabled]")));
+        }
+        if e.has_layout_update {
+            tags.push_str(&format!("  {}", style::number("[layout XML]")));
+        }
+        let stores: Vec<String> = e.stores.iter().map(|s| style::area(s)).collect();
+        println!(
+            "{}{}  {:>4}  {}{}  {}{tags}",
+            style::name(&e.identifier),
+            " ".repeat(wi - chars(&e.identifier)),
+            e.id,
+            e.title,
+            " ".repeat(wt - chars(&e.title)),
+            stores.join(", "),
+        );
+    }
+    eprintln!("\n{} entr(ies)", entries.len());
+}
+
+fn render_cms_entry(e: &magequery_core::CmsEntry) {
+    let active = if e.active { style::ok("active") } else { style::err("disabled") };
+    println!(
+        "{} {}  ({} {})  {active}",
+        style::kind(&e.kind.to_string()),
+        style::name(&e.identifier),
+        style::dim("id"),
+        e.id,
+    );
+    println!();
+    info_row("title", style::target(&e.title));
+    let stores: Vec<String> = e.stores.iter().map(|s| style::area(s)).collect();
+    info_row(
+        "stores",
+        if stores.is_empty() {
+            style::err("(no store assignment — invisible everywhere)")
+        } else {
+            stores.join(", ")
+        },
+    );
+    if let Some(l) = &e.page_layout {
+        info_row("layout", l.clone());
+    }
+    if let Some(m) = &e.meta_title {
+        info_row("meta title", m.clone());
+    }
+    if e.has_layout_update {
+        info_row("layout XML", style::number("custom layout update attached"));
+    }
+    info_row(
+        "updated",
+        style::dim(&format!(
+            "{}  (created {})",
+            e.updated.as_deref().unwrap_or("?"),
+            e.created.as_deref().unwrap_or("?"),
+        )),
+    );
+    let ellipsis = if e.content_len > e.content_preview.chars().count() { "…" } else { "" };
+    info_row(
+        "content",
+        format!(
+            "{}: {}",
+            style::dim(&format!("{} chars", e.content_len)),
+            style::dim(&format!("{}{ellipsis}", e.content_preview)),
+        ),
+    );
+    if let Some(full) = &e.content {
+        println!("\n{}", style::dim("─── content ───"));
+        println!("{full}");
+    }
 }
 
 fn sales_rule(mage: &Magento, args: &SalesRuleArgs) -> Result<()> {

@@ -1664,6 +1664,61 @@ pub struct ProductPrices {
     pub matched_by_id: bool,
 }
 
+/// CMS entry kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CmsKind {
+    Page,
+    Block,
+}
+
+impl std::fmt::Display for CmsKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            CmsKind::Page => "cms-page",
+            CmsKind::Block => "cms-block",
+        })
+    }
+}
+
+/// One CMS page or block row. The same identifier can exist as several rows scoped to
+/// different stores — lookups return every row, never a silent pick. Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CmsEntry {
+    pub kind: CmsKind,
+    pub id: u32,
+    pub identifier: String,
+    pub title: String,
+    pub active: bool,
+    /// Store codes; `(all stores)` for the store-0 assignment.
+    pub stores: Vec<String>,
+    pub created: Option<String>,
+    pub updated: Option<String>,
+    /// Pages only.
+    pub page_layout: Option<String>,
+    pub meta_title: Option<String>,
+    /// A layout-update XML is attached (pages; a classic invisible behavior source).
+    pub has_layout_update: bool,
+    pub content_len: usize,
+    /// First chunk of the content, whitespace-collapsed.
+    pub content_preview: String,
+    /// Full content — populated only when requested.
+    pub content: Option<String>,
+}
+
+/// One row of a CMS search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CmsHit {
+    pub id: u32,
+    pub identifier: String,
+    pub title: String,
+    pub active: bool,
+    pub stores: Vec<String>,
+}
+
 /// One coupon of a cart price rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
