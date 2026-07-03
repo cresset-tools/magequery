@@ -188,7 +188,7 @@ CONFIG & ADMIN (where settings & permissions live)
 FRONTEND      (presentation)
   layout [<handle>] [--area]    widgets [<id>]    email-templates [<id>]
   translations <str> [--locale] [--db]   ui-components [<name>] [--area]
-  cms-page|cms-block [<identifier>] [--content]   (live DB)
+  cms-page|cms-block [<identifier>] [--id <n>] [--content]   (live DB)
 
 RUNTIME       (env.php config & live connections)
   db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
@@ -1372,7 +1372,10 @@ match → card. The card: title, **store assignment** (`(all stores)` for store 
 "(no store assignment — invisible everywhere)"), page layout, meta title, a yellow
 **"custom layout update attached"** for pages carrying `layout_update_xml` (invisible
 behavior source), timestamps, and a whitespace-collapsed 160-char content preview with
-the char count — `--content` prints the full body. List widths use char counts, not byte
+the char count. **`--content` prints ONLY the raw body** (bare stdout, for
+`> block.html` scripting — the fact-command philosophy); an identifier matching several
+store-scoped rows errors with the row ids instead of concatenating, and `--id <n>` is
+the unambiguous row handle (works for cards too). List widths use char counts, not byte
 lengths (Über/café titles mis-padded otherwise). Validated on the scratchpad DB: the
 about-us per-store collision pair, layout-XML + disabled tags, --content, substring.
 

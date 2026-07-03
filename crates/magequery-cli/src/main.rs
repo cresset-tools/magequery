@@ -586,7 +586,10 @@ struct CmsArgs {
     /// An identifier (exact — every store-scoped row is shown); a substring lists
     /// matches. Omit to list all.
     identifier: Option<String>,
-    /// Print the full content.
+    /// A row id — the unambiguous handle when an identifier has per-store rows.
+    #[arg(long)]
+    id: Option<u32>,
+    /// Print ONLY the raw content (bare, for scripting/redirection).
     #[arg(long)]
     content: bool,
     #[arg(long)]
@@ -2399,7 +2402,18 @@ fn sequences(mage: &Magento, args: &SequencesArgs) -> Result<()> {
 }
 
 fn cms(mage: &Magento, kind: magequery_core::CmsKind, args: &CmsArgs) -> Result<()> {
+    // --id: the unambiguous row handle.
+    if let Some(id) = args.id {
+        let Some(e) = mage.cms_entry_by_id(kind, id, args.content || args.json)? else {
+            return Err(anyhow!("no {kind} with id {id}"));
+        };
+        return render_cms_entries(std::slice::from_ref(&e), args);
+    }
+
     let Some(ident) = &args.identifier else {
+        if args.content {
+            return Err(anyhow!("--content needs an identifier (or --id)"));
+        }
         // Everything, as a list.
         let entries = mage.cms_entries(kind, None, false)?;
         if args.json {
@@ -2410,29 +2424,9 @@ fn cms(mage: &Magento, kind: magequery_core::CmsKind, args: &CmsArgs) -> Result<
         return Ok(());
     };
 
-    let entries = mage.cms_entries(kind, Some(ident), args.content)?;
+    let entries = mage.cms_entries(kind, Some(ident), args.content || args.json)?;
     if !entries.is_empty() {
-        if args.json {
-            println!("{}", serde_json::to_string_pretty(&entries)?);
-            return Ok(());
-        }
-        if entries.len() > 1 {
-            println!(
-                "{}",
-                style::number(&format!(
-                    "{} rows share this identifier (per-store scoping):",
-                    entries.len()
-                ))
-            );
-            println!();
-        }
-        for (i, e) in entries.iter().enumerate() {
-            if i > 0 {
-                println!("\n{}", style::dim("────"));
-            }
-            render_cms_entry(e);
-        }
-        return Ok(());
+        return render_cms_entries(&entries, args);
     }
 
     // Substring → list; single hit → its card(s).
@@ -2440,15 +2434,9 @@ fn cms(mage: &Magento, kind: magequery_core::CmsKind, args: &CmsArgs) -> Result<
     match hits.len() {
         0 => Err(anyhow!("no {kind} matches `{ident}`")),
         1 => {
-            let entries = mage.cms_entries(kind, Some(&hits[0].identifier), args.content)?;
-            if args.json {
-                println!("{}", serde_json::to_string_pretty(&entries)?);
-                return Ok(());
-            }
-            for e in &entries {
-                render_cms_entry(e);
-            }
-            Ok(())
+            let entries =
+                mage.cms_entries(kind, Some(&hits[0].identifier), args.content || args.json)?;
+            render_cms_entries(&entries, args)
         }
         _ => {
             if args.json {
@@ -2477,6 +2465,52 @@ fn cms(mage: &Magento, kind: magequery_core::CmsKind, args: &CmsArgs) -> Result<
             Ok(())
         }
     }
+}
+
+/// Route resolved rows to the right output: JSON, bare content (scripting — exactly one
+/// row required), or human cards with the collision header.
+fn render_cms_entries(entries: &[magequery_core::CmsEntry], args: &CmsArgs) -> Result<()> {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+    if args.content {
+        if entries.len() > 1 {
+            let ids: Vec<String> = entries
+                .iter()
+                .map(|e| format!("{} ({})", e.id, e.stores.join("/")))
+                .collect();
+            return Err(anyhow!(
+                "`{}` matches {} store-scoped rows — pick one with --id: {}",
+                entries[0].identifier,
+                entries.len(),
+                ids.join(", "),
+            ));
+        }
+        // Bare content only — clean for redirection.
+        print!("{}", entries[0].content.as_deref().unwrap_or(""));
+        if !entries[0].content.as_deref().unwrap_or("").ends_with('\n') {
+            println!();
+        }
+        return Ok(());
+    }
+    if entries.len() > 1 {
+        println!(
+            "{}",
+            style::number(&format!(
+                "{} rows share this identifier (per-store scoping):",
+                entries.len()
+            ))
+        );
+        println!();
+    }
+    for (i, e) in entries.iter().enumerate() {
+        if i > 0 {
+            println!("\n{}", style::dim("────"));
+        }
+        render_cms_entry(e);
+    }
+    Ok(())
 }
 
 fn render_cms_list(entries: &[magequery_core::CmsEntry]) {
@@ -2551,15 +2585,12 @@ fn render_cms_entry(e: &magequery_core::CmsEntry) {
     info_row(
         "content",
         format!(
-            "{}: {}",
+            "{}: {}  {}",
             style::dim(&format!("{} chars", e.content_len)),
             style::dim(&format!("{}{ellipsis}", e.content_preview)),
+            style::dim("(--content for the raw body)"),
         ),
     );
-    if let Some(full) = &e.content {
-        println!("\n{}", style::dim("─── content ───"));
-        println!("{full}");
-    }
 }
 
 fn sales_rule(mage: &Magento, args: &SalesRuleArgs) -> Result<()> {

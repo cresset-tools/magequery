@@ -1086,10 +1086,36 @@ impl Magento {
         ident: Option<&str>,
         include_content: bool,
     ) -> Result<Vec<CmsEntry>> {
+        let sel = match ident {
+            Some(i) => db::CmsSelector::Identifier(i),
+            None => db::CmsSelector::All,
+        };
+        self.cms_fetch(kind, sel, include_content)
+    }
+
+    /// One CMS row by its numeric id — the unambiguous handle when an identifier is
+    /// shared by several store-scoped rows.
+    #[cfg(feature = "db")]
+    pub fn cms_entry_by_id(
+        &self,
+        kind: CmsKind,
+        id: u32,
+        include_content: bool,
+    ) -> Result<Option<CmsEntry>> {
+        Ok(self.cms_fetch(kind, db::CmsSelector::Id(id), include_content)?.into_iter().next())
+    }
+
+    #[cfg(feature = "db")]
+    fn cms_fetch(
+        &self,
+        kind: CmsKind,
+        sel: db::CmsSelector<'_>,
+        include_content: bool,
+    ) -> Result<Vec<CmsEntry>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raws =
-            db::fetch_cms_entries(conn, &cfg.table_prefix, kind, ident).map_err(Error::Db)?;
+            db::fetch_cms_entries(conn, &cfg.table_prefix, kind, sel).map_err(Error::Db)?;
         Ok(raws
             .into_iter()
             .map(|r| {

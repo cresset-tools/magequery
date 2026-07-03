@@ -205,13 +205,20 @@ pub(crate) struct DbCmsEntry {
     pub stores: Vec<String>,
 }
 
-/// CMS pages/blocks: every row matching the exact identifier (several rows can share
-/// one identifier, scoped to different stores), or all rows when `ident` is `None`.
+/// How to select CMS rows.
+pub(crate) enum CmsSelector<'a> {
+    All,
+    Identifier(&'a str),
+    Id(u32),
+}
+
+/// CMS pages/blocks: every row matching the selector (an identifier can match several
+/// rows, scoped to different stores).
 pub(crate) fn fetch_cms_entries(
     conn: &DbConnection,
     table_prefix: &str,
     kind: crate::model::CmsKind,
-    ident: Option<&str>,
+    sel: CmsSelector<'_>,
 ) -> Result<Vec<DbCmsEntry>, String> {
     use crate::model::CmsKind as K;
     use mysql::params;
@@ -242,11 +249,16 @@ pub(crate) fn fetch_cms_entries(
             "block_id",
         ),
     };
-    let rows: Vec<mysql::Row> = match ident {
-        Some(i) => c
+    let rows: Vec<mysql::Row> = match sel {
+        CmsSelector::Identifier(i) => c
             .exec(format!("{select} WHERE identifier = :v ORDER BY 1"), params! { "v" => i })
             .map_err(clean_err)?,
-        None => c.query(format!("{select} ORDER BY identifier, 1")).map_err(clean_err)?,
+        CmsSelector::Id(id) => c
+            .exec(format!("{select} WHERE {id_col} = :v"), params! { "v" => id })
+            .map_err(clean_err)?,
+        CmsSelector::All => {
+            c.query(format!("{select} ORDER BY identifier, 1")).map_err(clean_err)?
+        }
     };
     if rows.is_empty() {
         return Ok(Vec::new());
