@@ -1477,6 +1477,7 @@ pub struct CategoryIndexCount {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
 pub struct CategoryProduct {
+    pub entity_id: u32,
     pub sku: String,
     pub name: Option<String>,
     pub position: i64,

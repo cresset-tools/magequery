@@ -2038,9 +2038,10 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
         let ws = cat.products.iter().map(|p| p.sku.len()).max().unwrap_or(0);
         for p in &cat.products {
             println!(
-                "  {}{}  {}  {}",
+                "  {}{}  {:>6}  {}  {}",
                 style::name(&p.sku),
                 " ".repeat(ws - p.sku.len()),
+                p.entity_id,
                 style::dim(&format!("pos {:>3}", p.position)),
                 p.name.as_deref().unwrap_or(""),
             );

@@ -2777,7 +2777,12 @@ fn to_category(raw: db::DbCategoryCard) -> Category {
         products: raw
             .products
             .into_iter()
-            .map(|(sku, name, position)| CategoryProduct { sku, name, position })
+            .map(|(entity_id, sku, name, position)| CategoryProduct {
+                entity_id,
+                sku,
+                name,
+                position,
+            })
             .collect(),
     }
 }

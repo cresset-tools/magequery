@@ -317,8 +317,8 @@ pub(crate) struct DbCategoryCard {
     /// `(request_path, store code, redirect_type)`.
     pub rewrites: Vec<(String, String, u16)>,
     pub root_of: Vec<String>,
-    /// `(sku, name, position)`, when requested.
-    pub products: Vec<(String, Option<String>, i64)>,
+    /// `(entity_id, sku, name, position)`, when requested.
+    pub products: Vec<(u32, String, Option<String>, i64)>,
 }
 
 pub(crate) fn fetch_category_card(
@@ -467,10 +467,11 @@ pub(crate) fn fetch_category_card(
         )
         .unwrap_or_default();
 
-    let products: Vec<(String, Option<String>, i64)> = if include_products {
+    let products: Vec<(u32, String, Option<String>, i64)> = if include_products {
         c.exec(
             format!(
-                "SELECT e.sku, n.value, cp.position FROM {p}catalog_category_product cp \
+                "SELECT e.entity_id, e.sku, n.value, cp.position \
+                 FROM {p}catalog_category_product cp \
                  JOIN {p}catalog_product_entity e ON e.entity_id = cp.product_id \
                  LEFT JOIN {p}catalog_product_entity_varchar n ON n.entity_id = e.entity_id \
                  AND n.store_id = 0 AND n.attribute_id = \
