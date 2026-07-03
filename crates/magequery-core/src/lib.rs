@@ -2006,10 +2006,16 @@ impl Magento {
 
     /// Live message backlog per queue: every queue the static config knows (with its
     /// consumers) joined with the MysqlMq driver's `queue`/`queue_message_status` counts.
-    /// A static queue absent from the `queue` table is reported with `in_db: false`
-    /// (amqp-only or setup:upgrade pending — its broker backlog isn't inspectable here);
-    /// a DB queue no static config references is `orphaned` (removed module's leftover).
-    /// Sorted by queue name. Clean [`Error::Db`] when the database is unreachable.
+    ///
+    /// **MySQL (db) queue driver only.** AMQP/RabbitMQ state is never read: a static
+    /// queue absent from the `queue` table is reported with `in_db: false` (amqp-only or
+    /// setup:upgrade pending), and — the subtler case — on a store whose env.php
+    /// configures amqp, a queue may have rows here while its real traffic flows through
+    /// the broker, so zero counts are not proof of an empty queue. Check
+    /// [`Self::queue_config`] for configured amqp connections before treating these
+    /// numbers as the whole story. A DB queue no static config references is `orphaned`
+    /// (removed module's leftover). Sorted by queue name. Clean [`Error::Db`] when the
+    /// database is unreachable.
     #[cfg(feature = "db")]
     pub fn queue_backlog(&self) -> Result<Vec<QueueBacklog>> {
         let cfg = self.db_config()?;

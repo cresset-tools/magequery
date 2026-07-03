@@ -649,7 +649,9 @@ enum QueueCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Live message backlog per queue from the MysqlMq driver tables (db connection).
+    /// Live message backlog per queue — MySQL (db) queue driver only. AMQP/RabbitMQ
+    /// queues are not inspected; when env.php configures amqp, a note flags that these
+    /// counts don't cover the broker.
     Backlog {
         #[arg(long)]
         json: bool,
@@ -1257,6 +1259,14 @@ fn queue_backlog(mage: &Magento, json: bool) -> Result<()> {
     let waiting: u32 = rows.iter().map(|r| r.new + r.retry).sum();
     let errors: u32 = rows.iter().map(|r| r.error).sum();
     eprintln!("\n{} queue(s) · {waiting} waiting · {errors} error(s)", rows.len());
+    // Zeros must not read as "no backlog" when traffic actually flows through a broker
+    // this command can't see.
+    if mage.queue_config().map(|q| !q.connections.is_empty()).unwrap_or(false) {
+        eprintln!(
+            "note: env.php configures an amqp connection — these counts cover the MySQL \
+             (db) queue driver only; RabbitMQ-side backlog is not visible here."
+        );
+    }
     Ok(())
 }
 

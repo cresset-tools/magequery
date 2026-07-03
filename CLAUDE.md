@@ -715,10 +715,14 @@ the **MysqlMq driver tables** — `queue` (names; populated at setup:upgrade) +
 `queue_message_status` counts grouped by status (constants verified from
 `MysqlMq\Model\QueueManagement`: 2 new, 3 in-progress, 4 complete, 5 retry, 6 error, 7
 to-be-deleted; 4+7 collapse to `done` = cleanup pending), plus the oldest waiting
-(new/retry) message's age on the DB clock. Two honesty cases: a static queue absent from
-the `queue` table → `in_db: false` ("amqp-only, or setup:upgrade pending" — the broker's
-backlog isn't inspectable without an AMQP client, which we deliberately don't ship); a DB
-queue no static config references → `orphaned` (removed module's leftover). CLI `magequery
+(new/retry) message's age on the DB clock. **MySQL (db) queue driver only** — three
+honesty cases: a static queue absent from the `queue` table → `in_db: false` ("amqp-only,
+or setup:upgrade pending" — the broker's backlog isn't inspectable without an AMQP
+client, which we deliberately don't ship); a DB queue no static config references →
+`orphaned` (removed module's leftover); and when **env.php configures an amqp
+connection**, a stderr note warns that the counts cover only the db driver — a queue can
+hold rows in MySQL while its real traffic flows through RabbitMQ, so zeros there are not
+proof of an empty queue (both dev stores configure amqp; the note fires on both). CLI `magequery
 queue backlog`: `queue  N waiting  N in progress  N retry  N error  [N done]  [oldest
 waiting 3h]  → consumers` — zeros dim so nonzero pops, errors red, oldest-waiting red past
 1h, red "(no consumer reads this queue)" only when messages are actually waiting; summary
