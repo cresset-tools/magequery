@@ -1664,6 +1664,83 @@ pub struct ProductPrices {
     pub matched_by_id: bool,
 }
 
+/// One cart line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct QuoteItem {
+    pub sku: String,
+    pub name: Option<String>,
+    pub product_type: String,
+    pub is_child: bool,
+    pub qty: String,
+    pub price: Option<String>,
+    pub row_total: Option<String>,
+    pub discount: Option<String>,
+}
+
+/// A quote address; the shipping one carries the chosen shipping method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct QuoteAddress {
+    pub kind: String,
+    pub name: String,
+    pub company: Option<String>,
+    pub street: Option<String>,
+    pub postcode: Option<String>,
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub shipping_method: Option<String>,
+    pub shipping_description: Option<String>,
+}
+
+/// One quote (cart) as checkout computed it. Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Quote {
+    pub entity_id: u64,
+    pub active: bool,
+    pub store: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    /// Seconds since the last update, DB-server clock — cart age.
+    pub updated_secs: Option<i64>,
+    pub converted_at: Option<String>,
+    pub customer_id: Option<u32>,
+    pub customer_email: Option<String>,
+    pub customer_name: Option<String>,
+    pub guest: bool,
+    pub checkout_method: Option<String>,
+    pub quote_currency: Option<String>,
+    pub base_currency: Option<String>,
+    pub items_qty: Option<String>,
+    pub is_virtual: bool,
+    pub coupon: Option<String>,
+    pub applied_rule_ids: Option<String>,
+    /// The order increment reserved at checkout start.
+    pub reserved_order_id: Option<String>,
+    /// The order this quote became, if any (`sales_order.quote_id`).
+    pub order_increment: Option<String>,
+    /// subtotal/shipping/tax/discount/grand_total — subtotal + grand total from the
+    /// quote row, the rest from the shipping address (where checkout collects them).
+    pub totals: Vec<OrderTotal>,
+    pub items: Vec<QuoteItem>,
+    pub addresses: Vec<QuoteAddress>,
+    pub payment: Option<OrderPayment>,
+}
+
+/// One row of a quote search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct QuoteHit {
+    pub entity_id: u64,
+    pub active: bool,
+    pub customer_email: Option<String>,
+    pub items_qty: Option<String>,
+    pub grand_total: Option<String>,
+    pub currency: Option<String>,
+    pub updated_at: Option<String>,
+}
+
 /// One customer address, with default-billing/shipping tags.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

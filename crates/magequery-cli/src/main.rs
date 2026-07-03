@@ -52,6 +52,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("category", "The category tree; one category's visibility & product counts"),
             ("order", "One order: item lifecycle, totals, payment, documents, history"),
             ("customer", "One customer: account state, addresses, orders, newsletter"),
+            ("quote", "One cart as checkout computed it: items, totals, chosen methods"),
         ],
     ),
     (
@@ -267,6 +268,8 @@ enum Command {
     Order(OrderArgs),
     /// One customer: account state, addresses, order summary, newsletter.
     Customer(CustomerArgs),
+    /// One quote (cart) as checkout computed it: items, totals, chosen methods.
+    Quote(QuoteArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -537,6 +540,15 @@ struct CustomerArgs {
     /// Look up by entity_id.
     #[arg(long)]
     id: Option<u32>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct QuoteArgs {
+    /// A quote entity_id; anything else searches customer emails (active carts first
+    /// by recency).
+    query: String,
     #[arg(long)]
     json: bool,
 }
@@ -946,6 +958,7 @@ fn main() -> Result<()> {
         Command::Category(args) => category(&mage, &args),
         Command::Order(args) => order(&mage, &args),
         Command::Customer(args) => customer(&mage, &args),
+        Command::Quote(args) => quote(&mage, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
         Command::AdminRoles(args) => admin_roles(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
@@ -2127,6 +2140,248 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn quote(mage: &Magento, args: &QuoteArgs) -> Result<()> {
+    if let Ok(id) = args.query.parse::<u64>() {
+        let Some(q) = mage.quote(id)? else {
+            return Err(anyhow!("no quote with entity_id {id}"));
+        };
+        return render_quote(&q, args);
+    }
+    let (hits, truncated) = mage.quotes_like(&args.query, 50)?;
+    match hits.len() {
+        0 => Err(anyhow!("no quote matches `{}`", args.query)),
+        1 => {
+            let q = mage.quote(hits[0].entity_id)?.expect("listed quote");
+            render_quote(&q, args)
+        }
+        _ => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+                return Ok(());
+            }
+            let we = hits
+                .iter()
+                .map(|h| h.customer_email.as_deref().unwrap_or("").len())
+                .max()
+                .unwrap_or(0);
+            for h in &hits {
+                let active = if h.active { style::ok("active  ") } else { style::dim("inactive") };
+                let email = h.customer_email.as_deref().unwrap_or("");
+                println!(
+                    "{:>8}  {active}  {}{}  {:>6} items  {:>10} {}  {}",
+                    h.entity_id,
+                    style::name(email),
+                    " ".repeat(we - email.len()),
+                    h.items_qty.as_deref().unwrap_or("0"),
+                    h.grand_total.as_deref().unwrap_or("-"),
+                    h.currency.as_deref().unwrap_or(""),
+                    style::dim(h.updated_at.as_deref().unwrap_or("")),
+                );
+            }
+            if truncated {
+                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+            }
+            eprintln!("\n{} quote(s)", hits.len());
+            Ok(())
+        }
+    }
+}
+
+fn render_quote(q: &magequery_core::Quote, args: &QuoteArgs) -> Result<()> {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(q)?);
+        return Ok(());
+    }
+
+    let state = if let Some(inc) = &q.order_increment {
+        let stale = if q.active {
+            format!("  {}", style::number("[still active — checkout didn't deactivate it]"))
+        } else {
+            String::new()
+        };
+        format!(
+            "{} {}{stale}",
+            style::ok("converted"),
+            style::dim(&format!("→ order {inc}"))
+        )
+    } else if q.active {
+        style::ok("active")
+    } else {
+        style::dim("inactive, never converted")
+    };
+    let age = q
+        .updated_secs
+        .map(|s| format!("  {}", style::dim(&format!("(last touched {} ago)", humanize_secs(s)))))
+        .unwrap_or_default();
+    println!(
+        "quote {}  ({state})  {}{age}",
+        style::name(&q.entity_id.to_string()),
+        style::area(q.store.as_deref().unwrap_or("?")),
+    );
+    println!();
+    info_row(
+        "created",
+        style::dim(&format!(
+            "{}  · updated {}{}",
+            q.created_at.as_deref().unwrap_or("?"),
+            q.updated_at.as_deref().unwrap_or("?"),
+            q.converted_at
+                .as_deref()
+                .map(|c| format!("  · converted {c}"))
+                .unwrap_or_default(),
+        )),
+    );
+    let who = match (&q.customer_name, &q.customer_email) {
+        (Some(n), Some(e)) => format!("{n} <{e}>"),
+        (None, Some(e)) => e.clone(),
+        (Some(n), None) => n.clone(),
+        _ => style::dim("(no customer data yet)"),
+    };
+    let tag = if q.guest {
+        format!("  {}", style::number("[guest]"))
+    } else {
+        q.customer_id
+            .map(|id| format!("  {}", style::dim(&format!("(customer {id})"))))
+            .unwrap_or_default()
+    };
+    info_row("customer", format!("{who}{tag}"));
+    if let Some(m) = &q.checkout_method {
+        info_row("checkout", m.clone());
+    }
+    if let Some(r) = &q.reserved_order_id {
+        info_row("reserved", format!("increment {}", style::name(r)));
+    }
+    for a in &q.addresses {
+        let parts: Vec<String> = [
+            a.company.clone(),
+            Some(a.name.clone()).filter(|n| !n.is_empty()),
+            a.street.clone(),
+            match (&a.postcode, &a.city) {
+                (Some(p), Some(c)) => Some(format!("{p} {c}")),
+                (p, c) => p.clone().or_else(|| c.clone()),
+            },
+            a.country.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let addr = if parts.is_empty() { style::dim("(empty)") } else { parts.join(", ") };
+        info_row(if a.kind == "billing" { "bill to" } else { "ship to" }, addr);
+        if a.kind == "shipping" {
+            match &a.shipping_method {
+                Some(m) => info_row(
+                    "shipping",
+                    format!(
+                        "{m}{}",
+                        a.shipping_description
+                            .as_deref()
+                            .map(|d| format!("  {}", style::dim(&format!("— {d}"))))
+                            .unwrap_or_default(),
+                    ),
+                ),
+                None if !q.is_virtual => {
+                    info_row("shipping", style::number("(no method chosen yet)"))
+                }
+                None => {}
+            }
+        }
+    }
+    if let Some(p) = &q.payment {
+        match &p.method {
+            Some(m) => {
+                info_row("payment", style::target(m));
+                for (k, v) in p.additional.iter().take(12) {
+                    let val = if v.chars().count() > 90 {
+                        format!("{}…", v.chars().take(90).collect::<String>())
+                    } else {
+                        v.clone()
+                    };
+                    println!("              {}", style::dim(&format!("{k}: {val}")));
+                }
+            }
+            None => info_row("payment", style::number("(no method chosen yet)")),
+        }
+    }
+
+    if q.items.is_empty() {
+        println!("\n{}", style::dim("(empty cart)"));
+    } else {
+        println!(
+            "\n{}",
+            style::dim(&format!(
+                "items ({} row(s), {} unit(s)):",
+                q.items.len(),
+                q.items_qty.as_deref().unwrap_or("?"),
+            ))
+        );
+        let ws = q.items.iter().map(|i| i.sku.len()).max().unwrap_or(0);
+        for i in &q.items {
+            if i.is_child {
+                println!(
+                    "    {}",
+                    style::dim(&format!("↳ {} {}", i.sku, i.name.as_deref().unwrap_or("")))
+                );
+                continue;
+            }
+            let q_disp = i.qty.trim_end_matches('0').trim_end_matches('.');
+            let discount = i
+                .discount
+                .as_deref()
+                .filter(|d| !d.starts_with("0.") && *d != "0")
+                .map(|d| format!("  {}", style::ok(&format!("-{d}"))))
+                .unwrap_or_default();
+            println!(
+                "  {}{}  {}  {}  {}{discount}",
+                style::name(&i.sku),
+                " ".repeat(ws.saturating_sub(i.sku.len())),
+                style::dim(&format!("qty {q_disp} × {}", i.price.as_deref().unwrap_or("?"))),
+                i.name.as_deref().unwrap_or(""),
+                style::number(i.row_total.as_deref().unwrap_or("-")),
+            );
+        }
+    }
+
+    println!();
+    let different = q.quote_currency != q.base_currency;
+    let cur = q.quote_currency.as_deref().unwrap_or("");
+    let totals: Vec<String> = q
+        .totals
+        .iter()
+        .filter(|t| t.amount.is_some())
+        .map(|t| {
+            let amount = t.amount.as_deref().unwrap_or("-");
+            let base = if different {
+                t.base_amount
+                    .as_deref()
+                    .map(|b| {
+                        style::dim(&format!(" ({b} {})", q.base_currency.as_deref().unwrap_or("base")))
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let colored = if t.key == "grand_total" {
+                style::number(&format!("{amount} {cur}"))
+            } else {
+                amount.to_string()
+            };
+            format!("{} {colored}{base}", style::dim(&t.key.replace('_', " ")))
+        })
+        .collect();
+    info_row("totals", totals.join("  ·  "));
+    if let Some(c) = &q.coupon {
+        let rules = q
+            .applied_rule_ids
+            .as_deref()
+            .map(|r| format!("  {}", style::dim(&format!("(rules {r})"))))
+            .unwrap_or_default();
+        info_row("coupon", format!("{}{rules}", style::string_lit(&format!("\"{c}\""))));
+    } else if let Some(r) = &q.applied_rule_ids {
+        info_row("sales rules", format!("rule ids {r}"));
     }
     Ok(())
 }

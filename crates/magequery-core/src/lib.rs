@@ -64,7 +64,7 @@ pub use model::{
     OrderItem, OrderPayment, OrderShipment, OrderTotal, OrderTransaction,
     Preference, PreferenceStep, Plugin,
     PluginMethod, Product,
-    ProductCategory, ProductChild,
+    ProductCategory, ProductChild, Quote, QuoteAddress, QuoteHit, QuoteItem,
     ProductHit, ProductLegacyStock, ProductPrices, ProductRewrite, ProductScopeValue,
     ProductSourceStock, ProductValue,
     RedisConfig, RedisInstance, RedisPing, RulePrice, TierPrice,
@@ -1070,6 +1070,38 @@ impl Magento {
             db::fetch_category_card(conn, &cfg.table_prefix, id, include_products, indexed_store)
                 .map_err(Error::Db)?;
         Ok(raw.map(to_category))
+    }
+
+    /// One quote (cart) by entity_id. Live DB.
+    #[cfg(feature = "db")]
+    pub fn quote(&self, id: u64) -> Result<Option<Quote>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_quote(conn, &cfg.table_prefix, id).map_err(Error::Db)?;
+        Ok(raw.map(to_quote))
+    }
+
+    /// Quote search by customer email substring, newest first.
+    #[cfg(feature = "db")]
+    pub fn quotes_like(&self, needle: &str, limit: usize) -> Result<(Vec<QuoteHit>, bool)> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (rows, truncated) =
+            db::fetch_quotes_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
+        Ok((
+            rows.into_iter()
+                .map(|(entity_id, active, email, qty, total, currency, updated)| QuoteHit {
+                    entity_id,
+                    active,
+                    customer_email: email,
+                    items_qty: qty,
+                    grand_total: total,
+                    currency,
+                    updated_at: updated,
+                })
+                .collect(),
+            truncated,
+        ))
     }
 
     /// One customer by exact email. Live DB.
@@ -2721,6 +2753,100 @@ fn default_connection(cfg: &DbConfig) -> Result<&DbConnection> {
         .find(|c| c.name == "default")
         .or_else(|| cfg.connections.first())
         .ok_or_else(|| Error::Db("no db connection configured in env.php".to_string()))
+}
+
+/// Assemble [`Quote`]: blend the totals (subtotal + grand total from the quote row,
+/// shipping/tax/discount from the shipping address, where checkout collects them) and
+/// flatten the payment blob like the order card does.
+#[cfg(feature = "db")]
+fn to_quote(raw: db::DbQuote) -> Quote {
+    let (subtotal, base_subtotal, grand_total, base_grand_total) = raw.quote_totals;
+    let (shipping, base_shipping, tax, base_tax, discount, base_discount) = raw.address_totals;
+    let totals = vec![
+        OrderTotal { key: "subtotal".into(), amount: subtotal, base_amount: base_subtotal },
+        OrderTotal { key: "shipping".into(), amount: shipping, base_amount: base_shipping },
+        OrderTotal { key: "tax".into(), amount: tax, base_amount: base_tax },
+        OrderTotal { key: "discount".into(), amount: discount, base_amount: base_discount },
+        OrderTotal { key: "grand_total".into(), amount: grand_total, base_amount: base_grand_total },
+    ];
+    let payment = raw.payment.map(|(method, blob)| {
+        let additional: Vec<(String, String)> = blob
+            .as_deref()
+            .and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+            .and_then(|v| match v {
+                serde_json::Value::Object(map) => Some(
+                    map.into_iter()
+                        .map(|(k, v)| {
+                            let val = match v {
+                                serde_json::Value::String(s) => s,
+                                other => other.to_string(),
+                            };
+                            (k, val)
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        OrderPayment { method, last_trans_id: None, additional }
+    });
+    let customer_name = match (&raw.customer_firstname, &raw.customer_lastname) {
+        (Some(f), Some(l)) => Some(format!("{f} {l}")),
+        (Some(f), None) => Some(f.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        _ => None,
+    };
+
+    Quote {
+        entity_id: raw.entity_id,
+        active: raw.active,
+        store: raw.store,
+        created_at: raw.created_at,
+        updated_at: raw.updated_at,
+        updated_secs: raw.updated_secs,
+        converted_at: raw.converted_at,
+        customer_id: raw.customer_id,
+        customer_email: raw.customer_email,
+        customer_name,
+        guest: raw.guest,
+        checkout_method: raw.checkout_method,
+        quote_currency: raw.quote_currency,
+        base_currency: raw.base_currency,
+        items_qty: raw.items_qty,
+        is_virtual: raw.is_virtual,
+        coupon: raw.coupon,
+        applied_rule_ids: raw.applied_rule_ids,
+        reserved_order_id: raw.reserved_order_id,
+        order_increment: raw.order_increment,
+        totals,
+        items: raw
+            .items
+            .into_iter()
+            .map(|(sku, name, product_type, is_child, qty, price, row_total, discount)| {
+                QuoteItem { sku, name, product_type, is_child, qty, price, row_total, discount }
+            })
+            .collect(),
+        addresses: raw
+            .addresses
+            .into_iter()
+            .map(
+                |(kind, first, last, company, street, postcode, city, country, method, desc)| {
+                    QuoteAddress {
+                        kind,
+                        name: [first, last].into_iter().flatten().collect::<Vec<_>>().join(" "),
+                        company,
+                        street: street.map(|s| s.replace('\n', ", ")),
+                        postcode,
+                        city,
+                        country,
+                        shipping_method: method,
+                        shipping_description: desc,
+                    }
+                },
+            )
+            .collect(),
+        payment,
+    }
 }
 
 /// Assemble [`Customer`]: decode the newsletter status, name the addresses, and pass

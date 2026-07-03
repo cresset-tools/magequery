@@ -176,7 +176,7 @@ DATA          (persistence & model)
   extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>|<entity>] [--db]
   product <sku> [--id <n>] [--store <code>]   price <sku> [--id <n>]   (live DB)
   category [<id>|<name>] [--store] [--products]   order <increment#> [--id]
-  customer <email> [--id]   (live DB)
+  customer <email> [--id]   quote <id|email>   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1275,6 +1275,25 @@ and **guest orders** — orders carrying this email but not linked to the accoun
 scratchpad DB: full card incl. custom attribute + per-store newsletter, the
 locked+unconfirmed tags, search list.
 
+### `quote` (one cart as checkout computed it, live DB, done)
+
+`magequery quote <id|email>` — where checkout bugs live. Numeric = entity_id; anything
+else searches `customer_email` (newest first) — a customer's abandoned carts in one
+command. Quote tables carry no `sales_` prefix. The card: **state first** — `converted →
+order X` (joined via `sales_order.quote_id`), with a yellow **"[still active — checkout
+didn't deactivate it]"** when an order exists but `is_active=1` (a real bug symptom the
+synthetic seed hit by accident); `active`; or dim "inactive, never converted" — plus the
+cart's age (`last touched 12d ago`, DB clock). Then: customer (guest-tagged),
+checkout_method, the reserved increment, both addresses, the **chosen shipping/payment
+methods with honest "(no method chosen yet)"** for carts stuck mid-checkout (payment
+`additional_information` flattened like the order card — issuer selections etc.), items
+(qty × price, row totals, discounts, composite children dim), and the totals blend —
+subtotal/grand total from the quote row, shipping/tax/discount from the **shipping
+address** (where checkout collects them), dual-currency like `order`. Coupon + applied
+rule ids. Validated on the scratchpad DB: a converted USD quote with coupon and iDEAL
+issuer selection, a mid-checkout guest cart with empty address and no methods, the
+stale-active flag, and the email search.
+
 ### `admin-users` / `admin-roles` (live DB, done)
 
 Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
@@ -1310,9 +1329,9 @@ role, and seeding one into a live DB was deliberately not done.
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
 `queue backlog`, `product`). New ideas go here.
-- **Entity cards in the `product` mold:** `quote <id>` (carts — where checkout bugs
-  live), and optional thin document cards (`invoice`/`shipment`/`creditmemo
-  <increment#>`).
+- **Entity cards in the `product` mold:** optional thin document cards
+  (`invoice`/`shipment`/`creditmemo <increment#>`) — only if starting from a document
+  number turns out to be common; the `order` card already summarizes them.
 
 ## Build order
 

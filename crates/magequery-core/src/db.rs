@@ -189,6 +189,284 @@ pub(crate) fn fetch_patch_list(
     Ok(rows.into_iter().map(|r| r.trim_start_matches('\\').to_string()).collect())
 }
 
+/// Everything about one quote (cart), raw. Quote tables carry no `sales_` prefix.
+pub(crate) struct DbQuote {
+    pub entity_id: u64,
+    pub active: bool,
+    pub store: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub updated_secs: Option<i64>,
+    pub converted_at: Option<String>,
+    pub customer_id: Option<u32>,
+    pub customer_email: Option<String>,
+    pub customer_firstname: Option<String>,
+    pub customer_lastname: Option<String>,
+    pub guest: bool,
+    pub checkout_method: Option<String>,
+    pub quote_currency: Option<String>,
+    pub base_currency: Option<String>,
+    pub items_qty: Option<String>,
+    pub is_virtual: bool,
+    pub coupon: Option<String>,
+    pub applied_rule_ids: Option<String>,
+    pub reserved_order_id: Option<String>,
+    pub order_increment: Option<String>,
+    /// `(subtotal, base_subtotal, grand_total, base_grand_total)` from the quote row.
+    pub quote_totals: (Option<String>, Option<String>, Option<String>, Option<String>),
+    /// From the shipping address: `(shipping, base_shipping, tax, base_tax, discount,
+    /// base_discount)`.
+    #[allow(clippy::type_complexity)]
+    pub address_totals:
+        (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>),
+    /// `(sku, name, type, is_child, qty, price, row_total, discount)`.
+    #[allow(clippy::type_complexity)]
+    pub items: Vec<(
+        String,
+        Option<String>,
+        String,
+        bool,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )>,
+    /// `(kind, firstname, lastname, company, street, postcode, city, country,
+    /// shipping_method, shipping_description)`.
+    #[allow(clippy::type_complexity)]
+    pub addresses: Vec<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )>,
+    /// `(method, additional_information JSON)`.
+    pub payment: Option<(Option<String>, Option<String>)>,
+}
+
+pub(crate) fn fetch_quote(
+    conn: &DbConnection,
+    table_prefix: &str,
+    id: u64,
+) -> Result<Option<DbQuote>, String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    let row: Option<mysql::Row> = c
+        .exec_first(
+            format!(
+                "SELECT entity_id, is_active, store_id, CAST(created_at AS CHAR), \
+                 CAST(updated_at AS CHAR), TIMESTAMPDIFF(SECOND, updated_at, NOW()), \
+                 CAST(converted_at AS CHAR), customer_id, customer_email, \
+                 customer_firstname, customer_lastname, customer_is_guest, \
+                 checkout_method, quote_currency_code, base_currency_code, \
+                 CAST(items_qty AS CHAR), is_virtual, coupon_code, applied_rule_ids, \
+                 reserved_order_id, CAST(subtotal AS CHAR), CAST(base_subtotal AS CHAR), \
+                 CAST(grand_total AS CHAR), CAST(base_grand_total AS CHAR) \
+                 FROM {p}quote WHERE entity_id = :v"
+            ),
+            params! { "v" => id },
+        )
+        .map_err(clean_err)?;
+    let Some(mut row) = row else { return Ok(None) };
+    let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
+    let n = |r: &mut mysql::Row, i: usize| r.take::<Option<i64>, _>(i).flatten().unwrap_or(0);
+    let entity_id = n(&mut row, 0) as u64;
+    let active = n(&mut row, 1) != 0;
+    let store_id: Option<u32> = row.take::<Option<u32>, _>(2).flatten();
+    let created_at = s(&mut row, 3);
+    let updated_at = s(&mut row, 4);
+    let updated_secs = row.take::<Option<i64>, _>(5).flatten();
+    let converted_at = s(&mut row, 6);
+    let customer_id: Option<u32> = row.take::<Option<u32>, _>(7).flatten();
+    let customer_email = s(&mut row, 8);
+    let customer_firstname = s(&mut row, 9);
+    let customer_lastname = s(&mut row, 10);
+    let guest = n(&mut row, 11) != 0;
+    let checkout_method = s(&mut row, 12);
+    let quote_currency = s(&mut row, 13);
+    let base_currency = s(&mut row, 14);
+    let items_qty = s(&mut row, 15);
+    let is_virtual = n(&mut row, 16) != 0;
+    let coupon = s(&mut row, 17);
+    let applied_rule_ids = s(&mut row, 18);
+    let reserved_order_id = s(&mut row, 19);
+    let quote_totals = (s(&mut row, 20), s(&mut row, 21), s(&mut row, 22), s(&mut row, 23));
+
+    let store: Option<String> = match store_id {
+        Some(sid) => c
+            .exec_first(
+                format!("SELECT code FROM {p}store WHERE store_id = :v"),
+                params! { "v" => sid },
+            )
+            .map_err(clean_err)?,
+        None => None,
+    };
+    let order_increment: Option<String> = c
+        .exec_first(
+            format!("SELECT increment_id FROM {p}sales_order WHERE quote_id = :v"),
+            params! { "v" => entity_id },
+        )
+        .ok()
+        .flatten();
+
+    type QItemRow =
+        (String, Option<String>, String, Option<u64>, Option<String>, Option<String>, Option<String>, Option<String>);
+    let items: Vec<QItemRow> = c
+        .exec(
+            format!(
+                "SELECT sku, name, product_type, parent_item_id, CAST(qty AS CHAR), \
+                 CAST(price AS CHAR), CAST(row_total AS CHAR), \
+                 CAST(discount_amount AS CHAR) \
+                 FROM {p}quote_item WHERE quote_id = :v ORDER BY item_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+    let items = items
+        .into_iter()
+        .map(|(sku, name, ty, parent, qty, price, row_total, discount)| {
+            (
+                sku,
+                name,
+                ty,
+                parent.is_some(),
+                qty.unwrap_or_else(|| "0".to_string()),
+                price,
+                row_total,
+                discount,
+            )
+        })
+        .collect();
+
+    type QAddrRow = mysql::Row;
+    let addr_rows: Vec<QAddrRow> = c
+        .exec(
+            format!(
+                "SELECT address_type, firstname, lastname, company, street, postcode, \
+                 city, country_id, shipping_method, shipping_description, \
+                 CAST(shipping_amount AS CHAR), CAST(base_shipping_amount AS CHAR), \
+                 CAST(tax_amount AS CHAR), CAST(base_tax_amount AS CHAR), \
+                 CAST(discount_amount AS CHAR), CAST(base_discount_amount AS CHAR) \
+                 FROM {p}quote_address WHERE quote_id = :v ORDER BY address_type"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+    let mut addresses = Vec::new();
+    let mut address_totals = (None, None, None, None, None, None);
+    for mut r in addr_rows {
+        let kind = s(&mut r, 0).unwrap_or_default();
+        if kind == "shipping" {
+            address_totals = (
+                s(&mut r, 10),
+                s(&mut r, 11),
+                s(&mut r, 12),
+                s(&mut r, 13),
+                s(&mut r, 14),
+                s(&mut r, 15),
+            );
+        }
+        addresses.push((
+            kind,
+            s(&mut r, 1),
+            s(&mut r, 2),
+            s(&mut r, 3),
+            s(&mut r, 4),
+            s(&mut r, 5),
+            s(&mut r, 6),
+            s(&mut r, 7),
+            s(&mut r, 8),
+            s(&mut r, 9),
+        ));
+    }
+
+    let payment: Option<(Option<String>, Option<String>)> = c
+        .exec_first(
+            format!(
+                "SELECT method, additional_information FROM {p}quote_payment \
+                 WHERE quote_id = :v"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+
+    Ok(Some(DbQuote {
+        entity_id,
+        active,
+        store,
+        created_at,
+        updated_at,
+        updated_secs,
+        converted_at,
+        customer_id,
+        customer_email,
+        customer_firstname,
+        customer_lastname,
+        guest,
+        checkout_method,
+        quote_currency,
+        base_currency,
+        items_qty,
+        is_virtual,
+        coupon,
+        applied_rule_ids,
+        reserved_order_id,
+        order_increment,
+        quote_totals,
+        address_totals,
+        items,
+        addresses,
+        payment,
+    }))
+}
+
+/// Quote search by customer email substring, newest first.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_quotes_like(
+    conn: &DbConnection,
+    table_prefix: &str,
+    needle: &str,
+    limit: usize,
+) -> Result<
+    (Vec<(u64, bool, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)>, bool),
+    String,
+> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let rows: Vec<(u64, i64, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> =
+        c.exec(
+            format!(
+                "SELECT entity_id, is_active, customer_email, CAST(items_qty AS CHAR), \
+                 CAST(grand_total AS CHAR), quote_currency_code, CAST(updated_at AS CHAR) \
+                 FROM {p}quote WHERE customer_email LIKE :pat \
+                 ORDER BY entity_id DESC LIMIT {}",
+                limit + 1
+            ),
+            params! { "pat" => format!("%{needle}%") },
+        )
+        .map_err(clean_err)?;
+    let truncated = rows.len() > limit;
+    Ok((
+        rows.into_iter()
+            .take(limit)
+            .map(|(id, a, e, q, g, cur, u)| (id, a != 0, e, q, g, cur, u))
+            .collect(),
+        truncated,
+    ))
+}
+
 /// How to look a customer up.
 pub(crate) enum CustomerIdent<'a> {
     Email(&'a str),
