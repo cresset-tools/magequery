@@ -1335,9 +1335,15 @@ match (errors listing candidates otherwise — never emits a secret for an ambig
 mirroring `cms --content` and the `db info` "show the real password" precedent (the owner
 already has DB access). `--token` alone = the access token (the bearer case); pass
 `access-token`/`access-secret`/`consumer-key`/`consumer-secret` for a specific one, or `all`
-for tab-separated `kind\tvalue` lines. Revoked access token → the value still prints, with a
-`revoked — it won't authenticate` warning on **stderr** (pipe stays clean); never-activated
-→ non-zero exit ("no access token"). This is the ONLY path that selects a secret: a dedicated
+for tab-separated `kind\tvalue` lines. Magento stores these through its Encryptor, so the
+raw DB read is ciphertext (`keyVersion:cipher:…`) — **`--token` decrypts automatically** with
+`env.php`'s `crypt/key` via the same `Decryptor` as `config --decrypt` (plaintext values from
+older stores pass through). A value encrypted with a key not in this `env.php` (a DB imported
+from another environment) can't be recovered: a single selector then **exits non-zero with a
+clean error and prints nothing** (never leaks ciphertext into a script), while `all` keeps its
+column structure by emitting the raw envelope and flagging that field on **stderr**. Revoked
+access token → the value still prints, with a `revoked — it won't authenticate` warning on
+**stderr** (pipe stays clean); never-activated → non-zero exit ("no access token"). This is the ONLY path that selects a secret: a dedicated
 `db::fetch_integration_secrets` + `Magento::integration_credentials` returning a **non-`Serialize`**
 `IntegrationCredentials` (so no `--json` path can carry it) — the default list/card/`--json`
 still select only presence/revocation, re-verified: zero secret *values* in `--json` (the 3

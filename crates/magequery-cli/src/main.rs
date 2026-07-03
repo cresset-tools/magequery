@@ -4567,22 +4567,62 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
         let access = |v: &Option<String>| -> Result<String> {
             v.clone().ok_or_else(|| anyhow!("`{}` has no access token (never activated)", i.name))
         };
-        match which.as_str() {
-            "access-token" => println!("{}", access(&creds.access_token)?),
-            "access-secret" => println!("{}", access(&creds.access_secret)?),
-            "consumer-key" => println!("{}", creds.consumer_key),
-            "consumer-secret" => println!("{}", creds.consumer_secret),
-            "all" => {
-                println!("consumer-key\t{}", creds.consumer_key);
-                println!("consumer-secret\t{}", creds.consumer_secret);
-                println!("access-token\t{}", creds.access_token.as_deref().unwrap_or(""));
-                println!("access-secret\t{}", creds.access_secret.as_deref().unwrap_or(""));
-            }
+        // Which credential(s) the caller asked for, as (kind, raw-stored-value) pairs. The
+        // access pair errors here (single selectors) when the integration was never activated.
+        let requested: Vec<(&str, String)> = match which.as_str() {
+            "access-token" => vec![("access-token", access(&creds.access_token)?)],
+            "access-secret" => vec![("access-secret", access(&creds.access_secret)?)],
+            "consumer-key" => vec![("consumer-key", creds.consumer_key.clone())],
+            "consumer-secret" => vec![("consumer-secret", creds.consumer_secret.clone())],
+            "all" => vec![
+                ("consumer-key", creds.consumer_key.clone()),
+                ("consumer-secret", creds.consumer_secret.clone()),
+                ("access-token", creds.access_token.clone().unwrap_or_default()),
+                ("access-secret", creds.access_secret.clone().unwrap_or_default()),
+            ],
             other => {
                 return Err(anyhow!(
                     "unknown credential `{other}` — expected access-token, access-secret, \
                      consumer-key, consumer-secret, or all"
                 ));
+            }
+        };
+        // Magento stores these through its Encryptor (envelope `keyVersion:cipher:…`), so a
+        // raw read hands back ciphertext — useless for scripting. Decrypt with env.php's
+        // crypt key, exactly like `config --decrypt`; plaintext values pass through untouched.
+        let dec = mage.decryptor().ok();
+        let all_mode = which == "all";
+        for (kind, raw) in &requested {
+            let shown = if !raw.is_empty() && magequery_core::Decryptor::is_encrypted(raw) {
+                match dec.as_ref().and_then(|d| d.decrypt(raw)) {
+                    Some(plain) => plain,
+                    None => {
+                        let note = match magequery_core::Decryptor::cipher_version(raw) {
+                            Some(0) => "legacy Blowfish cipher unsupported",
+                            _ => "crypt key not in this env.php",
+                        };
+                        if all_mode {
+                            // Keep the line structure; flag the one that stayed encrypted.
+                            eprintln!(
+                                "{}",
+                                style::err(&format!("warning: {kind} left encrypted ({note})"))
+                            );
+                            raw.clone()
+                        } else {
+                            return Err(anyhow!(
+                                "`{}`'s {kind} is encrypted and can't be decrypted ({note})",
+                                i.name
+                            ));
+                        }
+                    }
+                }
+            } else {
+                raw.clone()
+            };
+            if all_mode {
+                println!("{kind}\t{shown}");
+            } else {
+                println!("{shown}");
             }
         }
         return Ok(());
