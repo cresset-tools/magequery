@@ -1719,6 +1719,44 @@ pub struct CmsHit {
     pub stores: Vec<String>,
 }
 
+/// One catalog price rule (`catalogrule`), with its applied state. Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CatalogRule {
+    pub rule_id: u32,
+    pub name: String,
+    pub description: Option<String>,
+    pub active: bool,
+    pub from_date: Option<String>,
+    pub to_date: Option<String>,
+    /// Today is inside [from_date, to_date], per the DB clock.
+    pub in_window: bool,
+    /// Decoded `simple_action`.
+    pub action: String,
+    pub sort_order: u32,
+    pub stop_rules_processing: bool,
+    pub websites: Vec<String>,
+    pub customer_groups: Vec<String>,
+    /// Raw `conditions_serialized` — displayed, not interpreted.
+    pub conditions: Option<String>,
+    /// Distinct products in `catalogrule_product` — the materialized matches. 0 while
+    /// everything else is green = "Apply Rules"/the catalogrule indexer never ran, or
+    /// the conditions match nothing.
+    pub matched_products: u32,
+}
+
+/// One row of a catalog-rule list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CatalogRuleHit {
+    pub rule_id: u32,
+    pub name: String,
+    pub active: bool,
+    pub from_date: Option<String>,
+    pub to_date: Option<String>,
+    pub matched_products: u32,
+}
+
 /// One coupon of a cart price rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

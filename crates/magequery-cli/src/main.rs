@@ -59,6 +59,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("order-statuses", "Every order status ↔ state mapping, incl. custom ones"),
             ("sequences", "Sales increment sequences: current value, next increment id"),
             ("sales-rule", "Why a coupon (won't) apply: a cart rule by coupon/id/name"),
+            ("catalog-rule", "Catalog price rules: window, scopes, actually applied?"),
         ],
     ),
     (
@@ -292,6 +293,8 @@ enum Command {
     /// A cart price rule by coupon code, rule id, or name — with the why-won't-it-apply
     /// checklist.
     SalesRule(SalesRuleArgs),
+    /// Catalog price rules: active window, scopes, and whether they're actually applied.
+    CatalogRule(CatalogRuleArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -577,6 +580,14 @@ struct QuoteArgs {
     /// A quote entity_id; anything else searches customer emails (active carts first
     /// by recency).
     query: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct CatalogRuleArgs {
+    /// A rule id or a name substring. Omit to list every rule.
+    query: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -1046,6 +1057,7 @@ fn main() -> Result<()> {
         Command::OrderStatuses(args) => order_statuses(&mage, &args),
         Command::Sequences(args) => sequences(&mage, &args),
         Command::SalesRule(args) => sales_rule(&mage, &args),
+        Command::CatalogRule(args) => catalog_rule(&mage, &args),
         Command::CmsPage(args) => cms(&mage, magequery_core::CmsKind::Page, &args),
         Command::CmsBlock(args) => cms(&mage, magequery_core::CmsKind::Block, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
@@ -2398,6 +2410,179 @@ fn sequences(mage: &Magento, args: &SequencesArgs) -> Result<()> {
         "\n{} sequence(s) — next increment computed with the default pattern (custom patterns not modeled)",
         seqs.len()
     );
+    Ok(())
+}
+
+fn catalog_rule(mage: &Magento, args: &CatalogRuleArgs) -> Result<()> {
+    if let Some(q) = &args.query {
+        if let Ok(id) = q.parse::<u32>() {
+            if let Some(r) = mage.catalog_rule(id)? {
+                return render_catalog_rule(&r, args);
+            }
+            return Err(anyhow!("no catalog rule with id {id}"));
+        }
+        let (hits, truncated) = mage.catalog_rules_like(q, 50)?;
+        return match hits.len() {
+            0 => Err(anyhow!("no catalog rule matches `{q}`")),
+            1 => {
+                let r = mage.catalog_rule(hits[0].rule_id)?.expect("listed rule");
+                render_catalog_rule(&r, args)
+            }
+            _ => render_catalog_rule_list(&hits, truncated, args),
+        };
+    }
+    let (hits, truncated) = mage.catalog_rules_like("", 200)?;
+    render_catalog_rule_list(&hits, truncated, args)
+}
+
+fn render_catalog_rule_list(
+    hits: &[magequery_core::CatalogRuleHit],
+    truncated: bool,
+    args: &CatalogRuleArgs,
+) -> Result<()> {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&hits)?);
+        return Ok(());
+    }
+    if hits.is_empty() {
+        println!("{}", style::dim("(no catalog rules)"));
+        return Ok(());
+    }
+    let wn = hits.iter().map(|h| h.name.chars().count()).max().unwrap_or(0);
+    for h in hits {
+        let active = if h.active { style::ok("active  ") } else { style::err("inactive") };
+        let applied = if h.matched_products > 0 {
+            format!("{} product(s)", h.matched_products)
+        } else if h.active {
+            style::number("0 products — not applied?")
+        } else {
+            style::dim("0 products")
+        };
+        let window = match (&h.from_date, &h.to_date) {
+            (None, None) => String::new(),
+            (f, t) => format!(
+                "  {}",
+                style::dim(&format!(
+                    "{} – {}",
+                    f.as_deref().unwrap_or("…"),
+                    t.as_deref().unwrap_or("…")
+                ))
+            ),
+        };
+        println!(
+            "{:>4}  {}{}  {active}  {applied}{window}",
+            h.rule_id,
+            style::name(&h.name),
+            " ".repeat(wn - h.name.chars().count()),
+        );
+    }
+    if truncated {
+        eprintln!("\n(showing first {} — narrow the search)", hits.len());
+    }
+    eprintln!("\n{} rule(s)", hits.len());
+    Ok(())
+}
+
+fn render_catalog_rule(r: &magequery_core::CatalogRule, args: &CatalogRuleArgs) -> Result<()> {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(r)?);
+        return Ok(());
+    }
+    let active = if r.active { style::ok("active") } else { style::err("inactive") };
+    println!("{}  (rule {})  {active}", style::name(&r.name), r.rule_id);
+    if let Some(d) = &r.description {
+        println!("{}", style::dim(d));
+    }
+    println!();
+
+    let mut blockers: Vec<String> = Vec::new();
+    if !r.active {
+        blockers.push("the rule is disabled".to_string());
+    }
+    if !r.in_window {
+        blockers.push(format!(
+            "today is outside the active window ({} – {})",
+            r.from_date.as_deref().unwrap_or("…"),
+            r.to_date.as_deref().unwrap_or("…"),
+        ));
+    }
+    for b in &blockers {
+        println!("{}", style::err(&format!("⚠ {b}")));
+    }
+    if blockers.is_empty() && r.matched_products == 0 {
+        println!(
+            "{}",
+            style::number(
+                "⚠ no materialized product matches — \"Apply Rules\"/the catalogrule \
+                 indexer never ran, or the conditions match nothing"
+            )
+        );
+    }
+    println!();
+
+    info_row(
+        "action",
+        format!(
+            "{}{}",
+            style::target(&r.action),
+            if r.stop_rules_processing {
+                format!("  {}", style::number("(stops further rules)"))
+            } else {
+                String::new()
+            },
+        ),
+    );
+    if r.from_date.is_some() || r.to_date.is_some() {
+        info_row(
+            "window",
+            format!(
+                "{} – {}",
+                r.from_date.as_deref().unwrap_or("(always)"),
+                r.to_date.as_deref().unwrap_or("(forever)"),
+            ),
+        );
+    }
+    let websites: Vec<String> = r.websites.iter().map(|w| style::area(w)).collect();
+    info_row(
+        "websites",
+        if websites.is_empty() {
+            style::err("(none — the rule can never apply)")
+        } else {
+            websites.join(", ")
+        },
+    );
+    let groups: Vec<String> = r.customer_groups.iter().map(|g| style::target(g)).collect();
+    info_row(
+        "groups",
+        if groups.is_empty() {
+            style::err("(none — the rule can never apply)")
+        } else {
+            groups.join(", ")
+        },
+    );
+    info_row("priority", r.sort_order.to_string());
+    info_row(
+        "applied",
+        if r.matched_products > 0 {
+            format!(
+                "{} — {}",
+                style::ok(&format!("{} product(s) matched", r.matched_products)),
+                style::dim("see them priced via `magequery price <sku>`"),
+            )
+        } else {
+            style::number("0 products in catalogrule_product")
+        },
+    );
+
+    if let Some(cond) = &r.conditions {
+        let compact: String = cond.chars().take(200).collect();
+        let ellipsis = if cond.chars().count() > 200 { "…" } else { "" };
+        println!(
+            "\n{}\n  {}",
+            style::dim("conditions (displayed, not evaluated — --json for full):"),
+            style::dim(&format!("{compact}{ellipsis}")),
+        );
+    }
     Ok(())
 }
 

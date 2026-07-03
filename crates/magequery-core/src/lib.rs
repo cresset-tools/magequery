@@ -59,6 +59,7 @@ pub use model::{
     BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount,
     CategoryIndexedProduct, CategoryProduct,
     CategoryTreeNode, CategoryVisibilityIssue,
+    CatalogRule, CatalogRuleHit,
     ChildPrice, CmsEntry, CmsHit, CmsKind, Customer, CustomerAddress, CustomerHit,
     CustomerNewsletter, CustomerOrders,
     IndexedPrice, Order, OrderAddress, OrderComment, OrderDocument, OrderHit,
@@ -1167,6 +1168,63 @@ impl Magento {
                     title,
                     active,
                     stores: Vec::new(),
+                })
+                .collect(),
+            truncated,
+        ))
+    }
+
+    /// One catalog price rule by rule_id. Live DB.
+    #[cfg(feature = "db")]
+    pub fn catalog_rule(&self, id: u32) -> Result<Option<CatalogRule>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_catalog_rule(conn, &cfg.table_prefix, id).map_err(Error::Db)?;
+        Ok(raw.map(|r| {
+            let amount = r.discount_amount.as_deref().unwrap_or("?");
+            let action = match r.simple_action.as_deref() {
+                Some("by_percent") => format!("{amount}% off"),
+                Some("by_fixed") => format!("{amount} off"),
+                Some("to_percent") => format!("price becomes {amount}% of original"),
+                Some("to_fixed") => format!("price set to {amount}"),
+                Some(other) => format!("{other} ({amount})"),
+                None => "(no action)".to_string(),
+            };
+            CatalogRule {
+                rule_id: r.rule_id,
+                name: r.name,
+                description: r.description,
+                active: r.active,
+                from_date: r.from_date,
+                to_date: r.to_date,
+                in_window: r.in_window,
+                action,
+                sort_order: r.sort_order,
+                stop_rules_processing: r.stop_rules_processing,
+                websites: r.websites,
+                customer_groups: r.customer_groups,
+                conditions: r.conditions,
+                matched_products: r.matched_products,
+            }
+        }))
+    }
+
+    /// Catalog rules by name/description substring (empty = all), with materialized
+    /// product counts.
+    #[cfg(feature = "db")]
+    pub fn catalog_rules_like(
+        &self,
+        needle: &str,
+        limit: usize,
+    ) -> Result<(Vec<CatalogRuleHit>, bool)> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (rows, truncated) =
+            db::fetch_catalog_rules(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
+        Ok((
+            rows.into_iter()
+                .map(|(rule_id, name, active, from_date, to_date, matched_products)| {
+                    CatalogRuleHit { rule_id, name, active, from_date, to_date, matched_products }
                 })
                 .collect(),
             truncated,

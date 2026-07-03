@@ -341,6 +341,143 @@ pub(crate) fn fetch_cms_like(
     ))
 }
 
+/// One catalog rule, raw.
+pub(crate) struct DbCatalogRule {
+    pub rule_id: u32,
+    pub name: String,
+    pub description: Option<String>,
+    pub active: bool,
+    pub from_date: Option<String>,
+    pub to_date: Option<String>,
+    pub in_window: bool,
+    pub simple_action: Option<String>,
+    pub discount_amount: Option<String>,
+    pub sort_order: u32,
+    pub stop_rules_processing: bool,
+    pub conditions: Option<String>,
+    pub websites: Vec<String>,
+    pub customer_groups: Vec<String>,
+    pub matched_products: u32,
+}
+
+pub(crate) fn fetch_catalog_rule(
+    conn: &DbConnection,
+    table_prefix: &str,
+    id: u32,
+) -> Result<Option<DbCatalogRule>, String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let row: Option<mysql::Row> = c
+        .exec_first(
+            format!(
+                "SELECT rule_id, name, description, is_active, CAST(from_date AS CHAR), \
+                 CAST(to_date AS CHAR), \
+                 ((from_date IS NULL OR from_date <= CURDATE()) \
+                  AND (to_date IS NULL OR to_date >= CURDATE())), \
+                 simple_action, CAST(discount_amount AS CHAR), sort_order, \
+                 stop_rules_processing, conditions_serialized \
+                 FROM {p}catalogrule WHERE rule_id = :v"
+            ),
+            params! { "v" => id },
+        )
+        .map_err(clean_err)?;
+    let Some(mut row) = row else { return Ok(None) };
+    let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
+    let n = |r: &mut mysql::Row, i: usize| r.take::<Option<i64>, _>(i).flatten().unwrap_or(0);
+    let rule_id = n(&mut row, 0) as u32;
+
+    let websites: Vec<String> = c
+        .exec(
+            format!(
+                "SELECT w.code FROM {p}catalogrule_website rw \
+                 JOIN {p}store_website w ON w.website_id = rw.website_id \
+                 WHERE rw.rule_id = :v ORDER BY w.code"
+            ),
+            params! { "v" => rule_id },
+        )
+        .map_err(clean_err)?;
+    let customer_groups: Vec<String> = c
+        .exec(
+            format!(
+                "SELECT g.customer_group_code FROM {p}catalogrule_customer_group rg \
+                 JOIN {p}customer_group g ON g.customer_group_id = rg.customer_group_id \
+                 WHERE rg.rule_id = :v ORDER BY g.customer_group_id"
+            ),
+            params! { "v" => rule_id },
+        )
+        .map_err(clean_err)?;
+    let matched: u64 = c
+        .exec_first(
+            format!(
+                "SELECT COUNT(DISTINCT product_id) FROM {p}catalogrule_product \
+                 WHERE rule_id = :v"
+            ),
+            params! { "v" => rule_id },
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+
+    Ok(Some(DbCatalogRule {
+        rule_id,
+        name: s(&mut row, 1).unwrap_or_default(),
+        description: s(&mut row, 2).filter(|d| !d.is_empty()),
+        active: n(&mut row, 3) != 0,
+        from_date: s(&mut row, 4),
+        to_date: s(&mut row, 5),
+        in_window: n(&mut row, 6) != 0,
+        simple_action: s(&mut row, 7),
+        discount_amount: s(&mut row, 8),
+        sort_order: n(&mut row, 9) as u32,
+        stop_rules_processing: n(&mut row, 10) != 0,
+        conditions: s(&mut row, 11),
+        websites,
+        customer_groups,
+        matched_products: matched as u32,
+    }))
+}
+
+/// Catalog rules by name/description substring (or all with an empty needle), with
+/// per-rule materialized product counts.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_catalog_rules(
+    conn: &DbConnection,
+    table_prefix: &str,
+    needle: &str,
+    limit: usize,
+) -> Result<(Vec<(u32, String, bool, Option<String>, Option<String>, u32)>, bool), String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let rows: Vec<(u32, String, i64, Option<String>, Option<String>, u64)> = c
+        .exec(
+            format!(
+                "SELECT r.rule_id, r.name, r.is_active, CAST(r.from_date AS CHAR), \
+                 CAST(r.to_date AS CHAR), COUNT(DISTINCT cp.product_id) \
+                 FROM {p}catalogrule r \
+                 LEFT JOIN {p}catalogrule_product cp ON cp.rule_id = r.rule_id \
+                 WHERE r.name LIKE :pat OR r.description LIKE :pat \
+                 GROUP BY r.rule_id, r.name, r.is_active, r.from_date, r.to_date \
+                 ORDER BY r.rule_id LIMIT {}",
+                limit + 1
+            ),
+            params! { "pat" => format!("%{needle}%") },
+        )
+        .map_err(clean_err)?;
+    let truncated = rows.len() > limit;
+    Ok((
+        rows.into_iter()
+            .take(limit)
+            .map(|(id, name, a, f, t, m)| (id, name, a != 0, f, t, m as u32))
+            .collect(),
+        truncated,
+    ))
+}
+
 /// How to look a sales rule up.
 pub(crate) enum RuleIdent<'a> {
     Id(u32),

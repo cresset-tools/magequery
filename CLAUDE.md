@@ -178,7 +178,7 @@ DATA          (persistence & model)
   category [<id>|<name>] [--store] [--products]   order <increment#> [--id]
   customer <email> [--id]   quote <id|email>
   invoice|shipment|creditmemo <increment#>   order-statuses [<filter>]   sequences [<entity>]
-  sales-rule <coupon|id|name>   (live DB)
+  sales-rule <coupon|id|name>   catalog-rule [<id|name>]   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1379,6 +1379,21 @@ the unambiguous row handle (works for cards too). List widths use char counts, n
 lengths (Über/café titles mis-padded otherwise). Validated on the scratchpad DB: the
 about-us per-store collision pair, layout-XML + disabled tags, --content, substring.
 
+### `catalog-rule` (live DB, done)
+
+The sibling of `sales-rule` and the partner of `price`'s rule section: `magequery
+catalog-rule [<id|name>]`. No arg → every rule with its **materialized product count**
+from `catalogrule_product` — an active rule at `0 products` gets yellow "not applied?"
+right in the list. The card: the sales-rule blocker checklist (disabled / outside
+window, DB clock) plus the catalog-rule-specific diagnosis — everything green but zero
+`catalogrule_product` rows → yellow **"Apply Rules"/the catalogrule indexer never ran,
+or the conditions match nothing** (the single most common "rule enabled, prices
+unchanged" cause). Facts: decoded action (`by_percent`/`by_fixed`/`to_percent`/
+`to_fixed`), window, websites/groups (empty = red can-never-apply), priority +
+stops-further-rules, applied count with a `price <sku>` cross-link, conditions truncated
+(displayed, not evaluated). Validated on the scratchpad DB: applied, never-applied, and
+disabled+expired rules.
+
 ### `admin-users` / `admin-roles` (live DB, done)
 
 Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
@@ -1414,7 +1429,7 @@ role, and seeding one into a live DB was deliberately not done.
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
 `queue backlog`, `product`). New ideas go here.
-- **Small entities, in build order:** `catalog-rule`, `tax`,
+- **Small entities, in build order:** `tax`,
   `integrations`. Backlog: reviews, wishlists, search terms.
 
 ## Build order
