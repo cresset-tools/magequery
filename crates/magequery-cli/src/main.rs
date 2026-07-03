@@ -56,6 +56,8 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("invoice", "One invoice by increment id (→ its order)"),
             ("shipment", "One shipment by increment id: items, tracking (→ its order)"),
             ("creditmemo", "One credit memo by increment id (→ its order)"),
+            ("order-statuses", "Every order status ↔ state mapping, incl. custom ones"),
+            ("sequences", "Sales increment sequences: current value, next increment id"),
         ],
     ),
     (
@@ -279,6 +281,10 @@ enum Command {
     Shipment(SalesDocArgs),
     /// One credit memo by increment id, with its order cross-link.
     Creditmemo(SalesDocArgs),
+    /// Every order status with its state mapping, incl. extension-added ones.
+    OrderStatuses(OrderStatusesArgs),
+    /// Sales increment sequences per entity type × store: current + next increment.
+    Sequences(SequencesArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -558,6 +564,22 @@ struct QuoteArgs {
     /// A quote entity_id; anything else searches customer emails (active carts first
     /// by recency).
     query: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct OrderStatusesArgs {
+    /// A status/label/state substring. Omit to list all.
+    filter: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct SequencesArgs {
+    /// An entity type substring (`order`, `invoice`, …). Omit to list all.
+    filter: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -979,6 +1001,8 @@ fn main() -> Result<()> {
         Command::Invoice(args) => sales_document(&mage, SalesDocKind::Invoice, &args),
         Command::Shipment(args) => sales_document(&mage, SalesDocKind::Shipment, &args),
         Command::Creditmemo(args) => sales_document(&mage, SalesDocKind::Creditmemo, &args),
+        Command::OrderStatuses(args) => order_statuses(&mage, &args),
+        Command::Sequences(args) => sequences(&mage, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
         Command::AdminRoles(args) => admin_roles(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
@@ -2161,6 +2185,98 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
             }
         }
     }
+    Ok(())
+}
+
+fn order_statuses(mage: &Magento, args: &OrderStatusesArgs) -> Result<()> {
+    let statuses = mage.order_statuses(args.filter.as_deref())?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&statuses)?);
+        return Ok(());
+    }
+    if statuses.is_empty() {
+        println!("{}", style::dim("(no status matches)"));
+        return Ok(());
+    }
+    let ws = statuses.iter().map(|s| s.status.len()).max().unwrap_or(0);
+    let wl = statuses.iter().map(|s| s.label.len()).max().unwrap_or(0);
+    for s in &statuses {
+        let mapping = if s.states.is_empty() {
+            style::number("(not mapped to any state — never set automatically)")
+        } else {
+            s.states
+                .iter()
+                .map(|st| {
+                    let mut tags = String::new();
+                    if st.is_default {
+                        tags.push_str(&format!("  {}", style::ok("(default)")));
+                    }
+                    if st.visible_on_front {
+                        tags.push_str(&format!("  {}", style::dim("(visible on front)")));
+                    }
+                    format!("{} {}{tags}", style::dim("state:"), style::kind(&st.state))
+                })
+                .collect::<Vec<_>>()
+                .join("  ·  ")
+        };
+        println!(
+            "{}{}  {}{}  {mapping}",
+            style::name(&s.status),
+            " ".repeat(ws - s.status.len()),
+            style::target(&s.label),
+            " ".repeat(wl - s.label.len()),
+        );
+    }
+    eprintln!("\n{} status(es)", statuses.len());
+    Ok(())
+}
+
+fn sequences(mage: &Magento, args: &SequencesArgs) -> Result<()> {
+    let seqs = mage.sales_sequences(args.filter.as_deref())?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&seqs)?);
+        return Ok(());
+    }
+    if seqs.is_empty() {
+        println!("{}", style::dim("(no sequences match)"));
+        return Ok(());
+    }
+    let we = seqs.iter().map(|s| s.entity_type.len()).max().unwrap_or(0);
+    let wst = seqs.iter().map(|s| s.store.len()).max().unwrap_or(0);
+    for s in &seqs {
+        let current = s
+            .current
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let mut tags = String::new();
+        if !s.active {
+            tags.push_str(&format!("  {}", style::err("[inactive profile]")));
+        }
+        if let (Some(cur), Some(warn)) = (s.current, s.warning_value) {
+            if cur >= warn {
+                tags.push_str(&format!(
+                    "  {}",
+                    style::err(&format!("[past warning value {warn}]"))
+                ));
+            }
+        }
+        if s.step != 1 {
+            tags.push_str(&format!("  {}", style::dim(&format!("step {}", s.step))));
+        }
+        println!(
+            "{}{}  {}{}  current {:>10}  next {}{tags}",
+            style::name(&s.entity_type),
+            " ".repeat(we - s.entity_type.len()),
+            style::area(&s.store),
+            " ".repeat(wst - s.store.len()),
+            style::number(&current),
+            style::number(&s.next_increment),
+        );
+    }
+    eprintln!(
+        "\n{} sequence(s) — next increment computed with the default pattern (custom patterns not modeled)",
+        seqs.len()
+    );
     Ok(())
 }
 

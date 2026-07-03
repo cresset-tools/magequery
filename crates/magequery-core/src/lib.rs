@@ -61,7 +61,8 @@ pub use model::{
     CategoryTreeNode, CategoryVisibilityIssue,
     ChildPrice, Customer, CustomerAddress, CustomerHit, CustomerNewsletter, CustomerOrders,
     IndexedPrice, Order, OrderAddress, OrderComment, OrderDocument, OrderHit,
-    OrderItem, OrderPayment, OrderShipment, OrderTotal, OrderTransaction,
+    OrderItem, OrderPayment, OrderShipment, OrderStatus, OrderStatusState, OrderTotal,
+    OrderTransaction, SalesSequence,
     Preference, PreferenceStep, Plugin,
     PluginMethod, Product,
     ProductCategory, ProductChild, Quote, QuoteAddress, QuoteHit, QuoteItem,
@@ -1071,6 +1072,85 @@ impl Magento {
             db::fetch_category_card(conn, &cfg.table_prefix, id, include_products, indexed_store)
                 .map_err(Error::Db)?;
         Ok(raw.map(to_category))
+    }
+
+    /// Every order status with its state mapping(s), filtered by a status/label/state
+    /// substring. Statuses mapped to no state sort last. Live DB.
+    #[cfg(feature = "db")]
+    pub fn order_statuses(&self, filter: Option<&str>) -> Result<Vec<OrderStatus>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (statuses, states) =
+            db::fetch_order_statuses(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let needle = filter.map(str::to_lowercase);
+        let mut out: Vec<OrderStatus> = statuses
+            .into_iter()
+            .map(|(status, label)| OrderStatus {
+                states: states
+                    .iter()
+                    .filter(|(st, ..)| *st == status)
+                    .map(|(_, state, is_default, visible_on_front)| OrderStatusState {
+                        state: state.clone(),
+                        is_default: *is_default,
+                        visible_on_front: *visible_on_front,
+                    })
+                    .collect(),
+                status,
+                label,
+            })
+            .filter(|s| match &needle {
+                Some(n) => {
+                    s.status.to_lowercase().contains(n)
+                        || s.label.to_lowercase().contains(n)
+                        || s.states.iter().any(|st| st.state.to_lowercase().contains(n))
+                }
+                None => true,
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            let key = |s: &OrderStatus| {
+                (s.states.is_empty(), s.states.first().map(|st| st.state.clone()), s.status.clone())
+            };
+            key(a).cmp(&key(b))
+        });
+        Ok(out)
+    }
+
+    /// The sales increment sequences (per entity type × store): the profile plus the
+    /// sequence table's high-water mark, and the computed next increment id. Live DB.
+    #[cfg(feature = "db")]
+    pub fn sales_sequences(&self, filter: Option<&str>) -> Result<Vec<SalesSequence>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let rows = db::fetch_sales_sequences(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let needle = filter.map(str::to_lowercase);
+        Ok(rows
+            .into_iter()
+            .filter(|(entity, ..)| {
+                needle.as_deref().map_or(true, |n| entity.to_lowercase().contains(n))
+            })
+            .map(|(entity_type, store, prefix, suffix, step, active, max, warn, current)| {
+                let next_value = current.map(|c| c + step).unwrap_or(1);
+                let next_increment = format!(
+                    "{}{:09}{}",
+                    prefix.as_deref().unwrap_or(""),
+                    next_value,
+                    suffix.as_deref().unwrap_or(""),
+                );
+                SalesSequence {
+                    entity_type,
+                    store,
+                    prefix,
+                    suffix,
+                    step,
+                    active,
+                    current,
+                    next_increment,
+                    max_value: max,
+                    warning_value: warn,
+                }
+            })
+            .collect())
     }
 
     /// One sales document (invoice/shipment/creditmemo) by exact increment id. Live DB.

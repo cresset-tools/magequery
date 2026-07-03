@@ -1664,6 +1664,46 @@ pub struct ProductPrices {
     pub matched_by_id: bool,
 }
 
+/// One state assignment of an order status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct OrderStatusState {
+    pub state: String,
+    /// The default status for that state.
+    pub is_default: bool,
+    pub visible_on_front: bool,
+}
+
+/// One order status with its state mapping(s). A status mapped to no state is
+/// assignable manually but never set by Magento itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct OrderStatus {
+    pub status: String,
+    pub label: String,
+    pub states: Vec<OrderStatusState>,
+}
+
+/// One sales increment sequence (per entity type × store).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct SalesSequence {
+    /// `order` / `invoice` / `shipment` / `creditmemo` (+ custom types).
+    pub entity_type: String,
+    pub store: String,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+    pub step: u64,
+    pub active: bool,
+    /// Highest issued sequence value; `None` = nothing issued yet.
+    pub current: Option<u64>,
+    /// The next increment id, computed with Magento's default pattern
+    /// (`prefix + 9-digit zero-padded value + suffix`) — custom patterns not modeled.
+    pub next_increment: String,
+    pub max_value: Option<u64>,
+    pub warning_value: Option<u64>,
+}
+
 /// Which sales document to look up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[derive(serde::Serialize)]

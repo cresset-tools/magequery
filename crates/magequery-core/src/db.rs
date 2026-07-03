@@ -189,6 +189,87 @@ pub(crate) fn fetch_patch_list(
     Ok(rows.into_iter().map(|r| r.trim_start_matches('\\').to_string()).collect())
 }
 
+/// Order statuses with their state mappings: `(status, label)` +
+/// `(status, state, is_default, visible_on_front)`.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_order_statuses(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<(Vec<(String, String)>, Vec<(String, String, bool, bool)>), String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let statuses: Vec<(String, String)> = c
+        .query(format!("SELECT status, label FROM {p}sales_order_status ORDER BY status"))
+        .map_err(clean_err)?;
+    let states: Vec<(String, String, i64, i64)> = c
+        .query(format!(
+            "SELECT status, state, is_default, visible_on_front \
+             FROM {p}sales_order_status_state ORDER BY state, status"
+        ))
+        .map_err(clean_err)?;
+    Ok((
+        statuses,
+        states.into_iter().map(|(st, s, d, v)| (st, s, d != 0, v != 0)).collect(),
+    ))
+}
+
+/// One row per (entity type × store) sequence: profile + the sequence table's high-water
+/// mark. `(entity_type, store_id, sequence_table, prefix, suffix, step, active,
+/// max_value, warning_value, current)`.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_sales_sequences(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<
+    Vec<(String, String, Option<String>, Option<String>, u64, bool, Option<u64>, Option<u64>, Option<u64>)>,
+    String,
+> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    type MetaRow = (String, u32, String, Option<String>, Option<String>, Option<u64>, Option<i64>, Option<u64>, Option<u64>);
+    let rows: Vec<MetaRow> = c
+        .query(format!(
+            "SELECT m.entity_type, m.store_id, m.sequence_table, pr.prefix, pr.suffix, \
+             pr.step, pr.is_active, pr.max_value, pr.warning_value \
+             FROM {p}sales_sequence_meta m \
+             LEFT JOIN {p}sales_sequence_profile pr ON pr.meta_id = m.meta_id \
+             ORDER BY m.entity_type, m.store_id"
+        ))
+        .map_err(clean_err)?;
+    let stores: std::collections::HashMap<u32, String> =
+        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?
+            .into_iter()
+            .collect();
+    let mut out = Vec::with_capacity(rows.len());
+    for (entity_type, store_id, table, prefix, suffix, step, active, max, warn) in rows {
+        // The sequence table name comes from the meta row — identifier-sanitized.
+        let current: Option<u64> =
+            if table.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                c.query_first(format!("SELECT MAX(sequence_value) FROM {p}{table}"))
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+        let store =
+            stores.get(&store_id).cloned().unwrap_or_else(|| format!("store/{store_id}"));
+        out.push((
+            entity_type,
+            store,
+            prefix,
+            suffix,
+            step.unwrap_or(1),
+            active.unwrap_or(1) != 0,
+            max,
+            warn,
+            current,
+        ));
+    }
+    Ok(out)
+}
+
 /// One sales document, raw.
 pub(crate) struct DbSalesDocument {
     pub entity_id: u32,

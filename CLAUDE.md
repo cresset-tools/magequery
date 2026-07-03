@@ -177,7 +177,7 @@ DATA          (persistence & model)
   product <sku> [--id <n>] [--store <code>]   price <sku> [--id <n>]   (live DB)
   category [<id>|<name>] [--store] [--products]   order <increment#> [--id]
   customer <email> [--id]   quote <id|email>
-  invoice|shipment|creditmemo <increment#>   (live DB)
+  invoice|shipment|creditmemo <increment#>   order-statuses [<filter>]   sequences [<entity>]   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1310,6 +1310,22 @@ numbers, "(no tracking numbers)" flagged; creditmemo: adjustment_positive/negati
 totals), item lines, and the totals in order currency (zero rows filtered). Validated on
 the scratchpad DB: all three cards, single-match substring, clean unknown error.
 
+### `order-statuses` + `sequences` (small sales views, live DB, done)
+
+`magequery order-statuses [<filter>]` — every status with its `sales_order_status_state`
+mapping: `status  Label  state: X (default) (visible on front)`, sorted by state; a
+status **mapped to no state** (extension misconfiguration — assignable manually, never
+set automatically) sorts last with a yellow flag. Filter matches status/label/state.
+
+`magequery sequences [<entity>]` — the `sales_sequence_meta`/`_profile` machinery joined
+with each sequence table's `MAX(sequence_value)` (table names identifier-sanitized;
+missing tables tolerated): per (entity type × store) the current value and the **computed
+next increment id** (default pattern — prefix + 9-digit zero-pad + suffix; custom
+patterns honestly footnoted as not modeled), red `[inactive profile]` and
+`[past warning value N]` flags. Answers "why did increment ids jump / what number is
+next". Validated on the scratchpad DB: prefix rendering (`2000000151`), the past-warning
+flag, unmapped custom status.
+
 ### `admin-users` / `admin-roles` (live DB, done)
 
 Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
@@ -1349,8 +1365,8 @@ the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-
   feeds every `--store` flag), `coupon`/`sales-rule` (the why-doesn't-my-coupon-work
   card), extend `order` search to match PSP transaction refs
   (`sales_order_payment.last_trans_id` + `sales_payment_transaction.txn_id`),
-  `cms-page`/`cms-block <identifier>`, `catalog-rule`, `order-statuses`, `tax`,
-  `integrations`. Backlog: sales sequences, reviews, wishlists, search terms.
+  `cms-page`/`cms-block <identifier>`, `catalog-rule`, `tax`,
+  `integrations`. Backlog: reviews, wishlists, search terms.
 
 ## Build order
 
