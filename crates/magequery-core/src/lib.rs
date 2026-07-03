@@ -56,7 +56,8 @@ pub use model::{
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
-    ChildPrice, IndexedPrice, Preference, PreferenceStep, Plugin, PluginMethod, Product,
+    BundleOption, BundleSelection, ChildPrice, IndexedPrice, Preference, PreferenceStep, Plugin,
+    PluginMethod, Product,
     ProductCategory, ProductChild,
     ProductHit, ProductLegacyStock, ProductPrices, ProductRewrite, ProductScopeValue,
     ProductSourceStock, ProductValue,
@@ -2636,10 +2637,19 @@ fn to_product_prices(raw: db::DbProductPrices, matched_by_id: bool) -> ProductPr
         children: raw
             .children
             .into_iter()
-            .map(|(entity_id, sku, enabled, price, special_price, final_min, final_max)| {
-                ChildPrice { sku, entity_id, enabled, price, special_price, final_min, final_max }
+            .map(|c| ChildPrice {
+                sku: c.sku,
+                entity_id: c.entity_id,
+                enabled: c.enabled,
+                price: c.price,
+                special_price: c.special,
+                final_min: c.final_min,
+                final_max: c.final_max,
+                selection_price: c.selection_price,
+                selection_percent: c.selection_percent,
             })
             .collect(),
+        bundle_price_type: raw.bundle_price_type,
         matched_by_id,
     }
 }
@@ -2768,13 +2778,41 @@ fn to_product(raw: db::DbProduct, matched_by_id: bool) -> Product {
         children: raw
             .children
             .into_iter()
-            .map(|(entity_id, sku, enabled, options, qty, in_stock)| ProductChild {
+            .map(|(entity_id, sku, enabled, options, qty, in_stock, default_qty)| ProductChild {
                 sku,
                 entity_id,
                 enabled,
                 options,
                 qty,
                 in_stock,
+                default_qty,
+            })
+            .collect(),
+        bundle_options: raw
+            .bundle_options
+            .into_iter()
+            .map(|o| BundleOption {
+                title: o.title,
+                required: o.required,
+                input_type: o.input_type,
+                selections: o
+                    .selections
+                    .into_iter()
+                    .map(
+                        |(entity_id, sku, enabled, qty, is_default, price, price_percent, in_stock)| {
+                            BundleSelection {
+                                sku,
+                                entity_id,
+                                enabled,
+                                qty,
+                                is_default,
+                                price,
+                                price_percent,
+                                in_stock,
+                            }
+                        },
+                    )
+                    .collect(),
             })
             .collect(),
         matched_by_id,

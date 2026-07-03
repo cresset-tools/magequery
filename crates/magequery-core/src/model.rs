@@ -1462,8 +1462,8 @@ pub struct IndexedPrice {
     pub tier_price: Option<String>,
 }
 
-/// One configurable variant, identity-flavored: which option combination it is, whether
-/// it's enabled, and its (legacy) stock.
+/// One component of a composite product (configurable variant or grouped associate),
+/// identity-flavored: which option combination it is, whether it's enabled, its stock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
 pub struct ProductChild {
@@ -1471,16 +1471,48 @@ pub struct ProductChild {
     pub entity_id: u32,
     /// `status` decoded; `None` = no status row.
     pub enabled: Option<bool>,
-    /// The child's value per super attribute, resolved to option labels, in
-    /// super-attribute order (`["Blue", "32"]`). `-` for a missing value.
+    /// Configurables: the child's value per super attribute, resolved to option labels,
+    /// in super-attribute order (`["Blue", "32"]`; `-` for a missing value). Empty for
+    /// grouped associates.
     pub options: Vec<String>,
     /// Legacy `cataloginventory_stock_item` qty; `None` = no row.
     pub qty: Option<String>,
     pub in_stock: Option<bool>,
+    /// Grouped: the default add-to-cart qty from the link attributes.
+    pub default_qty: Option<String>,
 }
 
-/// One configurable variant's price summary — a configurable's storefront price is
-/// derived from its children, so these lines explain the parent's index min/max.
+/// One selectable product inside a bundle option.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct BundleSelection {
+    pub sku: String,
+    pub entity_id: u32,
+    pub enabled: Option<bool>,
+    pub qty: String,
+    pub is_default: bool,
+    /// Fixed-price bundles: the selection's price adjustment.
+    pub price: Option<String>,
+    /// The adjustment is a percentage of the bundle price, not a fixed amount.
+    pub price_percent: bool,
+    pub in_stock: Option<bool>,
+}
+
+/// One bundle option (`catalog_product_bundle_option`) with its selections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct BundleOption {
+    /// Default-store title.
+    pub title: String,
+    pub required: bool,
+    /// `select`/`radio`/`checkbox`/`multi`.
+    pub input_type: String,
+    pub selections: Vec<BundleSelection>,
+}
+
+/// One component's price summary — a composite product's storefront price derives from
+/// its components (configurable variants, grouped associates, bundle selections), so
+/// these lines explain the parent's index min/max.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
 pub struct ChildPrice {
@@ -1495,6 +1527,10 @@ pub struct ChildPrice {
     /// both `None` = not indexed (excluded from the parent's price).
     pub final_min: Option<String>,
     pub final_max: Option<String>,
+    /// Fixed-price bundles: this selection's price adjustment.
+    pub selection_price: Option<String>,
+    /// The adjustment is a percentage, not an amount.
+    pub selection_percent: bool,
 }
 
 /// Every price the database stores for one product: the EAV price attributes per scope,
@@ -1513,8 +1549,11 @@ pub struct ProductPrices {
     pub tier_prices: Vec<TierPrice>,
     pub rule_prices: Vec<RulePrice>,
     pub index: Vec<IndexedPrice>,
-    /// Configurable variants' own prices (empty for non-configurables).
+    /// Component prices: configurable variants, grouped associates, or bundle
+    /// selections (empty for simples).
     pub children: Vec<ChildPrice>,
+    /// Bundles: `fixed` or `dynamic` (the `price_type` attribute).
+    pub bundle_price_type: Option<String>,
     pub matched_by_id: bool,
 }
 
@@ -1601,8 +1640,10 @@ pub struct Product {
     pub parents: Vec<String>,
     /// The attributes a configurable is configured by (`catalog_product_super_attribute`).
     pub super_attributes: Vec<String>,
-    /// Configurable variants under this product, with their identity essentials.
+    /// Configurable variants / grouped associates, with their identity essentials.
     pub children: Vec<ProductChild>,
+    /// Bundle options with their selections (bundles only).
+    pub bundle_options: Vec<BundleOption>,
     /// The lookup resolved via entity_id, not SKU (numeric query, no SKU match).
     pub matched_by_id: bool,
 }

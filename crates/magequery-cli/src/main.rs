@@ -1838,12 +1838,17 @@ fn price(mage: &Magento, args: &PriceArgs) -> Result<()> {
         String::new()
     };
     let scope = if p.price_scope_website { "website" } else { "global" };
+    let price_type = p
+        .bundle_price_type
+        .as_deref()
+        .map(|t| format!(" · price type: {t}"))
+        .unwrap_or_default();
     println!(
         "{}  ({}, entity_id {})  {}{matched}",
         style::name(&p.sku),
         style::kind(&p.type_id),
         p.entity_id,
-        style::dim(&format!("price scope: {scope}")),
+        style::dim(&format!("price scope: {scope}{price_type}")),
     );
     println!();
 
@@ -1906,10 +1911,15 @@ fn price(mage: &Magento, args: &PriceArgs) -> Result<()> {
         }
     }
 
-    // A configurable's storefront price is its children's — show each variant's own
-    // prices so the parent's index min/max is explainable.
+    // A composite's storefront price is its components' — show each one's own prices
+    // so the parent's index min/max is explainable.
     if !p.children.is_empty() {
-        println!("\n{}", style::dim(&format!("variants ({}):", p.children.len())));
+        let what = match p.type_id.as_str() {
+            "grouped" => "associated products",
+            "bundle" => "selections",
+            _ => "variants",
+        };
+        println!("\n{}", style::dim(&format!("{what} ({}):", p.children.len())));
         let ws = p.children.iter().map(|ch| ch.sku.len()).max().unwrap_or(0);
         let num = |v: &Option<String>| match v {
             Some(x) => style::number(x),
@@ -1923,12 +1933,18 @@ fn price(mage: &Magento, args: &PriceArgs) -> Result<()> {
                 }
                 _ => style::err("not indexed"),
             };
+            // Fixed-price bundles: the selection adjustment is what the customer pays.
+            let selection = match (&ch.selection_price, ch.selection_percent) {
+                (Some(v), true) => format!("  sel {}", style::number(&format!("{v}%"))),
+                (Some(v), false) => format!("  sel {}", style::number(v)),
+                _ => String::new(),
+            };
             let mut tags = String::new();
             if ch.enabled == Some(false) {
                 tags.push_str(&format!("  {}", style::err("[disabled]")));
             }
             println!(
-                "  {}{}  price {}  special {}  {final_range}{tags}",
+                "  {}{}  price {}  special {}  {final_range}{selection}{tags}",
                 style::name(&ch.sku),
                 " ".repeat(ws - ch.sku.len()),
                 num(&ch.price),
@@ -2134,12 +2150,18 @@ fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()>
         info_row("varies by", list.join(", "));
     }
     if !p.children.is_empty() {
-        println!("\n{}", style::dim(&format!("variants ({}):", p.children.len())));
+        let what = if p.type_id == "grouped" { "associated products" } else { "variants" };
+        println!("\n{}", style::dim(&format!("{what} ({}):", p.children.len())));
         let ws = p.children.iter().map(|ch| ch.sku.len()).max().unwrap_or(0);
         let opts = |ch: &magequery_core::ProductChild| ch.options.join(" / ");
         let wo = p.children.iter().map(|ch| opts(ch).len()).max().unwrap_or(0);
         for ch in &p.children {
             let o = opts(ch);
+            let default_qty = ch
+                .default_qty
+                .as_deref()
+                .map(|q| format!("default qty {}  ", style::number(q)))
+                .unwrap_or_default();
             let stock = match (&ch.qty, ch.in_stock) {
                 (Some(q), Some(true)) => {
                     format!("qty {} ({})", style::number(q), style::ok("in stock"))
@@ -2154,13 +2176,51 @@ fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()>
             } else {
                 String::new()
             };
+            let options_col = if wo == 0 {
+                String::new()
+            } else {
+                format!("{}{}  ", style::target(&o), " ".repeat(wo - o.len()))
+            };
             println!(
-                "  {}{}  {}{}  {stock}{disabled}",
+                "  {}{}  {options_col}{default_qty}{stock}{disabled}",
                 style::name(&ch.sku),
                 " ".repeat(ws - ch.sku.len()),
-                style::target(&o),
-                " ".repeat(wo - o.len()),
             );
+        }
+    }
+    if !p.bundle_options.is_empty() {
+        println!("\n{}", style::dim(&format!("bundle options ({}):", p.bundle_options.len())));
+        for o in &p.bundle_options {
+            let req = if o.required { style::area("required") } else { style::dim("optional") };
+            println!(
+                "  {}  {}",
+                style::target(&o.title),
+                style::dim(&format!("({}, {req})", o.input_type)),
+            );
+            let ws = o.selections.iter().map(|s| s.sku.len()).max().unwrap_or(0);
+            for s in &o.selections {
+                let default = if s.is_default {
+                    format!("  {}", style::ok("(default)"))
+                } else {
+                    String::new()
+                };
+                let mut tags = String::new();
+                if s.enabled == Some(false) {
+                    tags.push_str(&format!("  {}", style::err("[disabled]")));
+                }
+                if s.in_stock == Some(false) {
+                    tags.push_str(&format!("  {}", style::err("[out of stock]")));
+                }
+                println!(
+                    "    {}{}  qty {}{default}{tags}",
+                    style::name(&s.sku),
+                    " ".repeat(ws - s.sku.len()),
+                    style::number(&s.qty),
+                );
+            }
+            if o.selections.is_empty() {
+                println!("    {}", style::err("(no selections — the option can't be satisfied)"));
+            }
         }
     }
     if let (Some(c), Some(u)) = (&p.created_at, &p.updated_at) {

@@ -1172,14 +1172,22 @@ note; the note logic is factored into `shadow_note` using the light
 Header shows `catalog/price/scope` (global vs website) from `core_config_data`.
 Tier/rule/index queries tolerate missing tables (`unwrap_or_default`) — never-reindexed
 installs. Customer-group ids resolve to names via `customer_group`.
-**Configurables**: a configurable's storefront price derives from its children, so a
-`variants (N):` section lists each child's own default-scope price/special and index
-final range — a `[disabled]` or red `not indexed` child explains the parent's min/max
-(children come from `catalog_product_super_link`; grouped/bundle composition not
-modeled). `product` correspondingly grew `varies by` (super attributes, from
+**Composites** — a composite's storefront price derives from its components, so a
+per-component section (`variants` / `associated products` / `selections` by type) lists
+each one's own default-scope price/special and index final range — a `[disabled]` or red
+`not indexed` component explains the parent's min/max. Configurables =
+`catalog_product_super_link`; grouped = `catalog_product_link` type 3; bundles =
+`catalog_product_bundle_selection`, plus the `price_type` attribute in the header
+(`fixed`/`dynamic`) and per-selection price adjustments (`sel 45.00` / `sel 10%` —
+what a fixed-price bundle actually charges). `product` correspondingly grew `varies by` (super attributes, from
 `catalog_product_super_attribute`) and a full `variants (N):` table — each child's SKU,
 its **super-attribute values resolved to option labels** ("Blue / 32" — which variant it
-IS), legacy stock qty + in/out-of-stock, and `[disabled]`.
+IS), legacy stock qty + in/out-of-stock, and `[disabled]`. Grouped products get the same
+table as `associated products (N):` with the **default add-to-cart qty** from the link
+attributes (`catalog_product_link` type 3 — up-/cross-sells correctly excluded); bundles
+get a `bundle options (N):` tree — per option the title (store-0), input type,
+required/optional, and each selection with qty, `(default)`, and disabled/out-of-stock
+tags (an option with zero selections is red: the bundle can't be bought).
 `Magento::product_prices_by_sku/by_id`. Validated on the same scratchpad MariaDB
 (customer_group/tier/rule/index/super_attribute tables added): website price scope read,
 per-scope special_price incl. the NULL row, percentage + ALL-GROUPS tiers, rule rows,

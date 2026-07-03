@@ -234,10 +234,22 @@ pub(crate) struct DbProductPrices {
     pub index: Vec<(u32, u32, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)>,
     pub customer_groups: std::collections::HashMap<u32, String>,
     pub websites: std::collections::HashMap<u32, String>,
-    /// Configurable variants: `(entity_id, sku, enabled, price, special, final min, final max)`.
-    #[allow(clippy::type_complexity)]
-    pub children:
-        Vec<(u32, String, Option<bool>, Option<String>, Option<String>, Option<String>, Option<String>)>,
+    /// Component prices (configurable variants / grouped associates / bundle selections).
+    pub children: Vec<DbChildPrice>,
+    /// Bundles: `fixed` / `dynamic` from the `price_type` attribute.
+    pub bundle_price_type: Option<String>,
+}
+
+pub(crate) struct DbChildPrice {
+    pub entity_id: u32,
+    pub sku: String,
+    pub enabled: Option<bool>,
+    pub price: Option<String>,
+    pub special: Option<String>,
+    pub final_min: Option<String>,
+    pub final_max: Option<String>,
+    pub selection_price: Option<String>,
+    pub selection_percent: bool,
 }
 
 /// Fetch the full price picture on one connection: EAV price attributes (decimal +
@@ -355,29 +367,77 @@ pub(crate) fn fetch_product_prices(
         )
         .unwrap_or_default();
 
-    // A configurable's storefront price derives from its children — summarize each
-    // variant's own default-scope price/special and index final range.
-    let child_rows: Vec<(u32, String)> = c
-        .exec(
-            format!(
-                "SELECT e.entity_id, e.sku FROM {p}catalog_product_super_link l \
-                 JOIN {p}catalog_product_entity e ON e.entity_id = l.product_id \
-                 WHERE l.parent_id = :v ORDER BY e.sku"
-            ),
-            params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
-    let mut children = Vec::with_capacity(child_rows.len());
-    if !child_rows.is_empty() {
-        let ids: Vec<String> = child_rows.iter().map(|(id, _)| id.to_string()).collect();
-        let ids = ids.join(",");
-        let attr = |code: &str| {
-            format!(
-                "(SELECT a.attribute_id FROM {p}eav_attribute a \
-                 JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
-                 WHERE a.attribute_code = '{code}' AND t.entity_type_code = 'catalog_product')"
+    // A composite product's storefront price derives from its components — summarize
+    // each one's own default-scope price/special and index final range.
+    let mut bundle_price_type: Option<String> = None;
+    let component_rows: Vec<(u32, String, Option<String>, bool)> = match type_id.as_str() {
+        "configurable" => c
+            .exec(
+                format!(
+                    "SELECT e.entity_id, e.sku FROM {p}catalog_product_super_link l \
+                     JOIN {p}catalog_product_entity e ON e.entity_id = l.product_id \
+                     WHERE l.parent_id = :v ORDER BY e.sku"
+                ),
+                params! { "v" => entity_id },
             )
-        };
+            .map_err(clean_err)?
+            .into_iter()
+            .map(|(id, sku): (u32, String)| (id, sku, None, false))
+            .collect(),
+        "grouped" => c
+            .exec(
+                format!(
+                    "SELECT e.entity_id, e.sku FROM {p}catalog_product_link l \
+                     JOIN {p}catalog_product_entity e ON e.entity_id = l.linked_product_id \
+                     WHERE l.product_id = :v AND l.link_type_id = 3 ORDER BY e.sku"
+                ),
+                params! { "v" => entity_id },
+            )
+            .map_err(clean_err)?
+            .into_iter()
+            .map(|(id, sku): (u32, String)| (id, sku, None, false))
+            .collect(),
+        "bundle" => {
+            let pt: Option<Option<i64>> = c
+                .exec_first(
+                    format!(
+                        "SELECT value FROM {p}catalog_product_entity_int \
+                         WHERE entity_id = :v AND store_id = 0 AND attribute_id = \
+                         (SELECT a.attribute_id FROM {p}eav_attribute a \
+                          JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
+                          WHERE a.attribute_code = 'price_type' \
+                          AND t.entity_type_code = 'catalog_product')"
+                    ),
+                    params! { "v" => entity_id },
+                )
+                .unwrap_or(None);
+            bundle_price_type = pt
+                .flatten()
+                .map(|v| if v == 1 { "fixed".to_string() } else { "dynamic".to_string() });
+            c.exec(
+                format!(
+                    "SELECT e.entity_id, e.sku, s.selection_price_type, \
+                     CAST(s.selection_price_value AS CHAR) \
+                     FROM {p}catalog_product_bundle_selection s \
+                     JOIN {p}catalog_product_entity e ON e.entity_id = s.product_id \
+                     WHERE s.parent_product_id = :v ORDER BY s.position, e.sku"
+                ),
+                params! { "v" => entity_id },
+            )
+            .map_err(clean_err)?
+            .into_iter()
+            .map(|(id, sku, pt, pv): (u32, String, i64, Option<String>)| {
+                (id, sku, pv, pt == 1)
+            })
+            .collect()
+        }
+        _ => Vec::new(),
+    };
+    let mut children = Vec::with_capacity(component_rows.len());
+    if !component_rows.is_empty() {
+        let ids: std::collections::BTreeSet<String> =
+            component_rows.iter().map(|(id, ..)| id.to_string()).collect();
+        let ids = ids.into_iter().collect::<Vec<_>>().join(",");
         let decimals: Vec<(u32, String, Option<String>)> = c
             .query(format!(
                 "SELECT v.entity_id, a.attribute_code, CAST(v.value AS CHAR) \
@@ -387,13 +447,7 @@ pub(crate) fn fetch_product_prices(
                  AND a.attribute_code IN ('price','special_price')"
             ))
             .map_err(clean_err)?;
-        let statuses: Vec<(u32, Option<i64>)> = c
-            .query(format!(
-                "SELECT entity_id, value FROM {p}catalog_product_entity_int \
-                 WHERE entity_id IN ({ids}) AND store_id = 0 AND attribute_id = {}",
-                attr("status")
-            ))
-            .map_err(clean_err)?;
+        let statuses = fetch_child_statuses(&mut c, p, &ids)?;
         let finals: Vec<(u32, Option<String>, Option<String>)> = c
             .query(format!(
                 "SELECT entity_id, CAST(MIN(final_price) AS CHAR), \
@@ -401,7 +455,7 @@ pub(crate) fn fetch_product_prices(
                  WHERE entity_id IN ({ids}) GROUP BY entity_id"
             ))
             .unwrap_or_default();
-        for (id, child_sku) in child_rows {
+        for (id, child_sku, selection_price, selection_percent) in component_rows {
             let value_of = |code: &str| {
                 decimals
                     .iter()
@@ -415,15 +469,17 @@ pub(crate) fn fetch_product_prices(
                 .find(|(e, _, _)| *e == id)
                 .map(|(_, min, max)| (min.clone(), max.clone()))
                 .unwrap_or((None, None));
-            children.push((
-                id,
-                child_sku,
+            children.push(DbChildPrice {
+                entity_id: id,
+                sku: child_sku,
                 enabled,
-                value_of("price"),
-                value_of("special_price"),
+                price: value_of("price"),
+                special: value_of("special_price"),
                 final_min,
                 final_max,
-            ));
+                selection_price,
+                selection_percent,
+            });
         }
     }
 
@@ -440,6 +496,7 @@ pub(crate) fn fetch_product_prices(
         customer_groups,
         websites,
         children,
+        bundle_price_type,
     }))
 }
 
@@ -481,9 +538,53 @@ pub(crate) struct DbProduct {
     pub parents: Vec<String>,
     /// Attribute codes a configurable is configured by, in position order.
     pub super_attributes: Vec<String>,
-    /// Variants: `(entity_id, sku, enabled, option labels, qty, in_stock)`.
+    /// Variants/associates:
+    /// `(entity_id, sku, enabled, option labels, stock qty, in_stock, default qty)`.
     #[allow(clippy::type_complexity)]
-    pub children: Vec<(u32, String, Option<bool>, Vec<String>, Option<String>, Option<bool>)>,
+    pub children:
+        Vec<(u32, String, Option<bool>, Vec<String>, Option<String>, Option<bool>, Option<String>)>,
+    pub bundle_options: Vec<DbBundleOption>,
+}
+
+pub(crate) struct DbBundleOption {
+    pub title: String,
+    pub required: bool,
+    pub input_type: String,
+    /// `(entity_id, sku, enabled, qty, is_default, price, price_percent, in_stock)`.
+    #[allow(clippy::type_complexity)]
+    pub selections:
+        Vec<(u32, String, Option<bool>, String, bool, Option<String>, bool, Option<bool>)>,
+}
+
+/// Default-scope `status` per entity (batched over an id list).
+fn fetch_child_statuses(
+    c: &mut mysql::Conn,
+    p: &str,
+    ids: &str,
+) -> Result<Vec<(u32, Option<i64>)>, String> {
+    use mysql::prelude::Queryable;
+    c.query(format!(
+        "SELECT entity_id, value FROM {p}catalog_product_entity_int \
+         WHERE entity_id IN ({ids}) AND store_id = 0 AND attribute_id = \
+         (SELECT a.attribute_id FROM {p}eav_attribute a \
+          JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
+          WHERE a.attribute_code = 'status' AND t.entity_type_code = 'catalog_product')"
+    ))
+    .map_err(clean_err)
+}
+
+/// Legacy stock `(product_id, qty, is_in_stock)` per entity (batched).
+fn fetch_child_stock(
+    c: &mut mysql::Conn,
+    p: &str,
+    ids: &str,
+) -> Result<Vec<(u32, Option<String>, i64)>, String> {
+    use mysql::prelude::Queryable;
+    c.query(format!(
+        "SELECT product_id, CAST(qty AS CHAR), is_in_stock \
+         FROM {p}cataloginventory_stock_item WHERE product_id IN ({ids})"
+    ))
+    .map_err(clean_err)
 }
 
 /// Fetch one product wholesale (identity + per-scope EAV values + option labels + stock
@@ -712,8 +813,45 @@ pub(crate) fn fetch_product(
         .unwrap_or_default();
     let super_attributes: Vec<String> = super_attrs.iter().map(|(_, c)| c.clone()).collect();
 
-    let child_rows: Vec<(u32, String)> = c
-        .exec(
+    // Component children: configurable variants (super_link) or grouped associates
+    // (catalog_product_link type 3, with the default add-to-cart qty link attribute).
+    let mut default_qtys: HashMap<u32, String> = HashMap::new();
+    let child_rows: Vec<(u32, String)> = if type_id == "grouped" {
+        let links: Vec<(u32, u32, String)> = c
+            .exec(
+                format!(
+                    "SELECT l.link_id, e.entity_id, e.sku FROM {p}catalog_product_link l \
+                     JOIN {p}catalog_product_entity e ON e.entity_id = l.linked_product_id \
+                     WHERE l.product_id = :v AND l.link_type_id = 3 ORDER BY e.sku"
+                ),
+                params! { "v" => entity_id },
+            )
+            .map_err(clean_err)?;
+        if !links.is_empty() {
+            let link_ids =
+                links.iter().map(|(l, _, _)| l.to_string()).collect::<Vec<_>>().join(",");
+            let qtys: HashMap<u32, String> = c
+                .query(format!(
+                    "SELECT d.link_id, CAST(d.value AS CHAR) \
+                     FROM {p}catalog_product_link_attribute_decimal d \
+                     JOIN {p}catalog_product_link_attribute a \
+                     ON a.product_link_attribute_id = d.product_link_attribute_id \
+                     WHERE a.link_type_id = 3 AND a.product_link_attribute_code = 'qty' \
+                     AND d.link_id IN ({link_ids})"
+                ))
+                .map(|rows: Vec<(u32, Option<String>)>| {
+                    rows.into_iter().filter_map(|(l, q)| q.map(|q| (l, q))).collect()
+                })
+                .unwrap_or_default();
+            for (link_id, child, _) in &links {
+                if let Some(q) = qtys.get(link_id) {
+                    default_qtys.insert(*child, q.clone());
+                }
+            }
+        }
+        links.into_iter().map(|(_, id, sku)| (id, sku)).collect()
+    } else {
+        c.exec(
             format!(
                 "SELECT e.entity_id, e.sku FROM {p}catalog_product_super_link l \
                  JOIN {p}catalog_product_entity e ON e.entity_id = l.product_id \
@@ -721,21 +859,12 @@ pub(crate) fn fetch_product(
             ),
             params! { "v" => entity_id },
         )
-        .map_err(clean_err)?;
+        .map_err(clean_err)?
+    };
     let mut children = Vec::with_capacity(child_rows.len());
     if !child_rows.is_empty() {
         let ids = child_rows.iter().map(|(i, _)| i.to_string()).collect::<Vec<_>>().join(",");
-        let status_attr = format!(
-            "(SELECT a.attribute_id FROM {p}eav_attribute a \
-             JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
-             WHERE a.attribute_code = 'status' AND t.entity_type_code = 'catalog_product')"
-        );
-        let statuses: Vec<(u32, Option<i64>)> = c
-            .query(format!(
-                "SELECT entity_id, value FROM {p}catalog_product_entity_int \
-                 WHERE entity_id IN ({ids}) AND store_id = 0 AND attribute_id = {status_attr}"
-            ))
-            .map_err(clean_err)?;
+        let statuses = fetch_child_statuses(&mut c, p, &ids)?;
         // Each child's value per super attribute, with the admin option label.
         let mut super_values: HashMap<(u32, u32), String> = HashMap::new();
         if !super_attrs.is_empty() {
@@ -765,12 +894,7 @@ pub(crate) fn fetch_product(
                 }
             }
         }
-        let stock_rows: Vec<(u32, Option<String>, i64)> = c
-            .query(format!(
-                "SELECT product_id, CAST(qty AS CHAR), is_in_stock \
-                 FROM {p}cataloginventory_stock_item WHERE product_id IN ({ids})"
-            ))
-            .map_err(clean_err)?;
+        let stock_rows = fetch_child_stock(&mut c, p, &ids)?;
         for (id, child_sku) in child_rows {
             let enabled =
                 statuses.iter().find(|(e, _)| *e == id).and_then(|(_, s)| *s).map(|s| s == 1);
@@ -783,12 +907,82 @@ pub(crate) fn fetch_product(
             let stock = stock_rows.iter().find(|(e, _, _)| *e == id);
             children.push((
                 id,
-                child_sku,
+                child_sku.clone(),
                 enabled,
                 options,
                 stock.and_then(|(_, qty, _)| qty.clone()),
                 stock.map(|(_, _, s)| *s != 0),
+                default_qtys.get(&id).cloned(),
             ));
+        }
+    }
+
+    // Bundle options with their selections.
+    let mut bundle_options: Vec<DbBundleOption> = Vec::new();
+    if type_id == "bundle" {
+        let options: Vec<(u32, i64, String, Option<String>)> = c
+            .exec(
+                format!(
+                    "SELECT o.option_id, o.required, o.type, v.title \
+                     FROM {p}catalog_product_bundle_option o \
+                     LEFT JOIN {p}catalog_product_bundle_option_value v \
+                     ON v.option_id = o.option_id AND v.store_id = 0 \
+                     WHERE o.parent_id = :v ORDER BY o.position, o.option_id"
+                ),
+                params! { "v" => entity_id },
+            )
+            .map_err(clean_err)?;
+        type SelRow = (u32, u32, String, String, i64, i64, Option<String>);
+        let selections: Vec<SelRow> = c
+            .exec(
+                format!(
+                    "SELECT s.option_id, e.entity_id, e.sku, CAST(s.selection_qty AS CHAR), \
+                     s.is_default, s.selection_price_type, CAST(s.selection_price_value AS CHAR) \
+                     FROM {p}catalog_product_bundle_selection s \
+                     JOIN {p}catalog_product_entity e ON e.entity_id = s.product_id \
+                     WHERE s.parent_product_id = :v ORDER BY s.position, e.sku"
+                ),
+                params! { "v" => entity_id },
+            )
+            .map_err(clean_err)?;
+        let (statuses, stock_rows) = if selections.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            let ids: std::collections::BTreeSet<u32> =
+                selections.iter().map(|(_, id, ..)| *id).collect();
+            let ids = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+            (fetch_child_statuses(&mut c, p, &ids)?, fetch_child_stock(&mut c, p, &ids)?)
+        };
+        for (option_id, required, input_type, title) in options {
+            let sels = selections
+                .iter()
+                .filter(|(o, ..)| *o == option_id)
+                .map(|(_, id, sku, qty, is_default, price_type, price)| {
+                    let enabled = statuses
+                        .iter()
+                        .find(|(e, _)| e == id)
+                        .and_then(|(_, s)| *s)
+                        .map(|s| s == 1);
+                    let in_stock =
+                        stock_rows.iter().find(|(e, _, _)| e == id).map(|(_, _, s)| *s != 0);
+                    (
+                        *id,
+                        sku.clone(),
+                        enabled,
+                        qty.clone(),
+                        *is_default != 0,
+                        price.clone(),
+                        *price_type == 1,
+                        in_stock,
+                    )
+                })
+                .collect();
+            bundle_options.push(DbBundleOption {
+                title: title.unwrap_or_else(|| format!("(option {option_id})")),
+                required: required != 0,
+                input_type,
+                selections: sels,
+            });
         }
     }
 
@@ -811,6 +1005,7 @@ pub(crate) fn fetch_product(
         parents,
         super_attributes,
         children,
+        bundle_options,
     }))
 }
 
