@@ -65,6 +65,7 @@ pub use model::{
     Preference, PreferenceStep, Plugin,
     PluginMethod, Product,
     ProductCategory, ProductChild, Quote, QuoteAddress, QuoteHit, QuoteItem,
+    SalesDocKind, SalesDocument, SalesDocumentHit, SalesDocumentItem,
     ProductHit, ProductLegacyStock, ProductPrices, ProductRewrite, ProductScopeValue,
     ProductSourceStock, ProductValue,
     RedisConfig, RedisInstance, RedisPing, RulePrice, TierPrice,
@@ -1070,6 +1071,46 @@ impl Magento {
             db::fetch_category_card(conn, &cfg.table_prefix, id, include_products, indexed_store)
                 .map_err(Error::Db)?;
         Ok(raw.map(to_category))
+    }
+
+    /// One sales document (invoice/shipment/creditmemo) by exact increment id. Live DB.
+    #[cfg(feature = "db")]
+    pub fn sales_document(
+        &self,
+        kind: SalesDocKind,
+        increment: &str,
+    ) -> Result<Option<SalesDocument>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_sales_document(conn, &cfg.table_prefix, kind, increment)
+            .map_err(Error::Db)?;
+        Ok(raw.map(|r| to_sales_document(kind, r)))
+    }
+
+    /// Document search by increment substring, newest first.
+    #[cfg(feature = "db")]
+    pub fn sales_documents_like(
+        &self,
+        kind: SalesDocKind,
+        needle: &str,
+        limit: usize,
+    ) -> Result<(Vec<SalesDocumentHit>, bool)> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (rows, truncated) =
+            db::fetch_sales_documents_like(conn, &cfg.table_prefix, kind, needle, limit)
+                .map_err(Error::Db)?;
+        Ok((
+            rows.into_iter()
+                .map(|(increment_id, order_increment, created_at, amount)| SalesDocumentHit {
+                    increment_id,
+                    order_increment,
+                    created_at,
+                    amount,
+                })
+                .collect(),
+            truncated,
+        ))
     }
 
     /// One quote (cart) by entity_id. Live DB.
@@ -2753,6 +2794,59 @@ fn default_connection(cfg: &DbConfig) -> Result<&DbConnection> {
         .find(|c| c.name == "default")
         .or_else(|| cfg.connections.first())
         .ok_or_else(|| Error::Db("no db connection configured in env.php".to_string()))
+}
+
+/// Assemble [`SalesDocument`]: decode the kind-specific state.
+#[cfg(feature = "db")]
+fn to_sales_document(kind: SalesDocKind, raw: db::DbSalesDocument) -> SalesDocument {
+    let state = raw.state.map(|s| match (kind, s) {
+        (SalesDocKind::Invoice, 1) => "open".to_string(),
+        (SalesDocKind::Invoice, 2) => "paid".to_string(),
+        (SalesDocKind::Invoice, 3) => "canceled".to_string(),
+        (SalesDocKind::Creditmemo, 1) => "open".to_string(),
+        (SalesDocKind::Creditmemo, 2) => "refunded".to_string(),
+        (SalesDocKind::Creditmemo, 3) => "canceled".to_string(),
+        (_, other) => format!("state {other}"),
+    });
+    SalesDocument {
+        kind,
+        entity_id: raw.entity_id,
+        increment_id: raw.increment_id,
+        state,
+        order_increment: raw.order_increment,
+        order_status: raw.order_status,
+        created_at: raw.created_at,
+        currency: raw.currency,
+        totals: raw
+            .totals
+            .into_iter()
+            .map(|(key, amount, base_amount)| OrderTotal { key, amount, base_amount })
+            .collect(),
+        transaction_id: raw.transaction_id,
+        total_qty: raw.total_qty,
+        items: raw
+            .items
+            .into_iter()
+            .map(|(sku, name, qty, price, row_total)| SalesDocumentItem {
+                sku,
+                name,
+                qty,
+                price,
+                row_total,
+            })
+            .collect(),
+        tracks: raw
+            .tracks
+            .into_iter()
+            .map(|(carrier, title, number)| {
+                (
+                    carrier.unwrap_or_default(),
+                    title.unwrap_or_default(),
+                    number.unwrap_or_default(),
+                )
+            })
+            .collect(),
+    }
 }
 
 /// Assemble [`Quote`]: blend the totals (subtotal + grand total from the quote row,

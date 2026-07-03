@@ -189,6 +189,185 @@ pub(crate) fn fetch_patch_list(
     Ok(rows.into_iter().map(|r| r.trim_start_matches('\\').to_string()).collect())
 }
 
+/// One sales document, raw.
+pub(crate) struct DbSalesDocument {
+    pub entity_id: u32,
+    pub increment_id: String,
+    pub state: Option<i64>,
+    pub created_at: Option<String>,
+    pub currency: Option<String>,
+    /// `(key, amount, base)`.
+    pub totals: Vec<(String, Option<String>, Option<String>)>,
+    pub transaction_id: Option<String>,
+    pub total_qty: Option<String>,
+    pub order_increment: Option<String>,
+    pub order_status: Option<String>,
+    /// `(sku, name, qty, price, row_total)`.
+    pub items: Vec<(String, Option<String>, String, Option<String>, Option<String>)>,
+    pub tracks: Vec<(Option<String>, Option<String>, Option<String>)>,
+}
+
+pub(crate) fn fetch_sales_document(
+    conn: &DbConnection,
+    table_prefix: &str,
+    kind: crate::model::SalesDocKind,
+    increment: &str,
+) -> Result<Option<DbSalesDocument>, String> {
+    use crate::model::SalesDocKind as K;
+    use mysql::params;
+    use mysql::prelude::Queryable;
+
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
+
+    let head = match kind {
+        K::Invoice => format!(
+            "SELECT entity_id, order_id, state, CAST(created_at AS CHAR), \
+             order_currency_code, transaction_id, NULL, \
+             CAST(subtotal AS CHAR), CAST(base_subtotal AS CHAR), \
+             CAST(tax_amount AS CHAR), CAST(base_tax_amount AS CHAR), \
+             CAST(shipping_amount AS CHAR), CAST(base_shipping_amount AS CHAR), \
+             CAST(grand_total AS CHAR), CAST(base_grand_total AS CHAR) \
+             FROM {p}sales_invoice WHERE increment_id = :v"
+        ),
+        K::Creditmemo => format!(
+            "SELECT entity_id, order_id, state, CAST(created_at AS CHAR), \
+             order_currency_code, NULL, NULL, \
+             CAST(subtotal AS CHAR), CAST(base_subtotal AS CHAR), \
+             CAST(tax_amount AS CHAR), CAST(base_tax_amount AS CHAR), \
+             CAST(shipping_amount AS CHAR), CAST(base_shipping_amount AS CHAR), \
+             CAST(grand_total AS CHAR), CAST(base_grand_total AS CHAR), \
+             CAST(adjustment_positive AS CHAR), CAST(adjustment_negative AS CHAR) \
+             FROM {p}sales_creditmemo WHERE increment_id = :v"
+        ),
+        K::Shipment => format!(
+            "SELECT entity_id, order_id, NULL, CAST(created_at AS CHAR), NULL, NULL, \
+             CAST(total_qty AS CHAR) \
+             FROM {p}sales_shipment WHERE increment_id = :v"
+        ),
+    };
+    let row: Option<mysql::Row> =
+        c.exec_first(head, params! { "v" => increment }).map_err(clean_err)?;
+    let Some(mut row) = row else { return Ok(None) };
+
+    let entity_id: u32 = row.take::<Option<u32>, _>(0).flatten().unwrap_or(0);
+    let order_id: u32 = row.take::<Option<u32>, _>(1).flatten().unwrap_or(0);
+    let state: Option<i64> = row.take::<Option<i64>, _>(2).flatten();
+    let created_at = s(&mut row, 3);
+    let currency = s(&mut row, 4);
+    let transaction_id = s(&mut row, 5);
+    let total_qty = s(&mut row, 6);
+    let mut totals: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+    if !matches!(kind, K::Shipment) {
+        for (i, key) in ["subtotal", "tax", "shipping", "grand_total"].iter().enumerate() {
+            totals.push((key.to_string(), s(&mut row, 7 + i * 2), s(&mut row, 8 + i * 2)));
+        }
+        if matches!(kind, K::Creditmemo) {
+            totals.push(("adjustment_positive".to_string(), s(&mut row, 15), None));
+            totals.push(("adjustment_negative".to_string(), s(&mut row, 16), None));
+        }
+    }
+
+    let (order_increment, order_status): (Option<String>, Option<String>) = c
+        .exec_first::<(String, Option<String>), _, _>(
+            format!("SELECT increment_id, status FROM {p}sales_order WHERE entity_id = :v"),
+            params! { "v" => order_id },
+        )
+        .map_err(clean_err)?
+        .map(|(i, st)| (Some(i), st))
+        .unwrap_or((None, None));
+
+    let item_table = match kind {
+        K::Invoice => "sales_invoice_item",
+        K::Shipment => "sales_shipment_item",
+        K::Creditmemo => "sales_creditmemo_item",
+    };
+    let price_cols = if matches!(kind, K::Shipment) {
+        "NULL, NULL"
+    } else {
+        "CAST(price AS CHAR), CAST(row_total AS CHAR)"
+    };
+    let items: Vec<(String, Option<String>, Option<String>, Option<String>, Option<String>)> = c
+        .exec(
+            format!(
+                "SELECT sku, name, CAST(qty AS CHAR), {price_cols} \
+                 FROM {p}{item_table} WHERE parent_id = :v ORDER BY entity_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+    let items = items
+        .into_iter()
+        .map(|(sku, name, qty, price, row_total)| {
+            (sku, name, qty.unwrap_or_else(|| "0".to_string()), price, row_total)
+        })
+        .collect();
+
+    let tracks: Vec<(Option<String>, Option<String>, Option<String>)> =
+        if matches!(kind, K::Shipment) {
+            c.exec(
+                format!(
+                    "SELECT carrier_code, title, track_number FROM {p}sales_shipment_track \
+                     WHERE parent_id = :v ORDER BY entity_id"
+                ),
+                params! { "v" => entity_id },
+            )
+            .map_err(clean_err)?
+        } else {
+            Vec::new()
+        };
+
+    Ok(Some(DbSalesDocument {
+        entity_id,
+        increment_id: increment.to_string(),
+        state,
+        created_at,
+        currency,
+        totals,
+        transaction_id,
+        total_qty,
+        order_increment,
+        order_status,
+        items,
+        tracks,
+    }))
+}
+
+/// Document search by increment substring, newest first.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_sales_documents_like(
+    conn: &DbConnection,
+    table_prefix: &str,
+    kind: crate::model::SalesDocKind,
+    needle: &str,
+    limit: usize,
+) -> Result<(Vec<(String, Option<String>, Option<String>, Option<String>)>, bool), String> {
+    use crate::model::SalesDocKind as K;
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let (table, amount) = match kind {
+        K::Invoice => ("sales_invoice", "CAST(d.grand_total AS CHAR)"),
+        K::Shipment => ("sales_shipment", "CAST(d.total_qty AS CHAR)"),
+        K::Creditmemo => ("sales_creditmemo", "CAST(d.grand_total AS CHAR)"),
+    };
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = c
+        .exec(
+            format!(
+                "SELECT d.increment_id, o.increment_id, CAST(d.created_at AS CHAR), {amount} \
+                 FROM {p}{table} d LEFT JOIN {p}sales_order o ON o.entity_id = d.order_id \
+                 WHERE d.increment_id LIKE :pat ORDER BY d.entity_id DESC LIMIT {}",
+                limit + 1
+            ),
+            params! { "pat" => format!("%{needle}%") },
+        )
+        .map_err(clean_err)?;
+    let truncated = rows.len() > limit;
+    Ok((rows.into_iter().take(limit).collect(), truncated))
+}
+
 /// Everything about one quote (cart), raw. Quote tables carry no `sales_` prefix.
 pub(crate) struct DbQuote {
     pub entity_id: u64,

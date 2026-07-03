@@ -1664,6 +1664,73 @@ pub struct ProductPrices {
     pub matched_by_id: bool,
 }
 
+/// Which sales document to look up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SalesDocKind {
+    Invoice,
+    Shipment,
+    Creditmemo,
+}
+
+impl std::fmt::Display for SalesDocKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            SalesDocKind::Invoice => "invoice",
+            SalesDocKind::Shipment => "shipment",
+            SalesDocKind::Creditmemo => "creditmemo",
+        })
+    }
+}
+
+/// One line of a sales document (price/row_total absent on shipments).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct SalesDocumentItem {
+    pub sku: String,
+    pub name: Option<String>,
+    pub qty: String,
+    pub price: Option<String>,
+    pub row_total: Option<String>,
+}
+
+/// One invoice / shipment / credit memo, with its order cross-link. Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct SalesDocument {
+    pub kind: SalesDocKind,
+    pub entity_id: u32,
+    pub increment_id: String,
+    /// Decoded state (invoices: open/paid/canceled; memos: open/refunded/canceled;
+    /// shipments have none).
+    pub state: Option<String>,
+    pub order_increment: Option<String>,
+    pub order_status: Option<String>,
+    pub created_at: Option<String>,
+    pub currency: Option<String>,
+    /// subtotal/tax/shipping/grand_total (+ memo adjustments); empty for shipments.
+    pub totals: Vec<OrderTotal>,
+    /// Invoices: the payment transaction id.
+    pub transaction_id: Option<String>,
+    /// Shipments: total packed qty.
+    pub total_qty: Option<String>,
+    pub items: Vec<SalesDocumentItem>,
+    /// Shipments: `(carrier, title, number)`.
+    pub tracks: Vec<(String, String, String)>,
+}
+
+/// One row of a document search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct SalesDocumentHit {
+    pub increment_id: String,
+    pub order_increment: Option<String>,
+    pub created_at: Option<String>,
+    /// Kind-specific: grand total (invoice/memo) or packed qty (shipment).
+    pub amount: Option<String>,
+}
+
 /// One cart line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

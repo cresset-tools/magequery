@@ -176,7 +176,8 @@ DATA          (persistence & model)
   extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>|<entity>] [--db]
   product <sku> [--id <n>] [--store <code>]   price <sku> [--id <n>]   (live DB)
   category [<id>|<name>] [--store] [--products]   order <increment#> [--id]
-  customer <email> [--id]   quote <id|email>   (live DB)
+  customer <email> [--id]   quote <id|email>
+  invoice|shipment|creditmemo <increment#>   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1294,6 +1295,21 @@ rule ids. Validated on the scratchpad DB: a converted USD quote with coupon and 
 issuer selection, a mid-checkout guest cart with empty address and no methods, the
 stale-active flag, and the email search.
 
+### `invoice` / `shipment` / `creditmemo` (thin document cards, live DB, done)
+
+For when the *starting point* is a document number (accounting hands you an invoice,
+the carrier email a shipment increment). Three flat commands — deliberately NOT one
+`document <#>`: increment sequences are per-entity-type, so invoice `100000042` and
+order `100000042` legitimately coexist and a combined lookup would be ambiguous by
+construction. One shared implementation (`SalesDocKind` enum, `Magento::sales_document`
++ `sales_documents_like`, one renderer): exact increment → card, substring → newest-first
+list. Each card: decoded state (invoice open/paid/canceled, memo open/refunded/canceled),
+the **order cross-link** (`→ magequery order X`, red "(order row missing!)" if the parent
+is gone), kind-specifics (invoice: transaction id; shipment: packed qty + tracking
+numbers, "(no tracking numbers)" flagged; creditmemo: adjustment_positive/negative in the
+totals), item lines, and the totals in order currency (zero rows filtered). Validated on
+the scratchpad DB: all three cards, single-match substring, clean unknown error.
+
 ### `admin-users` / `admin-roles` (live DB, done)
 
 Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
@@ -1329,9 +1345,12 @@ role, and seeding one into a live DB was deliberately not done.
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
 `queue backlog`, `product`). New ideas go here.
-- **Entity cards in the `product` mold:** optional thin document cards
-  (`invoice`/`shipment`/`creditmemo <increment#>`) — only if starting from a document
-  number turns out to be common; the `order` card already summarizes them.
+- **Small entities, in build order:** `stores` (the scope tree with codes/roots —
+  feeds every `--store` flag), `coupon`/`sales-rule` (the why-doesn't-my-coupon-work
+  card), extend `order` search to match PSP transaction refs
+  (`sales_order_payment.last_trans_id` + `sales_payment_transaction.txn_id`),
+  `cms-page`/`cms-block <identifier>`, `catalog-rule`, `order-statuses`, `tax`,
+  `integrations`. Backlog: sales sequences, reviews, wishlists, search terms.
 
 ## Build order
 

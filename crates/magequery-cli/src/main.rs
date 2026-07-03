@@ -8,7 +8,7 @@ use magequery_core::model::ModuleSource;
 use magequery_core::{
     AclResource, ArgValue, Area, ChainStep, ClassName, ConfigSet, ConfigSourceKind, ConfigValue,
     DbColumn, DbTable, Error, EventName, Indexer, Magento, MethodChain, Observer, Plugin,
-    Preference, Resolution, Route, Source, UseRef, WebapiRoute,
+    Preference, Resolution, Route, SalesDocKind, Source, UseRef, WebapiRoute,
 };
 
 // The top-level command list, grouped, for `print_help`. Kept in sync with the `Command`
@@ -53,6 +53,9 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("order", "One order: item lifecycle, totals, payment, documents, history"),
             ("customer", "One customer: account state, addresses, orders, newsletter"),
             ("quote", "One cart as checkout computed it: items, totals, chosen methods"),
+            ("invoice", "One invoice by increment id (→ its order)"),
+            ("shipment", "One shipment by increment id: items, tracking (→ its order)"),
+            ("creditmemo", "One credit memo by increment id (→ its order)"),
         ],
     ),
     (
@@ -270,6 +273,12 @@ enum Command {
     Customer(CustomerArgs),
     /// One quote (cart) as checkout computed it: items, totals, chosen methods.
     Quote(QuoteArgs),
+    /// One invoice by increment id, with its order cross-link.
+    Invoice(SalesDocArgs),
+    /// One shipment by increment id: items, tracking numbers, its order.
+    Shipment(SalesDocArgs),
+    /// One credit memo by increment id, with its order cross-link.
+    Creditmemo(SalesDocArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -549,6 +558,14 @@ struct QuoteArgs {
     /// A quote entity_id; anything else searches customer emails (active carts first
     /// by recency).
     query: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct SalesDocArgs {
+    /// The document's increment id (exact; a substring lists matches).
+    increment: String,
     #[arg(long)]
     json: bool,
 }
@@ -959,6 +976,9 @@ fn main() -> Result<()> {
         Command::Order(args) => order(&mage, &args),
         Command::Customer(args) => customer(&mage, &args),
         Command::Quote(args) => quote(&mage, &args),
+        Command::Invoice(args) => sales_document(&mage, SalesDocKind::Invoice, &args),
+        Command::Shipment(args) => sales_document(&mage, SalesDocKind::Shipment, &args),
+        Command::Creditmemo(args) => sales_document(&mage, SalesDocKind::Creditmemo, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
         Command::AdminRoles(args) => admin_roles(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
@@ -2140,6 +2160,138 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn sales_document(mage: &Magento, kind: SalesDocKind, args: &SalesDocArgs) -> Result<()> {
+    if let Some(doc) = mage.sales_document(kind, &args.increment)? {
+        return render_sales_document(&doc, args);
+    }
+    let (hits, truncated) = mage.sales_documents_like(kind, &args.increment, 50)?;
+    match hits.len() {
+        0 => Err(anyhow!("no {kind} matches `{}`", args.increment)),
+        1 => {
+            let doc =
+                mage.sales_document(kind, &hits[0].increment_id)?.expect("listed document");
+            render_sales_document(&doc, args)
+        }
+        _ => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+                return Ok(());
+            }
+            let wi = hits.iter().map(|h| h.increment_id.len()).max().unwrap_or(0);
+            for h in &hits {
+                println!(
+                    "{}{}  {:>10}  {} {}  {}",
+                    style::name(&h.increment_id),
+                    " ".repeat(wi - h.increment_id.len()),
+                    h.amount.as_deref().unwrap_or("-"),
+                    style::dim("order"),
+                    style::name(h.order_increment.as_deref().unwrap_or("?")),
+                    style::dim(h.created_at.as_deref().unwrap_or("")),
+                );
+            }
+            if truncated {
+                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+            }
+            eprintln!("\n{} {kind}(s)", hits.len());
+            Ok(())
+        }
+    }
+}
+
+fn render_sales_document(doc: &magequery_core::SalesDocument, args: &SalesDocArgs) -> Result<()> {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(doc)?);
+        return Ok(());
+    }
+    let state = match doc.state.as_deref() {
+        Some("paid") | Some("refunded") => format!("  {}", style::ok(doc.state.as_deref().unwrap())),
+        Some("canceled") => format!("  {}", style::err("canceled")),
+        Some(s) => format!("  {}", style::number(s)),
+        None => String::new(),
+    };
+    println!(
+        "{} {}  (entity_id {}){state}  {}",
+        style::kind(&doc.kind.to_string()),
+        style::name(&doc.increment_id),
+        doc.entity_id,
+        style::dim(doc.created_at.as_deref().unwrap_or("")),
+    );
+    println!();
+    match &doc.order_increment {
+        Some(inc) => info_row(
+            "order",
+            format!(
+                "{} {}  {}",
+                style::name(inc),
+                style::target(doc.order_status.as_deref().unwrap_or("")),
+                style::dim(&format!("→ magequery order {inc}")),
+            ),
+        ),
+        None => info_row("order", style::err("(order row missing!)")),
+    }
+    if let Some(t) = &doc.transaction_id {
+        info_row("txn", t.clone());
+    }
+    if let Some(q) = &doc.total_qty {
+        info_row("packed qty", style::number(q));
+    }
+    if !doc.tracks.is_empty() {
+        let list: Vec<String> = doc
+            .tracks
+            .iter()
+            .map(|(carrier, title, number)| {
+                let label = if title.is_empty() { carrier.clone() } else { title.clone() };
+                format!("{} {}", style::dim(&label), style::number(number))
+            })
+            .collect();
+        info_row("tracking", list.join(", "));
+    } else if doc.kind == SalesDocKind::Shipment {
+        info_row("tracking", style::number("(no tracking numbers)"));
+    }
+
+    if !doc.items.is_empty() {
+        println!("\n{}", style::dim(&format!("items ({}):", doc.items.len())));
+        let ws = doc.items.iter().map(|i| i.sku.len()).max().unwrap_or(0);
+        for i in &doc.items {
+            let qty = i.qty.trim_end_matches('0').trim_end_matches('.');
+            let money = match (&i.price, &i.row_total) {
+                (Some(p), Some(t)) => {
+                    format!("  {}  {}", style::dim(&format!("× {p}")), style::number(t))
+                }
+                _ => String::new(),
+            };
+            println!(
+                "  {}{}  {}{money}  {}",
+                style::name(&i.sku),
+                " ".repeat(ws - i.sku.len()),
+                style::dim(&format!("qty {qty}")),
+                i.name.as_deref().unwrap_or(""),
+            );
+        }
+    }
+
+    if !doc.totals.is_empty() {
+        println!();
+        let cur = doc.currency.as_deref().unwrap_or("");
+        let list: Vec<String> = doc
+            .totals
+            .iter()
+            .filter(|t| t.amount.as_deref().is_some_and(|a| a != "0.0000"))
+            .map(|t| {
+                let amount = t.amount.as_deref().unwrap_or("-");
+                let colored = if t.key == "grand_total" {
+                    style::number(&format!("{amount} {cur}"))
+                } else {
+                    amount.to_string()
+                };
+                format!("{} {colored}", style::dim(&t.key.replace('_', " ")))
+            })
+            .collect();
+        info_row("totals", list.join("  ·  "));
     }
     Ok(())
 }
