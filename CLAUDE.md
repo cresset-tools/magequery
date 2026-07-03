@@ -172,7 +172,7 @@ ENTRY POINTS  (how execution starts)
   commands [<filter>]                   graphql [<type>|<Type.field>]
 
 DATA          (persistence & model)
-  schema [<table>] [--db]       indexers [<id>]
+  schema [<table>] [--db]       indexers [<id>] [--db]
   extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>|<entity>] [--db]
 
 CONFIG & ADMIN (where settings & permissions live)
@@ -200,8 +200,7 @@ PROJECT       (the codebase itself)
   (`uses` has `--area` but no `--all-areas`: its default is already the merged union.)
 - **`--json`** and **`--color auto|always|never`** + **`--root <path>`** — global, every command.
 - **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config`,
-  `schema`, `patches`, `eav`;
-  future `indexers --status`). Static by default; DB overlay when asked;
+  `schema`, `patches`, `eav`, `indexers`). Static by default; DB overlay when asked;
   clean `Error::Db` if unreachable. Pure-live commands (`db`/`redis` `ping`, `url-rewrites`)
   require the `db`/`redis` build feature instead.
 - **`--source app|vendor`** — listing commands, "only my code" (today `modules`; generalize).
@@ -625,7 +624,7 @@ mageos-lite: 64 commands, every name resolved (incl. `$this->commandName` proper
 indirection in Indexer's dimension commands and the four MessageQueue `\Proxy` entries);
 `encryption:*` proves the interface+concrete union. ~20ms (di parse dominates).
 
-### `indexers` (indexer.xml + mview.xml, static, done)
+### `indexers` (indexer.xml + mview.xml, static + `--db` status, done)
 
 The "why isn't this index updating" surface: indexer definitions joined with the tables
 whose changes feed them. An `IndexerIndex` in `breadth.rs` (lazy `OnceLock`, parallel
@@ -642,14 +641,26 @@ whose changes feed them. An `IndexerIndex` in `breadth.rs` (lazy `OnceLock`, par
   `catalogsearch_fulltext`); dependencies union; `source` keeps the first declaration.
   View subscriptions merge by table name, each keeping the **adding** module's `Source`.
   Join `indexer.view_id → view` at build time.
-- `Magento::indexers(filter?)` (id/title substring) + `Magento::indexer(id)`.
+- `Magento::indexers(filter?, include_db)` (id/title substring) +
+  `Magento::indexer(id, include_db)` — with `include_db`, each `Indexer` carries an
+  [`IndexerLive`]: `indexer_state.status` (valid/invalid/working/suspended), update mode
+  from `mview_state.mode` (enabled = by schedule, disabled = on save), the view's own
+  status, and the **backlog** — mirroring `IndexerStatusCommand`'s exact semantics,
+  `COUNT(DISTINCT entity_id) FROM <view_id>_cl WHERE version_id > state.version_id`
+  (changelog table names identifier-sanitized; a missing `_cl` table — created lazily on
+  first subscribe — degrades to `None`, as does a missing state row: rendered honestly as
+  "(no state row)", the flat indexers' normal state on installs that never enabled flat).
 
-CLI `magequery indexers [<id>]`: exact id → detail (title, description, class, view,
+CLI `magequery indexers [<id>] [--db]`: exact id → detail (title, description, class, view,
+`status valid · by schedule · backlog 0 (updated …)` with `--db`,
 `shared` + the other indexers sharing that physical index, `depends on`, and the
 subscription list with cross-module `← Vendor_Module` tags); substring → filtered list;
-no arg → all (`id  Title  N tables  # loc`). Validated on mageos-lite: 12 indexers;
+no arg → all (`id  Title  N tables  [live tag]  # loc`; invalid/suspended/backlog>0 red,
+working yellow, backlog shown only in schedule mode). Validated on mageos-lite: 12 indexers;
 `catalog_product_price` shows `catalogrule_product_price ← Magento_CatalogRule`; the
-`category_product` shared-index pair cross-references; deps exact. ~3ms.
+`category_product` shared-index pair cross-references; deps exact; `--db` joins all
+scheduled views with backlog 0 (~33ms). Commerce-store: 13 indexers all `on save`;
+clean `Error::Db` + exit 1 when the DB is down. ~3ms static.
 
 ### `queue topology` (message-queue wiring, static, done)
 
@@ -1071,8 +1082,8 @@ module's attribute honestly absent from both halves — its patch never ran). ~2
 
 Ideas surfaced while scoping breadth, in rough priority. All but the DB ones are
 static breadth-projections in the same `read_parse` + merge shape.
-- **DB-backed (phase-2 style, opt-in like `url-rewrites`):** `indexer:status` (`indexer_state`),
-  admin users/roles, cron history (`cron_schedule`), queue backlog.
+- **DB-backed (phase-2 style, opt-in like `url-rewrites`):** admin users/roles, cron
+  history (`cron_schedule`), queue backlog.
 
 ## Build order
 

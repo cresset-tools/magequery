@@ -1668,6 +1668,7 @@ impl IndexerIndex {
                     shared_index: None,
                     dependencies: Vec::new(),
                     subscriptions: Vec::new(),
+                    live: None,
                     source,
                 });
                 if let Some(c) = r.class {

@@ -223,6 +223,71 @@ pub(crate) fn fetch_scope_counts(
     Ok((websites, groups, stores))
 }
 
+/// One `indexer_state` row.
+pub(crate) struct DbIndexerState {
+    pub indexer_id: String,
+    /// `valid` / `invalid` / `working` / `suspended`.
+    pub status: String,
+    pub updated: Option<String>,
+}
+
+/// One `mview_state` row, with the pending-changelog count for scheduled views.
+pub(crate) struct DbMviewState {
+    pub view_id: String,
+    /// `enabled` = update by schedule, `disabled` = update on save.
+    pub mode: String,
+    /// `idle` / `working` / `suspended`.
+    pub status: String,
+    /// Distinct entities in `<view_id>_cl` past the applied version — what
+    /// `bin/magento indexer:status` reports as backlog. `None` = no changelog table.
+    pub backlog: Option<u64>,
+}
+
+/// Live indexer + mview state. The backlog mirrors Magento's `IndexerStatusCommand`:
+/// `COUNT(DISTINCT entity_id)` in the changelog beyond the view's applied `version_id`.
+pub(crate) fn fetch_indexer_states(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<(Vec<DbIndexerState>, Vec<DbMviewState>), String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    let states: Vec<(String, String, Option<String>)> = c
+        .query(format!(
+            "SELECT indexer_id, status, CAST(updated AS CHAR) FROM {p}indexer_state"
+        ))
+        .map_err(clean_err)?;
+    let states = states
+        .into_iter()
+        .map(|(indexer_id, status, updated)| DbIndexerState { indexer_id, status, updated })
+        .collect();
+
+    let views: Vec<(String, String, String, Option<u64>)> = c
+        .query(format!("SELECT view_id, mode, status, version_id FROM {p}mview_state"))
+        .map_err(clean_err)?;
+    let mut out = Vec::with_capacity(views.len());
+    for (view_id, mode, status, version_id) in views {
+        // The changelog table name embeds the view id — identifier-sanitized, and the
+        // query tolerated failing: the table is created lazily on first subscribe.
+        let backlog = if mode == "enabled"
+            && view_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            c.query_first::<u64, _>(format!(
+                "SELECT COUNT(DISTINCT entity_id) FROM {p}{view_id}_cl \
+                 WHERE version_id > {}",
+                version_id.unwrap_or(0)
+            ))
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+        out.push(DbMviewState { view_id, mode, status, backlog });
+    }
+    Ok((states, out))
+}
+
 /// One `eav_entity_type` row with its attribute count.
 pub(crate) struct DbEavEntity {
     pub code: String,

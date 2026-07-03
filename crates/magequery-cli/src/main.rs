@@ -517,6 +517,9 @@ struct IndexersArgs {
     /// An exact indexer id (`catalog_product_price`) → full detail incl. subscriptions;
     /// otherwise a substring matched against id or title. Omit to list every indexer.
     id: Option<String>,
+    /// Read live status from the database: valid/invalid, update mode, backlog.
+    #[arg(long)]
+    db: bool,
     #[arg(long)]
     json: bool,
 }
@@ -3393,7 +3396,7 @@ fn commands(mage: &Magento, args: &CommandsArgs, root: &Path) -> Result<()> {
 fn indexers(mage: &Magento, args: &IndexersArgs, root: &Path) -> Result<()> {
     // An exact indexer id → full detail; anything else is an id/title substring filter.
     if let Some(id) = &args.id {
-        if let Some(ix) = mage.indexer(id) {
+        if let Some(ix) = mage.indexer(id, args.db)? {
             if args.json {
                 println!("{}", serde_json::to_string_pretty(&ix)?);
                 return Ok(());
@@ -3403,7 +3406,7 @@ fn indexers(mage: &Magento, args: &IndexersArgs, root: &Path) -> Result<()> {
         }
     }
 
-    let list = mage.indexers(args.id.as_deref());
+    let list = mage.indexers(args.id.as_deref(), args.db)?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&list)?);
         return Ok(());
@@ -3417,8 +3420,13 @@ fn indexers(mage: &Magento, args: &IndexersArgs, root: &Path) -> Result<()> {
     for ix in &list {
         let pad = " ".repeat(width.saturating_sub(ix.id.len()));
         let tpad = " ".repeat(title_w.saturating_sub(ix.title.len()));
+        let live = ix
+            .live
+            .as_ref()
+            .map(|l| format!("{}  ", indexer_live_tag(l)))
+            .unwrap_or_default();
         println!(
-            "{}{pad}  {}{tpad}  {}  {}",
+            "{}{pad}  {}{tpad}  {}  {live}{}",
             style::name(&ix.id),
             style::target(&ix.title),
             style::dim(&format!("{:>2} tables", ix.subscriptions.len())),
@@ -3427,6 +3435,36 @@ fn indexers(mage: &Magento, args: &IndexersArgs, root: &Path) -> Result<()> {
     }
     eprintln!("\n{} indexer(s)", list.len());
     Ok(())
+}
+
+/// Compact live-status tag: `valid · by schedule · backlog 3` — invalid/backlog in red.
+fn indexer_live_tag(l: &magequery_core::IndexerLive) -> String {
+    let mut parts: Vec<String> = vec![match l.status.as_deref() {
+        Some("valid") => style::ok("valid"),
+        Some("invalid") => style::err("invalid"),
+        Some("working") => style::number("working"),
+        Some("suspended") => style::err("suspended"),
+        Some(other) => other.to_string(),
+        None => style::dim("(no state row)"),
+    }];
+    match l.by_schedule {
+        Some(true) => parts.push("by schedule".to_string()),
+        Some(false) => parts.push("on save".to_string()),
+        None => {}
+    }
+    if let Some(v) = l.view_status.as_deref() {
+        if v != "idle" {
+            parts.push(style::number(&format!("view {v}")));
+        }
+    }
+    if let Some(b) = l.backlog {
+        parts.push(if b > 0 {
+            style::err(&format!("backlog {b}"))
+        } else {
+            style::dim("backlog 0")
+        });
+    }
+    parts.join(&style::dim(" · "))
 }
 
 fn render_indexer(mage: &Magento, ix: &Indexer, root: &Path) {
@@ -3443,10 +3481,19 @@ fn render_indexer(mage: &Magento, ix: &Indexer, root: &Path) {
     if let Some(v) = &ix.view_id {
         println!("  view       {}", style::name(v));
     }
+    if let Some(l) = &ix.live {
+        let updated = l
+            .updated
+            .as_deref()
+            .map(|u| format!("  {}", style::dim(&format!("(updated {u})"))))
+            .unwrap_or_default();
+        println!("  status     {}{updated}", indexer_live_tag(l));
+    }
     if let Some(s) = &ix.shared_index {
         // Indexers sharing one physical index validate together — name the others.
         let others: Vec<String> = mage
-            .indexers(None)
+            .indexers(None, false)
+            .unwrap_or_default()
             .iter()
             .filter(|o| o.shared_index.as_deref() == Some(s) && o.id != ix.id)
             .map(|o| style::name(&o.id))

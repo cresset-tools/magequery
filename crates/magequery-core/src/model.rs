@@ -1044,6 +1044,24 @@ pub struct MviewSubscription {
     pub source: Source,
 }
 
+/// Live indexer state (`indexer_state` joined with `mview_state`), attached via `--db`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct IndexerLive {
+    /// `valid` (ready) / `invalid` (reindex required) / `working` / `suspended`;
+    /// `None` = no `indexer_state` row (never initialized).
+    pub status: Option<String>,
+    pub updated: Option<String>,
+    /// Update mode: `true` = by schedule (mview enabled), `false` = on save;
+    /// `None` = no `mview_state` row.
+    pub by_schedule: Option<bool>,
+    /// The view's own state: `idle`/`working`/`suspended`.
+    pub view_status: Option<String>,
+    /// Distinct pending entities in the changelog not yet applied (schedule mode;
+    /// `None` = no changelog table or mode is on-save).
+    pub backlog: Option<u64>,
+}
+
 /// An indexer from `indexer.xml`, joined (on `view_id`) with its `mview.xml` view — the
 /// definition plus the tables whose changes feed it. Merged across modules in load order
 /// (a module can add subscriptions to another module's view).
@@ -1063,6 +1081,8 @@ pub struct Indexer {
     pub dependencies: Vec<String>,
     /// Tables the indexer's view subscribes to, from `mview.xml` (empty if no view).
     pub subscriptions: Vec<MviewSubscription>,
+    /// Live status from the DB (`--db` only).
+    pub live: Option<IndexerLive>,
     pub source: Source,
 }
 

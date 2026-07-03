@@ -50,7 +50,7 @@ pub use model::{
     EavSetupRef, EavValueKind, EmailTemplate,
     EmailTemplateOverride, ExtendedType, ExtensionAttribute,
     ExtensionJoin, GqlArg, GqlField, GqlKind, GqlType,
-    Indexer, InstanceInfo, InterceptKind,
+    Indexer, IndexerLive, InstanceInfo, InterceptKind,
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
@@ -711,15 +711,55 @@ impl Magento {
     }
 
     /// Indexers from `indexer.xml`, each joined (on `view_id`) with its `mview.xml` view —
-    /// definition, dependencies, and the tables whose changes feed it. Static. Filtered by
-    /// an id/title substring, sorted by id.
-    pub fn indexers(&self, filter: Option<&str>) -> Vec<Indexer> {
-        self.indexer_index().indexers(filter)
+    /// definition, dependencies, and the tables whose changes feed it. Static by default;
+    /// with `include_db` each gets its live [`IndexerLive`] state (`indexer_state` +
+    /// `mview_state` + changelog backlog; clean [`Error::Db`] when unreachable). Filtered
+    /// by an id/title substring, sorted by id.
+    pub fn indexers(&self, filter: Option<&str>, include_db: bool) -> Result<Vec<Indexer>> {
+        let mut list = self.indexer_index().indexers(filter);
+        if include_db {
+            self.attach_indexer_live(&mut list)?;
+        }
+        Ok(list)
     }
 
-    /// One indexer by exact id, with its full subscription list.
-    pub fn indexer(&self, id: &str) -> Option<Indexer> {
-        self.indexer_index().indexer(id)
+    /// One indexer by exact id, with its full subscription list (and live state with
+    /// `include_db`).
+    pub fn indexer(&self, id: &str, include_db: bool) -> Result<Option<Indexer>> {
+        let Some(ix) = self.indexer_index().indexer(id) else { return Ok(None) };
+        let mut list = vec![ix];
+        if include_db {
+            self.attach_indexer_live(&mut list)?;
+        }
+        Ok(list.pop())
+    }
+
+    #[cfg(feature = "db")]
+    fn attach_indexer_live(&self, list: &mut [Indexer]) -> Result<()> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (states, views) =
+            db::fetch_indexer_states(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        for ix in list {
+            let state = states.iter().find(|s| s.indexer_id == ix.id);
+            let view = ix
+                .view_id
+                .as_deref()
+                .and_then(|v| views.iter().find(|m| m.view_id == v));
+            ix.live = Some(IndexerLive {
+                status: state.map(|s| s.status.clone()),
+                updated: state.and_then(|s| s.updated.clone()),
+                by_schedule: view.map(|v| v.mode == "enabled"),
+                view_status: view.map(|v| v.status.clone()),
+                backlog: view.and_then(|v| v.backlog),
+            });
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "db"))]
+    fn attach_indexer_live(&self, _list: &mut [Indexer]) -> Result<()> {
+        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
     }
 
     /// Setup patches: every `Setup/Patch/Data|Schema` class of the enabled modules (the
