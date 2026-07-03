@@ -56,7 +56,9 @@ pub use model::{
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
-    Preference, PreferenceStep, Plugin, PluginMethod, RedisConfig, RedisInstance, RedisPing,
+    Preference, PreferenceStep, Plugin, PluginMethod, Product, ProductCategory, ProductHit,
+    ProductLegacyStock, ProductRewrite, ProductScopeValue, ProductSourceStock, ProductValue,
+    RedisConfig, RedisInstance, RedisPing,
     Resolution, Route, SchemaDrift, TableColumn, TranslationEntry, TranslationLayer,
     TranslationMatch, Translations, UiComponentContribution, UiComponentOp, UiComponentView,
     UnregisteredModule, WebapiRoute, Widget,
@@ -943,6 +945,47 @@ impl Magento {
         }
 
         Ok(Patches { patches, orphaned_applied })
+    }
+
+    /// One product by exact SKU, as the database stores it. Live DB.
+    #[cfg(feature = "db")]
+    pub fn product_by_sku(&self, sku: &str) -> Result<Option<Product>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_product(conn, &cfg.table_prefix, db::ProductIdent::Sku(sku))
+            .map_err(Error::Db)?;
+        Ok(raw.map(|r| to_product(r, false)))
+    }
+
+    /// One product by entity_id (`matched_by_id` is set on the result).
+    #[cfg(feature = "db")]
+    pub fn product_by_id(&self, id: u32) -> Result<Option<Product>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_product(conn, &cfg.table_prefix, db::ProductIdent::Id(id))
+            .map_err(Error::Db)?;
+        Ok(raw.map(|r| to_product(r, true)))
+    }
+
+    /// SKU-substring search, `limit + 1` fetched to flag truncation.
+    #[cfg(feature = "db")]
+    pub fn products_like(&self, needle: &str, limit: usize) -> Result<(Vec<ProductHit>, bool)> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (rows, truncated) =
+            db::fetch_products_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
+        Ok((
+            rows.into_iter()
+                .map(|(entity_id, sku, type_id, name, status)| ProductHit {
+                    entity_id,
+                    sku,
+                    type_id,
+                    name,
+                    enabled: status.map(|s| s == 1),
+                })
+                .collect(),
+            truncated,
+        ))
     }
 
     /// Admin users from the live `admin_user` table, each joined with its role name;
@@ -2455,6 +2498,131 @@ fn default_connection(cfg: &DbConfig) -> Result<&DbConnection> {
         .find(|c| c.name == "default")
         .or_else(|| cfg.connections.first())
         .ok_or_else(|| Error::Db("no db connection configured in env.php".to_string()))
+}
+
+/// Assemble the public [`Product`] from the raw rows: group values per attribute with
+/// the default scope first, and resolve human labels where the data allows — Yes/No for
+/// booleans, the `Status`/`Visibility` source-model constants (hardcoded faithfully to
+/// core), tax classes from `tax_class`, and admin option labels for table-source
+/// select/multiselect values.
+#[cfg(feature = "db")]
+fn to_product(raw: db::DbProduct, matched_by_id: bool) -> Product {
+    let label_of = |v: &db::DbProductValue, value: &str| -> Option<String> {
+        match (v.attribute.as_str(), v.input.as_deref()) {
+            ("status", _) => match value {
+                "1" => Some("Enabled".to_string()),
+                "2" => Some("Disabled".to_string()),
+                _ => None,
+            },
+            ("visibility", _) => match value {
+                "1" => Some("Not Visible Individually".to_string()),
+                "2" => Some("Catalog".to_string()),
+                "3" => Some("Search".to_string()),
+                "4" => Some("Catalog, Search".to_string()),
+                _ => None,
+            },
+            ("tax_class_id", _) => {
+                value.parse::<u32>().ok().and_then(|id| raw.tax_classes.get(&id).cloned())
+            }
+            (_, Some("boolean")) => match value {
+                "1" => Some("Yes".to_string()),
+                "0" => Some("No".to_string()),
+                _ => None,
+            },
+            (_, Some("select")) => value
+                .parse::<u32>()
+                .ok()
+                .and_then(|o| raw.option_labels.get(&(v.attribute_id, o)).cloned()),
+            (_, Some("multiselect")) => {
+                let labels: Vec<String> = value
+                    .split(',')
+                    .filter_map(|part| {
+                        part.trim()
+                            .parse::<u32>()
+                            .ok()
+                            .and_then(|o| raw.option_labels.get(&(v.attribute_id, o)).cloned())
+                    })
+                    .collect();
+                (!labels.is_empty()).then(|| labels.join(", "))
+            }
+            _ => None,
+        }
+    };
+
+    let mut values: Vec<ProductValue> = Vec::new();
+    for v in &raw.values {
+        // The `config` scope convention: `default` = store_id 0, else `stores/<code>` —
+        // a store view *coded* "default" (nearly every install has one) must not collide
+        // with the default scope.
+        let store = if v.store_id == 0 {
+            "default".to_string()
+        } else {
+            let code = raw
+                .stores
+                .get(&v.store_id)
+                .cloned()
+                .unwrap_or_else(|| format!("{}", v.store_id));
+            format!("stores/{code}")
+        };
+        let value = v.value.clone().unwrap_or_else(|| "NULL".to_string());
+        let scope = ProductScopeValue {
+            store,
+            label: v.value.as_deref().and_then(|val| label_of(v, val)),
+            value,
+        };
+        match values.iter_mut().find(|e| e.attribute == v.attribute) {
+            Some(e) => e.scopes.push(scope),
+            None => values.push(ProductValue {
+                attribute: v.attribute.clone(),
+                backend_type: v.backend_type.clone(),
+                input: v.input.clone(),
+                scopes: vec![scope],
+            }),
+        }
+    }
+    for v in &mut values {
+        v.scopes.sort_by(|a, b| {
+            (a.store != "default").cmp(&(b.store != "default")).then_with(|| a.store.cmp(&b.store))
+        });
+    }
+    // The everyday attributes first, the rest alphabetical.
+    const FIRST: [&str; 6] = ["name", "status", "visibility", "price", "special_price", "url_key"];
+    let rank = |a: &str| FIRST.iter().position(|f| *f == a).unwrap_or(FIRST.len());
+    values.sort_by(|a, b| {
+        rank(&a.attribute).cmp(&rank(&b.attribute)).then_with(|| a.attribute.cmp(&b.attribute))
+    });
+
+    Product {
+        entity_id: raw.entity_id,
+        sku: raw.sku,
+        type_id: raw.type_id,
+        attribute_set: raw.attribute_set,
+        created_at: raw.created_at,
+        updated_at: raw.updated_at,
+        websites: raw.websites,
+        values,
+        stock: raw
+            .stock
+            .into_iter()
+            .map(|(source, quantity, in_stock)| ProductSourceStock { source, quantity, in_stock })
+            .collect(),
+        legacy_stock: raw
+            .legacy_stock
+            .map(|(qty, in_stock, manage_stock)| ProductLegacyStock { qty, in_stock, manage_stock }),
+        categories: raw
+            .categories
+            .into_iter()
+            .map(|(id, breadcrumb)| ProductCategory { id, breadcrumb })
+            .collect(),
+        rewrites: raw
+            .rewrites
+            .into_iter()
+            .map(|(request_path, store, redirect)| ProductRewrite { request_path, store, redirect })
+            .collect(),
+        parents: raw.parents,
+        children: raw.children,
+        matched_by_id,
+    }
 }
 
 /// Map a raw DB attribute row to the public type: decode `is_global`, split `apply_to`,

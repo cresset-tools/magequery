@@ -47,6 +47,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("extension-attributes", "Who bolts what onto which API interface"),
             ("catalog-attributes", "Attribute groups: what loads on quote items, wishlists, …"),
             ("eav", "EAV attributes: type, models, flags, sets, creator patch (--db)"),
+            ("product", "One product as the DB stores it: values per scope, stock, categories"),
         ],
     ),
     (
@@ -252,6 +253,8 @@ enum Command {
     CatalogAttributes(CatalogAttrsArgs),
     /// EAV attributes: type, models, flags, sets, creator patch (live rows via --db).
     Eav(EavArgs),
+    /// One product as the database stores it: EAV values per scope, stock, categories.
+    Product(ProductArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -453,6 +456,21 @@ struct TranslationsArgs {
     /// Also read the `translation` DB table (the layer that beats everything).
     #[arg(long)]
     db: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct ProductArgs {
+    /// A SKU (exact match; a substring lists matches). A numeric value with no matching
+    /// SKU is treated as an entity_id.
+    query: Option<String>,
+    /// Look up by entity_id — unambiguous when SKUs are numeric.
+    #[arg(long)]
+    id: Option<u32>,
+    /// Show one store view's resolved values (store rows fall back to default).
+    #[arg(long)]
+    store: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -857,6 +875,7 @@ fn main() -> Result<()> {
         Command::Translations(args) => translations(&mage, &args, &cli.root),
         Command::UiComponents(args) => ui_components(&mage, &args, &cli.root),
         Command::Eav(args) => eav(&mage, &args, &cli.root),
+        Command::Product(args) => product(&mage, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
         Command::AdminRoles(args) => admin_roles(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
@@ -1683,6 +1702,255 @@ fn layout_op_line(op: &magequery_core::LayoutOp) -> String {
                 .unwrap_or_default();
             format!("{} move {}{to}{}", style::kind("→"), style::name(&op.name), style::path(&line))
         }
+    }
+}
+
+fn product(mage: &Magento, args: &ProductArgs) -> Result<()> {
+    // Lookup rule: --id is unambiguous; a positional is an exact SKU first, then (if
+    // numeric and no SKU matches) an entity_id, then a SKU substring. When an exact SKU
+    // shadows a valid entity_id, say so instead of picking silently.
+    let found: Option<magequery_core::Product> = if let Some(id) = args.id {
+        let p = mage.product_by_id(id)?;
+        if p.is_none() {
+            return Err(anyhow!("no product with entity_id {id}"));
+        }
+        p
+    } else {
+        let Some(q) = &args.query else {
+            return Err(anyhow!("give a SKU (or --id <entity_id>)"));
+        };
+        if let Some(hit) = mage.product_by_sku(q)? {
+            if let Ok(id) = q.parse::<u32>() {
+                if let Some(other) = mage.product_by_id(id)? {
+                    if other.entity_id != hit.entity_id {
+                        eprintln!(
+                            "note: entity_id {id} is a different product (SKU \"{}\") — \
+                             use --id {id}",
+                            other.sku
+                        );
+                    }
+                }
+            }
+            Some(hit)
+        } else if let Ok(id) = q.parse::<u32>() {
+            mage.product_by_id(id)?
+        } else {
+            None
+        }
+    };
+    if let Some(p) = found {
+        return render_product(&p, args);
+    }
+
+    let q = args.query.as_deref().unwrap_or_default();
+    let (hits, truncated) = mage.products_like(q, 50)?;
+    match hits.len() {
+        0 => Err(anyhow!("no product matches `{q}`")),
+        1 => {
+            let p = mage.product_by_sku(&hits[0].sku)?.expect("listed product");
+            render_product(&p, args)
+        }
+        _ => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+                return Ok(());
+            }
+            let ws = hits.iter().map(|h| h.sku.len()).max().unwrap_or(0);
+            let wt = hits.iter().map(|h| h.type_id.len()).max().unwrap_or(0);
+            for h in &hits {
+                let disabled = match h.enabled {
+                    Some(false) => format!("  {}", style::err("[disabled]")),
+                    _ => String::new(),
+                };
+                println!(
+                    "{}{}  {:>6}  {}{}  {}{disabled}",
+                    style::name(&h.sku),
+                    " ".repeat(ws - h.sku.len()),
+                    h.entity_id,
+                    style::kind(&h.type_id),
+                    " ".repeat(wt - h.type_id.len()),
+                    h.name.as_deref().unwrap_or(""),
+                );
+            }
+            if truncated {
+                eprintln!("\n(showing first {} — narrow the SKU filter)", hits.len());
+            }
+            eprintln!("\n{} product(s)", hits.len());
+            Ok(())
+        }
+    }
+}
+
+fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()> {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(p)?);
+        return Ok(());
+    }
+
+    // Only note the id-resolution when it was *inferred* from a numeric positional —
+    // an explicit --id lookup needs no explanation.
+    let matched = if p.matched_by_id && args.id.is_none() {
+        format!("  {}", style::dim("(matched by entity_id — no SKU equals it)"))
+    } else {
+        String::new()
+    };
+    println!(
+        "{}  ({}, entity_id {}, set {}){matched}",
+        style::name(&p.sku),
+        style::kind(&p.type_id),
+        p.entity_id,
+        p.attribute_set
+            .as_deref()
+            .map(|s| style::string_lit(&format!("\"{s}\"")))
+            .unwrap_or_else(|| style::dim("?")),
+    );
+    if !p.websites.is_empty() {
+        let list: Vec<String> = p.websites.iter().map(|w| style::area(w)).collect();
+        info_row("websites", list.join(", "));
+    } else {
+        info_row("websites", style::err("(none — invisible on every storefront)"));
+    }
+    println!();
+
+    // Values: one line per attribute; store overrides indented below the default, or
+    // folded to one resolved line with --store.
+    let wa = p.values.iter().map(|v| v.attribute.len()).max().unwrap_or(0);
+    let wt = p.values.iter().map(|v| v.backend_type.len()).max().unwrap_or(0);
+    for v in &p.values {
+        let pad = " ".repeat(wa - v.attribute.len());
+        let tpad = " ".repeat(wt - v.backend_type.len());
+        let prefix = format!(
+            "{}{pad}  {}{tpad}  ",
+            style::name(&v.attribute),
+            style::dim(&v.backend_type)
+        );
+        if let Some(code) = &args.store {
+            let wanted = format!("stores/{code}");
+            let hit = v
+                .scopes
+                .iter()
+                .find(|s| s.store == wanted)
+                .map(|s| (s, false))
+                .or_else(|| v.scopes.iter().find(|s| s.store == "default").map(|s| (s, true)));
+            match hit {
+                Some((scope, inherited)) => {
+                    let tag = if inherited {
+                        style::dim("(default)")
+                    } else {
+                        style::area(&format!("({})", scope.store))
+                    };
+                    println!("{prefix}{}  {tag}", product_value(v, scope));
+                }
+                None => {
+                    let others: Vec<&str> =
+                        v.scopes.iter().map(|s| s.store.as_str()).collect();
+                    println!(
+                        "{prefix}{}",
+                        style::dim(&format!("(not set here — only: {})", others.join(", ")))
+                    );
+                }
+            }
+            continue;
+        }
+        let mut scopes = v.scopes.iter();
+        let first = scopes.next().expect("at least one scope row");
+        let tag = if first.store == "default" {
+            String::new()
+        } else {
+            format!("  {}", style::area(&format!("({})", first.store)))
+        };
+        println!("{prefix}{}{tag}", product_value(v, first));
+        for s in scopes {
+            println!(
+                "{}  {}  {}",
+                " ".repeat(wa + wt + 2),
+                style::area(&format!("{:>9}", s.store)),
+                product_value(v, s),
+            );
+        }
+    }
+
+    println!();
+    if !p.stock.is_empty() {
+        let msi: Vec<String> = p
+            .stock
+            .iter()
+            .map(|s| {
+                let state = if s.in_stock {
+                    style::ok("in stock")
+                } else {
+                    style::err("out of stock")
+                };
+                format!("{}: {} ({state})", style::area(&s.source), style::number(&s.quantity))
+            })
+            .collect();
+        info_row("stock (MSI)", msi.join(" · "));
+    }
+    if let Some(l) = &p.legacy_stock {
+        let state = if l.in_stock { style::ok("in stock") } else { style::err("out of stock") };
+        let manage = if l.manage_stock { "" } else { "  (stock not managed)" };
+        info_row(
+            "stock (lgcy)",
+            format!("qty {} ({state}){}", style::number(&l.qty), style::dim(manage)),
+        );
+    }
+    if p.stock.is_empty() && p.legacy_stock.is_none() {
+        info_row("stock", style::dim("(no stock rows)"));
+    }
+
+    if !p.categories.is_empty() {
+        let list: Vec<String> = p
+            .categories
+            .iter()
+            .map(|c| format!("{} {}", c.breadcrumb, style::dim(&format!("(id {})", c.id))))
+            .collect();
+        info_row("categories", list.join(", "));
+    }
+    if !p.rewrites.is_empty() {
+        let shown: Vec<String> = p
+            .rewrites
+            .iter()
+            .take(8)
+            .map(|r| {
+                let redirect = if r.redirect != 0 {
+                    style::err(&format!(" ⇒{}", r.redirect))
+                } else {
+                    String::new()
+                };
+                format!("{}{redirect} {}", r.request_path, style::dim(&format!("({})", r.store)))
+            })
+            .collect();
+        let more = if p.rewrites.len() > 8 {
+            style::dim(&format!("  … +{} more", p.rewrites.len() - 8))
+        } else {
+            String::new()
+        };
+        info_row("rewrites", format!("{}: {}{more}", p.rewrites.len(), shown.join(", ")));
+    }
+    if !p.parents.is_empty() {
+        let list: Vec<String> = p.parents.iter().map(|s| style::name(s)).collect();
+        info_row("variant of", list.join(", "));
+    }
+    if p.children > 0 {
+        info_row("variants", format!("{} child product(s)", p.children));
+    }
+    if let (Some(c), Some(u)) = (&p.created_at, &p.updated_at) {
+        info_row("created", style::dim(&format!("{c}  · updated {u}")));
+    }
+    Ok(())
+}
+
+/// One scope value, colored by backend type, with the resolved label when there is one.
+fn product_value(v: &magequery_core::ProductValue, s: &magequery_core::ProductScopeValue) -> String {
+    let raw = match v.backend_type.as_str() {
+        _ if s.value == "NULL" => style::keyword("NULL"),
+        "varchar" | "text" => style::string_lit(&format!("\"{}\"", s.value)),
+        "int" | "decimal" => style::number(&s.value),
+        _ => s.value.clone(),
+    };
+    match &s.label {
+        Some(l) => format!("{raw} {} {}", style::dim("→"), style::target(l)),
+        None => raw,
     }
 }
 

@@ -1424,6 +1424,105 @@ pub struct UiComponentView {
     pub contributions: Vec<UiComponentContribution>,
 }
 
+/// One scope's value of a product attribute: the raw stored value plus the resolved
+/// human label when the attribute's options make that possible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductScopeValue {
+    /// `default` (store_id 0) or the store view code.
+    pub store: String,
+    pub value: String,
+    /// Option/source label (`1` → `Enabled`, option id → admin label).
+    pub label: Option<String>,
+}
+
+/// One product attribute with every scope value the database stores for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductValue {
+    pub attribute: String,
+    /// `varchar`/`int`/`decimal`/`text`/`datetime` — which value table the rows live in.
+    pub backend_type: String,
+    pub input: Option<String>,
+    /// Default-scope row first, then store overrides sorted by store code.
+    pub scopes: Vec<ProductScopeValue>,
+}
+
+/// One MSI source's stock for a product (`inventory_source_item`, keyed by SKU).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductSourceStock {
+    pub source: String,
+    pub quantity: String,
+    pub in_stock: bool,
+}
+
+/// The legacy `cataloginventory_stock_item` row — what pre-MSI extensions still read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductLegacyStock {
+    pub qty: String,
+    pub in_stock: bool,
+    pub manage_stock: bool,
+}
+
+/// A category assignment, with the admin-style breadcrumb (root levels skipped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductCategory {
+    pub id: u32,
+    pub breadcrumb: String,
+}
+
+/// One `url_rewrite` row pointing at the product.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductRewrite {
+    pub request_path: String,
+    pub store: String,
+    /// 0 = internal rewrite, else the HTTP redirect code.
+    pub redirect: u16,
+}
+
+/// One product as the database stores it: identity, per-scope EAV values, stock (MSI +
+/// legacy), categories, rewrites, and configurable links. Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Product {
+    pub entity_id: u32,
+    pub sku: String,
+    pub type_id: String,
+    pub attribute_set: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    /// Website codes the product is assigned to.
+    pub websites: Vec<String>,
+    pub values: Vec<ProductValue>,
+    /// MSI per-source stock (empty when MSI tables are absent).
+    pub stock: Vec<ProductSourceStock>,
+    pub legacy_stock: Option<ProductLegacyStock>,
+    pub categories: Vec<ProductCategory>,
+    pub rewrites: Vec<ProductRewrite>,
+    /// Configurable parents this product is a variant of (SKUs).
+    pub parents: Vec<String>,
+    /// Number of configurable variants under this product.
+    pub children: u32,
+    /// The lookup resolved via entity_id, not SKU (numeric query, no SKU match).
+    pub matched_by_id: bool,
+}
+
+/// One row of a product search (`sku` substring).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductHit {
+    pub entity_id: u32,
+    pub sku: String,
+    pub type_id: String,
+    pub name: Option<String>,
+    /// `status` decoded; `None` = no status row.
+    pub enabled: Option<bool>,
+}
+
 /// One queue's live backlog (MysqlMq driver tables) joined with the static topology.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

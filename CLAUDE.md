@@ -174,6 +174,7 @@ ENTRY POINTS  (how execution starts)
 DATA          (persistence & model)
   schema [<table>] [--db]       indexers [<id>] [--db]
   extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>|<entity>] [--db]
+  product <sku> [--id <n>] [--store <code>]   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1118,6 +1119,40 @@ search "tax class" resolves; `gift` single-match → GiftMessage card; unregiste
 module's attribute honestly absent from both halves — its patch never ran). ~25ms static,
 ~75ms with DB.
 
+### `product` (one product as the DB stores it, live DB, done)
+
+The data-side twin of `eav`: `config`-style scope honesty applied to entity values —
+not "the price is 49.95" but which scope row provides each value and which value table
+it lives in. Pure-live (like `url-rewrites`). `db::fetch_product` gathers everything on
+one connection: the entity row, per-scope EAV values from all five value tables (joined
+with attribute metadata), admin option labels, `tax_class`, websites, MSI
+`inventory_source_item` (keyed by SKU; tolerated absent) + legacy
+`cataloginventory_stock_item`, categories with admin-style breadcrumbs (path components
+past the two roots, names from the category `name` attribute), `url_rewrite` rows, and
+`catalog_product_super_link` both directions. OSS schema (`entity_id`; Commerce `row_id`
+staging out of scope). Label resolution in `to_product`: booleans Yes/No,
+`status`/`visibility` source-model constants (hardcoded faithfully to core), tax classes,
+select/multiselect via the option tables (multiselect splits the id CSV).
+**Scope naming is the `config` convention** — `default` (store_id 0) vs `stores/<code>` —
+because nearly every install has a store view *coded* "default" that must not collide
+with the default scope (the synthetic-DB validation caught exactly this).
+
+**Lookup rule** (SKUs can be numeric, so `<sku|id>` is ambiguous): exact SKU always wins;
+`--id <n>` is the unambiguous entity_id lookup; a numeric positional with no SKU match
+falls back to entity_id (header note "(matched by entity_id — no SKU equals it)"); when
+an exact SKU *shadows* a valid entity_id, a stderr note names the other product and
+points at `--id`. Then SKU substring → list (`sku  id  type  name  [disabled]`, LIMIT+1
+truncation note). `--store <code>` folds each attribute to that store's resolved value —
+`(stores/de)` vs inherited `(default)` tag, honest "(not set here — only: …)" when
+neither row exists. `Magento::product_by_sku/product_by_id/products_like`.
+
+Validated against a **private scratchpad MariaDB** (both dev stores have empty catalogs;
+bougie's mariadbd binaries run a throwaway instance with a synthetic 19-table catalog —
+never touching a shared DB): store overrides per scope, every label kind, NULL value
+rows (rendered `NULL` — a real row stating no value), multi-source MSI incl. out-of-stock
+red, breadcrumbs, a 301 rewrite, variant links, the shadow note, numeric fallback, and
+the `--store` fold all exact. Real-catalog validation joins the live-shop test list.
+
 ### `admin-users` / `admin-roles` (live DB, done)
 
 Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
@@ -1152,7 +1187,9 @@ role, and seeding one into a live DB was deliberately not done.
 
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
-`queue backlog`). New ideas go here.
+`queue backlog`, `product`). New ideas go here.
+- **Entity cards in the `product` mold:** `order <increment_id>`, `customer <email>` —
+  same per-scope/raw-truth pattern.
 
 ## Build order
 
