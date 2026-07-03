@@ -175,6 +175,7 @@ DATA          (persistence & model)
   schema [<table>] [--db]       indexers [<id>] [--db]
   extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>|<entity>] [--db]
   product <sku> [--id <n>] [--store <code>]   price <sku> [--id <n>]   (live DB)
+  category [<id>|<name>] [--store] [--products]   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1193,6 +1194,36 @@ tags (an option with zero selections is red: the bundle can't be bought).
 per-scope special_price incl. the NULL row, percentage + ALL-GROUPS tiers, rule rows,
 index with green reduced finals, the red empty-index case, and a two-child configurable
 whose disabled/unindexed variant visibly explains the parent's range.
+
+### `category` (the tree + one category's visibility diagnosis, live DB, done)
+
+The category entity card plus the tree. No SKU-like business key exists, so the lookup is
+simpler than `product`: numeric = id, else exact `url_key`, else name/url_key substring
+(single match → card). No arg → the **tree** (pre-order DFS built in Rust from
+`parent_id` — string-sorting paths would misorder ids; cycle-guarded), each node with
+default-scope flags (`[disabled]`/`[not in menu]`/`[anchor]`), direct product count, and
+each level-1 root tagged with the store groups using it via
+`store_group.root_category_id` (an unreferenced root gets a yellow note).
+
+The card's two payoffs:
+1. **The visibility diagnosis** — own `is_active` *effective* per scope (store row
+   overrides default; no row = active) plus the same walk over every path ancestor: an
+   inactive ancestor hides the whole subtree, reported per scope ("ancestor Women (20) is
+   inactive on stores/de — the whole subtree is invisible there"); fully-off renders as
+   "all scopes". `CategoryVisibilityIssue` in the model.
+2. **Direct vs indexed counts** — `catalog_category_product` vs the per-store-view
+   dimension tables (`catalog_category_product_index_store<store_id>`, probed tolerantly;
+   the gap = anchor-inherited products; `0 indexed but N assigned` → red "stale index?").
+
+Rest of the card: per-scope values through the shared `ProductValue` machinery (name,
+is_active/include_in_menu/is_anchor with Yes/No labels, url_key/url_path, display_mode,
+sort settings, landing_page raw), admin breadcrumb (path names past the tree root), tree
+line (path · parent · children · position), `root of` store groups, category rewrites,
+and `--products` (opt-in: `sku  pos  name`). `--store` folds like `product`.
+`Magento::category_tree()/categories_like()/category(id, include_products)`. Validated on
+the scratchpad DB: the tree with root tag + flags, the ancestor-disabled warning firing
+through a store-scope override, anchor gap visible (1 assigned · 2 indexed), url_key
+exact lookup, store fold, and the assigned-products list.
 
 ### `admin-users` / `admin-roles` (live DB, done)
 

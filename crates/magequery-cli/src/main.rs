@@ -49,6 +49,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("eav", "EAV attributes: type, models, flags, sets, creator patch (--db)"),
             ("product", "One product as the DB stores it: values per scope, stock, categories"),
             ("price", "Every price of a product: attributes, tiers, rules, the price index"),
+            ("category", "The category tree; one category's visibility & product counts"),
         ],
     ),
     (
@@ -258,6 +259,8 @@ enum Command {
     Product(ProductArgs),
     /// Every price of a product: EAV attributes, tier prices, catalog rules, the index.
     Price(PriceArgs),
+    /// The category tree, or one category: visibility diagnosis, product counts, URLs.
+    Category(CategoryArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -485,6 +488,21 @@ struct PriceArgs {
     /// Look up by entity_id — unambiguous when SKUs are numeric.
     #[arg(long)]
     id: Option<u32>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct CategoryArgs {
+    /// A category id → the card; a name/url_key (or substring) → matching categories.
+    /// Omit for the whole tree.
+    query: Option<String>,
+    /// Show one store view's resolved values.
+    #[arg(long)]
+    store: Option<String>,
+    /// List the directly assigned products.
+    #[arg(long)]
+    products: bool,
     #[arg(long)]
     json: bool,
 }
@@ -891,6 +909,7 @@ fn main() -> Result<()> {
         Command::Eav(args) => eav(&mage, &args, &cli.root),
         Command::Product(args) => product(&mage, &args),
         Command::Price(args) => price(&mage, &args),
+        Command::Category(args) => category(&mage, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
         Command::AdminRoles(args) => admin_roles(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
@@ -1784,6 +1803,250 @@ fn product(mage: &Magento, args: &ProductArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn category(mage: &Magento, args: &CategoryArgs) -> Result<()> {
+    let Some(q) = &args.query else {
+        // The whole tree.
+        let tree = mage.category_tree()?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&tree)?);
+            return Ok(());
+        }
+        if tree.is_empty() {
+            println!("{}", style::dim("(no categories)"));
+            return Ok(());
+        }
+        for n in &tree {
+            let indent = "  ".repeat(n.level.saturating_sub(1) as usize);
+            let mut tags = String::new();
+            if n.active == Some(false) {
+                tags.push_str(&format!("  {}", style::err("[disabled]")));
+            }
+            if n.in_menu == Some(false) {
+                tags.push_str(&format!("  {}", style::dim("[not in menu]")));
+            }
+            if n.anchor == Some(true) {
+                tags.push_str(&format!("  {}", style::dim("[anchor]")));
+            }
+            let root = if n.root_of.is_empty() && n.level == 1 {
+                format!("  {}", style::number("(no store group uses this root)"))
+            } else if n.root_of.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", style::area(&format!("[root of \"{}\"]", n.root_of.join("\", \""))))
+            };
+            println!(
+                "{indent}{}  {}  {}{root}{tags}",
+                style::name(&n.name),
+                style::dim(&format!("(id {})", n.id)),
+                style::dim(&format!("{} products", n.direct_products)),
+            );
+        }
+        eprintln!("\n{} categories", tree.len());
+        return Ok(());
+    };
+
+    // Numeric = id; else exact url_key, else name/url_key substring.
+    if let Ok(id) = q.parse::<u32>() {
+        let Some(cat) = mage.category(id, args.products)? else {
+            return Err(anyhow!("no category with id {id}"));
+        };
+        return render_category(&cat, args);
+    }
+    let hits = mage.categories_like(q)?;
+    let exact: Vec<_> = hits.iter().filter(|h| h.url_key.as_deref() == Some(q)).collect();
+    let pick = match (exact.len(), hits.len()) {
+        (1, _) => Some(exact[0].id),
+        (0, 1) => Some(hits[0].id),
+        (0, 0) => return Err(anyhow!("no category matches `{q}`")),
+        _ => None,
+    };
+    if let Some(id) = pick {
+        let cat = mage.category(id, args.products)?.expect("listed category");
+        return render_category(&cat, args);
+    }
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&hits)?);
+        return Ok(());
+    }
+    let wn = hits.iter().map(|h| h.name.len()).max().unwrap_or(0);
+    for h in &hits {
+        let disabled = if h.active == Some(false) {
+            format!("  {}", style::err("[disabled]"))
+        } else {
+            String::new()
+        };
+        println!(
+            "{}{}  {:>5}  {}{disabled}",
+            style::name(&h.name),
+            " ".repeat(wn - h.name.len()),
+            h.id,
+            style::dim(h.url_key.as_deref().unwrap_or("")),
+        );
+    }
+    eprintln!("\n{} categories", hits.len());
+    Ok(())
+}
+
+fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Result<()> {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(cat)?);
+        return Ok(());
+    }
+    let name = cat
+        .values
+        .iter()
+        .find(|v| v.attribute == "name")
+        .and_then(|v| v.scopes.first())
+        .map(|s| s.value.clone())
+        .unwrap_or_else(|| format!("(category {})", cat.id));
+    let crumb = if cat.breadcrumb.is_empty() {
+        String::new()
+    } else {
+        format!("  {}", style::dim(&format!("{} > {name}", cat.breadcrumb)))
+    };
+    println!("{}  ({}){crumb}", style::name(&name), style::dim(&format!("id {}, level {}", cat.id, cat.level)));
+    let parent = match (&cat.parent_id, &cat.parent_name) {
+        (Some(id), Some(n)) => format!(" · parent {n} ({id})"),
+        _ => String::new(),
+    };
+    info_row(
+        "tree",
+        style::dim(&format!(
+            "path {}{parent} · {} children · position {}",
+            cat.path, cat.children, cat.position
+        )),
+    );
+    for group in &cat.root_of {
+        info_row("root of", style::area(&format!("store group \"{group}\"")));
+    }
+    println!();
+
+    let wa = cat.values.iter().map(|v| v.attribute.len()).max().unwrap_or(0);
+    for v in &cat.values {
+        let pad = " ".repeat(wa - v.attribute.len());
+        let prefix = format!("{}{pad}  ", style::name(&v.attribute));
+        if let Some(code) = &args.store {
+            let wanted = format!("stores/{code}");
+            let hit = v
+                .scopes
+                .iter()
+                .find(|s| s.store == wanted)
+                .map(|s| (s, false))
+                .or_else(|| v.scopes.iter().find(|s| s.store == "default").map(|s| (s, true)));
+            match hit {
+                Some((scope, inherited)) => {
+                    let tag = if inherited {
+                        style::dim("(default)")
+                    } else {
+                        style::area(&format!("({})", scope.store))
+                    };
+                    println!("{prefix}{}  {tag}", product_value(v, scope));
+                }
+                None => {
+                    let others: Vec<&str> = v.scopes.iter().map(|s| s.store.as_str()).collect();
+                    println!(
+                        "{prefix}{}",
+                        style::dim(&format!("(not set here — only: {})", others.join(", ")))
+                    );
+                }
+            }
+            continue;
+        }
+        let mut scopes = v.scopes.iter();
+        let first = scopes.next().expect("at least one scope row");
+        let tag = if first.store == "default" {
+            String::new()
+        } else {
+            format!("  {}", style::area(&format!("({})", first.store)))
+        };
+        println!("{prefix}{}{tag}", product_value(v, first));
+        for s in scopes {
+            println!(
+                "{}  {}  {}",
+                " ".repeat(wa),
+                style::area(&format!("{:>14}", s.store)),
+                product_value(v, s),
+            );
+        }
+    }
+
+    if !cat.visibility.is_empty() {
+        println!();
+        for issue in &cat.visibility {
+            let scopes = issue.scopes.join(", ");
+            let line = match (&issue.ancestor_id, &issue.ancestor_name) {
+                (Some(id), Some(n)) => format!(
+                    "⚠ ancestor {n} ({id}) is inactive on {scopes} — the whole subtree is invisible there"
+                ),
+                _ => format!("⚠ inactive on {scopes} (own setting)"),
+            };
+            println!("{}", style::err(&line));
+        }
+    }
+
+    println!();
+    let indexed = if cat.indexed.is_empty() {
+        style::dim("(no index tables found)")
+    } else {
+        cat.indexed
+            .iter()
+            .map(|i| {
+                let n = format!("{} on {}", i.products, style::area(&i.store));
+                if i.products == 0 && cat.direct_products > 0 {
+                    style::err(&format!("{} — stale index?", n))
+                } else {
+                    n
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    info_row(
+        "products",
+        format!(
+            "{} assigned · indexed: {indexed}  {}",
+            cat.direct_products,
+            style::dim("(index includes anchor-inherited)")
+        ),
+    );
+    if !cat.rewrites.is_empty() {
+        let shown: Vec<String> = cat
+            .rewrites
+            .iter()
+            .take(8)
+            .map(|r| {
+                let redirect = if r.redirect != 0 {
+                    style::err(&format!(" ⇒{}", r.redirect))
+                } else {
+                    String::new()
+                };
+                format!("{}{redirect} {}", r.request_path, style::dim(&format!("({})", r.store)))
+            })
+            .collect();
+        let more = if cat.rewrites.len() > 8 {
+            style::dim(&format!("  … +{} more", cat.rewrites.len() - 8))
+        } else {
+            String::new()
+        };
+        info_row("rewrites", format!("{}: {}{more}", cat.rewrites.len(), shown.join(", ")));
+    }
+
+    if !cat.products.is_empty() {
+        println!("\n{}", style::dim(&format!("assigned products ({}):", cat.products.len())));
+        let ws = cat.products.iter().map(|p| p.sku.len()).max().unwrap_or(0);
+        for p in &cat.products {
+            println!(
+                "  {}{}  {}  {}",
+                style::name(&p.sku),
+                " ".repeat(ws - p.sku.len()),
+                style::dim(&format!("pos {:>3}", p.position)),
+                p.name.as_deref().unwrap_or(""),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// When a numeric query matched a SKU exactly but is *also* a valid entity_id of a

@@ -1424,6 +1424,91 @@ pub struct UiComponentView {
     pub contributions: Vec<UiComponentContribution>,
 }
 
+/// One node of the category tree (pre-order flattened; `level` 1 = a root tree).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CategoryTreeNode {
+    pub id: u32,
+    pub name: String,
+    pub level: u32,
+    /// Directly assigned products (`catalog_category_product`).
+    pub direct_products: u32,
+    /// Default-scope flags; `None` = no row.
+    pub active: Option<bool>,
+    pub in_menu: Option<bool>,
+    pub anchor: Option<bool>,
+    /// Store groups using this category as their root (roots only).
+    pub root_of: Vec<String>,
+}
+
+/// A category search hit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CategoryHit {
+    pub id: u32,
+    pub name: String,
+    pub url_key: Option<String>,
+    pub level: u32,
+    pub active: Option<bool>,
+}
+
+/// One "this category is invisible" finding: the category's own scope settings, or an
+/// ancestor whose inactivity hides the whole subtree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CategoryVisibilityIssue {
+    /// `None` = the category itself.
+    pub ancestor_id: Option<u32>,
+    pub ancestor_name: Option<String>,
+    /// Scopes where it is effectively inactive (`all scopes`, `default`, `stores/<code>`).
+    pub scopes: Vec<String>,
+}
+
+/// The per-store indexed product count (`catalog_category_product_index_store<N>` —
+/// what the storefront lists, including anchor-inherited products).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CategoryIndexCount {
+    pub store: String,
+    pub products: u32,
+}
+
+/// One directly assigned product (`--products`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CategoryProduct {
+    pub sku: String,
+    pub name: Option<String>,
+    pub position: i64,
+}
+
+/// One category as the database stores it. Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Category {
+    pub id: u32,
+    pub path: String,
+    pub level: u32,
+    pub position: u32,
+    pub parent_id: Option<u32>,
+    pub parent_name: Option<String>,
+    pub children: u32,
+    /// Ancestor names past the two roots, joined ` > ` (admin style).
+    pub breadcrumb: String,
+    /// Per-scope attribute values (name, is_active, url_key, display_mode, …).
+    pub values: Vec<ProductValue>,
+    /// Why the category (or its subtree position) is invisible, when it is.
+    pub visibility: Vec<CategoryVisibilityIssue>,
+    pub direct_products: u32,
+    /// Indexed count per store view; empty = no index tables found.
+    pub indexed: Vec<CategoryIndexCount>,
+    pub rewrites: Vec<ProductRewrite>,
+    /// Store groups whose root this category is.
+    pub root_of: Vec<String>,
+    /// Directly assigned products (populated with `--products`).
+    pub products: Vec<CategoryProduct>,
+}
+
 /// One tier-price row (`catalog_product_entity_tier_price`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

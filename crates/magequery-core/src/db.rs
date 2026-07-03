@@ -189,6 +189,322 @@ pub(crate) fn fetch_patch_list(
     Ok(rows.into_iter().map(|r| r.trim_start_matches('\\').to_string()).collect())
 }
 
+/// A helper for category attribute-id subqueries (`entity_type_code = catalog_category`).
+fn cat_attr(p: &str, code: &str) -> String {
+    format!(
+        "(SELECT a.attribute_id FROM {p}eav_attribute a \
+         JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
+         WHERE a.attribute_code = '{code}' AND t.entity_type_code = 'catalog_category')"
+    )
+}
+
+/// One category with its tree fields and default-scope essentials — powers the tree view
+/// and name/url_key search.
+pub(crate) struct DbCategoryNode {
+    pub id: u32,
+    pub parent_id: u32,
+    pub level: u32,
+    pub position: u32,
+    pub name: Option<String>,
+    pub url_key: Option<String>,
+    pub active: Option<bool>,
+    pub in_menu: Option<bool>,
+    pub anchor: Option<bool>,
+    pub direct_products: u32,
+}
+
+/// Every category (excluding the global root, id 1) plus the store-group root map
+/// `(root_category_id, group name)`.
+pub(crate) fn fetch_category_nodes(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<(Vec<DbCategoryNode>, Vec<(u32, String)>), String> {
+    use mysql::prelude::Queryable;
+    use std::collections::HashMap;
+
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    let rows: Vec<(u32, u32, u32, u32)> = c
+        .query(format!(
+            "SELECT entity_id, parent_id, level, position FROM {p}catalog_category_entity \
+             WHERE entity_id <> 1"
+        ))
+        .map_err(clean_err)?;
+
+    let mut strings: HashMap<(u32, &str), String> = HashMap::new();
+    for code in ["name", "url_key"] {
+        let vals: Vec<(u32, Option<String>)> = c
+            .query(format!(
+                "SELECT entity_id, value FROM {p}catalog_category_entity_varchar \
+                 WHERE store_id = 0 AND attribute_id = {}",
+                cat_attr(p, code)
+            ))
+            .map_err(clean_err)?;
+        for (id, v) in vals {
+            if let Some(v) = v {
+                strings.insert((id, code), v);
+            }
+        }
+    }
+    let mut flags: HashMap<(u32, &str), bool> = HashMap::new();
+    for code in ["is_active", "include_in_menu", "is_anchor"] {
+        let vals: Vec<(u32, Option<i64>)> = c
+            .query(format!(
+                "SELECT entity_id, value FROM {p}catalog_category_entity_int \
+                 WHERE store_id = 0 AND attribute_id = {}",
+                cat_attr(p, code)
+            ))
+            .map_err(clean_err)?;
+        for (id, v) in vals {
+            if let Some(v) = v {
+                flags.insert((id, code), v != 0);
+            }
+        }
+    }
+    let counts: HashMap<u32, u32> = c
+        .query(format!(
+            "SELECT category_id, COUNT(*) FROM {p}catalog_category_product GROUP BY category_id"
+        ))
+        .map(|rows: Vec<(u32, u64)>| rows.into_iter().map(|(i, n)| (i, n as u32)).collect())
+        .unwrap_or_default();
+
+    let nodes = rows
+        .into_iter()
+        .map(|(id, parent_id, level, position)| DbCategoryNode {
+            id,
+            parent_id,
+            level,
+            position,
+            name: strings.get(&(id, "name")).cloned(),
+            url_key: strings.get(&(id, "url_key")).cloned(),
+            active: flags.get(&(id, "is_active")).copied(),
+            in_menu: flags.get(&(id, "include_in_menu")).copied(),
+            anchor: flags.get(&(id, "is_anchor")).copied(),
+            direct_products: counts.get(&id).copied().unwrap_or(0),
+        })
+        .collect();
+
+    let roots: Vec<(u32, String)> = c
+        .query(format!(
+            "SELECT root_category_id, name FROM {p}store_group WHERE group_id > 0"
+        ))
+        .map(|rows: Vec<(u32, String)>| rows)
+        .unwrap_or_default();
+
+    Ok((nodes, roots))
+}
+
+/// Everything the card needs for one category, raw.
+pub(crate) struct DbCategoryCard {
+    pub id: u32,
+    pub path: String,
+    pub level: u32,
+    pub position: u32,
+    pub parent_id: u32,
+    pub children: u32,
+    /// Per-scope attribute values (the fixed interesting set).
+    pub values: Vec<DbProductValue>,
+    pub stores: std::collections::HashMap<u32, String>,
+    /// Ancestor path components (id, name) in path order (excluding the global root and
+    /// the category itself).
+    pub ancestors: Vec<(u32, String)>,
+    /// `is_active` rows per entity on the path (incl. self): `(entity_id, store_id, value)`.
+    pub active_rows: Vec<(u32, u32, Option<i64>)>,
+    pub direct_products: u32,
+    /// `(store code, indexed count)` per store view whose index table exists.
+    pub indexed: Vec<(String, u32)>,
+    /// `(request_path, store code, redirect_type)`.
+    pub rewrites: Vec<(String, String, u16)>,
+    pub root_of: Vec<String>,
+    /// `(sku, name, position)`, when requested.
+    pub products: Vec<(String, Option<String>, i64)>,
+}
+
+pub(crate) fn fetch_category_card(
+    conn: &DbConnection,
+    table_prefix: &str,
+    id: u32,
+    include_products: bool,
+) -> Result<Option<DbCategoryCard>, String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    use std::collections::HashMap;
+
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    let row: Option<(u32, String, u32, u32, u32, u32)> = c
+        .exec_first(
+            format!(
+                "SELECT entity_id, path, level, position, parent_id, children_count \
+                 FROM {p}catalog_category_entity WHERE entity_id = :v"
+            ),
+            params! { "v" => id },
+        )
+        .map_err(clean_err)?;
+    let Some((id, path, level, position, parent_id, children)) = row else {
+        return Ok(None);
+    };
+
+    let stores: HashMap<u32, String> =
+        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?
+            .into_iter()
+            .collect();
+
+    const CAT_ATTRS: &str = "'name','is_active','include_in_menu','is_anchor','url_key',\
+'url_path','display_mode','available_sort_by','default_sort_by','landing_page'";
+    let mut values: Vec<DbProductValue> = Vec::new();
+    for table in ["varchar", "int", "text", "decimal", "datetime"] {
+        let rows: Vec<(String, String, Option<String>, Option<String>, u32, u32, Option<String>)> =
+            c.exec(
+                format!(
+                    "SELECT a.attribute_code, a.backend_type, a.frontend_input, \
+                     a.source_model, a.attribute_id, v.store_id, CAST(v.value AS CHAR) \
+                     FROM {p}catalog_category_entity_{table} v \
+                     JOIN {p}eav_attribute a ON a.attribute_id = v.attribute_id \
+                     JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
+                     WHERE v.entity_id = :v AND t.entity_type_code = 'catalog_category' \
+                     AND a.attribute_code IN ({CAT_ATTRS})"
+                ),
+                params! { "v" => id },
+            )
+            .unwrap_or_default();
+        for (attribute, backend_type, input, source_model, attribute_id, store_id, value) in rows {
+            values.push(DbProductValue {
+                attribute,
+                backend_type,
+                input,
+                source_model,
+                attribute_id,
+                store_id,
+                value,
+            });
+        }
+    }
+
+    // Path components: names for the breadcrumb, is_active rows for the visibility walk.
+    let path_ids: Vec<u32> = path.split('/').filter_map(|s| s.parse().ok()).collect();
+    let ids_csv = path_ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    let names: HashMap<u32, String> = c
+        .query(format!(
+            "SELECT entity_id, value FROM {p}catalog_category_entity_varchar \
+             WHERE store_id = 0 AND entity_id IN ({ids_csv}) AND attribute_id = {}",
+            cat_attr(p, "name")
+        ))
+        .map(|rows: Vec<(u32, Option<String>)>| {
+            rows.into_iter().filter_map(|(i, v)| v.map(|v| (i, v))).collect()
+        })
+        .unwrap_or_default();
+    let ancestors: Vec<(u32, String)> = path_ids
+        .iter()
+        .filter(|&&c| c != 1 && c != id)
+        .map(|&c| (c, names.get(&c).cloned().unwrap_or_else(|| format!("(category {c})"))))
+        .collect();
+    let active_rows: Vec<(u32, u32, Option<i64>)> = c
+        .query(format!(
+            "SELECT entity_id, store_id, value FROM {p}catalog_category_entity_int \
+             WHERE entity_id IN ({ids_csv}) AND attribute_id = {}",
+            cat_attr(p, "is_active")
+        ))
+        .map_err(clean_err)?;
+
+    let direct_products: u64 = c
+        .exec_first(
+            format!("SELECT COUNT(*) FROM {p}catalog_category_product WHERE category_id = :v"),
+            params! { "v" => id },
+        )
+        .map_err(clean_err)?
+        .unwrap_or(0);
+
+    // Per-store index counts — the per-store-view dimension tables are created by the
+    // indexer (`..._index_store<store_id>`); probe tolerantly, absent = not indexed.
+    let mut indexed: Vec<(String, u32)> = Vec::new();
+    let mut store_ids: Vec<u32> = stores.keys().copied().filter(|&s| s > 0).collect();
+    store_ids.sort();
+    for store_id in store_ids {
+        let count: Option<u64> = c
+            .exec_first(
+                format!(
+                    "SELECT COUNT(*) FROM {p}catalog_category_product_index_store{store_id} \
+                     WHERE category_id = :v AND store_id = {store_id}"
+                ),
+                params! { "v" => id },
+            )
+            .ok()
+            .flatten();
+        if let Some(n) = count {
+            let code =
+                stores.get(&store_id).cloned().unwrap_or_else(|| format!("store/{store_id}"));
+            indexed.push((code, n as u32));
+        }
+    }
+
+    let rewrites: Vec<(String, String, u16)> = c
+        .exec(
+            format!(
+                "SELECT request_path, store_id, redirect_type FROM {p}url_rewrite \
+                 WHERE entity_type = 'category' AND entity_id = :v \
+                 ORDER BY store_id, request_path"
+            ),
+            params! { "v" => id },
+        )
+        .map_err(clean_err)?
+        .into_iter()
+        .map(|(path, store_id, redirect): (String, u32, u16)| {
+            let store =
+                stores.get(&store_id).cloned().unwrap_or_else(|| format!("store/{store_id}"));
+            (path, store, redirect)
+        })
+        .collect();
+
+    let root_of: Vec<String> = c
+        .exec(
+            format!(
+                "SELECT name FROM {p}store_group WHERE root_category_id = :v AND group_id > 0"
+            ),
+            params! { "v" => id },
+        )
+        .unwrap_or_default();
+
+    let products: Vec<(String, Option<String>, i64)> = if include_products {
+        c.exec(
+            format!(
+                "SELECT e.sku, n.value, cp.position FROM {p}catalog_category_product cp \
+                 JOIN {p}catalog_product_entity e ON e.entity_id = cp.product_id \
+                 LEFT JOIN {p}catalog_product_entity_varchar n ON n.entity_id = e.entity_id \
+                 AND n.store_id = 0 AND n.attribute_id = \
+                 (SELECT a.attribute_id FROM {p}eav_attribute a \
+                  JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
+                  WHERE a.attribute_code = 'name' AND t.entity_type_code = 'catalog_product') \
+                 WHERE cp.category_id = :v ORDER BY cp.position, e.sku"
+            ),
+            params! { "v" => id },
+        )
+        .map_err(clean_err)?
+    } else {
+        Vec::new()
+    };
+
+    Ok(Some(DbCategoryCard {
+        id,
+        path,
+        level,
+        position,
+        parent_id,
+        children,
+        values,
+        stores,
+        ancestors,
+        active_rows,
+        direct_products: direct_products as u32,
+        indexed,
+        rewrites,
+        root_of,
+        products,
+    }))
+}
+
 /// How to look a product up.
 pub(crate) enum ProductIdent<'a> {
     Sku(&'a str),

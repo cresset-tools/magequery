@@ -56,7 +56,9 @@ pub use model::{
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
-    BundleOption, BundleSelection, ChildPrice, IndexedPrice, Preference, PreferenceStep, Plugin,
+    BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount, CategoryProduct,
+    CategoryTreeNode, CategoryVisibilityIssue,
+    ChildPrice, IndexedPrice, Preference, PreferenceStep, Plugin,
     PluginMethod, Product,
     ProductCategory, ProductChild,
     ProductHit, ProductLegacyStock, ProductPrices, ProductRewrite, ProductScopeValue,
@@ -968,6 +970,93 @@ impl Magento {
         let raw = db::fetch_product(conn, &cfg.table_prefix, db::ProductIdent::Id(id))
             .map_err(Error::Db)?;
         Ok(raw.map(|r| to_product(r, true)))
+    }
+
+    /// The category tree, pre-order flattened (`level` 1 = a root tree), each root
+    /// tagged with the store groups using it. Live DB.
+    #[cfg(feature = "db")]
+    pub fn category_tree(&self) -> Result<Vec<CategoryTreeNode>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (nodes, roots) =
+            db::fetch_category_nodes(conn, &cfg.table_prefix).map_err(Error::Db)?;
+
+        let mut by_parent: std::collections::BTreeMap<u32, Vec<&db::DbCategoryNode>> =
+            std::collections::BTreeMap::new();
+        for n in &nodes {
+            by_parent.entry(n.parent_id).or_default().push(n);
+        }
+        for children in by_parent.values_mut() {
+            children.sort_by_key(|n| (n.position, n.id));
+        }
+        let to_node = |n: &db::DbCategoryNode| CategoryTreeNode {
+            id: n.id,
+            name: n.name.clone().unwrap_or_else(|| format!("(category {})", n.id)),
+            level: n.level,
+            direct_products: n.direct_products,
+            active: n.active,
+            in_menu: n.in_menu,
+            anchor: n.anchor,
+            root_of: roots
+                .iter()
+                .filter(|(root, _)| *root == n.id)
+                .map(|(_, g)| g.clone())
+                .collect(),
+        };
+        // Pre-order DFS from the roots (children of the global root, id 1),
+        // cycle-guarded by a visited set.
+        let mut out = Vec::with_capacity(nodes.len());
+        let mut seen = std::collections::HashSet::new();
+        let mut stack: Vec<&db::DbCategoryNode> = by_parent
+            .get(&1)
+            .map(|roots| roots.iter().rev().copied().collect())
+            .unwrap_or_default();
+        while let Some(n) = stack.pop() {
+            if !seen.insert(n.id) {
+                continue;
+            }
+            out.push(to_node(n));
+            if let Some(children) = by_parent.get(&n.id) {
+                stack.extend(children.iter().rev());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Categories whose name or url_key contains `needle` (case-insensitive). Live DB.
+    #[cfg(feature = "db")]
+    pub fn categories_like(&self, needle: &str) -> Result<Vec<CategoryHit>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (nodes, _) = db::fetch_category_nodes(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let n = needle.to_lowercase();
+        let mut hits: Vec<CategoryHit> = nodes
+            .into_iter()
+            .filter(|c| {
+                c.name.as_deref().is_some_and(|x| x.to_lowercase().contains(&n))
+                    || c.url_key.as_deref().is_some_and(|x| x.to_lowercase().contains(&n))
+            })
+            .map(|c| CategoryHit {
+                id: c.id,
+                name: c.name.unwrap_or_else(|| format!("(category {})", c.id)),
+                url_key: c.url_key,
+                level: c.level,
+                active: c.active,
+            })
+            .collect();
+        hits.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        Ok(hits)
+    }
+
+    /// One category by id: per-scope values, the visibility diagnosis (own scopes + the
+    /// ancestor walk), direct vs indexed product counts, rewrites. Live DB.
+    #[cfg(feature = "db")]
+    pub fn category(&self, id: u32, include_products: bool) -> Result<Option<Category>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_category_card(conn, &cfg.table_prefix, id, include_products)
+            .map_err(Error::Db)?;
+        Ok(raw.map(to_category))
     }
 
     /// Light lookup: the SKU of an entity_id (for shadow-note checks). Live DB.
@@ -2531,6 +2620,166 @@ fn default_connection(cfg: &DbConfig) -> Result<&DbConnection> {
         .find(|c| c.name == "default")
         .or_else(|| cfg.connections.first())
         .ok_or_else(|| Error::Db("no db connection configured in env.php".to_string()))
+}
+
+/// Assemble [`Category`]: per-scope values with Yes/No labels for the boolean flags,
+/// the admin-style breadcrumb, and the visibility walk — the category's own effectively
+/// inactive scopes plus every ancestor whose inactivity hides the subtree.
+#[cfg(feature = "db")]
+fn to_category(raw: db::DbCategoryCard) -> Category {
+    let scope_name = |store_id: u32| -> String {
+        if store_id == 0 {
+            "default".to_string()
+        } else {
+            let code = raw
+                .stores
+                .get(&store_id)
+                .cloned()
+                .unwrap_or_else(|| format!("{store_id}"));
+            format!("stores/{code}")
+        }
+    };
+
+    let mut values: Vec<ProductValue> = Vec::new();
+    for v in &raw.values {
+        let label = match (v.attribute.as_str(), v.value.as_deref()) {
+            ("is_active" | "include_in_menu" | "is_anchor", Some("1")) => {
+                Some("Yes".to_string())
+            }
+            ("is_active" | "include_in_menu" | "is_anchor", Some("0")) => Some("No".to_string()),
+            _ => None,
+        };
+        let scope = ProductScopeValue {
+            store: scope_name(v.store_id),
+            label,
+            value: v.value.clone().unwrap_or_else(|| "NULL".to_string()),
+        };
+        match values.iter_mut().find(|e| e.attribute == v.attribute) {
+            Some(e) => e.scopes.push(scope),
+            None => values.push(ProductValue {
+                attribute: v.attribute.clone(),
+                backend_type: v.backend_type.clone(),
+                input: v.input.clone(),
+                scopes: vec![scope],
+            }),
+        }
+    }
+    for v in &mut values {
+        v.scopes.sort_by(|a, b| {
+            (a.store != "default").cmp(&(b.store != "default")).then_with(|| a.store.cmp(&b.store))
+        });
+    }
+    const ORDER: [&str; 10] = [
+        "name",
+        "is_active",
+        "include_in_menu",
+        "is_anchor",
+        "url_key",
+        "url_path",
+        "display_mode",
+        "available_sort_by",
+        "default_sort_by",
+        "landing_page",
+    ];
+    let rank = |a: &str| ORDER.iter().position(|f| *f == a).unwrap_or(ORDER.len());
+    values.sort_by(|a, b| {
+        rank(&a.attribute).cmp(&rank(&b.attribute)).then_with(|| a.attribute.cmp(&b.attribute))
+    });
+
+    // Effective inactivity per entity: the default row unless a store row overrides it.
+    // No is_active row at all = active (the attribute default).
+    let store_ids: Vec<u32> = {
+        let mut v: Vec<u32> = raw.stores.keys().copied().filter(|&s| s > 0).collect();
+        v.sort();
+        v
+    };
+    let inactive_scopes = |entity: u32| -> Vec<String> {
+        let row = |store: u32| {
+            raw.active_rows
+                .iter()
+                .find(|(e, s, _)| *e == entity && *s == store)
+                .and_then(|(_, _, v)| *v)
+        };
+        match row(0) {
+            Some(0) => {
+                let enabling: Vec<u32> =
+                    store_ids.iter().copied().filter(|&s| row(s) == Some(1)).collect();
+                if enabling.is_empty() {
+                    vec!["all scopes".to_string()]
+                } else {
+                    let mut out = vec!["default".to_string()];
+                    out.extend(
+                        store_ids
+                            .iter()
+                            .copied()
+                            .filter(|&s| row(s) != Some(1))
+                            .map(scope_name),
+                    );
+                    out
+                }
+            }
+            _ => store_ids.iter().copied().filter(|&s| row(s) == Some(0)).map(scope_name).collect(),
+        }
+    };
+    let mut visibility: Vec<CategoryVisibilityIssue> = Vec::new();
+    let own = inactive_scopes(raw.id);
+    if !own.is_empty() {
+        visibility.push(CategoryVisibilityIssue {
+            ancestor_id: None,
+            ancestor_name: None,
+            scopes: own,
+        });
+    }
+    for (aid, aname) in &raw.ancestors {
+        let scopes = inactive_scopes(*aid);
+        if !scopes.is_empty() {
+            visibility.push(CategoryVisibilityIssue {
+                ancestor_id: Some(*aid),
+                ancestor_name: Some(aname.clone()),
+                scopes,
+            });
+        }
+    }
+
+    // Admin-style breadcrumb: ancestors past the tree root.
+    let breadcrumb = raw
+        .ancestors
+        .iter()
+        .skip(1)
+        .map(|(_, n)| n.as_str())
+        .collect::<Vec<_>>()
+        .join(" > ");
+    let parent_name = raw.ancestors.last().map(|(_, n)| n.clone());
+
+    Category {
+        id: raw.id,
+        path: raw.path,
+        level: raw.level,
+        position: raw.position,
+        parent_id: (raw.parent_id > 0).then_some(raw.parent_id),
+        parent_name,
+        children: raw.children,
+        breadcrumb,
+        values,
+        visibility,
+        direct_products: raw.direct_products,
+        indexed: raw
+            .indexed
+            .into_iter()
+            .map(|(store, products)| CategoryIndexCount { store, products })
+            .collect(),
+        rewrites: raw
+            .rewrites
+            .into_iter()
+            .map(|(request_path, store, redirect)| ProductRewrite { request_path, store, redirect })
+            .collect(),
+        root_of: raw.root_of,
+        products: raw
+            .products
+            .into_iter()
+            .map(|(sku, name, position)| CategoryProduct { sku, name, position })
+            .collect(),
+    }
 }
 
 /// Assemble [`ProductPrices`]: the EAV price attributes reuse the product scope
