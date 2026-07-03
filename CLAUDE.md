@@ -146,7 +146,7 @@ Foo`; grep-ability and muscle memory are the whole UX. Grouping is a *help-rende
 (the `Command` enum order + a hand-rendered root help screen), **not** a typing one.
 
 **Nesting earns its keep in exactly one case: a noun with multiple verbs** — `db info`/`db
-ping`, `redis info`/`redis ping`, `queue info`/`queue topology` (bare `queue` = `queue info`,
+ping`, `redis info`/`redis ping`, `queue info`/`topology`/`backlog` (bare `queue` = `queue info`,
 kept for back-compat via an optional clap subcommand). Info-only nouns
 (`session`/`cache`/`lock`) stay flat.
 
@@ -186,7 +186,7 @@ FRONTEND      (presentation)
 
 RUNTIME       (env.php config & live connections)
   db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
-  queue [info]|topology [<topic>]      session   cache   lock   (info-only)
+  queue [info]|topology [<topic>]|backlog      session   cache   lock   (info-only)
 
 PROJECT       (the codebase itself)
   info      mode   maintenance   base-url [--secure]   admin-url   (single-fact views of info)
@@ -706,6 +706,27 @@ consumers, red flag when **no consumer reads a queue** or no route exists). Vali
 mageos-lite: sales_rule.codegenerator routes to queue `codegenerator` via both the direct
 publisher and its binding on exchange magento (amqp), consumer joined; ~3ms.
 
+### `queue backlog` (live message counts, done)
+
+The runtime half: *is anything stuck in the queues.* `MqIndex::queues()` = every queue
+the static config knows (consumer `queue=`, publisher direct `queue=`, binding
+destinations) with its consumers; `Magento::queue_backlog()` (db feature) joins that with
+the **MysqlMq driver tables** — `queue` (names; populated at setup:upgrade) +
+`queue_message_status` counts grouped by status (constants verified from
+`MysqlMq\Model\QueueManagement`: 2 new, 3 in-progress, 4 complete, 5 retry, 6 error, 7
+to-be-deleted; 4+7 collapse to `done` = cleanup pending), plus the oldest waiting
+(new/retry) message's age on the DB clock. Two honesty cases: a static queue absent from
+the `queue` table → `in_db: false` ("amqp-only, or setup:upgrade pending" — the broker's
+backlog isn't inspectable without an AMQP client, which we deliberately don't ship); a DB
+queue no static config references → `orphaned` (removed module's leftover). CLI `magequery
+queue backlog`: `queue  N waiting  N in progress  N retry  N error  [N done]  [oldest
+waiting 3h]  → consumers` — zeros dim so nonzero pops, errors red, oldest-waiting red past
+1h, red "(no consumer reads this queue)" only when messages are actually waiting; summary
+`N queue(s) · M waiting · K error(s)`. Validated on mageos-lite (10 queues) and
+commerce-store (23, incl. MSI/media queues), consumers joined, all zero-backlog (idle dev
+stores — no publishes happen); down-DB errors cleanly. Real message rows await a live
+shop.
+
 ### `info` + fact commands (the everyday facts, done)
 
 `magequery info` — one screen for "what am I looking at": Magento **version** (from the
@@ -1123,11 +1144,11 @@ down-DB exits 1 cleanly). The granular-role/deny/stale-rule branches are
 straightforward format arms verified by inspection — neither test store has a granular
 role, and seeding one into a live DB was deliberately not done.
 
-## Future query tools (backlog — not yet built)
+## Future query tools (backlog — empty)
 
-Ideas surfaced while scoping breadth, in rough priority. All but the DB ones are
-static breadth-projections in the same `read_parse` + merge shape.
-- **DB-backed (phase-2 style, opt-in like `url-rewrites`):** queue backlog.
+Everything scoped during breadth has been built — the whole command surface above plus
+the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
+`queue backlog`). New ideas go here.
 
 ## Build order
 

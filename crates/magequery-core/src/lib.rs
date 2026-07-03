@@ -64,7 +64,7 @@ pub use model::{
 };
 pub use model::{
     CacheConfig, CacheFrontend, CacheType, InjectionSite, LockConfig, MqConsumer, MqHandler,
-    MqPublisher, MqRoute, MqTopic, MqTopicRoute, MqVia, QueueConfig, QueueConnection,
+    MqPublisher, MqRoute, MqTopic, MqTopicRoute, MqVia, QueueBacklog, QueueConfig, QueueConnection,
     SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses, Whatis,
 };
 pub use model::{CatalogAttribute, CatalogAttributeGroup, ClassRef};
@@ -2002,6 +2002,54 @@ impl Magento {
     /// connection is reported, not matched.)
     pub fn queue_topic(&self, name: &str) -> Option<MqTopicRoute> {
         self.mq_index().topic_route(name)
+    }
+
+    /// Live message backlog per queue: every queue the static config knows (with its
+    /// consumers) joined with the MysqlMq driver's `queue`/`queue_message_status` counts.
+    /// A static queue absent from the `queue` table is reported with `in_db: false`
+    /// (amqp-only or setup:upgrade pending — its broker backlog isn't inspectable here);
+    /// a DB queue no static config references is `orphaned` (removed module's leftover).
+    /// Sorted by queue name. Clean [`Error::Db`] when the database is unreachable.
+    #[cfg(feature = "db")]
+    pub fn queue_backlog(&self) -> Result<Vec<QueueBacklog>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let counts = db::fetch_queue_backlog(conn, &cfg.table_prefix).map_err(Error::Db)?;
+
+        let mut out: Vec<QueueBacklog> = Vec::new();
+        for (queue, consumers) in self.mq_index().queues() {
+            let c = counts.iter().find(|c| c.queue == queue);
+            out.push(QueueBacklog {
+                queue,
+                consumers,
+                in_db: c.is_some(),
+                orphaned: false,
+                new: c.map_or(0, |c| c.new),
+                in_progress: c.map_or(0, |c| c.in_progress),
+                retry: c.map_or(0, |c| c.retry),
+                error: c.map_or(0, |c| c.error),
+                done: c.map_or(0, |c| c.done),
+                oldest_waiting_secs: c.and_then(|c| c.oldest_waiting_secs),
+            });
+        }
+        for c in &counts {
+            if !out.iter().any(|q| q.queue == c.queue) {
+                out.push(QueueBacklog {
+                    queue: c.queue.clone(),
+                    consumers: Vec::new(),
+                    in_db: true,
+                    orphaned: true,
+                    new: c.new,
+                    in_progress: c.in_progress,
+                    retry: c.retry,
+                    error: c.error,
+                    done: c.done,
+                    oldest_waiting_secs: c.oldest_waiting_secs,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.queue.cmp(&b.queue));
+        Ok(out)
     }
 
     /// The database configuration from `app/etc/env.php` (`db` section).

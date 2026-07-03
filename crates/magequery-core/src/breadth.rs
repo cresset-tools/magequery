@@ -1511,6 +1511,32 @@ impl MqIndex {
         v
     }
 
+    /// Every queue the static config knows — consumer `queue=`, publisher direct
+    /// `queue=`, binding destinations — with the consumers reading each. Sorted by name.
+    pub fn queues(&self) -> Vec<(String, Vec<String>)> {
+        let mut map: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        for c in self.consumers.values() {
+            map.entry(c.queue.clone()).or_default().push(c.name.clone());
+        }
+        for p in self.publishers.values() {
+            if let Some(q) = &p.queue {
+                map.entry(q.clone()).or_default();
+            }
+        }
+        for ex in self.exchanges.values() {
+            for b in ex.bindings.values() {
+                map.entry(b.destination.clone()).or_default();
+            }
+        }
+        map.into_iter()
+            .map(|(q, mut cs)| {
+                cs.sort();
+                (q, cs)
+            })
+            .collect()
+    }
+
     /// The publisher for `topic`, flattened to its enabled `<connection>` (Magento allows
     /// exactly one enabled connection per publisher).
     fn publisher(&self, topic: &str) -> Option<MqPublisher> {

@@ -1424,6 +1424,31 @@ pub struct UiComponentView {
     pub contributions: Vec<UiComponentContribution>,
 }
 
+/// One queue's live backlog (MysqlMq driver tables) joined with the static topology.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct QueueBacklog {
+    pub queue: String,
+    /// Consumers reading it (`queue_consumer.xml`).
+    pub consumers: Vec<String>,
+    /// The queue exists in the db driver's `queue` table. `false` = the static config
+    /// names it but the db driver doesn't know it (amqp-only, or setup:upgrade pending) —
+    /// its broker-side backlog isn't inspectable from here.
+    pub in_db: bool,
+    /// In the DB but no static config references it (a removed module's leftover).
+    pub orphaned: bool,
+    /// Waiting messages (status `new`).
+    pub new: u32,
+    pub in_progress: u32,
+    /// Failed, will be retried.
+    pub retry: u32,
+    pub error: u32,
+    /// Complete/to-be-deleted rows awaiting cleanup.
+    pub done: u32,
+    /// Age of the oldest waiting (new/retry) message, DB-server clock.
+    pub oldest_waiting_secs: Option<i64>,
+}
+
 /// One admin user (`admin_user` joined with its `authorization_role` group). Live DB.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

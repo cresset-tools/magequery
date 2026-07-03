@@ -78,7 +78,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("session", "Session storage config from env.php"),
             ("cache", "Cache backends and type flags from env.php"),
             ("lock", "Locking backend from env.php"),
-            ("queue", "Message queues: connections (env.php); topology (topics → consumers)"),
+            ("queue", "Message queues: connections (env.php); topology; live backlog"),
             ("url-rewrites", "URL rewrites from the DB (request → target)"),
         ],
     ),
@@ -649,6 +649,11 @@ enum QueueCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Live message backlog per queue from the MysqlMq driver tables (db connection).
+    Backlog {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(clap::Args)]
@@ -868,6 +873,7 @@ fn main() -> Result<()> {
             Some(QueueCommand::Topology { topic, json }) => {
                 queue_topology(&mage, topic.as_deref(), json, &cli.root)
             }
+            Some(QueueCommand::Backlog { json }) => queue_backlog(&mage, json),
             None => queue_info(&mage, args.json),
         },
         Command::SystemConfig(args) => system_config(&mage, &args, &cli.root),
@@ -1192,6 +1198,65 @@ fn queue_info(mage: &Magento, json: bool) -> Result<()> {
     if let Some(w) = &cfg.consumers_wait_for_messages {
         println!("\n{} {}", style::dim("consumers_wait_for_messages"), style::number(w));
     }
+    Ok(())
+}
+
+fn queue_backlog(mage: &Magento, json: bool) -> Result<()> {
+    let rows = mage.queue_backlog()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("{}", style::dim("(no queues — neither static config nor the db driver knows any)"));
+        return Ok(());
+    }
+
+    let w = rows.iter().map(|r| r.queue.len()).max().unwrap_or(0);
+    // Zero counts render dim so nonzero backlog pops.
+    let count = |n: u32, label: &str, color: fn(&str) -> String| {
+        let text = format!("{n} {label}");
+        if n == 0 { style::dim(&text) } else { color(&text) }
+    };
+    for r in &rows {
+        let pad = " ".repeat(w - r.queue.len());
+        if !r.in_db {
+            println!(
+                "{}{pad}  {}",
+                style::name(&r.queue),
+                style::dim("(not in the db driver's queue table — amqp-only, or setup:upgrade pending)"),
+            );
+            continue;
+        }
+        let mut cols = vec![
+            count(r.new, "waiting", |s| style::number(s)),
+            count(r.in_progress, "in progress", |s| s.to_string()),
+            count(r.retry, "retry", |s| style::number(s)),
+            count(r.error, "error", |s| style::err(s)),
+        ];
+        if r.done > 0 {
+            cols.push(style::dim(&format!("{} done (cleanup pending)", r.done)));
+        }
+        if let Some(secs) = r.oldest_waiting_secs {
+            let age = format!("oldest waiting {}", humanize_secs(secs));
+            cols.push(if secs > 3600 { style::err(&age) } else { style::dim(&age) });
+        }
+        let consumers = if r.consumers.is_empty() {
+            if r.orphaned {
+                style::number("(no static config references this queue — removed module?)")
+            } else if r.new + r.retry > 0 {
+                style::err("(no consumer reads this queue)")
+            } else {
+                style::dim("(no consumer)")
+            }
+        } else {
+            format!("{} {}", style::dim("→"), r.consumers.join(", "))
+        };
+        println!("{}{pad}  {}  {consumers}", style::name(&r.queue), cols.join("  "));
+    }
+    let waiting: u32 = rows.iter().map(|r| r.new + r.retry).sum();
+    let errors: u32 = rows.iter().map(|r| r.error).sum();
+    eprintln!("\n{} queue(s) · {waiting} waiting · {errors} error(s)", rows.len());
     Ok(())
 }
 

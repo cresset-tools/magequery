@@ -189,6 +189,86 @@ pub(crate) fn fetch_patch_list(
     Ok(rows.into_iter().map(|r| r.trim_start_matches('\\').to_string()).collect())
 }
 
+/// One queue's message counts from the MysqlMq driver tables.
+pub(crate) struct DbQueueCounts {
+    pub queue: String,
+    pub new: u32,
+    pub in_progress: u32,
+    pub retry: u32,
+    pub error: u32,
+    pub done: u32,
+    pub oldest_waiting_secs: Option<i64>,
+}
+
+/// Backlog per db-connection queue: `queue_message_status` counts grouped by status
+/// (constants from `MysqlMq\Model\QueueManagement`: 2 new, 3 in progress, 4 complete,
+/// 5 retry, 6 error, 7 to-be-deleted) plus the oldest waiting (new/retry) message's age
+/// on the DB server's clock. Queues with no messages still appear (from `queue`).
+pub(crate) fn fetch_queue_backlog(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<Vec<DbQueueCounts>, String> {
+    use mysql::prelude::Queryable;
+    use std::collections::HashMap;
+
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    let names: Vec<String> =
+        c.query(format!("SELECT name FROM {p}queue")).map_err(clean_err)?;
+    let mut by_name: HashMap<String, DbQueueCounts> = names
+        .into_iter()
+        .map(|queue| {
+            (
+                queue.clone(),
+                DbQueueCounts {
+                    queue,
+                    new: 0,
+                    in_progress: 0,
+                    retry: 0,
+                    error: 0,
+                    done: 0,
+                    oldest_waiting_secs: None,
+                },
+            )
+        })
+        .collect();
+
+    let counts: Vec<(String, u8, u64)> = c
+        .query(format!(
+            "SELECT q.name, s.status, COUNT(*) FROM {p}queue_message_status s \
+             JOIN {p}queue q ON q.id = s.queue_id GROUP BY q.name, s.status"
+        ))
+        .map_err(clean_err)?;
+    for (name, status, n) in counts {
+        let Some(e) = by_name.get_mut(&name) else { continue };
+        let n = n as u32;
+        match status {
+            2 => e.new = n,
+            3 => e.in_progress = n,
+            5 => e.retry = n,
+            6 => e.error = n,
+            4 | 7 => e.done += n,
+            _ => {}
+        }
+    }
+
+    let oldest: Vec<(String, Option<i64>)> = c
+        .query(format!(
+            "SELECT q.name, TIMESTAMPDIFF(SECOND, MIN(s.updated_at), NOW()) \
+             FROM {p}queue_message_status s JOIN {p}queue q ON q.id = s.queue_id \
+             WHERE s.status IN (2, 5) GROUP BY q.name"
+        ))
+        .map_err(clean_err)?;
+    for (name, secs) in oldest {
+        if let Some(e) = by_name.get_mut(&name) {
+            e.oldest_waiting_secs = secs;
+        }
+    }
+
+    Ok(by_name.into_values().collect())
+}
+
 /// One job's aggregated `cron_schedule` stats.
 pub(crate) struct DbCronStat {
     pub job_code: String,
