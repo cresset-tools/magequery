@@ -201,6 +201,17 @@ PROJECT       (the codebase itself)
   deps <module>             doctor [--source]          whatis <class>   patches [--db|--pending]
 ```
 
+**Tooling meta-commands** (`completions <shell>`, `man`) sit *outside* the seven groups —
+they describe the CLI itself, not a Magento entity, so they'd violate the "noun = Magento
+entity" grammar. Both are `#[command(hide = true)]` (absent from the grouped help screen but
+still `--help`-discoverable and tab-completable) and are dispatched **before**
+`Magento::open` so they work anywhere, no checkout needed. `completions` uses `clap_complete`
+(bash/zsh/fish/elvish/powershell → stdout), `man` uses `clap_mangen` (roff → stdout); a
+release step generates these and cargo-dist `include`s them in the archives. `main` also
+restores the default SIGPIPE handler on Unix (`libc::signal(SIGPIPE, SIG_DFL)`) so any command
+piped into `head`/`less` and quit early terminates cleanly instead of panicking on a broken
+pipe (Rust ignores SIGPIPE by default, which `println!`/clap_complete unwrap into a panic).
+
 ### Cross-cutting flag vocabulary (a flag means the same thing everywhere)
 
 - **`--area <name>` / `--all-areas`** — only on area-aware commands (`di`, `preference`,

@@ -3,7 +3,7 @@ mod style;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use magequery_core::model::ModuleSource;
 use magequery_core::{
     AclResource, ArgValue, Area, ChainStep, ClassName, ConfigSet, ConfigSourceKind, ConfigValue,
@@ -371,6 +371,21 @@ enum Command {
     Whatis(WhatisArgs),
     /// Setup patches on disk; applied/pending with --db.
     Patches(PatchesArgs),
+
+    // Tooling meta-commands: about the CLI itself, not a Magento entity, so they sit
+    // outside the seven locked groups and are hidden from the grouped help screen.
+    /// Print a shell completion script to stdout (bash|zsh|fish|elvish|powershell).
+    #[command(hide = true)]
+    Completions(CompletionsArgs),
+    /// Print a roff man page to stdout.
+    #[command(hide = true)]
+    Man,
+}
+
+#[derive(clap::Args)]
+struct CompletionsArgs {
+    /// The shell to generate for.
+    shell: clap_complete::Shell,
 }
 
 #[derive(clap::Args)]
@@ -1028,6 +1043,14 @@ enum SourceFilter {
 }
 
 fn main() -> Result<()> {
+    // Restore the default SIGPIPE disposition: piping into `head`/`less` and quitting early
+    // should terminate us cleanly like any Unix tool. Rust otherwise ignores SIGPIPE, turning
+    // a closed reader into a write error that `println!`/clap_complete unwrap into a panic.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     // Take over the root `--help` / no-args screen (grouped + colored, via `print_help`)
     // before clap can render its flat one; every `magequery <command> --help` still uses
     // clap's native per-command help.
@@ -1040,6 +1063,23 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     style::init(cli.color);
+
+    // Tooling meta-commands describe the CLI itself — they must work anywhere, so handle
+    // them before opening a Magento root (which would otherwise fail outside a checkout).
+    match &cli.command {
+        Command::Completions(args) => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_string();
+            clap_complete::generate(args.shell, &mut cmd, name, &mut std::io::stdout());
+            return Ok(());
+        }
+        Command::Man => {
+            clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout())?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let mage = Magento::open(&cli.root)
         .with_context(|| format!("opening Magento installation at {}", cli.root.display()))?;
 
@@ -1123,6 +1163,8 @@ fn main() -> Result<()> {
         Command::UrlRewrites(args) => url_rewrites(&mage, &args),
         Command::Stores(args) => stores(&mage, &args),
         Command::Config(args) => config(&mage, &args, &cli.root),
+        // Handled before Magento::open (they need no root).
+        Command::Completions(_) | Command::Man => unreachable!(),
     };
 
     // Diagnostics are non-fatal; surface them on stderr (so stdout stays pipeable) *after*
