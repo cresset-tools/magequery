@@ -503,6 +503,10 @@ struct CategoryArgs {
     /// List the directly assigned products.
     #[arg(long)]
     products: bool,
+    /// List the *indexed* products — what the storefront shows, anchor-inherited
+    /// included (reads the --store view's index; default: the first store view).
+    #[arg(long)]
+    indexed: bool,
     #[arg(long)]
     json: bool,
 }
@@ -1847,9 +1851,10 @@ fn category(mage: &Magento, args: &CategoryArgs) -> Result<()> {
         return Ok(());
     };
 
+    let indexed_store = args.indexed.then(|| args.store.as_deref());
     // Numeric = id; else exact url_key, else name/url_key substring.
     if let Ok(id) = q.parse::<u32>() {
-        let Some(cat) = mage.category(id, args.products)? else {
+        let Some(cat) = mage.category(id, args.products, indexed_store)? else {
             return Err(anyhow!("no category with id {id}"));
         };
         return render_category(&cat, args);
@@ -1863,7 +1868,7 @@ fn category(mage: &Magento, args: &CategoryArgs) -> Result<()> {
         _ => None,
     };
     if let Some(id) = pick {
-        let cat = mage.category(id, args.products)?.expect("listed category");
+        let cat = mage.category(id, args.products, indexed_store)?.expect("listed category");
         return render_category(&cat, args);
     }
     if args.json {
@@ -2045,6 +2050,50 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
                 style::dim(&format!("pos {:>3}", p.position)),
                 p.name.as_deref().unwrap_or(""),
             );
+        }
+    }
+    if let Some(store) = &cat.indexed_store {
+        match &cat.indexed_products {
+            None => println!(
+                "\n{}",
+                style::err(&format!(
+                    "no index table for store `{store}` — the catalog:category_product \
+                     indexer has never run for it"
+                ))
+            ),
+            Some(rows) => {
+                println!(
+                    "\n{}",
+                    style::dim(&format!(
+                        "indexed products ({}, store {}):",
+                        rows.len(),
+                        style::area(store)
+                    ))
+                );
+                let ws = rows.iter().map(|p| p.sku.len()).max().unwrap_or(0);
+                for p in rows {
+                    let mut tags = String::new();
+                    if p.via_anchor {
+                        tags.push_str(&format!("  {}", style::dim("(via anchor)")));
+                    }
+                    match p.visibility {
+                        Some(3) => tags
+                            .push_str(&format!("  {}", style::number("[search only]"))),
+                        Some(1) => {
+                            tags.push_str(&format!("  {}", style::err("[not visible]")))
+                        }
+                        _ => {}
+                    }
+                    println!(
+                        "  {}{}  {:>6}  {}  {}{tags}",
+                        style::name(&p.sku),
+                        " ".repeat(ws - p.sku.len()),
+                        p.entity_id,
+                        style::dim(&format!("pos {:>3}", p.position)),
+                        p.name.as_deref().unwrap_or(""),
+                    );
+                }
+            }
         }
     }
     Ok(())

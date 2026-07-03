@@ -1219,7 +1219,12 @@ Rest of the card: per-scope values through the shared `ProductValue` machinery (
 is_active/include_in_menu/is_anchor with Yes/No labels, url_key/url_path, display_mode,
 sort settings, landing_page raw), admin breadcrumb (path names past the tree root), tree
 line (path · parent · children · position), `root of` store groups, category rewrites,
-and `--products` (opt-in: `sku  pos  name`). `--store` folds like `product`.
+and `--products` (opt-in: `sku  id  pos  name`) plus `--indexed` — the per-store
+*index* list (what the storefront shows): each row tagged `(via anchor)` when
+`is_parent = 0` (inherited, not assigned here) and `[search only]`/`[not visible]` from
+the row's visibility; the `--store` view's table is read (default: first store view),
+a missing table renders red ("indexer never ran"), an unknown code errors. `--store`
+folds values like `product`.
 `Magento::category_tree()/categories_like()/category(id, include_products)`. Validated on
 the scratchpad DB: the tree with root tag + flags, the ancestor-disabled warning firing
 through a store-scope override, anchor gap visible (1 assigned · 2 indexed), url_key

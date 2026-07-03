@@ -1483,6 +1483,22 @@ pub struct CategoryProduct {
     pub position: i64,
 }
 
+/// One product from the category's per-store index (`--indexed`) — what the storefront
+/// actually lists, including anchor-inherited products.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CategoryIndexedProduct {
+    pub entity_id: u32,
+    pub sku: String,
+    pub name: Option<String>,
+    pub position: i64,
+    /// Inherited from a subcategory via anchoring (`is_parent = 0`), not assigned here.
+    pub via_anchor: bool,
+    /// The product's effective visibility (3 = search only — in the index but not on
+    /// the category page; 1 = not visible individually).
+    pub visibility: Option<i64>,
+}
+
 /// One category as the database stores it. Live DB.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
@@ -1508,6 +1524,11 @@ pub struct Category {
     pub root_of: Vec<String>,
     /// Directly assigned products (populated with `--products`).
     pub products: Vec<CategoryProduct>,
+    /// The store view whose index was read (`--indexed`); `None` = not requested.
+    pub indexed_store: Option<String>,
+    /// `None` while `indexed_store` is set = the store's index table doesn't exist
+    /// (the category:product indexer never ran for it).
+    pub indexed_products: Option<Vec<CategoryIndexedProduct>>,
 }
 
 /// One tier-price row (`catalog_product_entity_tier_price`).

@@ -56,7 +56,8 @@ pub use model::{
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
-    BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount, CategoryProduct,
+    BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount,
+    CategoryIndexedProduct, CategoryProduct,
     CategoryTreeNode, CategoryVisibilityIssue,
     ChildPrice, IndexedPrice, Preference, PreferenceStep, Plugin,
     PluginMethod, Product,
@@ -1049,13 +1050,22 @@ impl Magento {
     }
 
     /// One category by id: per-scope values, the visibility diagnosis (own scopes + the
-    /// ancestor walk), direct vs indexed product counts, rewrites. Live DB.
+    /// ancestor walk), direct vs indexed product counts, rewrites. `include_products`
+    /// lists the direct assignments; `indexed_store` (`Some(None)` = the first store
+    /// view, `Some(Some(code))` = that store) lists the store's *index* — what the
+    /// storefront shows, anchor-inherited included. Live DB.
     #[cfg(feature = "db")]
-    pub fn category(&self, id: u32, include_products: bool) -> Result<Option<Category>> {
+    pub fn category(
+        &self,
+        id: u32,
+        include_products: bool,
+        indexed_store: Option<Option<&str>>,
+    ) -> Result<Option<Category>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let raw = db::fetch_category_card(conn, &cfg.table_prefix, id, include_products)
-            .map_err(Error::Db)?;
+        let raw =
+            db::fetch_category_card(conn, &cfg.table_prefix, id, include_products, indexed_store)
+                .map_err(Error::Db)?;
         Ok(raw.map(to_category))
     }
 
@@ -2784,6 +2794,21 @@ fn to_category(raw: db::DbCategoryCard) -> Category {
                 position,
             })
             .collect(),
+        indexed_store: raw.indexed_store,
+        indexed_products: raw.indexed_products.map(|rows| {
+            rows.into_iter()
+                .map(|(entity_id, sku, name, position, is_parent, visibility)| {
+                    CategoryIndexedProduct {
+                        entity_id,
+                        sku,
+                        name,
+                        position,
+                        via_anchor: !is_parent,
+                        visibility,
+                    }
+                })
+                .collect()
+        }),
     }
 }
 

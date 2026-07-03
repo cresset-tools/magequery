@@ -319,6 +319,12 @@ pub(crate) struct DbCategoryCard {
     pub root_of: Vec<String>,
     /// `(entity_id, sku, name, position)`, when requested.
     pub products: Vec<(u32, String, Option<String>, i64)>,
+    /// The store code whose index was read; `None` = not requested.
+    pub indexed_store: Option<String>,
+    /// `(entity_id, sku, name, position, is_parent, visibility)`; `None` while
+    /// `indexed_store` is set = the index table doesn't exist.
+    #[allow(clippy::type_complexity)]
+    pub indexed_products: Option<Vec<(u32, String, Option<String>, i64, bool, Option<i64>)>>,
 }
 
 pub(crate) fn fetch_category_card(
@@ -326,6 +332,7 @@ pub(crate) fn fetch_category_card(
     table_prefix: &str,
     id: u32,
     include_products: bool,
+    indexed_store: Option<Option<&str>>,
 ) -> Result<Option<DbCategoryCard>, String> {
     use mysql::params;
     use mysql::prelude::Queryable;
@@ -487,6 +494,52 @@ pub(crate) fn fetch_category_card(
         Vec::new()
     };
 
+    // `--indexed`: the actual product list from one store view's index table.
+    let mut indexed_store_code: Option<String> = None;
+    let mut indexed_products: Option<Vec<(u32, String, Option<String>, i64, bool, Option<i64>)>> =
+        None;
+    if let Some(store_choice) = indexed_store {
+        let store_id = match store_choice {
+            Some(code) => stores
+                .iter()
+                .find(|(_, c)| c.as_str() == code)
+                .map(|(id, _)| *id)
+                .ok_or_else(|| format!("no store view with code `{code}`"))?,
+            None => *stores
+                .keys()
+                .filter(|&&s| s > 0)
+                .min()
+                .ok_or_else(|| "no store views exist".to_string())?,
+        };
+        indexed_store_code =
+            Some(stores.get(&store_id).cloned().unwrap_or_else(|| format!("store/{store_id}")));
+        indexed_products = c
+            .exec(
+                format!(
+                    "SELECT i.product_id, e.sku, n.value, i.position, i.is_parent, i.visibility \
+                     FROM {p}catalog_category_product_index_store{store_id} i \
+                     JOIN {p}catalog_product_entity e ON e.entity_id = i.product_id \
+                     LEFT JOIN {p}catalog_product_entity_varchar n ON n.entity_id = e.entity_id \
+                     AND n.store_id = 0 AND n.attribute_id = \
+                     (SELECT a.attribute_id FROM {p}eav_attribute a \
+                      JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
+                      WHERE a.attribute_code = 'name' \
+                      AND t.entity_type_code = 'catalog_product') \
+                     WHERE i.category_id = :v AND i.store_id = {store_id} \
+                     ORDER BY i.position, e.sku"
+                ),
+                params! { "v" => id },
+            )
+            .ok()
+            .map(|rows: Vec<(u32, String, Option<String>, i64, i64, Option<i64>)>| {
+                rows.into_iter()
+                    .map(|(id, sku, name, pos, is_parent, vis)| {
+                        (id, sku, name, pos, is_parent != 0, vis)
+                    })
+                    .collect()
+            });
+    }
+
     Ok(Some(DbCategoryCard {
         id,
         path,
@@ -503,6 +556,8 @@ pub(crate) fn fetch_category_card(
         rewrites,
         root_of,
         products,
+        indexed_store: indexed_store_code,
+        indexed_products,
     }))
 }
 
