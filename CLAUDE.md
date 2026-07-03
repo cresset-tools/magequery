@@ -1172,10 +1172,17 @@ note; the note logic is factored into `shadow_note` using the light
 Header shows `catalog/price/scope` (global vs website) from `core_config_data`.
 Tier/rule/index queries tolerate missing tables (`unwrap_or_default`) — never-reindexed
 installs. Customer-group ids resolve to names via `customer_group`.
+**Configurables**: a configurable's storefront price derives from its children, so a
+`variants (N):` section lists each child's own default-scope price/special and index
+final range — a `[disabled]` or red `not indexed` child explains the parent's min/max
+(children come from `catalog_product_super_link`; grouped/bundle composition not
+modeled). `product` correspondingly grew `varies by` (super attributes, from
+`catalog_product_super_attribute`) and the variant SKU list (capped at 16 shown).
 `Magento::product_prices_by_sku/by_id`. Validated on the same scratchpad MariaDB
-(customer_group/tier/rule/index tables added): website price scope read, per-scope
-special_price incl. the NULL row, percentage + ALL-GROUPS tiers, rule rows, index with
-green reduced finals, and the red empty-index case.
+(customer_group/tier/rule/index/super_attribute tables added): website price scope read,
+per-scope special_price incl. the NULL row, percentage + ALL-GROUPS tiers, rule rows,
+index with green reduced finals, the red empty-index case, and a two-child configurable
+whose disabled/unindexed variant visibly explains the parent's range.
 
 ### `admin-users` / `admin-roles` (live DB, done)
 

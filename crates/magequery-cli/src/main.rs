@@ -1906,6 +1906,37 @@ fn price(mage: &Magento, args: &PriceArgs) -> Result<()> {
         }
     }
 
+    // A configurable's storefront price is its children's — show each variant's own
+    // prices so the parent's index min/max is explainable.
+    if !p.children.is_empty() {
+        println!("\n{}", style::dim(&format!("variants ({}):", p.children.len())));
+        let ws = p.children.iter().map(|ch| ch.sku.len()).max().unwrap_or(0);
+        let num = |v: &Option<String>| match v {
+            Some(x) => style::number(x),
+            None => style::dim("-"),
+        };
+        for ch in &p.children {
+            let final_range = match (&ch.final_min, &ch.final_max) {
+                (Some(min), Some(max)) if min == max => format!("final {}", style::number(min)),
+                (Some(min), Some(max)) => {
+                    format!("final {}–{}", style::number(min), style::number(max))
+                }
+                _ => style::err("not indexed"),
+            };
+            let mut tags = String::new();
+            if ch.enabled == Some(false) {
+                tags.push_str(&format!("  {}", style::err("[disabled]")));
+            }
+            println!(
+                "  {}{}  price {}  special {}  {final_range}{tags}",
+                style::name(&ch.sku),
+                " ".repeat(ws - ch.sku.len()),
+                num(&ch.price),
+                num(&ch.special_price),
+            );
+        }
+    }
+
     println!();
     if p.index.is_empty() {
         println!(
@@ -2095,8 +2126,18 @@ fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()>
         let list: Vec<String> = p.parents.iter().map(|s| style::name(s)).collect();
         info_row("variant of", list.join(", "));
     }
-    if p.children > 0 {
-        info_row("variants", format!("{} child product(s)", p.children));
+    if !p.super_attributes.is_empty() {
+        let list: Vec<String> = p.super_attributes.iter().map(|a| style::name(a)).collect();
+        info_row("varies by", list.join(", "));
+    }
+    if !p.children.is_empty() {
+        let shown: Vec<String> = p.children.iter().take(16).map(|s| style::name(s)).collect();
+        let more = if p.children.len() > 16 {
+            style::dim(&format!("  … +{} more", p.children.len() - 16))
+        } else {
+            String::new()
+        };
+        info_row("variants", format!("{}: {}{more}", p.children.len(), shown.join(", ")));
     }
     if let (Some(c), Some(u)) = (&p.created_at, &p.updated_at) {
         info_row("created", style::dim(&format!("{c}  · updated {u}")));

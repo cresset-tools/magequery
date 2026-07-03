@@ -1462,6 +1462,24 @@ pub struct IndexedPrice {
     pub tier_price: Option<String>,
 }
 
+/// One configurable variant's price summary — a configurable's storefront price is
+/// derived from its children, so these lines explain the parent's index min/max.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ChildPrice {
+    pub sku: String,
+    pub entity_id: u32,
+    /// `status` decoded; `None` = no status row.
+    pub enabled: Option<bool>,
+    /// Default-scope EAV values.
+    pub price: Option<String>,
+    pub special_price: Option<String>,
+    /// The child's own index `final_price` range across (website, group) rows;
+    /// both `None` = not indexed (excluded from the parent's price).
+    pub final_min: Option<String>,
+    pub final_max: Option<String>,
+}
+
 /// Every price the database stores for one product: the EAV price attributes per scope,
 /// tier prices, materialized catalog-rule prices, and the price index.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1478,6 +1496,8 @@ pub struct ProductPrices {
     pub tier_prices: Vec<TierPrice>,
     pub rule_prices: Vec<RulePrice>,
     pub index: Vec<IndexedPrice>,
+    /// Configurable variants' own prices (empty for non-configurables).
+    pub children: Vec<ChildPrice>,
     pub matched_by_id: bool,
 }
 
@@ -1562,8 +1582,10 @@ pub struct Product {
     pub rewrites: Vec<ProductRewrite>,
     /// Configurable parents this product is a variant of (SKUs).
     pub parents: Vec<String>,
-    /// Number of configurable variants under this product.
-    pub children: u32,
+    /// The attributes a configurable is configured by (`catalog_product_super_attribute`).
+    pub super_attributes: Vec<String>,
+    /// Configurable variant SKUs under this product.
+    pub children: Vec<String>,
     /// The lookup resolved via entity_id, not SKU (numeric query, no SKU match).
     pub matched_by_id: bool,
 }

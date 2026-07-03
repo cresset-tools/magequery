@@ -234,6 +234,10 @@ pub(crate) struct DbProductPrices {
     pub index: Vec<(u32, u32, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)>,
     pub customer_groups: std::collections::HashMap<u32, String>,
     pub websites: std::collections::HashMap<u32, String>,
+    /// Configurable variants: `(entity_id, sku, enabled, price, special, final min, final max)`.
+    #[allow(clippy::type_complexity)]
+    pub children:
+        Vec<(u32, String, Option<bool>, Option<String>, Option<String>, Option<String>, Option<String>)>,
 }
 
 /// Fetch the full price picture on one connection: EAV price attributes (decimal +
@@ -351,6 +355,78 @@ pub(crate) fn fetch_product_prices(
         )
         .unwrap_or_default();
 
+    // A configurable's storefront price derives from its children — summarize each
+    // variant's own default-scope price/special and index final range.
+    let child_rows: Vec<(u32, String)> = c
+        .exec(
+            format!(
+                "SELECT e.entity_id, e.sku FROM {p}catalog_product_super_link l \
+                 JOIN {p}catalog_product_entity e ON e.entity_id = l.product_id \
+                 WHERE l.parent_id = :v ORDER BY e.sku"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+    let mut children = Vec::with_capacity(child_rows.len());
+    if !child_rows.is_empty() {
+        let ids: Vec<String> = child_rows.iter().map(|(id, _)| id.to_string()).collect();
+        let ids = ids.join(",");
+        let attr = |code: &str| {
+            format!(
+                "(SELECT a.attribute_id FROM {p}eav_attribute a \
+                 JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
+                 WHERE a.attribute_code = '{code}' AND t.entity_type_code = 'catalog_product')"
+            )
+        };
+        let decimals: Vec<(u32, String, Option<String>)> = c
+            .query(format!(
+                "SELECT v.entity_id, a.attribute_code, CAST(v.value AS CHAR) \
+                 FROM {p}catalog_product_entity_decimal v \
+                 JOIN {p}eav_attribute a ON a.attribute_id = v.attribute_id \
+                 WHERE v.entity_id IN ({ids}) AND v.store_id = 0 \
+                 AND a.attribute_code IN ('price','special_price')"
+            ))
+            .map_err(clean_err)?;
+        let statuses: Vec<(u32, Option<i64>)> = c
+            .query(format!(
+                "SELECT entity_id, value FROM {p}catalog_product_entity_int \
+                 WHERE entity_id IN ({ids}) AND store_id = 0 AND attribute_id = {}",
+                attr("status")
+            ))
+            .map_err(clean_err)?;
+        let finals: Vec<(u32, Option<String>, Option<String>)> = c
+            .query(format!(
+                "SELECT entity_id, CAST(MIN(final_price) AS CHAR), \
+                 CAST(MAX(final_price) AS CHAR) FROM {p}catalog_product_index_price \
+                 WHERE entity_id IN ({ids}) GROUP BY entity_id"
+            ))
+            .unwrap_or_default();
+        for (id, child_sku) in child_rows {
+            let value_of = |code: &str| {
+                decimals
+                    .iter()
+                    .find(|(e, c, _)| *e == id && c == code)
+                    .and_then(|(_, _, v)| v.clone())
+            };
+            let enabled =
+                statuses.iter().find(|(e, _)| *e == id).and_then(|(_, s)| *s).map(|s| s == 1);
+            let (final_min, final_max) = finals
+                .iter()
+                .find(|(e, _, _)| *e == id)
+                .map(|(_, min, max)| (min.clone(), max.clone()))
+                .unwrap_or((None, None));
+            children.push((
+                id,
+                child_sku,
+                enabled,
+                value_of("price"),
+                value_of("special_price"),
+                final_min,
+                final_max,
+            ));
+        }
+    }
+
     Ok(Some(DbProductPrices {
         entity_id,
         sku,
@@ -363,6 +439,7 @@ pub(crate) fn fetch_product_prices(
         index,
         customer_groups,
         websites,
+        children,
     }))
 }
 
@@ -402,7 +479,10 @@ pub(crate) struct DbProduct {
     /// `(request_path, store code, redirect_type)`.
     pub rewrites: Vec<(String, String, u16)>,
     pub parents: Vec<String>,
-    pub children: u32,
+    /// Attribute codes a configurable is configured by, in position order.
+    pub super_attributes: Vec<String>,
+    /// Variant SKUs.
+    pub children: Vec<String>,
 }
 
 /// Fetch one product wholesale (identity + per-scope EAV values + option labels + stock
@@ -618,13 +698,26 @@ pub(crate) fn fetch_product(
             params! { "v" => entity_id },
         )
         .map_err(clean_err)?;
-    let children: u64 = c
-        .exec_first(
-            format!("SELECT COUNT(*) FROM {p}catalog_product_super_link WHERE parent_id = :v"),
+    let super_attributes: Vec<String> = c
+        .exec(
+            format!(
+                "SELECT a.attribute_code FROM {p}catalog_product_super_attribute sa \
+                 JOIN {p}eav_attribute a ON a.attribute_id = sa.attribute_id \
+                 WHERE sa.product_id = :v ORDER BY sa.position, a.attribute_code"
+            ),
             params! { "v" => entity_id },
         )
-        .map_err(clean_err)?
-        .unwrap_or(0);
+        .unwrap_or_default();
+    let children: Vec<String> = c
+        .exec(
+            format!(
+                "SELECT e.sku FROM {p}catalog_product_super_link l \
+                 JOIN {p}catalog_product_entity e ON e.entity_id = l.product_id \
+                 WHERE l.parent_id = :v ORDER BY e.sku"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
 
     Ok(Some(DbProduct {
         entity_id,
@@ -643,7 +736,8 @@ pub(crate) fn fetch_product(
         categories,
         rewrites,
         parents,
-        children: children as u32,
+        super_attributes,
+        children,
     }))
 }
 
