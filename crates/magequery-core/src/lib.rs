@@ -65,8 +65,8 @@ pub use model::{
     OrderTransaction, SalesSequence,
     Preference, PreferenceStep, Plugin,
     PluginMethod, Product,
-    ProductCategory, ProductChild, Quote, QuoteAddress, QuoteHit, QuoteItem,
-    SalesDocKind, SalesDocument, SalesDocumentHit, SalesDocumentItem,
+    ProductCategory, ProductChild, Quote, QuoteAddress, QuoteHit, QuoteItem, RuleCoupon,
+    SalesDocKind, SalesDocument, SalesDocumentHit, SalesDocumentItem, SalesRule, SalesRuleHit,
     StoreGroupNode, StoreTree, StoreViewNode, WebsiteNode,
     ProductHit, ProductLegacyStock, ProductPrices, ProductRewrite, ProductScopeValue,
     ProductSourceStock, ProductValue,
@@ -1073,6 +1073,48 @@ impl Magento {
             db::fetch_category_card(conn, &cfg.table_prefix, id, include_products, indexed_store)
                 .map_err(Error::Db)?;
         Ok(raw.map(to_category))
+    }
+
+    /// One cart price rule by rule_id. Live DB.
+    #[cfg(feature = "db")]
+    pub fn sales_rule(&self, id: u32) -> Result<Option<SalesRule>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_sales_rule(conn, &cfg.table_prefix, db::RuleIdent::Id(id))
+            .map_err(Error::Db)?;
+        Ok(raw.map(to_sales_rule))
+    }
+
+    /// The rule behind an exact coupon code, with the matched coupon attached.
+    #[cfg(feature = "db")]
+    pub fn sales_rule_by_coupon(&self, code: &str) -> Result<Option<SalesRule>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_sales_rule(conn, &cfg.table_prefix, db::RuleIdent::Coupon(code))
+            .map_err(Error::Db)?;
+        Ok(raw.map(to_sales_rule))
+    }
+
+    /// Rule search by name/description substring, newest first.
+    #[cfg(feature = "db")]
+    pub fn sales_rules_like(&self, needle: &str, limit: usize) -> Result<(Vec<SalesRuleHit>, bool)> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (rows, truncated) =
+            db::fetch_sales_rules_like(conn, &cfg.table_prefix, needle, limit)
+                .map_err(Error::Db)?;
+        Ok((
+            rows.into_iter()
+                .map(|(rule_id, name, active, from_date, to_date)| SalesRuleHit {
+                    rule_id,
+                    name,
+                    active,
+                    from_date,
+                    to_date,
+                })
+                .collect(),
+            truncated,
+        ))
     }
 
     /// The scope tree — websites → store groups → store views (admin scopes excluded),
@@ -2919,6 +2961,70 @@ fn default_connection(cfg: &DbConfig) -> Result<&DbConnection> {
         .find(|c| c.name == "default")
         .or_else(|| cfg.connections.first())
         .ok_or_else(|| Error::Db("no db connection configured in env.php".to_string()))
+}
+
+/// Assemble [`SalesRule`]: decode coupon_type and the `simple_action` into a readable
+/// discount summary.
+#[cfg(feature = "db")]
+fn to_sales_rule(raw: db::DbSalesRule) -> SalesRule {
+    let amount = raw.discount_amount.as_deref().unwrap_or("?");
+    let action = match raw.simple_action.as_deref() {
+        Some("by_percent") => format!("{amount}% off"),
+        Some("by_fixed") => format!("{amount} off per item"),
+        Some("cart_fixed") => format!("{amount} off the cart"),
+        Some("buy_x_get_y") => format!(
+            "buy X get {} free (step {})",
+            raw.discount_qty.as_deref().unwrap_or("?"),
+            raw.discount_step.unwrap_or(0),
+        ),
+        Some(other) => format!("{other} ({amount})"),
+        None => "(no action)".to_string(),
+    };
+    let coupon_type = match raw.coupon_type {
+        1 => "no coupon needed".to_string(),
+        2 => "specific coupon".to_string(),
+        3 => "auto-generated coupons".to_string(),
+        other => format!("coupon_type {other}"),
+    };
+    let coupon = |(code, times_used, usage_limit, usage_per_customer, expiration_date, expired): (
+        String,
+        u64,
+        Option<u64>,
+        Option<u64>,
+        Option<String>,
+        bool,
+    )| RuleCoupon {
+        code,
+        times_used,
+        usage_limit: usage_limit.filter(|&l| l > 0),
+        usage_per_customer: usage_per_customer.filter(|&l| l > 0),
+        expiration_date,
+        expired,
+    };
+    SalesRule {
+        rule_id: raw.rule_id,
+        name: raw.name,
+        description: raw.description,
+        active: raw.active,
+        from_date: raw.from_date,
+        to_date: raw.to_date,
+        in_window: raw.in_window,
+        coupon_type,
+        action,
+        apply_to_shipping: raw.apply_to_shipping,
+        free_shipping: raw.free_shipping,
+        stop_rules_processing: raw.stop_rules_processing,
+        sort_order: raw.sort_order,
+        uses_per_customer: raw.uses_per_customer,
+        uses_per_coupon: raw.uses_per_coupon,
+        times_used: raw.times_used,
+        websites: raw.websites,
+        customer_groups: raw.customer_groups,
+        conditions: raw.conditions,
+        coupon_count: raw.coupon_count,
+        coupons: raw.coupons.into_iter().map(coupon).collect(),
+        matched_coupon: raw.matched_coupon.map(coupon),
+    }
 }
 
 /// Assemble [`SalesDocument`]: decode the kind-specific state.

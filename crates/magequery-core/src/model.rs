@@ -1664,6 +1664,68 @@ pub struct ProductPrices {
     pub matched_by_id: bool,
 }
 
+/// One coupon of a cart price rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct RuleCoupon {
+    pub code: String,
+    pub times_used: u64,
+    /// `None`/0 = unlimited.
+    pub usage_limit: Option<u64>,
+    pub usage_per_customer: Option<u64>,
+    pub expiration_date: Option<String>,
+    /// Past expiration, per the DB clock.
+    pub expired: bool,
+}
+
+/// One cart price rule (`salesrule`), with the why-won't-it-apply facts. Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct SalesRule {
+    pub rule_id: u32,
+    pub name: String,
+    pub description: Option<String>,
+    pub active: bool,
+    pub from_date: Option<String>,
+    pub to_date: Option<String>,
+    /// Today is inside [from_date, to_date], per the DB clock.
+    pub in_window: bool,
+    /// Decoded `coupon_type`: no coupon / specific coupon / auto-generated.
+    pub coupon_type: String,
+    /// Decoded `simple_action` + amount (`10% off`, `5.00 off cart`, …).
+    pub action: String,
+    pub apply_to_shipping: bool,
+    pub free_shipping: bool,
+    /// Later (higher sort_order) rules don't run after this one matches.
+    pub stop_rules_processing: bool,
+    pub sort_order: u32,
+    /// 0 = unlimited.
+    pub uses_per_customer: u64,
+    pub uses_per_coupon: u64,
+    /// Rule-level usage counter.
+    pub times_used: u64,
+    pub websites: Vec<String>,
+    pub customer_groups: Vec<String>,
+    /// Raw `conditions_serialized` — displayed, not interpreted.
+    pub conditions: Option<String>,
+    pub coupon_count: u32,
+    /// First few coupons (auto-generated rules can have thousands).
+    pub coupons: Vec<RuleCoupon>,
+    /// Set when the lookup came in via a coupon code.
+    pub matched_coupon: Option<RuleCoupon>,
+}
+
+/// One row of a sales-rule search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct SalesRuleHit {
+    pub rule_id: u32,
+    pub name: String,
+    pub active: bool,
+    pub from_date: Option<String>,
+    pub to_date: Option<String>,
+}
+
 /// One store view in the scope tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

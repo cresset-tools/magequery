@@ -177,7 +177,8 @@ DATA          (persistence & model)
   product <sku> [--id <n>] [--store <code>]   price <sku> [--id <n>]   (live DB)
   category [<id>|<name>] [--store] [--products]   order <increment#> [--id]
   customer <email> [--id]   quote <id|email>
-  invoice|shipment|creditmemo <increment#>   order-statuses [<filter>]   sequences [<entity>]   (live DB)
+  invoice|shipment|creditmemo <increment#>   order-statuses [<filter>]   sequences [<entity>]
+  sales-rule <coupon|id|name>   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1339,6 +1340,24 @@ on the synthetic DB (two websites, an inactive default view, unnamed root) AND l
 mageos-lite (real tree + real currency rates — the first entity command validated against
 a genuine database).
 
+### `sales-rule` (why a coupon won't apply, live DB, done)
+
+`magequery sales-rule <coupon|id|name>` — the most common support question, answered as
+a checklist. Lookup order: **exact coupon code first** (codes can be numeric, so coupon
+beats rule-id on collision), then rule_id, then name/description substring. The card
+opens with the **blockers**, each computed on the DB clock: rule disabled, today outside
+the from/to window, the matched coupon expired, its usage limit exhausted
+(`times_used >= usage_limit`); zero blockers ends with the honest footer "no blockers
+found — conditions are not evaluated statically". Facts below: decoded action
+(`by_percent`/`by_fixed`/`cart_fixed`/`buy_x_get_y` → "10% off", + free-shipping /
+applies-to-shipping), coupon_type, window, **websites and customer groups** (red
+"(none — the rule can never apply)" for empty link tables), usage counters (0 rendered
+as `unlimited`), priority + stops-further-rules, the matched coupon's own usage/expiry,
+the rule's coupon list (COUNT + first 10 — auto-generated rules have thousands), and
+`conditions_serialized` truncated ("displayed, not evaluated"; --json for full).
+Validated on the scratchpad DB: healthy coupon, window+expiry double blocker, exhausted
+limit, disabled rule, name search.
+
 ### `admin-users` / `admin-roles` (live DB, done)
 
 Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
@@ -1374,8 +1393,7 @@ role, and seeding one into a live DB was deliberately not done.
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
 `queue backlog`, `product`). New ideas go here.
-- **Small entities, in build order:** `coupon`/`sales-rule` (the
-  why-doesn't-my-coupon-work card), extend `order` search to match PSP transaction refs
+- **Small entities, in build order:** extend `order` search to match PSP transaction refs
   (`sales_order_payment.last_trans_id` + `sales_payment_transaction.txn_id`),
   `cms-page`/`cms-block <identifier>`, `catalog-rule`, `tax`,
   `integrations`. Backlog: reviews, wishlists, search terms.

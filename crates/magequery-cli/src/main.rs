@@ -58,6 +58,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("creditmemo", "One credit memo by increment id (→ its order)"),
             ("order-statuses", "Every order status ↔ state mapping, incl. custom ones"),
             ("sequences", "Sales increment sequences: current value, next increment id"),
+            ("sales-rule", "Why a coupon (won't) apply: a cart rule by coupon/id/name"),
         ],
     ),
     (
@@ -286,6 +287,9 @@ enum Command {
     OrderStatuses(OrderStatusesArgs),
     /// Sales increment sequences per entity type × store: current + next increment.
     Sequences(SequencesArgs),
+    /// A cart price rule by coupon code, rule id, or name — with the why-won't-it-apply
+    /// checklist.
+    SalesRule(SalesRuleArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -566,6 +570,14 @@ struct CustomerArgs {
 struct QuoteArgs {
     /// A quote entity_id; anything else searches customer emails (active carts first
     /// by recency).
+    query: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct SalesRuleArgs {
+    /// A coupon code (exact), a rule id, or a rule-name substring.
     query: String,
     #[arg(long)]
     json: bool,
@@ -1012,6 +1024,7 @@ fn main() -> Result<()> {
         Command::Creditmemo(args) => sales_document(&mage, SalesDocKind::Creditmemo, &args),
         Command::OrderStatuses(args) => order_statuses(&mage, &args),
         Command::Sequences(args) => sequences(&mage, &args),
+        Command::SalesRule(args) => sales_rule(&mage, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
         Command::AdminRoles(args) => admin_roles(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
@@ -2362,6 +2375,213 @@ fn sequences(mage: &Magento, args: &SequencesArgs) -> Result<()> {
         "\n{} sequence(s) — next increment computed with the default pattern (custom patterns not modeled)",
         seqs.len()
     );
+    Ok(())
+}
+
+fn sales_rule(mage: &Magento, args: &SalesRuleArgs) -> Result<()> {
+    // A coupon code is the usual entry point — try it first (codes can be numeric, so
+    // coupon beats rule-id on collision), then rule id, then name substring.
+    let found: Option<magequery_core::SalesRule> =
+        if let Some(r) = mage.sales_rule_by_coupon(&args.query)? {
+            Some(r)
+        } else if let Ok(id) = args.query.parse::<u32>() {
+            mage.sales_rule(id)?
+        } else {
+            None
+        };
+    if let Some(r) = found {
+        return render_sales_rule(&r, args);
+    }
+    let (hits, truncated) = mage.sales_rules_like(&args.query, 50)?;
+    match hits.len() {
+        0 => Err(anyhow!("no coupon or cart rule matches `{}`", args.query)),
+        1 => {
+            let r = mage.sales_rule(hits[0].rule_id)?.expect("listed rule");
+            render_sales_rule(&r, args)
+        }
+        _ => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+                return Ok(());
+            }
+            let wn = hits.iter().map(|h| h.name.len()).max().unwrap_or(0);
+            for h in &hits {
+                let active = if h.active { style::ok("active  ") } else { style::err("inactive") };
+                let window = match (&h.from_date, &h.to_date) {
+                    (None, None) => String::new(),
+                    (f, t) => format!(
+                        "  {}",
+                        style::dim(&format!(
+                            "{} – {}",
+                            f.as_deref().unwrap_or("…"),
+                            t.as_deref().unwrap_or("…")
+                        ))
+                    ),
+                };
+                println!(
+                    "{:>4}  {}{}  {active}{window}",
+                    h.rule_id,
+                    style::name(&h.name),
+                    " ".repeat(wn - h.name.len()),
+                );
+            }
+            if truncated {
+                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+            }
+            eprintln!("\n{} rule(s)", hits.len());
+            Ok(())
+        }
+    }
+}
+
+fn render_sales_rule(r: &magequery_core::SalesRule, args: &SalesRuleArgs) -> Result<()> {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(r)?);
+        return Ok(());
+    }
+
+    let active = if r.active { style::ok("active") } else { style::err("inactive") };
+    println!("{}  (rule {})  {active}", style::name(&r.name), r.rule_id);
+    if let Some(d) = &r.description {
+        println!("{}", style::dim(d));
+    }
+    println!();
+
+    // The why-won't-it-apply checklist.
+    let mut blockers: Vec<String> = Vec::new();
+    if !r.active {
+        blockers.push("the rule is disabled".to_string());
+    }
+    if !r.in_window {
+        blockers.push(format!(
+            "today is outside the active window ({} – {})",
+            r.from_date.as_deref().unwrap_or("…"),
+            r.to_date.as_deref().unwrap_or("…"),
+        ));
+    }
+    if let Some(c) = &r.matched_coupon {
+        if c.expired {
+            blockers.push(format!(
+                "the coupon expired on {}",
+                c.expiration_date.as_deref().unwrap_or("?"),
+            ));
+        }
+        if let Some(limit) = c.usage_limit {
+            if c.times_used >= limit {
+                blockers.push(format!("the coupon's usage limit is exhausted ({}/{limit})", c.times_used));
+            }
+        }
+    }
+    for b in &blockers {
+        println!("{}", style::err(&format!("⚠ {b}")));
+    }
+    if !blockers.is_empty() {
+        println!();
+    }
+
+    info_row("action", format!("{}{}{}", style::target(&r.action),
+        if r.free_shipping { format!("  {}", style::ok("+ free shipping")) } else { String::new() },
+        if r.apply_to_shipping { format!("  {}", style::dim("(applies to shipping)")) } else { String::new() },
+    ));
+    info_row("coupon", r.coupon_type.clone());
+    if let (Some(f), Some(t)) = (&r.from_date, &r.to_date) {
+        info_row("window", format!("{f} – {t}"));
+    } else if r.from_date.is_some() || r.to_date.is_some() {
+        info_row(
+            "window",
+            format!(
+                "{} – {}",
+                r.from_date.as_deref().unwrap_or("(always)"),
+                r.to_date.as_deref().unwrap_or("(forever)"),
+            ),
+        );
+    }
+    let websites: Vec<String> = r.websites.iter().map(|w| style::area(w)).collect();
+    info_row(
+        "websites",
+        if websites.is_empty() {
+            style::err("(none — the rule can never apply)")
+        } else {
+            websites.join(", ")
+        },
+    );
+    let groups: Vec<String> = r.customer_groups.iter().map(|g| style::target(g)).collect();
+    info_row(
+        "groups",
+        if groups.is_empty() {
+            style::err("(none — the rule can never apply)")
+        } else {
+            groups.join(", ")
+        },
+    );
+    let unlimited = |n: u64| {
+        if n == 0 { style::dim("unlimited") } else { n.to_string() }
+    };
+    info_row(
+        "usage",
+        format!(
+            "{} time(s) used · per coupon {} · per customer {}",
+            r.times_used,
+            unlimited(r.uses_per_coupon),
+            unlimited(r.uses_per_customer),
+        ),
+    );
+    let mut flags: Vec<String> = vec![format!("priority {}", r.sort_order)];
+    if r.stop_rules_processing {
+        flags.push(style::number("stops further rules"));
+    }
+    info_row("flags", flags.join(" · "));
+
+    if let Some(c) = &r.matched_coupon {
+        println!();
+        let limit = c
+            .usage_limit
+            .map(|l| format!("/{l}"))
+            .unwrap_or_else(|| " (unlimited)".to_string());
+        let expiry = match (&c.expiration_date, c.expired) {
+            (Some(e), true) => format!("  {}", style::err(&format!("expired {e}"))),
+            (Some(e), false) => format!("  {}", style::dim(&format!("expires {e}"))),
+            _ => String::new(),
+        };
+        info_row(
+            "this coupon",
+            format!("{}  used {}{limit}{expiry}", style::name(&c.code), c.times_used),
+        );
+    }
+    if r.coupon_count > 0 && r.matched_coupon.is_none() {
+        println!();
+        let shown: Vec<String> = r
+            .coupons
+            .iter()
+            .map(|c| {
+                let used = match c.usage_limit {
+                    Some(l) => format!(" {}/{l}", c.times_used),
+                    None => format!(" {}", c.times_used),
+                };
+                let expired = if c.expired { format!(" {}", style::err("(expired)")) } else { String::new() };
+                format!("{}{}{expired}", style::name(&c.code), style::dim(&used))
+            })
+            .collect();
+        let more = if r.coupon_count as usize > r.coupons.len() {
+            style::dim(&format!("  … +{} more", r.coupon_count as usize - r.coupons.len()))
+        } else {
+            String::new()
+        };
+        info_row("coupons", format!("{}: {}{more}", r.coupon_count, shown.join(", ")));
+    }
+
+    if let Some(cond) = &r.conditions {
+        let compact: String = cond.chars().take(200).collect();
+        let ellipsis = if cond.chars().count() > 200 { "…" } else { "" };
+        println!(
+            "\n{}\n  {}",
+            style::dim("conditions (displayed, not evaluated — --json for full):"),
+            style::dim(&format!("{compact}{ellipsis}")),
+        );
+    }
+    if blockers.is_empty() {
+        eprintln!("\nno blockers found — conditions are not evaluated statically");
+    }
     Ok(())
 }
 
