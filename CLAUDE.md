@@ -174,7 +174,7 @@ ENTRY POINTS  (how execution starts)
 DATA          (persistence & model)
   schema [<table>] [--db]       indexers [<id>] [--db]
   extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>|<entity>] [--db]
-  product <sku> [--id <n>] [--store <code>]   (live DB)
+  product <sku> [--id <n>] [--store <code>]   price <sku> [--id <n>]   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1152,6 +1152,30 @@ never touching a shared DB): store overrides per scope, every label kind, NULL v
 rows (rendered `NULL` — a real row stating no value), multi-source MSI incl. out-of-stock
 red, breadcrumbs, a 301 rewrite, variant links, the shadow note, numeric fallback, and
 the `--store` fold all exact. Real-catalog validation joins the live-shop test list.
+
+### `price` (every price of one product, live DB, done)
+
+The "why does the storefront show this price" command — all four price layers side by
+side, sharing `product`'s lookup rule (exact SKU → `--id` → numeric fallback → shadow
+note; the note logic is factored into `shadow_note` using the light
+`product_sku_of_id`). `db::fetch_product_prices` on one connection:
+1. **EAV price attributes** (`price`, `special_price` + from/to dates, `cost`, `msrp`,
+   `minimal_price`) from the decimal+datetime value tables, per scope
+   (`default`/`stores/<code>`), rendered with the shared `ProductValue` machinery;
+2. **tier prices** (`catalog_product_entity_tier_price`): fixed value or `-N%`
+   percentage rows, `ALL GROUPS`/named groups, website `(all)` for website_id 0;
+3. **catalog-rule prices** (`catalogrule_product_price` — the rule engine's materialized
+   ±1-day rows) per date/website/group;
+4. **the price index** (`catalog_product_index_price` — what the storefront reads):
+   price/final/min/max/tier per (website, customer group), `final < price` highlighted
+   green; **zero index rows = red** "product is invisible on the storefront — reindex".
+Header shows `catalog/price/scope` (global vs website) from `core_config_data`.
+Tier/rule/index queries tolerate missing tables (`unwrap_or_default`) — never-reindexed
+installs. Customer-group ids resolve to names via `customer_group`.
+`Magento::product_prices_by_sku/by_id`. Validated on the same scratchpad MariaDB
+(customer_group/tier/rule/index tables added): website price scope read, per-scope
+special_price incl. the NULL row, percentage + ALL-GROUPS tiers, rule rows, index with
+green reduced finals, and the red empty-index case.
 
 ### `admin-users` / `admin-roles` (live DB, done)
 

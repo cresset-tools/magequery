@@ -56,9 +56,10 @@ pub use model::{
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
-    Preference, PreferenceStep, Plugin, PluginMethod, Product, ProductCategory, ProductHit,
-    ProductLegacyStock, ProductRewrite, ProductScopeValue, ProductSourceStock, ProductValue,
-    RedisConfig, RedisInstance, RedisPing,
+    IndexedPrice, Preference, PreferenceStep, Plugin, PluginMethod, Product, ProductCategory,
+    ProductHit, ProductLegacyStock, ProductPrices, ProductRewrite, ProductScopeValue,
+    ProductSourceStock, ProductValue,
+    RedisConfig, RedisInstance, RedisPing, RulePrice, TierPrice,
     Resolution, Route, SchemaDrift, TableColumn, TranslationEntry, TranslationLayer,
     TranslationMatch, Translations, UiComponentContribution, UiComponentOp, UiComponentView,
     UnregisteredModule, WebapiRoute, Widget,
@@ -965,6 +966,36 @@ impl Magento {
         let raw = db::fetch_product(conn, &cfg.table_prefix, db::ProductIdent::Id(id))
             .map_err(Error::Db)?;
         Ok(raw.map(|r| to_product(r, true)))
+    }
+
+    /// Light lookup: the SKU of an entity_id (for shadow-note checks). Live DB.
+    #[cfg(feature = "db")]
+    pub fn product_sku_of_id(&self, id: u32) -> Result<Option<String>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        Ok(db::fetch_product_identity(conn, &cfg.table_prefix, &db::ProductIdent::Id(id))
+            .map_err(Error::Db)?
+            .map(|(_, sku, _)| sku))
+    }
+
+    /// Every price the database stores for a product, by exact SKU. Live DB.
+    #[cfg(feature = "db")]
+    pub fn product_prices_by_sku(&self, sku: &str) -> Result<Option<ProductPrices>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_product_prices(conn, &cfg.table_prefix, db::ProductIdent::Sku(sku))
+            .map_err(Error::Db)?;
+        Ok(raw.map(|r| to_product_prices(r, false)))
+    }
+
+    /// Every price for a product, by entity_id.
+    #[cfg(feature = "db")]
+    pub fn product_prices_by_id(&self, id: u32) -> Result<Option<ProductPrices>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_product_prices(conn, &cfg.table_prefix, db::ProductIdent::Id(id))
+            .map_err(Error::Db)?;
+        Ok(raw.map(|r| to_product_prices(r, true)))
     }
 
     /// SKU-substring search, `limit + 1` fetched to flag truncation.
@@ -2498,6 +2529,111 @@ fn default_connection(cfg: &DbConfig) -> Result<&DbConnection> {
         .find(|c| c.name == "default")
         .or_else(|| cfg.connections.first())
         .ok_or_else(|| Error::Db("no db connection configured in env.php".to_string()))
+}
+
+/// Assemble [`ProductPrices`]: the EAV price attributes reuse the product scope
+/// grouping; tier/rule/index rows resolve website codes and customer-group names.
+#[cfg(feature = "db")]
+fn to_product_prices(raw: db::DbProductPrices, matched_by_id: bool) -> ProductPrices {
+    let website = |id: u32| -> String {
+        if id == 0 {
+            "(all)".to_string()
+        } else {
+            raw.websites.get(&id).cloned().unwrap_or_else(|| format!("website/{id}"))
+        }
+    };
+    let group = |id: u32| -> String {
+        raw.customer_groups.get(&id).cloned().unwrap_or_else(|| format!("group/{id}"))
+    };
+
+    let mut attributes: Vec<ProductValue> = Vec::new();
+    for v in &raw.values {
+        let store = if v.store_id == 0 {
+            "default".to_string()
+        } else {
+            let code = raw
+                .stores
+                .get(&v.store_id)
+                .cloned()
+                .unwrap_or_else(|| format!("{}", v.store_id));
+            format!("stores/{code}")
+        };
+        let scope = ProductScopeValue {
+            store,
+            label: None,
+            value: v.value.clone().unwrap_or_else(|| "NULL".to_string()),
+        };
+        match attributes.iter_mut().find(|e| e.attribute == v.attribute) {
+            Some(e) => e.scopes.push(scope),
+            None => attributes.push(ProductValue {
+                attribute: v.attribute.clone(),
+                backend_type: v.backend_type.clone(),
+                input: v.input.clone(),
+                scopes: vec![scope],
+            }),
+        }
+    }
+    for v in &mut attributes {
+        v.scopes.sort_by(|a, b| {
+            (a.store != "default").cmp(&(b.store != "default")).then_with(|| a.store.cmp(&b.store))
+        });
+    }
+    const ORDER: [&str; 7] = [
+        "price",
+        "special_price",
+        "special_from_date",
+        "special_to_date",
+        "cost",
+        "msrp",
+        "minimal_price",
+    ];
+    let rank = |a: &str| ORDER.iter().position(|f| *f == a).unwrap_or(ORDER.len());
+    attributes.sort_by(|a, b| {
+        rank(&a.attribute).cmp(&rank(&b.attribute)).then_with(|| a.attribute.cmp(&b.attribute))
+    });
+
+    ProductPrices {
+        entity_id: raw.entity_id,
+        sku: raw.sku,
+        type_id: raw.type_id,
+        price_scope_website: raw.price_scope_website,
+        attributes,
+        tier_prices: raw
+            .tiers
+            .into_iter()
+            .map(|(w, all, g, qty, value, percentage)| TierPrice {
+                website: website(w),
+                customer_group: if all { "ALL GROUPS".to_string() } else { group(g) },
+                qty,
+                value,
+                percentage,
+            })
+            .collect(),
+        rule_prices: raw
+            .rules
+            .into_iter()
+            .map(|(date, g, w, rule_price)| RulePrice {
+                date,
+                website: website(w),
+                customer_group: group(g),
+                rule_price,
+            })
+            .collect(),
+        index: raw
+            .index
+            .into_iter()
+            .map(|(g, w, price, final_price, min_price, max_price, tier_price)| IndexedPrice {
+                website: website(w),
+                customer_group: group(g),
+                price,
+                final_price,
+                min_price,
+                max_price,
+                tier_price,
+            })
+            .collect(),
+        matched_by_id,
+    }
 }
 
 /// Assemble the public [`Product`] from the raw rows: group values per attribute with

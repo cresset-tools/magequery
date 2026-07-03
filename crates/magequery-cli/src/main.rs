@@ -48,6 +48,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("catalog-attributes", "Attribute groups: what loads on quote items, wishlists, …"),
             ("eav", "EAV attributes: type, models, flags, sets, creator patch (--db)"),
             ("product", "One product as the DB stores it: values per scope, stock, categories"),
+            ("price", "Every price of a product: attributes, tiers, rules, the price index"),
         ],
     ),
     (
@@ -255,6 +256,8 @@ enum Command {
     Eav(EavArgs),
     /// One product as the database stores it: EAV values per scope, stock, categories.
     Product(ProductArgs),
+    /// Every price of a product: EAV attributes, tier prices, catalog rules, the index.
+    Price(PriceArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -471,6 +474,17 @@ struct ProductArgs {
     /// Show one store view's resolved values (store rows fall back to default).
     #[arg(long)]
     store: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct PriceArgs {
+    /// A SKU (exact match). A numeric value with no matching SKU is an entity_id.
+    query: Option<String>,
+    /// Look up by entity_id — unambiguous when SKUs are numeric.
+    #[arg(long)]
+    id: Option<u32>,
     #[arg(long)]
     json: bool,
 }
@@ -876,6 +890,7 @@ fn main() -> Result<()> {
         Command::UiComponents(args) => ui_components(&mage, &args, &cli.root),
         Command::Eav(args) => eav(&mage, &args, &cli.root),
         Command::Product(args) => product(&mage, &args),
+        Command::Price(args) => price(&mage, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
         Command::AdminRoles(args) => admin_roles(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
@@ -1720,17 +1735,7 @@ fn product(mage: &Magento, args: &ProductArgs) -> Result<()> {
             return Err(anyhow!("give a SKU (or --id <entity_id>)"));
         };
         if let Some(hit) = mage.product_by_sku(q)? {
-            if let Ok(id) = q.parse::<u32>() {
-                if let Some(other) = mage.product_by_id(id)? {
-                    if other.entity_id != hit.entity_id {
-                        eprintln!(
-                            "note: entity_id {id} is a different product (SKU \"{}\") — \
-                             use --id {id}",
-                            other.sku
-                        );
-                    }
-                }
-            }
+            shadow_note(mage, q, hit.entity_id)?;
             Some(hit)
         } else if let Ok(id) = q.parse::<u32>() {
             mage.product_by_id(id)?
@@ -1779,6 +1784,165 @@ fn product(mage: &Magento, args: &ProductArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// When a numeric query matched a SKU exactly but is *also* a valid entity_id of a
+/// different product, say so instead of picking silently.
+fn shadow_note(mage: &Magento, query: &str, matched_entity_id: u32) -> Result<()> {
+    if let Ok(id) = query.parse::<u32>() {
+        if id != matched_entity_id {
+            if let Some(sku) = mage.product_sku_of_id(id)? {
+                eprintln!(
+                    "note: entity_id {id} is a different product (SKU \"{sku}\") — use --id {id}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn price(mage: &Magento, args: &PriceArgs) -> Result<()> {
+    let found: Option<magequery_core::ProductPrices> = if let Some(id) = args.id {
+        let p = mage.product_prices_by_id(id)?;
+        if p.is_none() {
+            return Err(anyhow!("no product with entity_id {id}"));
+        }
+        p
+    } else {
+        let Some(q) = &args.query else {
+            return Err(anyhow!("give a SKU (or --id <entity_id>)"));
+        };
+        if let Some(hit) = mage.product_prices_by_sku(q)? {
+            shadow_note(mage, q, hit.entity_id)?;
+            Some(hit)
+        } else if let Ok(id) = q.parse::<u32>() {
+            mage.product_prices_by_id(id)?
+        } else {
+            None
+        }
+    };
+    let Some(p) = found else {
+        return Err(anyhow!(
+            "no product matches `{}`\n  Search SKUs with `magequery product <substring>`.",
+            args.query.as_deref().unwrap_or_default()
+        ));
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&p)?);
+        return Ok(());
+    }
+
+    let matched = if p.matched_by_id && args.id.is_none() {
+        format!("  {}", style::dim("(matched by entity_id — no SKU equals it)"))
+    } else {
+        String::new()
+    };
+    let scope = if p.price_scope_website { "website" } else { "global" };
+    println!(
+        "{}  ({}, entity_id {})  {}{matched}",
+        style::name(&p.sku),
+        style::kind(&p.type_id),
+        p.entity_id,
+        style::dim(&format!("price scope: {scope}")),
+    );
+    println!();
+
+    if p.attributes.is_empty() {
+        println!("{}", style::dim("(no price attribute rows)"));
+    }
+    let wa = p.attributes.iter().map(|v| v.attribute.len()).max().unwrap_or(0);
+    for v in &p.attributes {
+        let pad = " ".repeat(wa - v.attribute.len());
+        let mut scopes = v.scopes.iter();
+        let first = scopes.next().expect("at least one scope row");
+        let tag = if first.store == "default" {
+            String::new()
+        } else {
+            format!("  {}", style::area(&format!("({})", first.store)))
+        };
+        println!(
+            "{}{pad}  {}{tag}",
+            style::name(&v.attribute),
+            product_value(v, first),
+        );
+        for s in scopes {
+            println!(
+                "{}  {}  {}",
+                " ".repeat(wa),
+                style::area(&format!("{:>14}", s.store)),
+                product_value(v, s),
+            );
+        }
+    }
+
+    if !p.tier_prices.is_empty() {
+        println!("\n{}", style::dim("tier prices:"));
+        for t in &p.tier_prices {
+            let amount = match (&t.value, &t.percentage) {
+                (_, Some(pc)) => style::number(&format!("-{pc}%")),
+                (Some(v), _) => style::number(v),
+                _ => style::dim("?"),
+            };
+            println!(
+                "  {}  qty {}+  {amount}  {}",
+                style::target(&t.customer_group),
+                style::number(&t.qty),
+                style::dim(&format!("(website: {})", t.website)),
+            );
+        }
+    }
+
+    if !p.rule_prices.is_empty() {
+        println!("\n{}", style::dim("catalog rule prices (materialized, ±1 day):"));
+        for r in &p.rule_prices {
+            println!(
+                "  {}  {} / {}  {} {}",
+                r.date,
+                style::area(&r.website),
+                style::target(&r.customer_group),
+                style::dim("→"),
+                style::number(&r.rule_price),
+            );
+        }
+    }
+
+    println!();
+    if p.index.is_empty() {
+        println!(
+            "{}",
+            style::err(
+                "no price index rows — the product is invisible on the storefront \
+                 (reindex catalog_product_price, and check website assignment/status)"
+            )
+        );
+        return Ok(());
+    }
+    println!("{}", style::dim("price index (what the storefront reads):"));
+    let n = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".to_string());
+    let ww = p.index.iter().map(|i| i.website.len()).max().unwrap_or(0);
+    let wg = p.index.iter().map(|i| i.customer_group.len()).max().unwrap_or(0);
+    for i in &p.index {
+        let final_p = n(&i.final_price);
+        let reduced = i.final_price.is_some() && i.final_price != i.price;
+        let final_col =
+            if reduced { style::ok(&final_p) } else { style::number(&final_p) };
+        let tier = i
+            .tier_price
+            .as_deref()
+            .map(|t| format!("  tier {}", style::number(t)))
+            .unwrap_or_default();
+        println!(
+            "  {}{} {}{}  price {}  final {final_col}  min {}  max {}{tier}",
+            style::area(&i.website),
+            " ".repeat(ww - i.website.len()),
+            style::target(&i.customer_group),
+            " ".repeat(wg - i.customer_group.len()),
+            style::number(&n(&i.price)),
+            style::number(&n(&i.min_price)),
+            style::number(&n(&i.max_price)),
+        );
+    }
+    Ok(())
 }
 
 fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()> {

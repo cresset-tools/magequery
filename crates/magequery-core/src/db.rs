@@ -195,6 +195,177 @@ pub(crate) enum ProductIdent<'a> {
     Id(u32),
 }
 
+/// The light identity lookup: `(entity_id, sku, type_id)`.
+pub(crate) fn fetch_product_identity(
+    conn: &DbConnection,
+    table_prefix: &str,
+    ident: &ProductIdent<'_>,
+) -> Result<Option<(u32, String, String)>, String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let base = format!("SELECT entity_id, sku, type_id FROM {p}catalog_product_entity");
+    match ident {
+        ProductIdent::Sku(sku) => {
+            c.exec_first(format!("{base} WHERE sku = :v"), params! { "v" => *sku })
+        }
+        ProductIdent::Id(id) => {
+            c.exec_first(format!("{base} WHERE entity_id = :v"), params! { "v" => *id })
+        }
+    }
+    .map_err(clean_err)
+}
+
+/// Everything price-shaped for one product, raw.
+pub(crate) struct DbProductPrices {
+    pub entity_id: u32,
+    pub sku: String,
+    pub type_id: String,
+    pub price_scope_website: bool,
+    pub values: Vec<DbProductValue>,
+    pub stores: std::collections::HashMap<u32, String>,
+    /// `(website_id, all_groups, customer_group_id, qty, value, percentage)`.
+    pub tiers: Vec<(u32, bool, u32, String, Option<String>, Option<String>)>,
+    /// `(rule_date, customer_group_id, website_id, rule_price)`.
+    pub rules: Vec<(String, u32, u32, String)>,
+    /// `(customer_group_id, website_id, price, final, min, max, tier)`.
+    #[allow(clippy::type_complexity)]
+    pub index: Vec<(u32, u32, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)>,
+    pub customer_groups: std::collections::HashMap<u32, String>,
+    pub websites: std::collections::HashMap<u32, String>,
+}
+
+/// Fetch the full price picture on one connection: EAV price attributes (decimal +
+/// datetime value tables), tier prices, materialized catalog-rule prices, and the price
+/// index. `catalogrule_product_price` / `catalog_product_index_price` queries tolerate
+/// missing tables (never-reindexed or stripped installs) by returning empty.
+pub(crate) fn fetch_product_prices(
+    conn: &DbConnection,
+    table_prefix: &str,
+    ident: ProductIdent<'_>,
+) -> Result<Option<DbProductPrices>, String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    use std::collections::HashMap;
+
+    let Some((entity_id, sku, type_id)) = fetch_product_identity(conn, table_prefix, &ident)?
+    else {
+        return Ok(None);
+    };
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    // `catalog/price/scope` default-scope row; absent = 0 = global.
+    let price_scope_website: bool = c
+        .query_first::<Option<String>, _>(format!(
+            "SELECT value FROM {p}core_config_data \
+             WHERE path = 'catalog/price/scope' AND scope = 'default'"
+        ))
+        .ok()
+        .flatten()
+        .flatten()
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false);
+
+    let stores: HashMap<u32, String> =
+        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?
+            .into_iter()
+            .collect();
+    let websites: HashMap<u32, String> = c
+        .query(format!("SELECT website_id, code FROM {p}store_website"))
+        .map_err(clean_err)?
+        .into_iter()
+        .collect();
+    let customer_groups: HashMap<u32, String> = c
+        .query(format!("SELECT customer_group_id, customer_group_code FROM {p}customer_group"))
+        .map(|rows: Vec<(u32, String)>| rows.into_iter().collect())
+        .unwrap_or_default();
+
+    const PRICE_ATTRS: &str =
+        "'price','special_price','special_from_date','special_to_date','cost','msrp','minimal_price'";
+    let mut values: Vec<DbProductValue> = Vec::new();
+    for table in ["decimal", "datetime"] {
+        let rows: Vec<(String, String, Option<String>, Option<String>, u32, u32, Option<String>)> =
+            c.exec(
+                format!(
+                    "SELECT a.attribute_code, a.backend_type, a.frontend_input, \
+                     a.source_model, a.attribute_id, v.store_id, CAST(v.value AS CHAR) \
+                     FROM {p}catalog_product_entity_{table} v \
+                     JOIN {p}eav_attribute a ON a.attribute_id = v.attribute_id \
+                     WHERE v.entity_id = :v AND a.attribute_code IN ({PRICE_ATTRS})"
+                ),
+                params! { "v" => entity_id },
+            )
+            .map_err(clean_err)?;
+        for (attribute, backend_type, input, source_model, attribute_id, store_id, value) in rows {
+            values.push(DbProductValue {
+                attribute,
+                backend_type,
+                input,
+                source_model,
+                attribute_id,
+                store_id,
+                value,
+            });
+        }
+    }
+
+    let tiers: Vec<(u32, bool, u32, String, Option<String>, Option<String>)> = c
+        .exec(
+            format!(
+                "SELECT website_id, all_groups, customer_group_id, CAST(qty AS CHAR), \
+                 CAST(value AS CHAR), CAST(percentage_value AS CHAR) \
+                 FROM {p}catalog_product_entity_tier_price WHERE entity_id = :v \
+                 ORDER BY website_id, customer_group_id, qty"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map(|rows: Vec<(u32, i64, u32, String, Option<String>, Option<String>)>| {
+            rows.into_iter().map(|(w, a, g, q, v, pc)| (w, a != 0, g, q, v, pc)).collect()
+        })
+        .unwrap_or_default();
+
+    let rules: Vec<(String, u32, u32, String)> = c
+        .exec(
+            format!(
+                "SELECT CAST(rule_date AS CHAR), customer_group_id, website_id, \
+                 CAST(rule_price AS CHAR) FROM {p}catalogrule_product_price \
+                 WHERE product_id = :v ORDER BY rule_date, website_id, customer_group_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .unwrap_or_default();
+
+    #[allow(clippy::type_complexity)]
+    let index: Vec<(u32, u32, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> = c
+        .exec(
+            format!(
+                "SELECT customer_group_id, website_id, CAST(price AS CHAR), \
+                 CAST(final_price AS CHAR), CAST(min_price AS CHAR), \
+                 CAST(max_price AS CHAR), CAST(tier_price AS CHAR) \
+                 FROM {p}catalog_product_index_price WHERE entity_id = :v \
+                 ORDER BY website_id, customer_group_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .unwrap_or_default();
+
+    Ok(Some(DbProductPrices {
+        entity_id,
+        sku,
+        type_id,
+        price_scope_website,
+        values,
+        stores,
+        tiers,
+        rules,
+        index,
+        customer_groups,
+        websites,
+    }))
+}
+
 /// One `(attribute, store)` value row, with the attribute metadata needed to render it.
 pub(crate) struct DbProductValue {
     pub attribute: String,

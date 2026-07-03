@@ -1424,6 +1424,63 @@ pub struct UiComponentView {
     pub contributions: Vec<UiComponentContribution>,
 }
 
+/// One tier-price row (`catalog_product_entity_tier_price`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct TierPrice {
+    /// Website code, or `(all)` for website_id 0.
+    pub website: String,
+    /// Customer group name, or `ALL GROUPS`.
+    pub customer_group: String,
+    pub qty: String,
+    /// Fixed price — or `None` when the row is a percentage discount.
+    pub value: Option<String>,
+    pub percentage: Option<String>,
+}
+
+/// One catalog-rule price row (`catalogrule_product_price` — the rule engine's
+/// materialized prices, ±1 day around today).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct RulePrice {
+    pub date: String,
+    pub website: String,
+    pub customer_group: String,
+    pub rule_price: String,
+}
+
+/// One `catalog_product_index_price` row — what the storefront actually reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct IndexedPrice {
+    pub website: String,
+    pub customer_group: String,
+    pub price: Option<String>,
+    pub final_price: Option<String>,
+    pub min_price: Option<String>,
+    pub max_price: Option<String>,
+    pub tier_price: Option<String>,
+}
+
+/// Every price the database stores for one product: the EAV price attributes per scope,
+/// tier prices, materialized catalog-rule prices, and the price index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductPrices {
+    pub entity_id: u32,
+    pub sku: String,
+    pub type_id: String,
+    /// `catalog/price/scope`: `true` = website-scoped prices, `false` = global.
+    pub price_scope_website: bool,
+    /// The price-ish EAV attributes (`price`, `special_price` + validity dates, `cost`,
+    /// `msrp`, …), with every scope row.
+    pub attributes: Vec<ProductValue>,
+    pub tier_prices: Vec<TierPrice>,
+    pub rule_prices: Vec<RulePrice>,
+    pub index: Vec<IndexedPrice>,
+    pub matched_by_id: bool,
+}
+
 /// One scope's value of a product attribute: the raw stored value plus the resolved
 /// human label when the attribute's options make that possible.
 #[derive(Debug, Clone, PartialEq, Eq)]
