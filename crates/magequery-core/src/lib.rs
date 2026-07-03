@@ -52,7 +52,7 @@ pub use model::{
     EavSetupRef, EavValueKind, EmailTemplate,
     EmailTemplateOverride, ExtendedType, ExtensionAttribute,
     ExtensionJoin, GqlArg, GqlField, GqlKind, GqlType,
-    Indexer, IndexerLive, InstanceInfo, InterceptKind,
+    Indexer, IndexerLive, InstanceInfo, Integration, InterceptKind,
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
@@ -1173,6 +1173,58 @@ impl Magento {
                 .collect(),
             truncated,
         ))
+    }
+
+    /// API integrations with their token state and granted ACL resources (titled from
+    /// the static acl.xml index — a missing title flags a stale grant). Filtered by a
+    /// name substring. Token secrets are never returned. Live DB.
+    #[cfg(feature = "db")]
+    pub fn integrations(&self, filter: Option<&str>) -> Result<Vec<Integration>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raws = db::fetch_integrations(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let needle = filter.map(str::to_lowercase);
+        Ok(raws
+            .into_iter()
+            .filter(|(_, name, ..)| {
+                needle.as_deref().map_or(true, |n| name.to_lowercase().contains(n))
+            })
+            .map(
+                |(id, name, email, endpoint, status, setup, created_at, updated_at, token, rules)| {
+                    let rules: Vec<AdminRule> = rules
+                        .into_iter()
+                        .map(|(resource, allow)| AdminRule {
+                            title: self
+                                .acl_resource(&resource)
+                                .map(|r| r.title)
+                                .filter(|t| !t.is_empty()),
+                            resource,
+                            allow,
+                        })
+                        .collect();
+                    let all_resources =
+                        rules.iter().any(|r| r.resource == "Magento_Backend::all" && r.allow);
+                    Integration {
+                        id,
+                        name,
+                        email: email.filter(|e| !e.is_empty()),
+                        endpoint: endpoint.filter(|e| !e.is_empty()),
+                        status: match status {
+                            0 => "inactive".to_string(),
+                            1 => "active".to_string(),
+                            2 => "recreated".to_string(),
+                            other => format!("status {other}"),
+                        },
+                        setup: if setup == 1 { "config".to_string() } else { "manual".to_string() },
+                        created_at,
+                        updated_at,
+                        token,
+                        all_resources,
+                        rules,
+                    }
+                },
+            )
+            .collect())
     }
 
     /// The tax picture: classes (flagging ones no rule references — a product class in

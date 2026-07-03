@@ -1719,6 +1719,29 @@ pub struct CmsHit {
     pub stores: Vec<String>,
 }
 
+/// One API integration (`integration` + its oauth token state + granted ACL resources).
+/// Token secrets are never exposed — only presence/revocation. Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Integration {
+    pub id: u32,
+    pub name: String,
+    pub email: Option<String>,
+    pub endpoint: Option<String>,
+    /// `inactive` / `active` / `recreated`.
+    pub status: String,
+    /// `manual` (admin-created) / `config` (defined in a module's config).
+    pub setup: String,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    /// Access-token state: `none` / `active` / `revoked`.
+    pub token: String,
+    /// Granted `Magento_Backend::all`.
+    pub all_resources: bool,
+    /// Granted resources, titled from the static acl.xml index (like admin roles).
+    pub rules: Vec<AdminRule>,
+}
+
 /// One tax rate (`tax_calculation_rate`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

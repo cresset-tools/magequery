@@ -341,6 +341,92 @@ pub(crate) fn fetch_cms_like(
     ))
 }
 
+/// Integrations, raw: `(id, name, email, endpoint, status, setup_type, created,
+/// updated, token state)` + per-integration `(resource, allow)` rules.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_integrations(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<
+    Vec<(
+        u32,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        String,
+        Vec<(String, bool)>,
+    )>,
+    String,
+> {
+    use mysql::prelude::Queryable;
+    use std::collections::HashMap;
+
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    type IntRow = (u32, String, Option<String>, Option<String>, i64, i64, Option<String>, Option<String>, Option<u64>);
+    let integrations: Vec<IntRow> = c
+        .query(format!(
+            "SELECT integration_id, name, email, endpoint, status, setup_type, \
+             CAST(created_at AS CHAR), CAST(updated_at AS CHAR), consumer_id \
+             FROM {p}integration ORDER BY name"
+        ))
+        .map_err(clean_err)?;
+    if integrations.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Access-token state per consumer — presence and revocation only, never the secret.
+    let tokens: HashMap<u64, i64> = c
+        .query(format!(
+            "SELECT consumer_id, revoked FROM {p}oauth_token WHERE type = 'access'"
+        ))
+        .map(|rows: Vec<(Option<u64>, i64)>| {
+            rows.into_iter().filter_map(|(cid, r)| cid.map(|c| (c, r))).collect()
+        })
+        .unwrap_or_default();
+
+    // Integration permissions: the U-role with user_type 1 (integration), then its rules.
+    let roles: Vec<(u32, u32)> = c
+        .query(format!(
+            "SELECT role_id, user_id FROM {p}authorization_role WHERE user_type = '1'"
+        ))
+        .map(|rows: Vec<(u32, u32)>| rows)
+        .unwrap_or_default();
+    let rules: Vec<(u32, String, Option<String>)> = c
+        .query(format!(
+            "SELECT role_id, resource_id, permission FROM {p}authorization_rule \
+             ORDER BY resource_id"
+        ))
+        .map(|rows: Vec<(u32, String, Option<String>)>| rows)
+        .unwrap_or_default();
+
+    Ok(integrations
+        .into_iter()
+        .map(|(id, name, email, endpoint, status, setup, created, updated, consumer)| {
+            let token = match consumer.and_then(|cid| tokens.get(&cid)) {
+                Some(0) => "active".to_string(),
+                Some(_) => "revoked".to_string(),
+                None => "none".to_string(),
+            };
+            let my_rules: Vec<(String, bool)> = roles
+                .iter()
+                .filter(|(_, uid)| *uid == id)
+                .flat_map(|(rid, _)| {
+                    rules.iter().filter(move |(r, ..)| r == rid).map(|(_, res, perm)| {
+                        (res.clone(), perm.as_deref() == Some("allow"))
+                    })
+                })
+                .collect();
+            (id, name, email, endpoint, status, setup, created, updated, token, my_rules)
+        })
+        .collect())
+}
+
 /// The tax configuration, raw.
 #[allow(clippy::type_complexity)]
 pub(crate) struct DbTaxInfo {

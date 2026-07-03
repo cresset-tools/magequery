@@ -183,7 +183,7 @@ DATA          (persistence & model)
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
   acl [<resource>]                              menu [<item>]
-  admin-users [<user>]   admin-roles [<role>]   (live DB)
+  admin-users [<user>]   admin-roles [<role>]   integrations [<name>]   (live DB)
 
 FRONTEND      (presentation)
   layout [<handle>] [--area]    widgets [<id>]    email-templates [<id>]
@@ -1315,6 +1315,19 @@ numbers, "(no tracking numbers)" flagged; creditmemo: adjustment_positive/negati
 totals), item lines, and the totals in order currency (zero rows filtered). Validated on
 the scratchpad DB: all three cards, single-match substring, clean unknown error.
 
+### `integrations` (API access audit, live DB, done)
+
+The third leg of the access story (`admin-users`/`admin-roles` are the human half):
+`magequery integrations [<name>]`. List = `name  status  token-state  access  setup`;
+single named match → the card. Joins: `integration` + `oauth_token` (access-token
+**presence/revocation only — the secret is never selected**, verified in tests: zero
+occurrences even in --json) + the integration's `authorization_role` (`user_type = '1'`,
+per `UserContextInterface`) rules, each resource titled from the static acl.xml index —
+untitled = stale grant of a removed module (on the synthetic root everything flags since
+the fake root ships no acl.xml; on a real store only genuinely-gone modules do).
+Red flags: `full access (Magento_Backend::all)`, revoked tokens; dim honesty for
+never-activated integrations and zero-grant ones ("the API rejects it").
+
 ### `order-statuses` + `sequences` (small sales views, live DB, done)
 
 `magequery order-statuses [<filter>]` — every status with its `sales_order_status_state`
@@ -1446,8 +1459,7 @@ role, and seeding one into a live DB was deliberately not done.
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
 `queue backlog`, `product`). New ideas go here.
-- **Small entities, in build order:** `integrations`. Backlog: reviews, wishlists,
-  search terms.
+Backlog: reviews, wishlists, search terms — waiting for a real need.
 
 ## Build order
 

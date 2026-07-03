@@ -84,6 +84,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("menu", "Admin menu tree from menu.xml: what's where, guarded by which ACL"),
             ("admin-users", "Admin users from the DB: role, status, last login"),
             ("admin-roles", "Admin roles from the DB: members, permitted ACL resources"),
+            ("integrations", "API integrations: token state, granted ACL resources"),
         ],
     ),
     (
@@ -328,6 +329,8 @@ enum Command {
     AdminUsers(AdminUsersArgs),
     /// Admin roles from the DB: members and permitted ACL resources.
     AdminRoles(AdminRolesArgs),
+    /// API integrations: status, token state, granted ACL resources.
+    Integrations(IntegrationsArgs),
 
     // ── Runtime: env.php config & live connections ──
     /// DB connections from env.php; info / ping.
@@ -653,6 +656,14 @@ struct SequencesArgs {
 struct SalesDocArgs {
     /// The document's increment id (exact; a substring lists matches).
     increment: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct IntegrationsArgs {
+    /// A name substring → single match shows the full grant list. Omit to list all.
+    name: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -1075,6 +1086,7 @@ fn main() -> Result<()> {
         Command::CmsBlock(args) => cms(&mage, magequery_core::CmsKind::Block, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
         Command::AdminRoles(args) => admin_roles(&mage, &args),
+        Command::Integrations(args) => integrations(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
         Command::Actions(args) => actions(&mage, &args, &cli.root),
@@ -4507,6 +4519,104 @@ fn product_value(v: &magequery_core::ProductValue, s: &magequery_core::ProductSc
         Some(l) => format!("{raw} {} {}", style::dim("→"), style::target(l)),
         None => raw,
     }
+}
+
+fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
+    let list = mage.integrations(args.name.as_deref())?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+    if list.is_empty() {
+        return match &args.name {
+            Some(n) => Err(anyhow!("no integration matches `{n}`")),
+            None => {
+                println!("{}", style::dim("(no integrations)"));
+                Ok(())
+            }
+        };
+    }
+
+    // Single named match → the full card with every grant.
+    if list.len() == 1 && args.name.is_some() {
+        let i = &list[0];
+        let status = match i.status.as_str() {
+            "active" => style::ok("active"),
+            "inactive" => style::dim("inactive"),
+            other => style::number(other),
+        };
+        println!("{}  (integration {})  {status}", style::name(&i.name), i.id);
+        println!();
+        if let Some(e) = &i.email {
+            info_row("email", e.clone());
+        }
+        if let Some(e) = &i.endpoint {
+            info_row("endpoint", e.clone());
+        }
+        info_row("setup", i.setup.clone());
+        let token = match i.token.as_str() {
+            "active" => style::ok("access token active"),
+            "revoked" => style::err("access token revoked"),
+            _ => style::dim("no access token — never activated"),
+        };
+        info_row("token", token);
+        info_row(
+            "created",
+            style::dim(&format!(
+                "{}  · updated {}",
+                i.created_at.as_deref().unwrap_or("?"),
+                i.updated_at.as_deref().unwrap_or("?"),
+            )),
+        );
+        if i.all_resources {
+            info_row("access", style::err("full (Magento_Backend::all) — every API"));
+            return Ok(());
+        }
+        if i.rules.is_empty() {
+            info_row("access", style::dim("(no resources granted — the API rejects it)"));
+            return Ok(());
+        }
+        info_row("access", format!("{} resource(s):", i.rules.len()));
+        for rule in &i.rules {
+            let mark = if rule.allow { style::ok("✓") } else { style::err("✕ deny") };
+            let title = match &rule.title {
+                Some(t) => format!("  {t}"),
+                None => format!(
+                    "  {}",
+                    style::number("(not declared in any acl.xml — module removed?)")
+                ),
+            };
+            println!("  {mark} {}{title}", style::name(&rule.resource));
+        }
+        return Ok(());
+    }
+
+    let wn = list.iter().map(|i| i.name.chars().count()).max().unwrap_or(0);
+    for i in &list {
+        let status = match i.status.as_str() {
+            "active" => style::ok("active  "),
+            "inactive" => style::dim("inactive"),
+            other => style::number(other),
+        };
+        let token = match i.token.as_str() {
+            "active" => style::ok("token"),
+            "revoked" => style::err("revoked"),
+            _ => style::dim("no token"),
+        };
+        let access = if i.all_resources {
+            style::err("full access")
+        } else {
+            format!("{} resource(s)", i.rules.len())
+        };
+        println!(
+            "{}{}  {status}  {token}  {access}  {}",
+            style::name(&i.name),
+            " ".repeat(wn - i.name.chars().count()),
+            style::dim(&i.setup),
+        );
+    }
+    eprintln!("\n{} integration(s)", list.len());
+    Ok(())
 }
 
 fn admin_users(mage: &Magento, args: &AdminUsersArgs) -> Result<()> {
