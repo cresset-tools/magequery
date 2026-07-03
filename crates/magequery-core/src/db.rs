@@ -189,6 +189,149 @@ pub(crate) fn fetch_patch_list(
     Ok(rows.into_iter().map(|r| r.trim_start_matches('\\').to_string()).collect())
 }
 
+/// One job's aggregated `cron_schedule` stats.
+pub(crate) struct DbCronStat {
+    pub job_code: String,
+    pub pending: u32,
+    pub running: u32,
+    pub success: u32,
+    pub error: u32,
+    pub missed: u32,
+    pub last_status: Option<String>,
+    pub last_run: Option<String>,
+    pub last_run_secs: Option<i64>,
+    pub last_duration_secs: Option<i64>,
+    pub last_error: Option<String>,
+    pub next_scheduled: Option<String>,
+}
+
+/// Per-job `cron_schedule` summary: status counts, the most recently *started* run (its
+/// status is the job's last outcome; duration = finished − executed), the most recent
+/// retained error message, and the next pending run. All ages on the DB server's clock.
+pub(crate) fn fetch_cron_stats(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<Vec<DbCronStat>, String> {
+    use mysql::prelude::Queryable;
+    use std::collections::HashMap;
+
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    let mut by_code: HashMap<String, DbCronStat> = HashMap::new();
+    fn stat<'a>(m: &'a mut HashMap<String, DbCronStat>, code: &str) -> &'a mut DbCronStat {
+        m.entry(code.to_string()).or_insert_with(|| DbCronStat {
+            job_code: code.to_string(),
+            pending: 0,
+            running: 0,
+            success: 0,
+            error: 0,
+            missed: 0,
+            last_status: None,
+            last_run: None,
+            last_run_secs: None,
+            last_duration_secs: None,
+            last_error: None,
+            next_scheduled: None,
+        })
+    }
+
+    let counts: Vec<(String, String, u64)> = c
+        .query(format!(
+            "SELECT job_code, status, COUNT(*) FROM {p}cron_schedule \
+             GROUP BY job_code, status"
+        ))
+        .map_err(clean_err)?;
+    for (code, status, n) in counts {
+        let s = stat(&mut by_code, &code);
+        let n = n as u32;
+        match status.as_str() {
+            "pending" => s.pending = n,
+            "running" => s.running = n,
+            "success" => s.success = n,
+            "error" => s.error = n,
+            "missed" => s.missed = n,
+            _ => {}
+        }
+    }
+
+    // The most recently started row per job = the last outcome.
+    let last: Vec<(String, String, Option<String>, Option<i64>, Option<i64>)> = c
+        .query(format!(
+            "SELECT s.job_code, s.status, CAST(s.executed_at AS CHAR), \
+             TIMESTAMPDIFF(SECOND, s.executed_at, NOW()), \
+             TIMESTAMPDIFF(SECOND, s.executed_at, s.finished_at) \
+             FROM {p}cron_schedule s \
+             JOIN (SELECT job_code, MAX(executed_at) me FROM {p}cron_schedule \
+                   WHERE executed_at IS NOT NULL GROUP BY job_code) m \
+             ON m.job_code = s.job_code AND s.executed_at = m.me"
+        ))
+        .map_err(clean_err)?;
+    for (code, status, run, secs, duration) in last {
+        let s = stat(&mut by_code, &code);
+        if s.last_status.is_none() {
+            s.last_status = Some(status);
+            s.last_run = run;
+            s.last_run_secs = secs;
+            s.last_duration_secs = duration;
+        }
+    }
+
+    let errors: Vec<(String, Option<String>)> = c
+        .query(format!(
+            "SELECT s.job_code, s.messages FROM {p}cron_schedule s \
+             JOIN (SELECT job_code, MAX(schedule_id) mi FROM {p}cron_schedule \
+                   WHERE status = 'error' GROUP BY job_code) m \
+             ON m.mi = s.schedule_id"
+        ))
+        .map_err(clean_err)?;
+    for (code, msg) in errors {
+        stat(&mut by_code, &code).last_error = msg.filter(|m| !m.is_empty());
+    }
+
+    let next: Vec<(String, Option<String>)> = c
+        .query(format!(
+            "SELECT job_code, CAST(MIN(scheduled_at) AS CHAR) FROM {p}cron_schedule \
+             WHERE status = 'pending' GROUP BY job_code"
+        ))
+        .map_err(clean_err)?;
+    for (code, at) in next {
+        stat(&mut by_code, &code).next_scheduled = at;
+    }
+
+    Ok(by_code.into_values().collect())
+}
+
+/// A job's recent history rows — runs, errors, and misses (pending rows are excluded:
+/// Magento schedules ahead, so dozens of future pendings would drown the log), newest
+/// first. `(status, scheduled_at, executed_at, finished_at, duration, messages)`.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_cron_history(
+    conn: &DbConnection,
+    table_prefix: &str,
+    job_code: &str,
+    limit: usize,
+) -> Result<
+    Vec<(String, Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>)>,
+    String,
+> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    c.exec(
+        format!(
+            "SELECT status, CAST(scheduled_at AS CHAR), CAST(executed_at AS CHAR), \
+             CAST(finished_at AS CHAR), TIMESTAMPDIFF(SECOND, executed_at, finished_at), \
+             messages FROM {table_prefix}cron_schedule \
+             WHERE job_code = :code AND status <> 'pending' \
+             ORDER BY COALESCE(executed_at, scheduled_at) DESC, schedule_id DESC \
+             LIMIT {limit}"
+        ),
+        params! { "code" => job_code },
+    )
+    .map_err(clean_err)
+}
+
 /// Seconds since the last *successful* cron job finished, per the DB server's own clock
 /// (`TIMESTAMPDIFF` — no client-side time needed). `None` = no successful runs recorded.
 pub(crate) fn fetch_cron_last_success(

@@ -45,7 +45,8 @@ pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
     AclResource, AdminRole, AdminRule, AdminUser, ArgItem, ArgValue, Argument, ByArea,
     ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
-    ConsoleCommand, ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
+    ConsoleCommand, ControllerAction, CronJob, CronJobLive, CronJobs, CronRun,
+    DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
     DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, EavAttribute, EavAttributeCard,
     EavCatalogFlags, EavEntityType, EavScope, EavSetMembership, EavSetupKind, EavSetupProp,
     EavSetupRef, EavValueKind, EmailTemplate,
@@ -361,8 +362,95 @@ impl Magento {
     }
 
     /// Cron jobs, optionally restricted to one group.
-    pub fn cron_jobs(&self, group: Option<&str>) -> Vec<CronJob> {
-        self.cron.get_or_init(|| breadth::CronIndex::build(&self.index.modules)).jobs(group)
+    pub fn cron_jobs(&self, group: Option<&str>, include_db: bool) -> Result<CronJobs> {
+        let mut jobs =
+            self.cron.get_or_init(|| breadth::CronIndex::build(&self.index.modules)).jobs(group);
+        let mut orphaned_codes = Vec::new();
+        if include_db {
+            orphaned_codes = self.attach_cron_live(&mut jobs)?;
+            if group.is_some() {
+                // Orphans can't be attributed to a group — only meaningful unfiltered.
+                orphaned_codes.clear();
+            }
+        }
+        Ok(CronJobs { jobs, orphaned_codes })
+    }
+
+    /// A job's recent `cron_schedule` rows (runs, errors, misses — not future pendings),
+    /// newest first.
+    #[cfg(feature = "db")]
+    pub fn cron_history(&self, job_code: &str, limit: usize) -> Result<Vec<CronRun>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let rows = db::fetch_cron_history(conn, &cfg.table_prefix, job_code, limit)
+            .map_err(Error::Db)?;
+        Ok(rows
+            .into_iter()
+            .map(|(status, scheduled_at, executed_at, finished_at, duration_secs, messages)| {
+                CronRun {
+                    status,
+                    scheduled_at,
+                    executed_at,
+                    finished_at,
+                    duration_secs,
+                    messages: messages.filter(|m| !m.is_empty()),
+                }
+            })
+            .collect())
+    }
+
+    /// Overlay `cron_schedule` stats onto the job list; returns the job codes present in
+    /// the table that no crontab.xml defines (removed modules' leftover schedules).
+    #[cfg(feature = "db")]
+    fn attach_cron_live(&self, jobs: &mut [CronJob]) -> Result<Vec<String>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let stats = db::fetch_cron_stats(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        for job in jobs.iter_mut() {
+            let s = stats.iter().find(|s| s.job_code == job.name);
+            job.live = Some(match s {
+                Some(s) => CronJobLive {
+                    last_status: s.last_status.clone(),
+                    last_run: s.last_run.clone(),
+                    last_run_secs: s.last_run_secs,
+                    last_duration_secs: s.last_duration_secs,
+                    last_error: s.last_error.clone(),
+                    next_scheduled: s.next_scheduled.clone(),
+                    pending: s.pending,
+                    running: s.running,
+                    success: s.success,
+                    error: s.error,
+                    missed: s.missed,
+                },
+                None => CronJobLive {
+                    last_status: None,
+                    last_run: None,
+                    last_run_secs: None,
+                    last_duration_secs: None,
+                    last_error: None,
+                    next_scheduled: None,
+                    pending: 0,
+                    running: 0,
+                    success: 0,
+                    error: 0,
+                    missed: 0,
+                },
+            });
+        }
+        let known: std::collections::HashSet<&str> =
+            jobs.iter().map(|j| j.name.as_str()).collect();
+        let mut orphans: Vec<String> = stats
+            .iter()
+            .filter(|s| !known.contains(s.job_code.as_str()))
+            .map(|s| s.job_code.clone())
+            .collect();
+        orphans.sort();
+        Ok(orphans)
+    }
+
+    #[cfg(not(feature = "db"))]
+    fn attach_cron_live(&self, _jobs: &mut [CronJob]) -> Result<Vec<String>> {
+        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
     }
 
     /// Frontend/adminhtml routes (frontName → modules) in `area`.

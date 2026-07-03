@@ -74,8 +74,13 @@ pub(crate) fn run(mage: &Magento, class: &ClassName) -> Result<Whatis> {
         }
     }
 
-    let cron_jobs: Vec<_> =
-        mage.cron_jobs(None).into_iter().filter(|j| j.instance == *class).collect();
+    let cron_jobs: Vec<_> = mage
+        .cron_jobs(None, false)
+        .map(|c| c.jobs)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|j| j.instance == *class)
+        .collect();
 
     let webapi: Vec<_> =
         mage.webapi(None).into_iter().filter(|r| r.service_class == *class).collect();

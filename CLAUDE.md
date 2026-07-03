@@ -168,7 +168,7 @@ WIRING        (object manager — how a class is assembled)
   uses <class>           reverse DI: who injects it
 
 ENTRY POINTS  (how execution starts)
-  routes [--area]    actions [<url>]    webapi [<url>]    cron [<group>]
+  routes [--area]    actions [<url>]    webapi [<url>]    cron [<group>|<job>] [--db]
   commands [<filter>]                   graphql [<type>|<Type.field>]
 
 DATA          (persistence & model)
@@ -201,7 +201,7 @@ PROJECT       (the codebase itself)
   (`uses` has `--area` but no `--all-areas`: its default is already the merged union.)
 - **`--json`** and **`--color auto|always|never`** + **`--root <path>`** — global, every command.
 - **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config`,
-  `schema`, `patches`, `eav`, `indexers`). Static by default; DB overlay when asked;
+  `schema`, `patches`, `eav`, `indexers`, `cron`). Static by default; DB overlay when asked;
   clean `Error::Db` if unreachable. Pure-live commands (`db`/`redis` `ping`, `url-rewrites`)
   require the `db`/`redis` build feature instead.
 - **`--source app|vendor`** — listing commands, "only my code" (today `modules`; generalize).
@@ -410,7 +410,21 @@ merge) — events ~108ms→25ms, routes ~100ms→21ms.
   within an event (last-wins, disabled/shared attrs). `Magento::observers(event, area)`,
   `events(area)`. CLI: `events [<event>] [--area]` (list with counts, or one event's observers).
 - **cron** — `crontab.xml` (global; the parser fills `<schedule>`/`<config_path>` text into
-  the current `<job>`). Merged by (group, name). `cron_jobs(group?)`. CLI: `cron [<group>]`.
+  the current `<job>`). Merged by (group, name). `cron_jobs(group?, include_db) ->
+  Result<CronJobs>`; with `include_db` each job carries a `CronJobLive` from
+  `cron_schedule` — status counts over the retained window, the most recently *started*
+  row as the last outcome (executed_at age + duration on the DB clock), the latest
+  retained error message, and the next pending run — plus `CronJobs.orphaned_codes`: job
+  codes in the table no crontab.xml defines (removed modules' leftover schedules;
+  unfiltered runs only, like `Patches::orphaned_applied`). `cron_history(code, limit)` =
+  the recent non-pending rows (Magento schedules ahead — future pendings would drown the
+  log). CLI: `cron [<group>|<job>] [--db]` — arg is a group (grouped list, live tag `✓
+  12m ago`/red `✕ error`/`(N missed)` per job), an exact/single-match job code (detail
+  card: class, schedule, last/next run, error message, count breakdown, and `recent
+  runs:` log lines with durations + messages), or a code substring. Both dev stores'
+  cron_schedule tables are empty (no cron daemon; success rows prune within the hour) —
+  zero states validated (`never ran`, no orphans, clean down-DB error); real history
+  rendering awaits a live shop.
 - **routes** — `routes.xml`, per-area (frontend/adminhtml/…); routes keyed by (router, id),
   modules accumulated across modules. `routes(area)`. CLI: `routes [--area]` (defaults to
   frontend+adminhtml). (Limitation: module `before`/`after` ordering within a route not
@@ -1113,8 +1127,7 @@ role, and seeding one into a live DB was deliberately not done.
 
 Ideas surfaced while scoping breadth, in rough priority. All but the DB ones are
 static breadth-projections in the same `read_parse` + merge shape.
-- **DB-backed (phase-2 style, opt-in like `url-rewrites`):** cron history
-  (`cron_schedule`), queue backlog.
+- **DB-backed (phase-2 style, opt-in like `url-rewrites`):** queue backlog.
 
 ## Build order
 

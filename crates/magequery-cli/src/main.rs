@@ -697,8 +697,12 @@ struct EventsArgs {
 
 #[derive(clap::Args)]
 struct CronArgs {
-    /// Restrict to one cron group.
-    group: Option<String>,
+    /// A cron group → its jobs; an exact job code → detail (recent runs with --db);
+    /// anything else filters job codes. Omit to list every job.
+    query: Option<String>,
+    /// Read live history from cron_schedule: last/next run, errors, missed counts.
+    #[arg(long)]
+    db: bool,
     #[arg(long)]
     json: bool,
 }
@@ -3253,9 +3257,39 @@ fn events(mage: &Magento, args: &EventsArgs, root: &Path) -> Result<()> {
 }
 
 fn cron(mage: &Magento, args: &CronArgs, root: &Path) -> Result<()> {
-    let jobs = mage.cron_jobs(args.group.as_deref());
+    let report = mage.cron_jobs(None, args.db)?;
+
+    // The query is a group name → its jobs; an exact job code → detail; else a
+    // substring over job codes (single match → detail).
+    let jobs: Vec<&magequery_core::CronJob> = match &args.query {
+        None => report.jobs.iter().collect(),
+        Some(q) => {
+            if report.jobs.iter().any(|j| j.group == *q) {
+                report.jobs.iter().filter(|j| j.group == *q).collect()
+            } else if let Some(job) = report.jobs.iter().find(|j| j.name == *q) {
+                return cron_job_detail(mage, job, args, root);
+            } else {
+                let n = q.to_lowercase();
+                let subs: Vec<_> = report
+                    .jobs
+                    .iter()
+                    .filter(|j| j.name.to_lowercase().contains(&n))
+                    .collect();
+                match subs.len() {
+                    0 => return Err(anyhow!("no cron group or job matches `{q}`")),
+                    1 => return cron_job_detail(mage, subs[0], args, root),
+                    _ => subs,
+                }
+            }
+        }
+    };
+
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&jobs)?);
+        let owned = magequery_core::CronJobs {
+            jobs: jobs.iter().map(|j| (*j).clone()).collect(),
+            orphaned_codes: report.orphaned_codes.clone(),
+        };
+        println!("{}", serde_json::to_string_pretty(&owned)?);
         return Ok(());
     }
     let mut group = "";
@@ -3270,8 +3304,13 @@ fn cron(mage: &Magento, args: &CronArgs, root: &Path) -> Result<()> {
             .map(|s| style::number(s))
             .or_else(|| j.config_path.as_deref().map(|c| style::dim(&format!("config:{c}"))))
             .unwrap_or_else(|| style::dim("(no schedule)"));
+        let live = j
+            .live
+            .as_ref()
+            .map(|l| format!("{}  ", cron_live_tag(l)))
+            .unwrap_or_default();
         println!(
-            "  {}  {}::{}  {}  {}",
+            "  {}  {}::{}  {}  {live}{}",
             style::name(&j.name),
             style::class(j.instance.as_str()),
             j.method,
@@ -3279,7 +3318,158 @@ fn cron(mage: &Magento, args: &CronArgs, root: &Path) -> Result<()> {
             style::path(&short_loc(&j.source, root)),
         );
     }
+    if !report.orphaned_codes.is_empty() {
+        println!(
+            "\n{} {}",
+            style::number(&format!(
+                "{} job code(s) in cron_schedule have no crontab.xml definition \
+                 (removed modules?):",
+                report.orphaned_codes.len()
+            )),
+            report.orphaned_codes.join(", "),
+        );
+    }
     eprintln!("\n{} job(s)", jobs.len());
+    Ok(())
+}
+
+/// Compact live tag: `✓ 12m ago` / red `✕ error 2h ago` / `never ran`, plus retained
+/// error/missed counts when nonzero.
+fn cron_live_tag(l: &magequery_core::CronJobLive) -> String {
+    let mut s = match &l.last_status {
+        Some(status) => {
+            let word = match status.as_str() {
+                "success" => style::ok("✓"),
+                "error" => style::err("✕ error"),
+                "running" => style::number("running"),
+                other => other.to_string(),
+            };
+            let age = l
+                .last_run_secs
+                .map(|x| format!(" {} ago", humanize_secs(x)))
+                .unwrap_or_default();
+            format!("{word}{}", style::dim(&age))
+        }
+        None => style::dim("never ran"),
+    };
+    if l.error > 0 && l.last_status.as_deref() != Some("error") {
+        s.push_str(&format!(" {}", style::err(&format!("({} errors)", l.error))));
+    }
+    if l.missed > 0 {
+        s.push_str(&format!(" {}", style::number(&format!("({} missed)", l.missed))));
+    }
+    s
+}
+
+fn cron_job_detail(
+    mage: &Magento,
+    job: &magequery_core::CronJob,
+    args: &CronArgs,
+    root: &Path,
+) -> Result<()> {
+    let history = if args.db { mage.cron_history(&job.name, 15)? } else { Vec::new() };
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "job": job, "history": history
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{}  [{}]  {}",
+        style::name(&job.name),
+        style::area(&job.group),
+        style::path(&short_loc(&job.source, root)),
+    );
+    println!();
+    info_row(
+        "class",
+        format!("{}::{}", style::class(job.instance.as_str()), style::target(&job.method)),
+    );
+    let when = job
+        .schedule
+        .as_deref()
+        .map(|s| style::number(s))
+        .or_else(|| job.config_path.as_deref().map(|c| format!("config: {c}")))
+        .unwrap_or_else(|| style::dim("(no schedule — runs only when triggered in code)"));
+    info_row("schedule", when);
+
+    let Some(l) = &job.live else {
+        println!("\n{}", style::dim("(live history: --db)"));
+        return Ok(());
+    };
+    println!();
+    match &l.last_status {
+        Some(status) => {
+            let word = match status.as_str() {
+                "success" => style::ok("success"),
+                "error" => style::err("error"),
+                "running" => style::number("running"),
+                other => other.to_string(),
+            };
+            let when = l.last_run.as_deref().unwrap_or("");
+            let mut tail = l
+                .last_run_secs
+                .map(|x| format!("{} ago", humanize_secs(x)))
+                .unwrap_or_default();
+            if let Some(d) = l.last_duration_secs {
+                tail.push_str(&format!(" · took {}", humanize_secs(d)));
+            }
+            info_row("last run", format!("{word}  {when}  {}", style::dim(&format!("({tail})"))));
+        }
+        None => info_row("last run", style::dim("never ran")),
+    }
+    if let Some(e) = &l.last_error {
+        info_row("last error", style::err(e));
+    }
+    if let Some(n) = &l.next_scheduled {
+        info_row("next run", n.clone());
+    }
+    let counts = [
+        (l.success, "success", style::ok(&l.success.to_string())),
+        (l.error, "error", style::err(&l.error.to_string())),
+        (l.missed, "missed", style::number(&l.missed.to_string())),
+        (l.running, "running", l.running.to_string()),
+        (l.pending, "pending", l.pending.to_string()),
+    ];
+    let breakdown: Vec<String> = counts
+        .iter()
+        .filter(|(n, _, _)| *n > 0)
+        .map(|(_, label, colored)| format!("{colored} {label}"))
+        .collect();
+    if !breakdown.is_empty() {
+        info_row("history", format!("{}  {}", breakdown.join(" · "), style::dim("(retained rows)")));
+    }
+
+    if !history.is_empty() {
+        println!("\n{}", style::dim("recent runs:"));
+        for r in &history {
+            let (mark, when) = match r.status.as_str() {
+                "success" => (style::ok("✓"), r.executed_at.as_deref()),
+                "error" => (style::err("✕"), r.executed_at.as_deref()),
+                "running" => (style::number("▶"), r.executed_at.as_deref()),
+                "missed" => (style::number("–"), r.scheduled_at.as_deref()),
+                _ => (style::dim("·"), r.scheduled_at.as_deref()),
+            };
+            let duration = r
+                .duration_secs
+                .map(|d| format!("  {}", style::dim(&format!("({})", humanize_secs(d)))))
+                .unwrap_or_default();
+            let msg = r
+                .messages
+                .as_deref()
+                .map(|m| format!("  {}", style::err(&m.replace('\n', " "))))
+                .unwrap_or_default();
+            println!(
+                "  {mark} {:<7}  {}{duration}{msg}",
+                r.status,
+                when.unwrap_or("(no timestamp)"),
+            );
+        }
+    }
     Ok(())
 }
 

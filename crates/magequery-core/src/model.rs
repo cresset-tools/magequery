@@ -487,7 +487,56 @@ pub struct CronJob {
     pub schedule: Option<String>,
     /// A config path the schedule is read from (`<config_path>`), if configurable.
     pub config_path: Option<String>,
+    /// Live history from `cron_schedule` (`--db` only).
+    pub live: Option<CronJobLive>,
     pub source: Source,
+}
+
+/// One job's live `cron_schedule` summary: the outcome of its most recent started run,
+/// the next pending run, and status counts over the retained history window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CronJobLive {
+    /// Status of the most recently *started* row (`success`/`error`/`running`);
+    /// `None` = the job never ran.
+    pub last_status: Option<String>,
+    /// When that run started (`executed_at`).
+    pub last_run: Option<String>,
+    /// Seconds since that run started, per the DB server's clock.
+    pub last_run_secs: Option<i64>,
+    /// How long it took (success runs).
+    pub last_duration_secs: Option<i64>,
+    /// The `messages` of the most recent error row, if any error is retained.
+    pub last_error: Option<String>,
+    /// The earliest pending `scheduled_at` — the next run.
+    pub next_scheduled: Option<String>,
+    pub pending: u32,
+    pub running: u32,
+    pub success: u32,
+    pub error: u32,
+    pub missed: u32,
+}
+
+/// One `cron_schedule` row of a job's history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CronRun {
+    pub status: String,
+    pub scheduled_at: Option<String>,
+    pub executed_at: Option<String>,
+    pub finished_at: Option<String>,
+    pub duration_secs: Option<i64>,
+    pub messages: Option<String>,
+}
+
+/// The `cron` result: definitions (with live overlay via `--db`), plus job codes in
+/// `cron_schedule` no crontab.xml defines — leftovers of removed modules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CronJobs {
+    pub jobs: Vec<CronJob>,
+    /// Only populated with `--db` and no group filter (like `Patches::orphaned_applied`).
+    pub orphaned_codes: Vec<String>,
 }
 
 /// A named di.xml declaration pointing at a class: a `<preference for=name type=X>` (the

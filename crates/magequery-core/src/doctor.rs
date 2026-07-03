@@ -318,7 +318,8 @@ impl Doctor<'_> {
     }
 
     fn check_cron(&mut self) {
-        for job in self.mage.cron_jobs(None) {
+        // Static call — can't fail; a hypothetical error just skips the lint.
+        for job in self.mage.cron_jobs(None, false).map(|c| c.jobs).unwrap_or_default() {
             if !self.class_known(&job.instance) {
                 self.error(
                     DoctorLint::CronInstanceMissing,

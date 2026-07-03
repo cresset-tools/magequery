@@ -169,6 +169,7 @@ impl CronIndex {
                         method: job.method,
                         schedule: job.schedule,
                         config_path: job.config_path,
+                        live: None,
                         source,
                     },
                 );
