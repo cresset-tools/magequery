@@ -1719,6 +1719,55 @@ pub struct CmsHit {
     pub stores: Vec<String>,
 }
 
+/// One tax rate (`tax_calculation_rate`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct TaxRate {
+    pub id: u32,
+    pub code: String,
+    pub country: String,
+    /// Region code, `*` for all.
+    pub region: String,
+    /// `*` for all (or a zip range collapsed to `from–to`).
+    pub postcode: String,
+    pub rate: String,
+}
+
+/// One tax class, with whether any rule references it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct TaxClassInfo {
+    pub id: u32,
+    pub name: String,
+    /// `CUSTOMER` / `PRODUCT`.
+    pub class_type: String,
+    /// Referenced by at least one tax rule — a product class in no rule is untaxed.
+    pub in_rules: bool,
+}
+
+/// One tax rule with its class combination and rates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct TaxRule {
+    pub id: u32,
+    pub code: String,
+    pub priority: u32,
+    pub calculate_subtotal: bool,
+    pub customer_classes: Vec<String>,
+    pub product_classes: Vec<String>,
+    pub rates: Vec<TaxRate>,
+}
+
+/// The tax picture: classes, rules, and rates no rule uses. Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct TaxInfo {
+    pub classes: Vec<TaxClassInfo>,
+    pub rules: Vec<TaxRule>,
+    /// Configured but referenced by no rule.
+    pub unused_rates: Vec<TaxRate>,
+}
+
 /// One catalog price rule (`catalogrule`), with its applied state. Live DB.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

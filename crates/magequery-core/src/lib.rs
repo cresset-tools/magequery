@@ -69,7 +69,8 @@ pub use model::{
     PluginMethod, Product,
     ProductCategory, ProductChild, Quote, QuoteAddress, QuoteHit, QuoteItem, RuleCoupon,
     SalesDocKind, SalesDocument, SalesDocumentHit, SalesDocumentItem, SalesRule, SalesRuleHit,
-    StoreGroupNode, StoreTree, StoreViewNode, WebsiteNode,
+    StoreGroupNode, StoreTree, StoreViewNode, TaxClassInfo, TaxInfo, TaxRate, TaxRule,
+    WebsiteNode,
     ProductHit, ProductLegacyStock, ProductPrices, ProductRewrite, ProductScopeValue,
     ProductSourceStock, ProductValue,
     RedisConfig, RedisInstance, RedisPing, RulePrice, TierPrice,
@@ -1172,6 +1173,100 @@ impl Magento {
                 .collect(),
             truncated,
         ))
+    }
+
+    /// The tax picture: classes (flagging ones no rule references — a product class in
+    /// no rule ships untaxed), rules with their class combinations and rates, and rates
+    /// no rule uses. Live DB.
+    #[cfg(feature = "db")]
+    pub fn tax_info(&self) -> Result<TaxInfo> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_tax_info(conn, &cfg.table_prefix).map_err(Error::Db)?;
+
+        let class_name = |id: u32| -> String {
+            raw.classes
+                .iter()
+                .find(|(cid, ..)| *cid == id)
+                .map(|(_, n, _)| n.clone())
+                .unwrap_or_else(|| format!("(class {id})"))
+        };
+        let rate_of = |id: u32| -> Option<TaxRate> {
+            raw.rates.iter().find(|(rid, ..)| *rid == id).map(
+                |(id, code, country, region, postcode, rate)| TaxRate {
+                    id: *id,
+                    code: code.clone(),
+                    country: country.clone(),
+                    region: region.clone(),
+                    postcode: postcode.clone(),
+                    rate: rate.clone(),
+                },
+            )
+        };
+
+        let rules: Vec<TaxRule> = raw
+            .rules
+            .iter()
+            .map(|(rule_id, code, priority, calculate_subtotal)| {
+                let mine: Vec<&(u32, u32, u32, u32)> =
+                    raw.links.iter().filter(|(r, ..)| r == rule_id).collect();
+                let mut customer: Vec<u32> = mine.iter().map(|(_, _, c, _)| *c).collect();
+                let mut product: Vec<u32> = mine.iter().map(|(_, _, _, p)| *p).collect();
+                let mut rate_ids: Vec<u32> = mine.iter().map(|(_, ra, _, _)| *ra).collect();
+                customer.sort_unstable();
+                customer.dedup();
+                product.sort_unstable();
+                product.dedup();
+                rate_ids.sort_unstable();
+                rate_ids.dedup();
+                TaxRule {
+                    id: *rule_id,
+                    code: code.clone(),
+                    priority: *priority,
+                    calculate_subtotal: *calculate_subtotal,
+                    customer_classes: customer.into_iter().map(class_name).collect(),
+                    product_classes: product.into_iter().map(class_name).collect(),
+                    rates: rate_ids.into_iter().filter_map(rate_of).collect(),
+                }
+            })
+            .collect();
+
+        let used_customer: std::collections::HashSet<u32> =
+            raw.links.iter().map(|(_, _, c, _)| *c).collect();
+        let used_product: std::collections::HashSet<u32> =
+            raw.links.iter().map(|(_, _, _, p)| *p).collect();
+        let used_rates: std::collections::HashSet<u32> =
+            raw.links.iter().map(|(_, r, _, _)| *r).collect();
+
+        let classes = raw
+            .classes
+            .iter()
+            .map(|(id, name, class_type)| TaxClassInfo {
+                id: *id,
+                name: name.clone(),
+                in_rules: if class_type == "CUSTOMER" {
+                    used_customer.contains(id)
+                } else {
+                    used_product.contains(id)
+                },
+                class_type: class_type.clone(),
+            })
+            .collect();
+        let unused_rates = raw
+            .rates
+            .iter()
+            .filter(|(id, ..)| !used_rates.contains(id))
+            .map(|(id, code, country, region, postcode, rate)| TaxRate {
+                id: *id,
+                code: code.clone(),
+                country: country.clone(),
+                region: region.clone(),
+                postcode: postcode.clone(),
+                rate: rate.clone(),
+            })
+            .collect();
+
+        Ok(TaxInfo { classes, rules, unused_rates })
     }
 
     /// One catalog price rule by rule_id. Live DB.

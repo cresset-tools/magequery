@@ -341,6 +341,76 @@ pub(crate) fn fetch_cms_like(
     ))
 }
 
+/// The tax configuration, raw.
+#[allow(clippy::type_complexity)]
+pub(crate) struct DbTaxInfo {
+    /// `(class_id, name, type)`.
+    pub classes: Vec<(u32, String, String)>,
+    /// `(rate_id, code, country, region code or *, postcode display, rate)`.
+    pub rates: Vec<(u32, String, String, String, String, String)>,
+    /// `(rule_id, code, priority, calculate_subtotal)`.
+    pub rules: Vec<(u32, String, u32, bool)>,
+    /// `(rule_id, rate_id, customer_class_id, product_class_id)`.
+    pub links: Vec<(u32, u32, u32, u32)>,
+}
+
+pub(crate) fn fetch_tax_info(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<DbTaxInfo, String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    let classes: Vec<(u32, String, String)> = c
+        .query(format!(
+            "SELECT class_id, class_name, class_type FROM {p}tax_class \
+             ORDER BY class_type, class_id"
+        ))
+        .map_err(clean_err)?;
+    type RateRow = (u32, String, String, Option<String>, Option<String>, i64, Option<String>, Option<String>, String);
+    let rates: Vec<RateRow> = c
+        .query(format!(
+            "SELECT r.tax_calculation_rate_id, r.code, r.tax_country_id, reg.code, \
+             r.tax_postcode, r.zip_is_range, CAST(r.zip_from AS CHAR), \
+             CAST(r.zip_to AS CHAR), CAST(r.rate AS CHAR) \
+             FROM {p}tax_calculation_rate r \
+             LEFT JOIN {p}directory_country_region reg ON reg.region_id = r.tax_region_id \
+             ORDER BY r.tax_country_id, r.code"
+        ))
+        .map_err(clean_err)?;
+    let rates = rates
+        .into_iter()
+        .map(|(id, code, country, region, postcode, zip_is_range, from, to, rate)| {
+            let postcode = if zip_is_range != 0 {
+                format!("{}–{}", from.as_deref().unwrap_or("?"), to.as_deref().unwrap_or("?"))
+            } else {
+                postcode.unwrap_or_else(|| "*".to_string())
+            };
+            (id, code, country, region.unwrap_or_else(|| "*".to_string()), postcode, rate)
+        })
+        .collect();
+    let rules: Vec<(u32, String, u32, i64)> = c
+        .query(format!(
+            "SELECT tax_calculation_rule_id, code, priority, calculate_subtotal \
+             FROM {p}tax_calculation_rule ORDER BY priority, position, tax_calculation_rule_id"
+        ))
+        .map_err(clean_err)?;
+    let links: Vec<(u32, u32, u32, u32)> = c
+        .query(format!(
+            "SELECT tax_calculation_rule_id, tax_calculation_rate_id, \
+             customer_tax_class_id, product_tax_class_id FROM {p}tax_calculation"
+        ))
+        .map_err(clean_err)?;
+
+    Ok(DbTaxInfo {
+        classes,
+        rates,
+        rules: rules.into_iter().map(|(i, c, pr, cs)| (i, c, pr, cs != 0)).collect(),
+        links,
+    })
+}
+
 /// One catalog rule, raw.
 pub(crate) struct DbCatalogRule {
     pub rule_id: u32,

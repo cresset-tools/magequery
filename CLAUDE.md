@@ -178,7 +178,7 @@ DATA          (persistence & model)
   category [<id>|<name>] [--store] [--products]   order <increment#> [--id]
   customer <email> [--id]   quote <id|email>
   invoice|shipment|creditmemo <increment#>   order-statuses [<filter>]   sequences [<entity>]
-  sales-rule <coupon|id|name>   catalog-rule [<id|name>]   (live DB)
+  sales-rule <coupon|id|name>   catalog-rule [<id|name>]   tax [<filter>]   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1394,6 +1394,23 @@ stops-further-rules, applied count with a `price <sku>` cross-link, conditions t
 (displayed, not evaluated). Validated on the scratchpad DB: applied, never-applied, and
 disabled+expired rules.
 
+### `tax` (classes, rules, rates — the why-is-tax-wrong matrix, live DB, done)
+
+`magequery tax [<filter>]` — one screen for the whole calculation setup, with the
+misconfiguration diagnoses inline:
+- **classes** (`tax_class`, customer + product) — a **product class referenced by no
+  rule renders red "(in no rule — products in it are UNTAXED)"**, the classic silent
+  zero-tax bug; unused customer classes yellow.
+- **rules** (`tax_calculation_rule` + the `tax_calculation` link table): each rule's
+  customer × product class combination and its rates (`code country region postcode
+  rate%` — regions resolved via `directory_country_region`, `*` for all; zip ranges
+  collapsed to `from–to`); a rule with zero rates renders red "taxes nothing"; zero
+  rules at all → red "nothing is ever taxed".
+- **rates no rule uses** — configured but dead.
+Filter narrows all sections (country code exact, rate/rule/class substring). Validated
+on the scratchpad DB: the untaxed-class flag, a three-rate rule incl. a US-CA zip-range
+rate, the unused BE rate, and country filtering.
+
 ### `admin-users` / `admin-roles` (live DB, done)
 
 Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
@@ -1429,8 +1446,8 @@ role, and seeding one into a live DB was deliberately not done.
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
 `queue backlog`, `product`). New ideas go here.
-- **Small entities, in build order:** `tax`,
-  `integrations`. Backlog: reviews, wishlists, search terms.
+- **Small entities, in build order:** `integrations`. Backlog: reviews, wishlists,
+  search terms.
 
 ## Build order
 

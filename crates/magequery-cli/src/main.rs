@@ -60,6 +60,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("sequences", "Sales increment sequences: current value, next increment id"),
             ("sales-rule", "Why a coupon (won't) apply: a cart rule by coupon/id/name"),
             ("catalog-rule", "Catalog price rules: window, scopes, actually applied?"),
+            ("tax", "Tax classes, rules, and rates — incl. untaxed classes"),
         ],
     ),
     (
@@ -295,6 +296,8 @@ enum Command {
     SalesRule(SalesRuleArgs),
     /// Catalog price rules: active window, scopes, and whether they're actually applied.
     CatalogRule(CatalogRuleArgs),
+    /// Tax classes, rules, and rates — including classes no rule taxes.
+    Tax(TaxArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -580,6 +583,15 @@ struct QuoteArgs {
     /// A quote entity_id; anything else searches customer emails (active carts first
     /// by recency).
     query: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct TaxArgs {
+    /// A country/rate-code/rule/class substring filtering all sections. Omit for the
+    /// full picture.
+    filter: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -1058,6 +1070,7 @@ fn main() -> Result<()> {
         Command::Sequences(args) => sequences(&mage, &args),
         Command::SalesRule(args) => sales_rule(&mage, &args),
         Command::CatalogRule(args) => catalog_rule(&mage, &args),
+        Command::Tax(args) => tax(&mage, &args),
         Command::CmsPage(args) => cms(&mage, magequery_core::CmsKind::Page, &args),
         Command::CmsBlock(args) => cms(&mage, magequery_core::CmsKind::Block, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
@@ -2410,6 +2423,111 @@ fn sequences(mage: &Magento, args: &SequencesArgs) -> Result<()> {
         "\n{} sequence(s) — next increment computed with the default pattern (custom patterns not modeled)",
         seqs.len()
     );
+    Ok(())
+}
+
+fn tax(mage: &Magento, args: &TaxArgs) -> Result<()> {
+    let mut info = mage.tax_info()?;
+    if let Some(f) = &args.filter {
+        let n = f.to_lowercase();
+        let rate_hits = |r: &magequery_core::TaxRate| {
+            r.code.to_lowercase().contains(&n) || r.country.to_lowercase() == n
+        };
+        info.classes.retain(|c| c.name.to_lowercase().contains(&n));
+        info.rules.retain(|r| {
+            r.code.to_lowercase().contains(&n)
+                || r.rates.iter().any(rate_hits)
+                || r.customer_classes.iter().any(|c| c.to_lowercase().contains(&n))
+                || r.product_classes.iter().any(|c| c.to_lowercase().contains(&n))
+        });
+        info.unused_rates.retain(rate_hits);
+    }
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&info)?);
+        return Ok(());
+    }
+
+    let rate_line = |r: &magequery_core::TaxRate| {
+        format!(
+            "{} {} {} {} {}",
+            style::name(&r.code),
+            style::area(&r.country),
+            r.region,
+            style::dim(&r.postcode),
+            style::number(&format!("{}%", r.rate)),
+        )
+    };
+
+    if !info.classes.is_empty() {
+        println!("{}", style::dim("tax classes:"));
+        let wn = info.classes.iter().map(|c| c.name.chars().count()).max().unwrap_or(0);
+        for c in &info.classes {
+            let kind = if c.class_type == "CUSTOMER" { "customer" } else { "product " };
+            let unused = if c.in_rules {
+                String::new()
+            } else if c.class_type == "PRODUCT" {
+                format!("  {}", style::err("(in no rule — products in it are UNTAXED)"))
+            } else {
+                format!("  {}", style::number("(in no rule)"))
+            };
+            println!(
+                "  {}  {}{}  {}{unused}",
+                style::kind(kind),
+                style::target(&c.name),
+                " ".repeat(wn - c.name.chars().count()),
+                style::dim(&format!("(id {})", c.id)),
+            );
+        }
+    }
+
+    if info.rules.is_empty() {
+        println!("\n{}", style::err("no tax rules — nothing is ever taxed"));
+    } else {
+        println!("\n{}", style::dim("rules:"));
+        for r in &info.rules {
+            let subtotal = if r.calculate_subtotal {
+                format!("  {}", style::dim("(calculate off subtotal)"))
+            } else {
+                String::new()
+            };
+            println!(
+                "  {}  {}{subtotal}",
+                style::name(&r.code),
+                style::dim(&format!("(rule {}, priority {})", r.id, r.priority)),
+            );
+            println!(
+                "    {}  {}",
+                style::dim("customers"),
+                r.customer_classes
+                    .iter()
+                    .map(|c| style::target(c))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            println!(
+                "    {}  {}",
+                style::dim("products "),
+                r.product_classes
+                    .iter()
+                    .map(|c| style::target(c))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            let rates = if r.rates.is_empty() {
+                style::err("(no rates — the rule taxes nothing)")
+            } else {
+                r.rates.iter().map(rate_line).collect::<Vec<_>>().join("  ·  ")
+            };
+            println!("    {}  {rates}", style::dim("rates    "));
+        }
+    }
+
+    if !info.unused_rates.is_empty() {
+        println!("\n{}", style::dim("rates no rule uses:"));
+        for r in &info.unused_rates {
+            println!("  {}  {}", rate_line(r), style::number("(not used by any rule)"));
+        }
+    }
     Ok(())
 }
 
