@@ -670,6 +670,10 @@ struct IntegrationsArgs {
     /// Requires an unambiguous match.
     #[arg(long, num_args = 0..=1, default_missing_value = "access-token", value_name = "WHICH")]
     token: Option<String>,
+    /// With `--token`, decrypt the value using env.php's crypt key (Magento stores these
+    /// encrypted). Without it the raw stored value is printed as-is.
+    #[arg(long)]
+    decrypt: bool,
     #[arg(long)]
     json: bool,
 }
@@ -4588,12 +4592,14 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
             }
         };
         // Magento stores these through its Encryptor (envelope `keyVersion:cipher:…`), so a
-        // raw read hands back ciphertext — useless for scripting. Decrypt with env.php's
-        // crypt key, exactly like `config --decrypt`; plaintext values pass through untouched.
-        let dec = mage.decryptor().ok();
+        // raw read hands back ciphertext. Decrypt only when explicitly asked, mirroring
+        // `config --decrypt`; the default prints the value verbatim (with a stderr hint when
+        // it's encrypted, so a script doesn't silently pipe ciphertext into an API call).
+        let dec = if args.decrypt { mage.decryptor().ok() } else { None };
         let all_mode = which == "all";
         for (kind, raw) in &requested {
-            let shown = if !raw.is_empty() && magequery_core::Decryptor::is_encrypted(raw) {
+            let encrypted = !raw.is_empty() && magequery_core::Decryptor::is_encrypted(raw);
+            let shown = if encrypted && args.decrypt {
                 match dec.as_ref().and_then(|d| d.decrypt(raw)) {
                     Some(plain) => plain,
                     None => {
@@ -4617,6 +4623,12 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
                     }
                 }
             } else {
+                if encrypted {
+                    eprintln!(
+                        "{}",
+                        style::dim(&format!("note: {kind} is encrypted — pass --decrypt to reveal it"))
+                    );
+                }
                 raw.clone()
             };
             if all_mode {
