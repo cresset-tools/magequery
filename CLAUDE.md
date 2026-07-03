@@ -175,7 +175,7 @@ DATA          (persistence & model)
   schema [<table>] [--db]       indexers [<id>] [--db]
   extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>|<entity>] [--db]
   product <sku> [--id <n>] [--store <code>]   price <sku> [--id <n>]   (live DB)
-  category [<id>|<name>] [--store] [--products]   (live DB)
+  category [<id>|<name>] [--store] [--products]   order <increment#> [--id]   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1230,6 +1230,33 @@ the scratchpad DB: the tree with root tag + flags, the ancestor-disabled warning
 through a store-scope override, anchor gap visible (1 assigned · 2 indexed), url_key
 exact lookup, store fold, and the assigned-products list.
 
+### `order` (one order, live DB, done — first of the sales cards)
+
+`magequery order <increment#> [--id <entity_id>]` — the admin order view plus the
+diagnostics it doesn't show. Sales tables are flat (no EAV), so this is one
+`db::fetch_order` over `sales_order` + satellites (items, addresses, payment,
+`sales_payment_transaction`, invoices, shipments + tracks, creditmemos, status history,
+`sales_order_status` label). Lookup: exact increment_id → numeric falls back to
+entity_id (header note) → substring over increment ids AND customer emails (newest
+first, LIMIT+1 truncation) — `order jelle@` lists a customer's orders.
+
+The card: status colored by *state* (state shown too — custom statuses explained), the
+**grid-drift check** (`sales_order` row missing from `sales_order_grid` = red "invisible
+in the admin grid — grid indexer behind"), customer (guest-tagged), both address
+snapshots, shipping method, **payment with the flattened `additional_information` JSON**
+(where every PSP stashes its transaction state; nested values compact, capped at 12 keys
+with a --json pointer) + the transaction rows, the **item lifecycle matrix** (`2 ordered
+· 2 invoiced · 1 shipped …`, composite children dim `↳`, yellow `[not fully invoiced]` /
+`[not fully shipped]` heuristics on top-level lines — virtual/downloadable skipped,
+configurables checked on the parent where Magento books shipment, bundles skipped as
+shipment_type-ambiguous), **dual-currency totals** (order currency primary, base in dim
+parens when they differ; nonzero `due` red), coupon + applied rule ids, documents
+(invoice/creditmemo states decoded, shipments with carrier + tracking numbers), and the
+status history with customer-notified tags. Validated on the scratchpad DB: a
+USD-on-EUR-base order with configurable parent/child lines, Mollie-style payment blob,
+paid invoice, PostNL track, the grid-drift warning, and the fulfillment tags; plus a
+guest order (in-grid, red due) and the email search.
+
 ### `admin-users` / `admin-roles` (live DB, done)
 
 Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
@@ -1265,8 +1292,9 @@ role, and seeding one into a live DB was deliberately not done.
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
 `queue backlog`, `product`). New ideas go here.
-- **Entity cards in the `product` mold:** `order <increment_id>`, `customer <email>` —
-  same per-scope/raw-truth pattern.
+- **Entity cards in the `product` mold:** `customer <email>`, `quote <id>` (carts —
+  where checkout bugs live), and optional thin document cards
+  (`invoice`/`shipment`/`creditmemo <increment#>`).
 
 ## Build order
 

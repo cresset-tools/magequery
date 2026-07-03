@@ -59,7 +59,9 @@ pub use model::{
     BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount,
     CategoryIndexedProduct, CategoryProduct,
     CategoryTreeNode, CategoryVisibilityIssue,
-    ChildPrice, IndexedPrice, Preference, PreferenceStep, Plugin,
+    ChildPrice, IndexedPrice, Order, OrderAddress, OrderComment, OrderDocument, OrderHit,
+    OrderItem, OrderPayment, OrderShipment, OrderTotal, OrderTransaction,
+    Preference, PreferenceStep, Plugin,
     PluginMethod, Product,
     ProductCategory, ProductChild,
     ProductHit, ProductLegacyStock, ProductPrices, ProductRewrite, ProductScopeValue,
@@ -1067,6 +1069,53 @@ impl Magento {
             db::fetch_category_card(conn, &cfg.table_prefix, id, include_products, indexed_store)
                 .map_err(Error::Db)?;
         Ok(raw.map(to_category))
+    }
+
+    /// One order by exact increment_id. Live DB.
+    #[cfg(feature = "db")]
+    pub fn order_by_increment(&self, increment: &str) -> Result<Option<Order>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_order(conn, &cfg.table_prefix, db::OrderIdent::Increment(increment))
+            .map_err(Error::Db)?;
+        Ok(raw.map(|r| to_order(r, false)))
+    }
+
+    /// One order by entity_id (`matched_by_id` set on the result).
+    #[cfg(feature = "db")]
+    pub fn order_by_id(&self, id: u32) -> Result<Option<Order>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_order(conn, &cfg.table_prefix, db::OrderIdent::Id(id))
+            .map_err(Error::Db)?;
+        Ok(raw.map(|r| to_order(r, true)))
+    }
+
+    /// Order search: increment_id or customer email substring, newest first.
+    #[cfg(feature = "db")]
+    pub fn orders_like(&self, needle: &str, limit: usize) -> Result<(Vec<OrderHit>, bool)> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (rows, truncated) =
+            db::fetch_orders_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
+        Ok((
+            rows.into_iter()
+                .map(
+                    |(entity_id, increment_id, status, grand_total, currency, email, created)| {
+                        OrderHit {
+                            entity_id,
+                            increment_id,
+                            status,
+                            grand_total,
+                            currency,
+                            customer_email: email,
+                            created_at: created,
+                        }
+                    },
+                )
+                .collect(),
+            truncated,
+        ))
     }
 
     /// Light lookup: the SKU of an entity_id (for shadow-note checks). Live DB.
@@ -2630,6 +2679,190 @@ fn default_connection(cfg: &DbConfig) -> Result<&DbConnection> {
         .find(|c| c.name == "default")
         .or_else(|| cfg.connections.first())
         .ok_or_else(|| Error::Db("no db connection configured in env.php".to_string()))
+}
+
+/// Assemble [`Order`]: decode document states, join tracks onto their shipments, and
+/// flatten the payment's `additional_information` JSON (top-level keys; nested values
+/// re-serialized compactly).
+#[cfg(feature = "db")]
+fn to_order(raw: db::DbOrder, matched_by_id: bool) -> Order {
+    let invoice_state = |s: Option<i64>| {
+        s.map(|s| match s {
+            1 => "open".to_string(),
+            2 => "paid".to_string(),
+            3 => "canceled".to_string(),
+            other => format!("state {other}"),
+        })
+    };
+    let memo_state = |s: Option<i64>| {
+        s.map(|s| match s {
+            1 => "open".to_string(),
+            2 => "refunded".to_string(),
+            3 => "canceled".to_string(),
+            other => format!("state {other}"),
+        })
+    };
+
+    let payment = raw.payment.map(|(method, last_trans_id, blob)| {
+        let additional: Vec<(String, String)> = blob
+            .as_deref()
+            .and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+            .and_then(|v| match v {
+                serde_json::Value::Object(map) => Some(
+                    map.into_iter()
+                        .map(|(k, v)| {
+                            let val = match v {
+                                serde_json::Value::String(s) => s,
+                                other => other.to_string(),
+                            };
+                            (k, val)
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        OrderPayment { method, last_trans_id, additional }
+    });
+
+    let customer_name = match (&raw.customer_firstname, &raw.customer_lastname) {
+        (Some(f), Some(l)) => Some(format!("{f} {l}")),
+        (Some(f), None) => Some(f.clone()),
+        (None, Some(l)) => Some(l.clone()),
+        _ => None,
+    };
+
+    Order {
+        entity_id: raw.entity_id,
+        increment_id: raw.increment_id,
+        state: raw.state,
+        status: raw.status,
+        status_label: raw.status_label,
+        store: raw.store,
+        created_at: raw.created_at,
+        updated_at: raw.updated_at,
+        customer_id: raw.customer_id,
+        customer_email: raw.customer_email,
+        customer_name,
+        guest: raw.guest,
+        order_currency: raw.order_currency,
+        base_currency: raw.base_currency,
+        total_qty: raw.total_qty,
+        coupon: raw.coupon,
+        applied_rule_ids: raw.applied_rule_ids,
+        shipping_method: raw.shipping_method,
+        shipping_description: raw.shipping_description,
+        totals: raw
+            .totals
+            .into_iter()
+            .map(|(key, amount, base_amount)| OrderTotal { key, amount, base_amount })
+            .collect(),
+        items: raw
+            .items
+            .into_iter()
+            .map(
+                |(sku, name, product_type, is_child, ordered, invoiced, shipped, refunded, canceled, price, row_total)| {
+                    OrderItem {
+                        sku,
+                        name,
+                        product_type,
+                        is_child,
+                        qty_ordered: ordered,
+                        qty_invoiced: invoiced,
+                        qty_shipped: shipped,
+                        qty_refunded: refunded,
+                        qty_canceled: canceled,
+                        price,
+                        row_total,
+                    }
+                },
+            )
+            .collect(),
+        addresses: raw
+            .addresses
+            .into_iter()
+            .map(
+                |(kind, first, last, company, street, postcode, city, country, telephone)| {
+                    let name = [first, last].into_iter().flatten().collect::<Vec<_>>().join(" ");
+                    OrderAddress {
+                        kind,
+                        name,
+                        company,
+                        street: street.map(|s| s.replace('\n', ", ")),
+                        postcode,
+                        city,
+                        country,
+                        telephone,
+                    }
+                },
+            )
+            .collect(),
+        payment,
+        transactions: raw
+            .transactions
+            .into_iter()
+            .map(|(txn_id, kind, closed, created_at)| OrderTransaction {
+                txn_id,
+                kind,
+                closed,
+                created_at,
+            })
+            .collect(),
+        invoices: raw
+            .invoices
+            .into_iter()
+            .map(|(increment_id, state, total, created_at)| OrderDocument {
+                increment_id,
+                state: invoice_state(state),
+                total,
+                created_at,
+            })
+            .collect(),
+        shipments: raw
+            .shipments
+            .into_iter()
+            .map(|(sid, increment_id, qty, created_at)| OrderShipment {
+                increment_id,
+                qty,
+                created_at,
+                tracks: raw
+                    .tracks
+                    .iter()
+                    .filter(|(parent, ..)| *parent == sid)
+                    .map(|(_, carrier, title, number)| {
+                        (
+                            carrier.clone().unwrap_or_default(),
+                            title.clone().unwrap_or_default(),
+                            number.clone().unwrap_or_default(),
+                        )
+                    })
+                    .collect(),
+            })
+            .collect(),
+        creditmemos: raw
+            .creditmemos
+            .into_iter()
+            .map(|(increment_id, state, total, created_at)| OrderDocument {
+                increment_id,
+                state: memo_state(state),
+                total,
+                created_at,
+            })
+            .collect(),
+        history: raw
+            .history
+            .into_iter()
+            .map(|(status, comment, created_at, notified)| OrderComment {
+                status,
+                comment,
+                created_at,
+                notified,
+            })
+            .collect(),
+        in_grid: raw.in_grid,
+        quote_id: raw.quote_id,
+        matched_by_id,
+    }
 }
 
 /// Assemble [`Category`]: per-scope values with Yes/No labels for the boolean flags,

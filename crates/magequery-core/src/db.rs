@@ -189,6 +189,381 @@ pub(crate) fn fetch_patch_list(
     Ok(rows.into_iter().map(|r| r.trim_start_matches('\\').to_string()).collect())
 }
 
+/// How to look an order up.
+pub(crate) enum OrderIdent<'a> {
+    Increment(&'a str),
+    Id(u32),
+}
+
+/// Everything about one order, raw. Sales tables are flat — no EAV.
+pub(crate) struct DbOrder {
+    pub entity_id: u32,
+    pub increment_id: String,
+    pub state: Option<String>,
+    pub status: Option<String>,
+    pub status_label: Option<String>,
+    pub store: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub customer_id: Option<u32>,
+    pub customer_email: Option<String>,
+    pub customer_firstname: Option<String>,
+    pub customer_lastname: Option<String>,
+    pub guest: bool,
+    pub base_currency: Option<String>,
+    pub order_currency: Option<String>,
+    pub coupon: Option<String>,
+    pub applied_rule_ids: Option<String>,
+    pub shipping_method: Option<String>,
+    pub shipping_description: Option<String>,
+    pub total_qty: Option<String>,
+    pub quote_id: Option<u64>,
+    /// `(key, amount, base_amount)` in canonical order.
+    pub totals: Vec<(String, Option<String>, Option<String>)>,
+    /// `(sku, name, type, is_child, ordered, invoiced, shipped, refunded, canceled,
+    /// price, row_total)`.
+    #[allow(clippy::type_complexity)]
+    pub items: Vec<(
+        String,
+        Option<String>,
+        String,
+        bool,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    )>,
+    /// `(kind, firstname, lastname, company, street, postcode, city, country, phone)`.
+    #[allow(clippy::type_complexity)]
+    pub addresses: Vec<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )>,
+    /// `(method, last_trans_id, additional_information JSON)`.
+    pub payment: Option<(Option<String>, Option<String>, Option<String>)>,
+    /// `(txn_id, txn_type, is_closed, created_at)`.
+    pub transactions: Vec<(String, String, bool, Option<String>)>,
+    /// `(increment_id, state code, grand_total, created_at)`.
+    pub invoices: Vec<(String, Option<i64>, Option<String>, Option<String>)>,
+    /// `(shipment entity_id, increment_id, total_qty, created_at)`.
+    pub shipments: Vec<(u32, String, Option<String>, Option<String>)>,
+    /// `(shipment entity_id, carrier, title, number)`.
+    pub tracks: Vec<(u32, Option<String>, Option<String>, Option<String>)>,
+    pub creditmemos: Vec<(String, Option<i64>, Option<String>, Option<String>)>,
+    /// `(status, comment, created_at, notified)`.
+    pub history: Vec<(Option<String>, Option<String>, Option<String>, bool)>,
+    pub in_grid: bool,
+}
+
+pub(crate) fn fetch_order(
+    conn: &DbConnection,
+    table_prefix: &str,
+    ident: OrderIdent<'_>,
+) -> Result<Option<DbOrder>, String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    let base = format!(
+        "SELECT entity_id, increment_id, state, status, store_id, \
+         CAST(created_at AS CHAR), CAST(updated_at AS CHAR), customer_id, customer_email, \
+         customer_firstname, customer_lastname, customer_is_guest, base_currency_code, \
+         order_currency_code, coupon_code, applied_rule_ids, shipping_method, \
+         shipping_description, CAST(total_qty_ordered AS CHAR), quote_id \
+         FROM {p}sales_order"
+    );
+    let row: Option<mysql::Row> = match ident {
+        OrderIdent::Increment(inc) => c
+            .exec_first(format!("{base} WHERE increment_id = :v"), params! { "v" => inc })
+            .map_err(clean_err)?,
+        OrderIdent::Id(id) => c
+            .exec_first(format!("{base} WHERE entity_id = :v"), params! { "v" => id })
+            .map_err(clean_err)?,
+    };
+    let Some(mut row) = row else { return Ok(None) };
+    let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
+    let entity_id: u32 = row.take::<Option<u32>, _>(0).flatten().unwrap_or(0);
+    let increment_id = s(&mut row, 1).unwrap_or_default();
+    let state = s(&mut row, 2);
+    let status = s(&mut row, 3);
+    let store_id: Option<u32> = row.take::<Option<u32>, _>(4).flatten();
+    let created_at = s(&mut row, 5);
+    let updated_at = s(&mut row, 6);
+    let customer_id: Option<u32> = row.take::<Option<u32>, _>(7).flatten();
+    let customer_email = s(&mut row, 8);
+    let customer_firstname = s(&mut row, 9);
+    let customer_lastname = s(&mut row, 10);
+    let guest = row.take::<Option<i64>, _>(11).flatten().unwrap_or(0) != 0;
+    let base_currency = s(&mut row, 12);
+    let order_currency = s(&mut row, 13);
+    let coupon = s(&mut row, 14);
+    let applied_rule_ids = s(&mut row, 15);
+    let shipping_method = s(&mut row, 16);
+    let shipping_description = s(&mut row, 17);
+    let total_qty = s(&mut row, 18);
+    let quote_id: Option<u64> = row.take::<Option<u64>, _>(19).flatten();
+
+    let status_label: Option<String> = match &status {
+        Some(st) => c
+            .exec_first(
+                format!("SELECT label FROM {p}sales_order_status WHERE status = :v"),
+                params! { "v" => st.as_str() },
+            )
+            .ok()
+            .flatten(),
+        None => None,
+    };
+    let store: Option<String> = match store_id {
+        Some(id) => c
+            .exec_first(
+                format!("SELECT code FROM {p}store WHERE store_id = :v"),
+                params! { "v" => id },
+            )
+            .map_err(clean_err)?,
+        None => None,
+    };
+
+    // Totals — 8 canonical pairs, (order currency, base currency) each.
+    const TOTAL_KEYS: [&str; 8] =
+        ["subtotal", "shipping", "tax", "discount", "grand_total", "paid", "refunded", "due"];
+    let trow: Option<mysql::Row> = c
+        .exec_first(
+            format!(
+                "SELECT CAST(subtotal AS CHAR), CAST(base_subtotal AS CHAR), \
+                 CAST(shipping_amount AS CHAR), CAST(base_shipping_amount AS CHAR), \
+                 CAST(tax_amount AS CHAR), CAST(base_tax_amount AS CHAR), \
+                 CAST(discount_amount AS CHAR), CAST(base_discount_amount AS CHAR), \
+                 CAST(grand_total AS CHAR), CAST(base_grand_total AS CHAR), \
+                 CAST(total_paid AS CHAR), CAST(base_total_paid AS CHAR), \
+                 CAST(total_refunded AS CHAR), CAST(base_total_refunded AS CHAR), \
+                 CAST(total_due AS CHAR), CAST(base_total_due AS CHAR) \
+                 FROM {p}sales_order WHERE entity_id = :v"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+    let mut totals = Vec::with_capacity(8);
+    if let Some(mut t) = trow {
+        for (i, key) in TOTAL_KEYS.iter().enumerate() {
+            totals.push((key.to_string(), s(&mut t, i * 2), s(&mut t, i * 2 + 1)));
+        }
+    }
+
+    type ItemRow = mysql::Row;
+    let item_rows: Vec<ItemRow> = c
+        .exec(
+            format!(
+                "SELECT sku, name, product_type, parent_item_id, \
+                 CAST(qty_ordered AS CHAR), CAST(qty_invoiced AS CHAR), \
+                 CAST(qty_shipped AS CHAR), CAST(qty_refunded AS CHAR), \
+                 CAST(qty_canceled AS CHAR), CAST(price AS CHAR), CAST(row_total AS CHAR) \
+                 FROM {p}sales_order_item WHERE order_id = :v ORDER BY item_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+    let items = item_rows
+        .into_iter()
+        .map(|mut r| {
+            let q = |r: &mut mysql::Row, i: usize| {
+                r.take::<Option<String>, _>(i).flatten().unwrap_or_else(|| "0".to_string())
+            };
+            (
+                s(&mut r, 0).unwrap_or_default(),
+                s(&mut r, 1),
+                s(&mut r, 2).unwrap_or_default(),
+                r.take::<Option<u64>, _>(3).flatten().is_some(),
+                q(&mut r, 4),
+                q(&mut r, 5),
+                q(&mut r, 6),
+                q(&mut r, 7),
+                q(&mut r, 8),
+                s(&mut r, 9),
+                s(&mut r, 10),
+            )
+        })
+        .collect();
+
+    let addresses = c
+        .exec(
+            format!(
+                "SELECT address_type, firstname, lastname, company, street, postcode, \
+                 city, country_id, telephone FROM {p}sales_order_address \
+                 WHERE parent_id = :v ORDER BY address_type"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+
+    let payment: Option<(Option<String>, Option<String>, Option<String>)> = c
+        .exec_first(
+            format!(
+                "SELECT method, last_trans_id, additional_information \
+                 FROM {p}sales_order_payment WHERE parent_id = :v"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+
+    let transactions: Vec<(String, String, bool, Option<String>)> = c
+        .exec(
+            format!(
+                "SELECT txn_id, txn_type, is_closed, CAST(created_at AS CHAR) \
+                 FROM {p}sales_payment_transaction WHERE order_id = :v ORDER BY transaction_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map(|rows: Vec<(String, String, i64, Option<String>)>| {
+            rows.into_iter().map(|(t, k, cl, d)| (t, k, cl != 0, d)).collect()
+        })
+        .unwrap_or_default();
+
+    let invoices: Vec<(String, Option<i64>, Option<String>, Option<String>)> = c
+        .exec(
+            format!(
+                "SELECT increment_id, state, CAST(grand_total AS CHAR), \
+                 CAST(created_at AS CHAR) FROM {p}sales_invoice \
+                 WHERE order_id = :v ORDER BY entity_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+    let shipments: Vec<(u32, String, Option<String>, Option<String>)> = c
+        .exec(
+            format!(
+                "SELECT entity_id, increment_id, CAST(total_qty AS CHAR), \
+                 CAST(created_at AS CHAR) FROM {p}sales_shipment \
+                 WHERE order_id = :v ORDER BY entity_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+    let tracks: Vec<(u32, Option<String>, Option<String>, Option<String>)> = c
+        .exec(
+            format!(
+                "SELECT parent_id, carrier_code, title, track_number \
+                 FROM {p}sales_shipment_track WHERE order_id = :v ORDER BY entity_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+    let creditmemos: Vec<(String, Option<i64>, Option<String>, Option<String>)> = c
+        .exec(
+            format!(
+                "SELECT increment_id, state, CAST(grand_total AS CHAR), \
+                 CAST(created_at AS CHAR) FROM {p}sales_creditmemo \
+                 WHERE order_id = :v ORDER BY entity_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+
+    let history: Vec<(Option<String>, Option<String>, Option<String>, bool)> = c
+        .exec(
+            format!(
+                "SELECT status, comment, CAST(created_at AS CHAR), is_customer_notified \
+                 FROM {p}sales_order_status_history WHERE parent_id = :v ORDER BY entity_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map(
+            |rows: Vec<(Option<String>, Option<String>, Option<String>, Option<i64>)>| {
+                rows.into_iter()
+                    .map(|(st, co, d, n)| (st, co, d, n.unwrap_or(0) != 0))
+                    .collect()
+            },
+        )
+        .unwrap_or_default();
+
+    let in_grid: bool = c
+        .exec_first::<u32, _, _>(
+            format!("SELECT entity_id FROM {p}sales_order_grid WHERE entity_id = :v"),
+            params! { "v" => entity_id },
+        )
+        .map(|r| r.is_some())
+        .unwrap_or(false);
+
+    Ok(Some(DbOrder {
+        entity_id,
+        increment_id,
+        state,
+        status,
+        status_label,
+        store,
+        created_at,
+        updated_at,
+        customer_id,
+        customer_email,
+        customer_firstname,
+        customer_lastname,
+        guest,
+        base_currency,
+        order_currency,
+        coupon,
+        applied_rule_ids,
+        shipping_method,
+        shipping_description,
+        total_qty,
+        quote_id,
+        totals,
+        items,
+        addresses,
+        payment,
+        transactions,
+        invoices,
+        shipments,
+        tracks,
+        creditmemos,
+        history,
+        in_grid,
+    }))
+}
+
+/// Order search by increment_id or customer email substring, newest first;
+/// `limit + 1` fetched to flag truncation.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_orders_like(
+    conn: &DbConnection,
+    table_prefix: &str,
+    needle: &str,
+    limit: usize,
+) -> Result<
+    (Vec<(u32, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)>, bool),
+    String,
+> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let rows: Vec<(u32, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> =
+        c.exec(
+            format!(
+                "SELECT entity_id, increment_id, status, CAST(grand_total AS CHAR), \
+                 order_currency_code, customer_email, CAST(created_at AS CHAR) \
+                 FROM {p}sales_order \
+                 WHERE increment_id LIKE :pat OR customer_email LIKE :pat \
+                 ORDER BY entity_id DESC LIMIT {}",
+                limit + 1
+            ),
+            params! { "pat" => format!("%{needle}%") },
+        )
+        .map_err(clean_err)?;
+    let truncated = rows.len() > limit;
+    Ok((rows.into_iter().take(limit).collect(), truncated))
+}
+
 /// A helper for category attribute-id subqueries (`entity_type_code = catalog_category`).
 fn cat_attr(p: &str, code: &str) -> String {
     format!(

@@ -1664,6 +1664,153 @@ pub struct ProductPrices {
     pub matched_by_id: bool,
 }
 
+/// One order total line (order currency; `base` shown when the currencies differ).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct OrderTotal {
+    pub key: String,
+    pub amount: Option<String>,
+    pub base_amount: Option<String>,
+}
+
+/// One order line, with the full quantity lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct OrderItem {
+    pub sku: String,
+    pub name: Option<String>,
+    pub product_type: String,
+    /// A composite's child row (qty bookkeeping lives on the parent).
+    pub is_child: bool,
+    pub qty_ordered: String,
+    pub qty_invoiced: String,
+    pub qty_shipped: String,
+    pub qty_refunded: String,
+    pub qty_canceled: String,
+    pub price: Option<String>,
+    pub row_total: Option<String>,
+}
+
+/// A billing or shipping address snapshot on the order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct OrderAddress {
+    /// `billing` / `shipping`.
+    pub kind: String,
+    pub name: String,
+    pub company: Option<String>,
+    pub street: Option<String>,
+    pub postcode: Option<String>,
+    pub city: Option<String>,
+    pub country: Option<String>,
+    pub telephone: Option<String>,
+}
+
+/// The order's payment: method plus the PSP's `additional_information` blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct OrderPayment {
+    pub method: Option<String>,
+    pub last_trans_id: Option<String>,
+    /// Flattened top-level entries of `additional_information` (nested values as JSON).
+    pub additional: Vec<(String, String)>,
+}
+
+/// One `sales_payment_transaction` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct OrderTransaction {
+    pub txn_id: String,
+    pub kind: String,
+    pub closed: bool,
+    pub created_at: Option<String>,
+}
+
+/// An invoice or credit memo attached to the order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct OrderDocument {
+    pub increment_id: String,
+    /// Decoded state (`open`/`paid`/`refunded`/`canceled`).
+    pub state: Option<String>,
+    pub total: Option<String>,
+    pub created_at: Option<String>,
+}
+
+/// One shipment with its tracking numbers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct OrderShipment {
+    pub increment_id: String,
+    pub qty: Option<String>,
+    pub created_at: Option<String>,
+    /// `(carrier, title, number)`.
+    pub tracks: Vec<(String, String, String)>,
+}
+
+/// One status-history/comment row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct OrderComment {
+    pub status: Option<String>,
+    pub comment: Option<String>,
+    pub created_at: Option<String>,
+    pub notified: bool,
+}
+
+/// One order as the database stores it (`sales_order` + its satellites). Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Order {
+    pub entity_id: u32,
+    pub increment_id: String,
+    pub state: Option<String>,
+    pub status: Option<String>,
+    /// The status's admin label (`sales_order_status`).
+    pub status_label: Option<String>,
+    pub store: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub customer_id: Option<u32>,
+    pub customer_email: Option<String>,
+    pub customer_name: Option<String>,
+    pub guest: bool,
+    pub order_currency: Option<String>,
+    pub base_currency: Option<String>,
+    pub total_qty: Option<String>,
+    pub coupon: Option<String>,
+    pub applied_rule_ids: Option<String>,
+    pub shipping_method: Option<String>,
+    pub shipping_description: Option<String>,
+    pub totals: Vec<OrderTotal>,
+    pub items: Vec<OrderItem>,
+    pub addresses: Vec<OrderAddress>,
+    pub payment: Option<OrderPayment>,
+    pub transactions: Vec<OrderTransaction>,
+    pub invoices: Vec<OrderDocument>,
+    pub shipments: Vec<OrderShipment>,
+    pub creditmemos: Vec<OrderDocument>,
+    pub history: Vec<OrderComment>,
+    /// Present in `sales_order_grid` — `false` = the admin grid can't see this order
+    /// (grid indexer behind).
+    pub in_grid: bool,
+    pub quote_id: Option<u64>,
+    pub matched_by_id: bool,
+}
+
+/// One row of an order search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct OrderHit {
+    pub entity_id: u32,
+    pub increment_id: String,
+    pub status: Option<String>,
+    pub grand_total: Option<String>,
+    pub currency: Option<String>,
+    pub customer_email: Option<String>,
+    pub created_at: Option<String>,
+}
+
 /// One scope's value of a product attribute: the raw stored value plus the resolved
 /// human label when the attribute's options make that possible.
 #[derive(Debug, Clone, PartialEq, Eq)]

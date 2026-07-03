@@ -50,6 +50,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("product", "One product as the DB stores it: values per scope, stock, categories"),
             ("price", "Every price of a product: attributes, tiers, rules, the price index"),
             ("category", "The category tree; one category's visibility & product counts"),
+            ("order", "One order: item lifecycle, totals, payment, documents, history"),
         ],
     ),
     (
@@ -261,6 +262,8 @@ enum Command {
     Price(PriceArgs),
     /// The category tree, or one category: visibility diagnosis, product counts, URLs.
     Category(CategoryArgs),
+    /// One order: item lifecycle, totals, payment, documents, status history.
+    Order(OrderArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -507,6 +510,18 @@ struct CategoryArgs {
     /// included (reads the --store view's index; default: the first store view).
     #[arg(long)]
     indexed: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct OrderArgs {
+    /// An increment id (exact). A number with no matching increment is an entity_id;
+    /// anything else searches increment ids and customer emails.
+    query: Option<String>,
+    /// Look up by entity_id.
+    #[arg(long)]
+    id: Option<u32>,
     #[arg(long)]
     json: bool,
 }
@@ -914,6 +929,7 @@ fn main() -> Result<()> {
         Command::Product(args) => product(&mage, &args),
         Command::Price(args) => price(&mage, &args),
         Command::Category(args) => category(&mage, &args),
+        Command::Order(args) => order(&mage, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
         Command::AdminRoles(args) => admin_roles(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
@@ -2094,6 +2110,361 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
                     );
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn order(mage: &Magento, args: &OrderArgs) -> Result<()> {
+    let found: Option<magequery_core::Order> = if let Some(id) = args.id {
+        let o = mage.order_by_id(id)?;
+        if o.is_none() {
+            return Err(anyhow!("no order with entity_id {id}"));
+        }
+        o
+    } else {
+        let Some(q) = &args.query else {
+            return Err(anyhow!("give an increment id (or --id <entity_id>)"));
+        };
+        if let Some(hit) = mage.order_by_increment(q)? {
+            Some(hit)
+        } else if let Ok(id) = q.parse::<u32>() {
+            mage.order_by_id(id)?
+        } else {
+            None
+        }
+    };
+    if let Some(o) = found {
+        return render_order(&o, args);
+    }
+
+    // Substring search over increment ids and customer emails.
+    let q = args.query.as_deref().unwrap_or_default();
+    let (hits, truncated) = mage.orders_like(q, 50)?;
+    match hits.len() {
+        0 => Err(anyhow!("no order matches `{q}`")),
+        1 => {
+            let o = mage.order_by_increment(&hits[0].increment_id)?.expect("listed order");
+            render_order(&o, args)
+        }
+        _ => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+                return Ok(());
+            }
+            let wi = hits.iter().map(|h| h.increment_id.len()).max().unwrap_or(0);
+            let ws = hits.iter().map(|h| h.status.as_deref().unwrap_or("").len()).max().unwrap_or(0);
+            for h in &hits {
+                let status = h.status.as_deref().unwrap_or("");
+                println!(
+                    "{}{}  {}{}  {:>10} {}  {}  {}",
+                    style::name(&h.increment_id),
+                    " ".repeat(wi - h.increment_id.len()),
+                    style::target(status),
+                    " ".repeat(ws - status.len()),
+                    h.grand_total.as_deref().unwrap_or("-"),
+                    h.currency.as_deref().unwrap_or(""),
+                    h.customer_email.as_deref().unwrap_or(""),
+                    style::dim(h.created_at.as_deref().unwrap_or("")),
+                );
+            }
+            if truncated {
+                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+            }
+            eprintln!("\n{} order(s)", hits.len());
+            Ok(())
+        }
+    }
+}
+
+fn render_order(o: &magequery_core::Order, args: &OrderArgs) -> Result<()> {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(o)?);
+        return Ok(());
+    }
+
+    let matched = if o.matched_by_id && args.id.is_none() {
+        format!("  {}", style::dim("(matched by entity_id — no such increment id)"))
+    } else {
+        String::new()
+    };
+    let status = o.status.as_deref().unwrap_or("?");
+    let state = o.state.as_deref().unwrap_or("?");
+    let status_col = match state {
+        "canceled" | "holded" => style::err(status),
+        "complete" | "closed" => style::ok(status),
+        _ => style::number(status),
+    };
+    let label = o
+        .status_label
+        .as_deref()
+        .filter(|l| l.to_lowercase() != status.to_lowercase())
+        .map(|l| format!(" \"{l}\""))
+        .unwrap_or_default();
+    println!(
+        "{}  (entity_id {})  {status_col}{label} {}  {}{matched}",
+        style::name(&o.increment_id),
+        o.entity_id,
+        style::dim(&format!("(state: {state})")),
+        style::area(o.store.as_deref().unwrap_or("?")),
+    );
+    if !o.in_grid {
+        println!(
+            "{}",
+            style::err("⚠ not in sales_order_grid — invisible in the admin grid (grid indexer behind?)")
+        );
+    }
+    println!();
+    info_row(
+        "placed",
+        style::dim(&format!(
+            "{}  · updated {}",
+            o.created_at.as_deref().unwrap_or("?"),
+            o.updated_at.as_deref().unwrap_or("?"),
+        )),
+    );
+    let who = match (&o.customer_name, &o.customer_email) {
+        (Some(n), Some(e)) => format!("{n} <{e}>"),
+        (None, Some(e)) => e.clone(),
+        (Some(n), None) => n.clone(),
+        _ => "(unknown)".to_string(),
+    };
+    let tag = if o.guest {
+        format!("  {}", style::number("[guest]"))
+    } else {
+        o.customer_id.map(|id| format!("  {}", style::dim(&format!("(customer {id})")))).unwrap_or_default()
+    };
+    info_row("customer", format!("{who}{tag}"));
+    for a in &o.addresses {
+        let parts: Vec<String> = [
+            a.company.clone(),
+            Some(a.name.clone()).filter(|n| !n.is_empty()),
+            a.street.clone(),
+            match (&a.postcode, &a.city) {
+                (Some(p), Some(c)) => Some(format!("{p} {c}")),
+                (p, c) => p.clone().or_else(|| c.clone()),
+            },
+            a.country.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        info_row(
+            if a.kind == "billing" { "bill to" } else { "ship to" },
+            parts.join(", "),
+        );
+    }
+    if o.shipping_method.is_some() || o.shipping_description.is_some() {
+        info_row(
+            "shipping",
+            format!(
+                "{}{}",
+                o.shipping_method.as_deref().unwrap_or("?"),
+                o.shipping_description
+                    .as_deref()
+                    .map(|d| format!("  {}", style::dim(&format!("— {d}"))))
+                    .unwrap_or_default(),
+            ),
+        );
+    }
+    if let Some(p) = &o.payment {
+        let txn = p
+            .last_trans_id
+            .as_deref()
+            .map(|t| format!("  {}", style::dim(&format!("txn {t}"))))
+            .unwrap_or_default();
+        info_row("payment", format!("{}{txn}", style::target(p.method.as_deref().unwrap_or("?"))));
+        for (k, v) in p.additional.iter().take(12) {
+            let val = if v.chars().count() > 90 {
+                format!("{}…", v.chars().take(90).collect::<String>())
+            } else {
+                v.clone()
+            };
+            println!("              {}", style::dim(&format!("{k}: {val}")));
+        }
+        if p.additional.len() > 12 {
+            println!(
+                "              {}",
+                style::dim(&format!("… +{} more keys (--json for all)", p.additional.len() - 12))
+            );
+        }
+    }
+    for t in &o.transactions {
+        let closed = if t.closed { style::dim("(closed)") } else { style::ok("(open)") };
+        info_row(
+            "txn",
+            format!(
+                "{} {}  {closed}  {}",
+                style::kind(&t.kind),
+                t.txn_id,
+                style::dim(t.created_at.as_deref().unwrap_or("")),
+            ),
+        );
+    }
+
+    if !o.items.is_empty() {
+        println!("\n{}", style::dim(&format!("items ({}):", o.items.len())));
+        let ws = o.items.iter().map(|i| i.sku.len()).max().unwrap_or(0);
+        for i in &o.items {
+            let q = |v: &str| v.trim_end_matches('0').trim_end_matches('.').to_string();
+            let mut lifecycle = vec![format!("{} ordered", q(&i.qty_ordered))];
+            for (v, label) in [
+                (&i.qty_invoiced, "invoiced"),
+                (&i.qty_shipped, "shipped"),
+                (&i.qty_refunded, "refunded"),
+                (&i.qty_canceled, "canceled"),
+            ] {
+                if q(v) != "0" && !q(v).is_empty() {
+                    lifecycle.push(format!("{} {label}", q(v)));
+                }
+            }
+            // Fulfillment gaps on top-level shippable lines — the "stuck order" smell.
+            let mut tags = String::new();
+            if !i.is_child && !matches!(i.product_type.as_str(), "virtual" | "downloadable") {
+                let n = |v: &str| v.parse::<f64>().unwrap_or(0.0);
+                let ordered = n(&i.qty_ordered);
+                if n(&i.qty_invoiced) + n(&i.qty_canceled) < ordered {
+                    tags.push_str(&format!("  {}", style::number("[not fully invoiced]")));
+                }
+                // Configurables record shipment on the parent; bundles may record it on
+                // either side depending on shipment_type, so they're skipped.
+                if i.product_type != "bundle"
+                    && n(&i.qty_shipped) + n(&i.qty_canceled) + n(&i.qty_refunded) < ordered
+                {
+                    tags.push_str(&format!("  {}", style::number("[not fully shipped]")));
+                }
+            }
+            if i.is_child {
+                // Composite children duplicate the parent's bookkeeping — name them dimly.
+                println!(
+                    "    {}",
+                    style::dim(&format!("↳ {} {}", i.sku, i.name.as_deref().unwrap_or("")))
+                );
+                continue;
+            }
+            let price = i
+                .row_total
+                .as_deref()
+                .map(|t| format!("  {}", style::number(t)))
+                .unwrap_or_default();
+            println!(
+                "  {}{}  {}  {}{price}{tags}",
+                style::name(&i.sku),
+                " ".repeat(ws.saturating_sub(i.sku.len())),
+                style::dim(&lifecycle.join(" · ")),
+                i.name.as_deref().unwrap_or(""),
+            );
+        }
+    }
+
+    println!();
+    let different_currency = o.order_currency != o.base_currency;
+    let cur = o.order_currency.as_deref().unwrap_or("");
+    let totals: Vec<String> = o
+        .totals
+        .iter()
+        .filter(|t| t.amount.is_some())
+        .map(|t| {
+            let amount = t.amount.as_deref().unwrap_or("-");
+            let base = if different_currency {
+                t.base_amount
+                    .as_deref()
+                    .map(|b| {
+                        style::dim(&format!(
+                            " ({b} {})",
+                            o.base_currency.as_deref().unwrap_or("base")
+                        ))
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let colored = match t.key.as_str() {
+                "grand_total" => style::number(&format!("{amount} {cur}")),
+                "due" if amount != "0.0000" && amount != "0.00" => {
+                    style::err(&format!("{amount}"))
+                }
+                _ => amount.to_string(),
+            };
+            format!("{} {colored}{base}", style::dim(&t.key.replace('_', " ")))
+        })
+        .collect();
+    info_row("totals", totals.join("  ·  "));
+    if let Some(c) = &o.coupon {
+        let rules = o
+            .applied_rule_ids
+            .as_deref()
+            .map(|r| format!("  {}", style::dim(&format!("(rules {r})"))))
+            .unwrap_or_default();
+        info_row("coupon", format!("{}{rules}", style::string_lit(&format!("\"{c}\""))));
+    } else if let Some(r) = &o.applied_rule_ids {
+        info_row("sales rules", format!("rule ids {r}"));
+    }
+
+    let docs = |kind: &str, docs: &[magequery_core::OrderDocument]| {
+        if docs.is_empty() {
+            return;
+        }
+        let list: Vec<String> = docs
+            .iter()
+            .map(|d| {
+                let state = match d.state.as_deref() {
+                    Some("paid") | Some("refunded") => style::ok(d.state.as_deref().unwrap()),
+                    Some("canceled") => style::err("canceled"),
+                    Some(s) => s.to_string(),
+                    None => String::new(),
+                };
+                format!(
+                    "{} {state} {} {}",
+                    style::name(&d.increment_id),
+                    d.total.as_deref().unwrap_or(""),
+                    style::dim(d.created_at.as_deref().unwrap_or("")),
+                )
+            })
+            .collect();
+        info_row(kind, list.join("  ·  "));
+    };
+    docs("invoices", &o.invoices);
+    docs("creditmemos", &o.creditmemos);
+    for s in &o.shipments {
+        let tracks: Vec<String> = s
+            .tracks
+            .iter()
+            .map(|(carrier, title, number)| {
+                let label = if title.is_empty() { carrier.clone() } else { title.clone() };
+                format!("{} {}", style::dim(&label), style::number(number))
+            })
+            .collect();
+        let tracks = if tracks.is_empty() {
+            style::dim("(no tracking)")
+        } else {
+            tracks.join(", ")
+        };
+        info_row(
+            "shipment",
+            format!(
+                "{}  qty {}  {tracks}  {}",
+                style::name(&s.increment_id),
+                s.qty.as_deref().unwrap_or("?"),
+                style::dim(s.created_at.as_deref().unwrap_or("")),
+            ),
+        );
+    }
+
+    if !o.history.is_empty() {
+        println!("\n{}", style::dim("history:"));
+        for h in &o.history {
+            let notified = if h.notified { style::dim(" (customer notified)") } else { String::new() };
+            let comment = h
+                .comment
+                .as_deref()
+                .map(|c| format!("  {}", c.replace('\n', " ")))
+                .unwrap_or_default();
+            println!(
+                "  {}  {}{comment}{notified}",
+                style::dim(h.created_at.as_deref().unwrap_or("")),
+                style::target(h.status.as_deref().unwrap_or("")),
+            );
         }
     }
     Ok(())
