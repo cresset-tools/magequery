@@ -43,7 +43,8 @@ mod whatis;
 pub use error::{Diagnostic, Error, Result, Severity};
 pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
-    AclResource, ArgItem, ArgValue, Argument, ByArea, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
+    AclResource, AdminRole, AdminRule, AdminUser, ArgItem, ArgValue, Argument, ByArea,
+    ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ConsoleCommand, ControllerAction, CronJob, DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
     DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, EavAttribute, EavAttributeCard,
     EavCatalogFlags, EavEntityType, EavScope, EavSetMembership, EavSetupKind, EavSetupProp,
@@ -854,6 +855,72 @@ impl Magento {
         }
 
         Ok(Patches { patches, orphaned_applied })
+    }
+
+    /// Admin users from the live `admin_user` table, each joined with its role name;
+    /// lock state and login age computed on the DB server's clock. Sorted by username.
+    #[cfg(feature = "db")]
+    pub fn admin_users(&self) -> Result<Vec<AdminUser>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let rows = db::fetch_admin_users(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        Ok(rows
+            .into_iter()
+            .map(|u| AdminUser {
+                id: u.id,
+                username: u.username,
+                firstname: u.firstname,
+                lastname: u.lastname,
+                email: u.email,
+                active: u.active,
+                role: u.role,
+                created: u.created,
+                last_login: u.last_login,
+                last_login_secs: u.last_login_secs,
+                logins: u.logins,
+                failures: u.failures,
+                locked: u.locked,
+                lock_expires: u.lock_expires,
+                locale: u.locale,
+            })
+            .collect())
+    }
+
+    /// Admin roles from the live `authorization_role`/`authorization_rule` tables: each
+    /// with its member usernames and permission rules, every rule's resource id joined
+    /// with its title from the static acl.xml index (`None` title = no module declares
+    /// the resource — a stale rule of an uninstalled module). Sorted by role name.
+    #[cfg(feature = "db")]
+    pub fn admin_roles(&self) -> Result<Vec<AdminRole>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (roles, members, rules) =
+            db::fetch_admin_roles(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        Ok(roles
+            .into_iter()
+            .map(|(id, name)| {
+                let users: Vec<String> = members
+                    .iter()
+                    .filter(|(rid, _)| *rid == id)
+                    .map(|(_, u)| u.clone())
+                    .collect();
+                let rules: Vec<AdminRule> = rules
+                    .iter()
+                    .filter(|(rid, _, _)| *rid == id)
+                    .map(|(_, resource, allow)| AdminRule {
+                        title: self
+                            .acl_resource(resource)
+                            .map(|r| r.title)
+                            .filter(|t| !t.is_empty()),
+                        resource: resource.clone(),
+                        allow: *allow,
+                    })
+                    .collect();
+                let all_resources =
+                    rules.iter().any(|r| r.resource == "Magento_Backend::all" && r.allow);
+                AdminRole { id, name, users, all_resources, rules }
+            })
+            .collect())
     }
 
     fn eav_setup_index(&self) -> &eav::EavSetupIndex {

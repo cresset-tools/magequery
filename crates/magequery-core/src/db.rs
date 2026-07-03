@@ -223,6 +223,113 @@ pub(crate) fn fetch_scope_counts(
     Ok((websites, groups, stores))
 }
 
+/// One `admin_user` row joined with its role name (wide row — columns by index).
+pub(crate) struct DbAdminUser {
+    pub id: u32,
+    pub username: String,
+    pub firstname: String,
+    pub lastname: String,
+    pub email: String,
+    pub active: bool,
+    pub created: Option<String>,
+    pub last_login: Option<String>,
+    pub last_login_secs: Option<i64>,
+    pub logins: u32,
+    pub failures: u32,
+    pub locked: bool,
+    pub lock_expires: Option<String>,
+    pub locale: Option<String>,
+    pub role: Option<String>,
+}
+
+/// Admin users with their group role: each user's `role_type='U'` row (user_type '2' =
+/// admin, per `UserContextInterface`) points at the group via `parent_id`. Lock state and
+/// login age are computed with the DB server's own clock.
+pub(crate) fn fetch_admin_users(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<Vec<DbAdminUser>, String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let rows: Vec<mysql::Row> = c
+        .query(format!(
+            "SELECT u.user_id, u.username, u.firstname, u.lastname, u.email, u.is_active, \
+             CAST(u.created AS CHAR), CAST(u.logdate AS CHAR), \
+             TIMESTAMPDIFF(SECOND, u.logdate, NOW()), u.lognum, u.failures_num, \
+             (u.lock_expires IS NOT NULL AND u.lock_expires > NOW()), \
+             CAST(u.lock_expires AS CHAR), u.interface_locale, r.role_name \
+             FROM {p}admin_user u \
+             LEFT JOIN {p}authorization_role ur ON ur.role_type = 'U' \
+             AND ur.user_type = '2' AND ur.user_id = u.user_id \
+             LEFT JOIN {p}authorization_role r ON r.role_id = ur.parent_id \
+             ORDER BY u.username"
+        ))
+        .map_err(clean_err)?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for mut row in rows {
+        let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
+        let n = |r: &mut mysql::Row, i: usize| {
+            r.take::<Option<i64>, _>(i).flatten().unwrap_or(0)
+        };
+        out.push(DbAdminUser {
+            id: n(&mut row, 0) as u32,
+            username: s(&mut row, 1).unwrap_or_default(),
+            firstname: s(&mut row, 2).unwrap_or_default(),
+            lastname: s(&mut row, 3).unwrap_or_default(),
+            email: s(&mut row, 4).unwrap_or_default(),
+            active: n(&mut row, 5) != 0,
+            created: s(&mut row, 6),
+            last_login: s(&mut row, 7),
+            last_login_secs: row.take::<Option<i64>, _>(8).flatten(),
+            logins: n(&mut row, 9) as u32,
+            failures: n(&mut row, 10) as u32,
+            locked: n(&mut row, 11) != 0,
+            lock_expires: s(&mut row, 12),
+            locale: s(&mut row, 13),
+            role: s(&mut row, 14),
+        });
+    }
+    Ok(out)
+}
+
+/// Admin roles (`role_type='G'`), their admin members, and their `authorization_rule`
+/// permissions: `(role_id, name)` + `(role_id, username)` + `(role_id, resource, allow)`.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_admin_roles(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<(Vec<(u32, String)>, Vec<(u32, String)>, Vec<(u32, String, bool)>), String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let roles: Vec<(u32, String)> = c
+        .query(format!(
+            "SELECT role_id, role_name FROM {p}authorization_role \
+             WHERE role_type = 'G' ORDER BY role_name"
+        ))
+        .map_err(clean_err)?;
+    let members: Vec<(u32, String)> = c
+        .query(format!(
+            "SELECT ur.parent_id, u.username FROM {p}authorization_role ur \
+             JOIN {p}admin_user u ON u.user_id = ur.user_id \
+             WHERE ur.role_type = 'U' AND ur.user_type = '2' ORDER BY u.username"
+        ))
+        .map_err(clean_err)?;
+    let rules: Vec<(u32, String, Option<String>)> = c
+        .query(format!(
+            "SELECT role_id, resource_id, permission FROM {p}authorization_rule \
+             ORDER BY resource_id"
+        ))
+        .map_err(clean_err)?;
+    let rules = rules
+        .into_iter()
+        .map(|(id, res, perm)| (id, res, perm.as_deref() == Some("allow")))
+        .collect();
+    Ok((roles, members, rules))
+}
+
 /// One `indexer_state` row.
 pub(crate) struct DbIndexerState {
     pub indexer_id: String,

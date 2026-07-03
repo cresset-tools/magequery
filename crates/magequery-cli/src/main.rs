@@ -66,6 +66,8 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("system-config", "Where each admin config path lives (Stores → Configuration)"),
             ("acl", "Admin ACL resource tree from acl.xml; resolve a <resource> id"),
             ("menu", "Admin menu tree from menu.xml: what's where, guarded by which ACL"),
+            ("admin-users", "Admin users from the DB: role, status, last login"),
+            ("admin-roles", "Admin roles from the DB: members, permitted ACL resources"),
         ],
     ),
     (
@@ -272,6 +274,10 @@ enum Command {
     Acl(AclArgs),
     /// Admin menu tree from menu.xml: what's where, guarded by which ACL.
     Menu(MenuArgs),
+    /// Admin users from the DB: role, active/locked status, last login.
+    AdminUsers(AdminUsersArgs),
+    /// Admin roles from the DB: members and permitted ACL resources.
+    AdminRoles(AdminRolesArgs),
 
     // ── Runtime: env.php config & live connections ──
     /// DB connections from env.php; info / ping.
@@ -447,6 +453,23 @@ struct TranslationsArgs {
     /// Also read the `translation` DB table (the layer that beats everything).
     #[arg(long)]
     db: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct AdminUsersArgs {
+    /// A username or email (exact or substring) → detail; omit to list every admin user.
+    user: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct AdminRolesArgs {
+    /// A role name (exact or substring) → members + full permission list; omit to list
+    /// every role.
+    role: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -823,6 +846,8 @@ fn main() -> Result<()> {
         Command::Translations(args) => translations(&mage, &args, &cli.root),
         Command::UiComponents(args) => ui_components(&mage, &args, &cli.root),
         Command::Eav(args) => eav(&mage, &args, &cli.root),
+        Command::AdminUsers(args) => admin_users(&mage, &args),
+        Command::AdminRoles(args) => admin_roles(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
         Command::Webapi(args) => webapi(&mage, &args, &cli.root),
         Command::Actions(args) => actions(&mage, &args, &cli.root),
@@ -1580,6 +1605,191 @@ fn layout_op_line(op: &magequery_core::LayoutOp) -> String {
             format!("{} move {}{to}{}", style::kind("→"), style::name(&op.name), style::path(&line))
         }
     }
+}
+
+fn admin_users(mage: &Magento, args: &AdminUsersArgs) -> Result<()> {
+    let users = mage.admin_users()?;
+    let matches: Vec<&magequery_core::AdminUser> = match &args.user {
+        None => users.iter().collect(),
+        Some(q) => {
+            let exact: Vec<_> =
+                users.iter().filter(|u| u.username == *q || u.email == *q).collect();
+            if exact.is_empty() {
+                let n = q.to_lowercase();
+                users
+                    .iter()
+                    .filter(|u| {
+                        u.username.to_lowercase().contains(&n)
+                            || u.email.to_lowercase().contains(&n)
+                            || format!("{} {}", u.firstname, u.lastname)
+                                .to_lowercase()
+                                .contains(&n)
+                    })
+                    .collect()
+            } else {
+                exact
+            }
+        }
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&matches)?);
+        return Ok(());
+    }
+    if matches.is_empty() {
+        return Err(anyhow!(
+            "no admin user matches `{}`",
+            args.user.as_deref().unwrap_or("")
+        ));
+    }
+    if matches.len() == 1 && args.user.is_some() {
+        let u = matches[0];
+        println!("{}{}", style::name(&u.username), admin_user_tags(u));
+        println!();
+        info_row("name", format!("{} {}", u.firstname, u.lastname));
+        info_row("email", &u.email);
+        match &u.role {
+            Some(r) => info_row(
+                "role",
+                format!(
+                    "{}  {}",
+                    style::target(r),
+                    style::dim(&format!("→ magequery admin-roles \"{r}\""))
+                ),
+            ),
+            None => info_row("role", style::err("(no role assigned)")),
+        }
+        info_row("last login", admin_last_login(u));
+        if u.failures > 0 || u.locked {
+            let lock = u
+                .lock_expires
+                .as_deref()
+                .filter(|_| u.locked)
+                .map(|e| format!("  {}", style::err(&format!("locked until {e}"))))
+                .unwrap_or_default();
+            info_row("failures", format!("{}{lock}", u.failures));
+        }
+        if let Some(c) = &u.created {
+            info_row("created", style::dim(c));
+        }
+        if let Some(l) = &u.locale {
+            info_row("locale", l);
+        }
+        return Ok(());
+    }
+
+    let wu = matches.iter().map(|u| u.username.len()).max().unwrap_or(0);
+    let name = |u: &magequery_core::AdminUser| format!("{} {}", u.firstname, u.lastname);
+    let wn = matches.iter().map(|u| name(u).len()).max().unwrap_or(0);
+    let we = matches.iter().map(|u| u.email.len()).max().unwrap_or(0);
+    for u in &matches {
+        let n = name(u);
+        println!(
+            "{}{}  {n}{}  {}{}  {}  {}{}",
+            style::name(&u.username),
+            " ".repeat(wu - u.username.len()),
+            " ".repeat(wn - n.len()),
+            u.email,
+            " ".repeat(we - u.email.len()),
+            style::target(u.role.as_deref().unwrap_or("(no role)")),
+            style::dim(&admin_last_login(u)),
+            admin_user_tags(u),
+        );
+    }
+    eprintln!("\n{} admin user(s)", matches.len());
+    Ok(())
+}
+
+/// Red status tags: ` [inactive]` / ` [LOCKED]`.
+fn admin_user_tags(u: &magequery_core::AdminUser) -> String {
+    let mut s = String::new();
+    if !u.active {
+        s.push_str(&format!("  {}", style::err("[inactive]")));
+    }
+    if u.locked {
+        s.push_str(&format!("  {}", style::err("[LOCKED]")));
+    }
+    s
+}
+
+fn admin_last_login(u: &magequery_core::AdminUser) -> String {
+    match (&u.last_login, u.last_login_secs) {
+        (Some(d), Some(secs)) => {
+            format!("{d} ({} ago · {} logins)", humanize_secs(secs), u.logins)
+        }
+        (Some(d), None) => d.clone(),
+        _ => "never logged in".to_string(),
+    }
+}
+
+fn admin_roles(mage: &Magento, args: &AdminRolesArgs) -> Result<()> {
+    let roles = mage.admin_roles()?;
+    let matches: Vec<&magequery_core::AdminRole> = match &args.role {
+        None => roles.iter().collect(),
+        Some(q) => {
+            let exact: Vec<_> = roles.iter().filter(|r| r.name == *q).collect();
+            if exact.is_empty() {
+                let n = q.to_lowercase();
+                roles.iter().filter(|r| r.name.to_lowercase().contains(&n)).collect()
+            } else {
+                exact
+            }
+        }
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&matches)?);
+        return Ok(());
+    }
+    if matches.is_empty() {
+        return Err(anyhow!("no admin role matches `{}`", args.role.as_deref().unwrap_or("")));
+    }
+    if matches.len() == 1 && args.role.is_some() {
+        let r = matches[0];
+        println!("{}  {}", style::target(&r.name), style::dim(&format!("(role_id {})", r.id)));
+        println!();
+        if r.users.is_empty() {
+            info_row("users", style::dim("(none)"));
+        } else {
+            let list: Vec<String> = r.users.iter().map(|u| style::name(u)).collect();
+            info_row("users", list.join(", "));
+        }
+        if r.all_resources {
+            info_row("access", style::ok("full (Magento_Backend::all)"));
+            return Ok(());
+        }
+        info_row("access", format!("{} resource(s):", r.rules.len()));
+        for rule in &r.rules {
+            let mark = if rule.allow { style::ok("✓") } else { style::err("✕ deny") };
+            let title = match &rule.title {
+                Some(t) => format!("  {t}"),
+                None => format!(
+                    "  {}",
+                    style::number("(not declared in any acl.xml — module removed?)")
+                ),
+            };
+            println!("  {mark} {}{title}", style::name(&rule.resource));
+        }
+        return Ok(());
+    }
+
+    let w = matches.iter().map(|r| r.name.len()).max().unwrap_or(0);
+    for r in &matches {
+        let access = if r.all_resources {
+            style::ok("full access")
+        } else {
+            format!("{} resource(s)", r.rules.len())
+        };
+        let users = match r.users.len() {
+            0 => style::dim("0 users"),
+            n => format!("{n} user(s)"),
+        };
+        println!(
+            "{}{}  {users}  {access}",
+            style::target(&r.name),
+            " ".repeat(w - r.name.len()),
+        );
+    }
+    eprintln!("\n{} admin role(s)", matches.len());
+    Ok(())
 }
 
 fn eav(mage: &Magento, args: &EavArgs, root: &Path) -> Result<()> {

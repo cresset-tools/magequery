@@ -178,6 +178,7 @@ DATA          (persistence & model)
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
   acl [<resource>]                              menu [<item>]
+  admin-users [<user>]   admin-roles [<role>]   (live DB)
 
 FRONTEND      (presentation)
   layout [<handle>] [--area]    widgets [<id>]    email-templates [<id>]
@@ -1078,12 +1079,42 @@ search "tax class" resolves; `gift` single-match → GiftMessage card; unregiste
 module's attribute honestly absent from both halves — its patch never ran). ~25ms static,
 ~75ms with DB.
 
+### `admin-users` / `admin-roles` (live DB, done)
+
+Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
+`url-rewrites` — the tables have no static source; clean `Error::Db` when unreachable),
+and they close the ACL loop: role rules cite the resource ids `acl`/`webapi`/`menu`
+already work with.
+- `db::fetch_admin_users` — `admin_user` LEFT-JOINed twice through `authorization_role`
+  (the user's `role_type='U'`/`user_type='2'` row → its `parent_id` group row = the role
+  name; user_type '2' = admin per `UserContextInterface`). Lock state
+  (`lock_expires > NOW()`) and login age (`TIMESTAMPDIFF`) computed on the **DB server's
+  clock** — no client-side time. Wide row → columns by index.
+- `db::fetch_admin_roles` — `role_type='G'` groups + member usernames + every
+  `authorization_rule` row. `Magento::admin_roles()` joins each rule's resource id with
+  its **title from the static acl.xml index** (`None` title = no module declares it — a
+  stale rule of a removed module, rendered as a yellow warning);
+  `Magento_Backend::all` allow = `all_resources` (rendered green "full access" instead of
+  a rule dump).
+
+CLI `magequery admin-users [<user>]` (exact username/email, else substring over
+username/email/name; single match → card): list = `username  Name  email  role
+last-login`, red `[inactive]`/`[LOCKED]` tags; card adds role (with a `→ magequery
+admin-roles` cross-link), `last login … (8d ago · 42 logins)` via `humanize_secs`,
+failures + lock expiry, created, locale. `magequery admin-roles [<role>]`: list = `name
+N user(s)  full access|N resource(s)`; detail = members + the permission list (`✓`
+allow / red `✕ deny`, each resource id titled from acl.xml). Validated on mageos-lite +
+commerce-store (single full-access Administrators; never-logged-in rendered honestly;
+down-DB exits 1 cleanly). The granular-role/deny/stale-rule branches are
+straightforward format arms verified by inspection — neither test store has a granular
+role, and seeding one into a live DB was deliberately not done.
+
 ## Future query tools (backlog — not yet built)
 
 Ideas surfaced while scoping breadth, in rough priority. All but the DB ones are
 static breadth-projections in the same `read_parse` + merge shape.
-- **DB-backed (phase-2 style, opt-in like `url-rewrites`):** admin users/roles, cron
-  history (`cron_schedule`), queue backlog.
+- **DB-backed (phase-2 style, opt-in like `url-rewrites`):** cron history
+  (`cron_schedule`), queue backlog.
 
 ## Build order
 
