@@ -59,7 +59,8 @@ pub use model::{
     BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount,
     CategoryIndexedProduct, CategoryProduct,
     CategoryTreeNode, CategoryVisibilityIssue,
-    ChildPrice, IndexedPrice, Order, OrderAddress, OrderComment, OrderDocument, OrderHit,
+    ChildPrice, Customer, CustomerAddress, CustomerHit, CustomerNewsletter, CustomerOrders,
+    IndexedPrice, Order, OrderAddress, OrderComment, OrderDocument, OrderHit,
     OrderItem, OrderPayment, OrderShipment, OrderTotal, OrderTransaction,
     Preference, PreferenceStep, Plugin,
     PluginMethod, Product,
@@ -1069,6 +1070,47 @@ impl Magento {
             db::fetch_category_card(conn, &cfg.table_prefix, id, include_products, indexed_store)
                 .map_err(Error::Db)?;
         Ok(raw.map(to_category))
+    }
+
+    /// One customer by exact email. Live DB.
+    #[cfg(feature = "db")]
+    pub fn customer_by_email(&self, email: &str) -> Result<Option<Customer>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_customer(conn, &cfg.table_prefix, db::CustomerIdent::Email(email))
+            .map_err(Error::Db)?;
+        Ok(raw.map(|r| to_customer(r, false)))
+    }
+
+    /// One customer by entity_id.
+    #[cfg(feature = "db")]
+    pub fn customer_by_id(&self, id: u32) -> Result<Option<Customer>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw = db::fetch_customer(conn, &cfg.table_prefix, db::CustomerIdent::Id(id))
+            .map_err(Error::Db)?;
+        Ok(raw.map(|r| to_customer(r, true)))
+    }
+
+    /// Customer search: email or name substring, newest first.
+    #[cfg(feature = "db")]
+    pub fn customers_like(&self, needle: &str, limit: usize) -> Result<(Vec<CustomerHit>, bool)> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let (rows, truncated) =
+            db::fetch_customers_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
+        Ok((
+            rows.into_iter()
+                .map(|(entity_id, email, name, group, created_at, _)| CustomerHit {
+                    entity_id,
+                    email,
+                    name: name.unwrap_or_default(),
+                    group,
+                    created_at,
+                })
+                .collect(),
+            truncated,
+        ))
     }
 
     /// One order by exact increment_id. Live DB.
@@ -2679,6 +2721,98 @@ fn default_connection(cfg: &DbConfig) -> Result<&DbConnection> {
         .find(|c| c.name == "default")
         .or_else(|| cfg.connections.first())
         .ok_or_else(|| Error::Db("no db connection configured in env.php".to_string()))
+}
+
+/// Assemble [`Customer`]: decode the newsletter status, name the addresses, and pass
+/// custom EAV values through the shared scope machinery (single `default` scope —
+/// customer attributes aren't store-scoped).
+#[cfg(feature = "db")]
+fn to_customer(raw: db::DbCustomer, matched_by_id: bool) -> Customer {
+    let newsletter_status = |s: i64| match s {
+        1 => "subscribed".to_string(),
+        2 => "not active".to_string(),
+        3 => "unsubscribed".to_string(),
+        4 => "unconfirmed".to_string(),
+        other => format!("status {other}"),
+    };
+    let name = [raw.firstname.clone(), raw.lastname.clone()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut values: Vec<ProductValue> = Vec::new();
+    for v in &raw.values {
+        let scope = ProductScopeValue {
+            store: "default".to_string(),
+            label: None,
+            value: v.value.clone().unwrap_or_else(|| "NULL".to_string()),
+        };
+        match values.iter_mut().find(|e| e.attribute == v.attribute) {
+            Some(e) => e.scopes.push(scope),
+            None => values.push(ProductValue {
+                attribute: v.attribute.clone(),
+                backend_type: v.backend_type.clone(),
+                input: v.input.clone(),
+                scopes: vec![scope],
+            }),
+        }
+    }
+    values.sort_by(|a, b| a.attribute.cmp(&b.attribute));
+
+    Customer {
+        entity_id: raw.entity_id,
+        email: raw.email,
+        name,
+        group: raw.group,
+        website: raw.website,
+        created_in: raw.created_in,
+        created_at: raw.created_at,
+        active: raw.active,
+        confirmed: raw.confirmed,
+        locked: raw.locked,
+        lock_expires: raw.lock_expires,
+        failures: raw.failures,
+        last_login: raw.last_login,
+        last_logout: raw.last_logout,
+        dob: raw.dob,
+        taxvat: raw.taxvat,
+        addresses: raw
+            .addresses
+            .into_iter()
+            .map(|(id, f, l, company, street, postcode, city, region, country, telephone, db, ds)| {
+                CustomerAddress {
+                    id,
+                    name: [f, l].into_iter().flatten().collect::<Vec<_>>().join(" "),
+                    company,
+                    street: street.map(|s| s.replace('\n', ", ")),
+                    postcode,
+                    city,
+                    region,
+                    country,
+                    telephone,
+                    default_billing: db,
+                    default_shipping: ds,
+                }
+            })
+            .collect(),
+        newsletter: raw
+            .newsletter
+            .into_iter()
+            .map(|(store, status)| CustomerNewsletter { store, status: newsletter_status(status) })
+            .collect(),
+        values,
+        orders: CustomerOrders {
+            count: raw.order_stats.0,
+            lifetime: raw.order_stats.1,
+            first_at: raw.order_stats.2,
+            last_at: raw.order_stats.3,
+            last_increment: raw.last_order.as_ref().map(|(i, _)| i.clone()),
+            last_status: raw.last_order.and_then(|(_, s)| s),
+        },
+        guest_orders: raw.guest_orders,
+        matched_by_id,
+    }
 }
 
 /// Assemble [`Order`]: decode document states, join tracks onto their shipments, and

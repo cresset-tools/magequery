@@ -1664,6 +1664,88 @@ pub struct ProductPrices {
     pub matched_by_id: bool,
 }
 
+/// One customer address, with default-billing/shipping tags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CustomerAddress {
+    pub id: u32,
+    pub name: String,
+    pub company: Option<String>,
+    pub street: Option<String>,
+    pub postcode: Option<String>,
+    pub city: Option<String>,
+    pub region: Option<String>,
+    pub country: Option<String>,
+    pub telephone: Option<String>,
+    pub default_billing: bool,
+    pub default_shipping: bool,
+}
+
+/// A newsletter subscription row (per store).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CustomerNewsletter {
+    pub store: String,
+    /// Decoded `subscriber_status`.
+    pub status: String,
+}
+
+/// The customer's order summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CustomerOrders {
+    pub count: u32,
+    /// Lifetime `base_grand_total` sum (base currency).
+    pub lifetime: Option<String>,
+    pub first_at: Option<String>,
+    pub last_at: Option<String>,
+    pub last_increment: Option<String>,
+    pub last_status: Option<String>,
+}
+
+/// One customer as the database stores it. Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Customer {
+    pub entity_id: u32,
+    pub email: String,
+    pub name: String,
+    pub group: Option<String>,
+    pub website: Option<String>,
+    /// The `created_in` store-name snapshot.
+    pub created_in: Option<String>,
+    pub created_at: Option<String>,
+    pub active: bool,
+    /// `false` = a confirmation token is pending — the account can't log in yet.
+    pub confirmed: bool,
+    pub locked: bool,
+    pub lock_expires: Option<String>,
+    pub failures: u32,
+    pub last_login: Option<String>,
+    pub last_logout: Option<String>,
+    pub dob: Option<String>,
+    pub taxvat: Option<String>,
+    pub addresses: Vec<CustomerAddress>,
+    pub newsletter: Vec<CustomerNewsletter>,
+    /// Custom (non-static) customer EAV attribute values.
+    pub values: Vec<ProductValue>,
+    pub orders: CustomerOrders,
+    /// Guest orders placed with the same email (not linked to the account).
+    pub guest_orders: u32,
+    pub matched_by_id: bool,
+}
+
+/// One row of a customer search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CustomerHit {
+    pub entity_id: u32,
+    pub email: String,
+    pub name: String,
+    pub group: Option<String>,
+    pub created_at: Option<String>,
+}
+
 /// One order total line (order currency; `base` shown when the currencies differ).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]

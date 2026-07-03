@@ -189,6 +189,295 @@ pub(crate) fn fetch_patch_list(
     Ok(rows.into_iter().map(|r| r.trim_start_matches('\\').to_string()).collect())
 }
 
+/// How to look a customer up.
+pub(crate) enum CustomerIdent<'a> {
+    Email(&'a str),
+    Id(u32),
+}
+
+/// Everything about one customer, raw.
+pub(crate) struct DbCustomer {
+    pub entity_id: u32,
+    pub email: String,
+    pub firstname: Option<String>,
+    pub lastname: Option<String>,
+    pub group: Option<String>,
+    pub website: Option<String>,
+    pub created_in: Option<String>,
+    pub created_at: Option<String>,
+    pub active: bool,
+    pub confirmed: bool,
+    pub locked: bool,
+    pub lock_expires: Option<String>,
+    pub failures: u32,
+    pub dob: Option<String>,
+    pub taxvat: Option<String>,
+    pub last_login: Option<String>,
+    pub last_logout: Option<String>,
+    /// `(id, firstname, lastname, company, street, postcode, city, region, country,
+    /// telephone, is_default_billing, is_default_shipping)`.
+    #[allow(clippy::type_complexity)]
+    pub addresses: Vec<(
+        u32,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        bool,
+        bool,
+    )>,
+    /// `(store code, subscriber_status)`.
+    pub newsletter: Vec<(String, i64)>,
+    /// Custom EAV values (customer value tables have no store scope — store_id 0).
+    pub values: Vec<DbProductValue>,
+    /// `(count, lifetime base sum, first, last)`.
+    pub order_stats: (u32, Option<String>, Option<String>, Option<String>),
+    pub last_order: Option<(String, Option<String>)>,
+    pub guest_orders: u32,
+}
+
+pub(crate) fn fetch_customer(
+    conn: &DbConnection,
+    table_prefix: &str,
+    ident: CustomerIdent<'_>,
+) -> Result<Option<DbCustomer>, String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    let base = format!(
+        "SELECT e.entity_id, e.email, e.firstname, e.lastname, g.customer_group_code, \
+         w.code, e.created_in, CAST(e.created_at AS CHAR), e.is_active, e.confirmation, \
+         (e.lock_expires IS NOT NULL AND e.lock_expires > NOW()), \
+         CAST(e.lock_expires AS CHAR), e.failures_num, CAST(e.dob AS CHAR), e.taxvat, \
+         e.default_billing, e.default_shipping \
+         FROM {p}customer_entity e \
+         LEFT JOIN {p}customer_group g ON g.customer_group_id = e.group_id \
+         LEFT JOIN {p}store_website w ON w.website_id = e.website_id"
+    );
+    let row: Option<mysql::Row> = match ident {
+        CustomerIdent::Email(email) => c
+            .exec_first(format!("{base} WHERE e.email = :v"), params! { "v" => email })
+            .map_err(clean_err)?,
+        CustomerIdent::Id(id) => c
+            .exec_first(format!("{base} WHERE e.entity_id = :v"), params! { "v" => id })
+            .map_err(clean_err)?,
+    };
+    let Some(mut row) = row else { return Ok(None) };
+    let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
+    let n = |r: &mut mysql::Row, i: usize| r.take::<Option<i64>, _>(i).flatten().unwrap_or(0);
+    let entity_id = n(&mut row, 0) as u32;
+    let email = s(&mut row, 1).unwrap_or_default();
+    let firstname = s(&mut row, 2);
+    let lastname = s(&mut row, 3);
+    let group = s(&mut row, 4);
+    let website = s(&mut row, 5);
+    let created_in = s(&mut row, 6);
+    let created_at = s(&mut row, 7);
+    let active = n(&mut row, 8) != 0;
+    let confirmed = s(&mut row, 9).is_none();
+    let locked = n(&mut row, 10) != 0;
+    let lock_expires = s(&mut row, 11);
+    let failures = n(&mut row, 12) as u32;
+    let dob = s(&mut row, 13);
+    let taxvat = s(&mut row, 14);
+    let default_billing: Option<u32> = row.take::<Option<u32>, _>(15).flatten();
+    let default_shipping: Option<u32> = row.take::<Option<u32>, _>(16).flatten();
+
+    type AddrRow =
+        (u32, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+    let addr_rows: Vec<AddrRow> = c
+        .exec(
+            format!(
+                "SELECT entity_id, firstname, lastname, company, street, postcode, city, \
+                 region, country_id, telephone FROM {p}customer_address_entity \
+                 WHERE parent_id = :v ORDER BY entity_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map_err(clean_err)?;
+    let addresses = addr_rows
+        .into_iter()
+        .map(|(id, f, l, co, st, pc, ci, re, cn, ph)| {
+            (
+                id,
+                f,
+                l,
+                co,
+                st,
+                pc,
+                ci,
+                re,
+                cn,
+                ph,
+                default_billing == Some(id),
+                default_shipping == Some(id),
+            )
+        })
+        .collect();
+
+    let (last_login, last_logout) = c
+        .exec_first::<(Option<String>, Option<String>), _, _>(
+            format!(
+                "SELECT CAST(last_login_at AS CHAR), CAST(last_logout_at AS CHAR) \
+                 FROM {p}customer_log WHERE customer_id = :v"
+            ),
+            params! { "v" => entity_id },
+        )
+        .ok()
+        .flatten()
+        .unwrap_or((None, None));
+
+    let stores: std::collections::HashMap<u32, String> =
+        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?
+            .into_iter()
+            .collect();
+    let newsletter: Vec<(String, i64)> = c
+        .exec(
+            format!(
+                "SELECT ns.store_id, ns.subscriber_status FROM {p}newsletter_subscriber ns \
+                 WHERE ns.customer_id = :v OR ns.subscriber_email = :email \
+                 ORDER BY ns.store_id"
+            ),
+            params! { "v" => entity_id, "email" => email.as_str() },
+        )
+        .map(|rows: Vec<(u32, i64)>| rows)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(store_id, status)| {
+            let code =
+                stores.get(&store_id).cloned().unwrap_or_else(|| format!("store/{store_id}"));
+            (code, status)
+        })
+        .collect();
+
+    // Custom EAV values — customer value tables aren't store-scoped.
+    let mut values: Vec<DbProductValue> = Vec::new();
+    for table in ["varchar", "int", "decimal", "datetime", "text"] {
+        let rows: Vec<(String, String, Option<String>, Option<String>, u32, Option<String>)> = c
+            .exec(
+                format!(
+                    "SELECT a.attribute_code, a.backend_type, a.frontend_input, \
+                     a.source_model, a.attribute_id, CAST(v.value AS CHAR) \
+                     FROM {p}customer_entity_{table} v \
+                     JOIN {p}eav_attribute a ON a.attribute_id = v.attribute_id \
+                     WHERE v.entity_id = :v"
+                ),
+                params! { "v" => entity_id },
+            )
+            .unwrap_or_default();
+        for (attribute, backend_type, input, source_model, attribute_id, value) in rows {
+            values.push(DbProductValue {
+                attribute,
+                backend_type,
+                input,
+                source_model,
+                attribute_id,
+                store_id: 0,
+                value,
+            });
+        }
+    }
+
+    let order_stats: (u32, Option<String>, Option<String>, Option<String>) = c
+        .exec_first::<(u64, Option<String>, Option<String>, Option<String>), _, _>(
+            format!(
+                "SELECT COUNT(*), CAST(SUM(base_grand_total) AS CHAR), \
+                 CAST(MIN(created_at) AS CHAR), CAST(MAX(created_at) AS CHAR) \
+                 FROM {p}sales_order WHERE customer_id = :v"
+            ),
+            params! { "v" => entity_id },
+        )
+        .ok()
+        .flatten()
+        .map(|(n, sum, first, last)| (n as u32, sum, first, last))
+        .unwrap_or((0, None, None, None));
+    let last_order: Option<(String, Option<String>)> = c
+        .exec_first(
+            format!(
+                "SELECT increment_id, status FROM {p}sales_order \
+                 WHERE customer_id = :v ORDER BY entity_id DESC LIMIT 1"
+            ),
+            params! { "v" => entity_id },
+        )
+        .ok()
+        .flatten();
+    let guest_orders: u64 = c
+        .exec_first(
+            format!(
+                "SELECT COUNT(*) FROM {p}sales_order \
+                 WHERE customer_email = :email AND (customer_id IS NULL OR customer_id <> :v)"
+            ),
+            params! { "email" => email.as_str(), "v" => entity_id },
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+
+    Ok(Some(DbCustomer {
+        entity_id,
+        email,
+        firstname,
+        lastname,
+        group,
+        website,
+        created_in,
+        created_at,
+        active,
+        confirmed,
+        locked,
+        lock_expires,
+        failures,
+        dob,
+        taxvat,
+        last_login,
+        last_logout,
+        addresses,
+        newsletter,
+        values,
+        order_stats,
+        last_order,
+        guest_orders: guest_orders as u32,
+    }))
+}
+
+/// Customer search by email or name substring, newest first.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_customers_like(
+    conn: &DbConnection,
+    table_prefix: &str,
+    needle: &str,
+    limit: usize,
+) -> Result<(Vec<(u32, String, Option<String>, Option<String>, Option<String>, Option<String>)>, bool), String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    let rows: Vec<(u32, String, Option<String>, Option<String>, Option<String>, Option<String>)> = c
+        .exec(
+            format!(
+                "SELECT e.entity_id, e.email, CONCAT_WS(' ', e.firstname, e.lastname), \
+                 g.customer_group_code, CAST(e.created_at AS CHAR), NULL \
+                 FROM {p}customer_entity e \
+                 LEFT JOIN {p}customer_group g ON g.customer_group_id = e.group_id \
+                 WHERE e.email LIKE :pat OR CONCAT_WS(' ', e.firstname, e.lastname) LIKE :pat \
+                 ORDER BY e.entity_id DESC LIMIT {}",
+                limit + 1
+            ),
+            params! { "pat" => format!("%{needle}%") },
+        )
+        .map_err(clean_err)?;
+    let truncated = rows.len() > limit;
+    Ok((rows.into_iter().take(limit).collect(), truncated))
+}
+
 /// How to look an order up.
 pub(crate) enum OrderIdent<'a> {
     Increment(&'a str),

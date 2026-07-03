@@ -51,6 +51,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("price", "Every price of a product: attributes, tiers, rules, the price index"),
             ("category", "The category tree; one category's visibility & product counts"),
             ("order", "One order: item lifecycle, totals, payment, documents, history"),
+            ("customer", "One customer: account state, addresses, orders, newsletter"),
         ],
     ),
     (
@@ -264,6 +265,8 @@ enum Command {
     Category(CategoryArgs),
     /// One order: item lifecycle, totals, payment, documents, status history.
     Order(OrderArgs),
+    /// One customer: account state, addresses, order summary, newsletter.
+    Customer(CustomerArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -518,6 +521,18 @@ struct CategoryArgs {
 struct OrderArgs {
     /// An increment id (exact). A number with no matching increment is an entity_id;
     /// anything else searches increment ids and customer emails.
+    query: Option<String>,
+    /// Look up by entity_id.
+    #[arg(long)]
+    id: Option<u32>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct CustomerArgs {
+    /// An email (exact). A number is an entity_id; anything else searches emails and
+    /// names.
     query: Option<String>,
     /// Look up by entity_id.
     #[arg(long)]
@@ -930,6 +945,7 @@ fn main() -> Result<()> {
         Command::Price(args) => price(&mage, &args),
         Command::Category(args) => category(&mage, &args),
         Command::Order(args) => order(&mage, &args),
+        Command::Customer(args) => customer(&mage, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
         Command::AdminRoles(args) => admin_roles(&mage, &args),
         Command::Routes(args) => routes(&mage, &args, &cli.root),
@@ -2111,6 +2127,226 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn customer(mage: &Magento, args: &CustomerArgs) -> Result<()> {
+    let found: Option<magequery_core::Customer> = if let Some(id) = args.id {
+        let c = mage.customer_by_id(id)?;
+        if c.is_none() {
+            return Err(anyhow!("no customer with entity_id {id}"));
+        }
+        c
+    } else {
+        let Some(q) = &args.query else {
+            return Err(anyhow!("give an email (or --id <entity_id>)"));
+        };
+        if let Ok(id) = q.parse::<u32>() {
+            mage.customer_by_id(id)?
+        } else {
+            mage.customer_by_email(q)?
+        }
+    };
+    if let Some(c) = found {
+        return render_customer(&c, args);
+    }
+
+    let q = args.query.as_deref().unwrap_or_default();
+    let (hits, truncated) = mage.customers_like(q, 50)?;
+    match hits.len() {
+        0 => Err(anyhow!("no customer matches `{q}`")),
+        1 => {
+            let c = mage.customer_by_id(hits[0].entity_id)?.expect("listed customer");
+            render_customer(&c, args)
+        }
+        _ => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+                return Ok(());
+            }
+            let we = hits.iter().map(|h| h.email.len()).max().unwrap_or(0);
+            let wn = hits.iter().map(|h| h.name.len()).max().unwrap_or(0);
+            for h in &hits {
+                println!(
+                    "{}{}  {}{}  {:>6}  {}  {}",
+                    style::name(&h.email),
+                    " ".repeat(we - h.email.len()),
+                    h.name,
+                    " ".repeat(wn - h.name.len()),
+                    h.entity_id,
+                    style::target(h.group.as_deref().unwrap_or("")),
+                    style::dim(h.created_at.as_deref().unwrap_or("")),
+                );
+            }
+            if truncated {
+                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+            }
+            eprintln!("\n{} customer(s)", hits.len());
+            Ok(())
+        }
+    }
+}
+
+fn render_customer(c: &magequery_core::Customer, args: &CustomerArgs) -> Result<()> {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(c)?);
+        return Ok(());
+    }
+
+    let mut tags = String::new();
+    if !c.active {
+        tags.push_str(&format!("  {}", style::err("[inactive]")));
+    }
+    if !c.confirmed {
+        tags.push_str(&format!("  {}", style::err("[confirmation pending — can't log in]")));
+    }
+    if c.locked {
+        tags.push_str(&format!("  {}", style::err("[LOCKED]")));
+    }
+    println!(
+        "{}  {}  (entity_id {}){tags}",
+        style::name(&c.email),
+        style::target(&c.name),
+        c.entity_id,
+    );
+    println!();
+    info_row(
+        "group",
+        format!(
+            "{}  {}",
+            style::target(c.group.as_deref().unwrap_or("?")),
+            style::dim(&format!("· website {}", c.website.as_deref().unwrap_or("?"))),
+        ),
+    );
+    info_row(
+        "created",
+        style::dim(&format!(
+            "{}{}",
+            c.created_at.as_deref().unwrap_or("?"),
+            c.created_in.as_deref().map(|s| format!("  (in {s})")).unwrap_or_default(),
+        )),
+    );
+    match (&c.last_login, &c.last_logout) {
+        (Some(li), lo) => info_row(
+            "last login",
+            format!(
+                "{li}{}",
+                lo.as_deref()
+                    .map(|l| style::dim(&format!("  · last logout {l}")))
+                    .unwrap_or_default()
+            ),
+        ),
+        (None, _) => info_row("last login", style::dim("never logged in")),
+    }
+    if c.failures > 0 || c.locked {
+        let lock = c
+            .lock_expires
+            .as_deref()
+            .filter(|_| c.locked)
+            .map(|e| format!("  {}", style::err(&format!("locked until {e}"))))
+            .unwrap_or_default();
+        info_row("failures", format!("{}{lock}", c.failures));
+    }
+    if let Some(d) = &c.dob {
+        info_row("dob", d.clone());
+    }
+    if let Some(t) = &c.taxvat {
+        info_row("tax/vat", t.clone());
+    }
+
+    if c.addresses.is_empty() {
+        info_row("addresses", style::dim("(none)"));
+    }
+    for a in &c.addresses {
+        let mut label_tags = String::new();
+        if a.default_billing {
+            label_tags.push_str(&format!("  {}", style::ok("(default billing)")));
+        }
+        if a.default_shipping {
+            label_tags.push_str(&format!("  {}", style::ok("(default shipping)")));
+        }
+        let parts: Vec<String> = [
+            a.company.clone(),
+            Some(a.name.clone()).filter(|n| !n.is_empty()),
+            a.street.clone(),
+            match (&a.postcode, &a.city) {
+                (Some(p), Some(ci)) => Some(format!("{p} {ci}")),
+                (p, ci) => p.clone().or_else(|| ci.clone()),
+            },
+            a.region.clone(),
+            a.country.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        info_row("address", format!("{}{label_tags}", parts.join(", ")));
+    }
+
+    if !c.newsletter.is_empty() {
+        let list: Vec<String> = c
+            .newsletter
+            .iter()
+            .map(|n| {
+                let status = match n.status.as_str() {
+                    "subscribed" => style::ok("subscribed"),
+                    "unsubscribed" => style::dim("unsubscribed"),
+                    other => style::number(other),
+                };
+                format!("{status} {}", style::dim(&format!("({})", n.store)))
+            })
+            .collect();
+        info_row("newsletter", list.join(", "));
+    }
+
+    if !c.values.is_empty() {
+        println!("\n{}", style::dim("custom attributes:"));
+        let wa = c.values.iter().map(|v| v.attribute.len()).max().unwrap_or(0);
+        for v in &c.values {
+            let s = v.scopes.first().expect("one scope");
+            println!(
+                "  {}{}  {}",
+                style::name(&v.attribute),
+                " ".repeat(wa - v.attribute.len()),
+                product_value(v, s),
+            );
+        }
+    }
+
+    println!();
+    if c.orders.count == 0 {
+        info_row("orders", style::dim("(none)"));
+    } else {
+        let last = match (&c.orders.last_increment, &c.orders.last_status) {
+            (Some(i), s) => format!(
+                "  · last {} {}",
+                style::name(i),
+                style::target(s.as_deref().unwrap_or(""))
+            ),
+            _ => String::new(),
+        };
+        info_row(
+            "orders",
+            format!(
+                "{} order(s) · lifetime {} {}{last}",
+                c.orders.count,
+                style::number(c.orders.lifetime.as_deref().unwrap_or("-")),
+                style::dim(&format!(
+                    "(base) · first {} · latest {}",
+                    c.orders.first_at.as_deref().unwrap_or("?"),
+                    c.orders.last_at.as_deref().unwrap_or("?"),
+                )),
+            ),
+        );
+    }
+    if c.guest_orders > 0 {
+        info_row(
+            "guest orders",
+            style::number(&format!(
+                "{} order(s) with this email not linked to the account",
+                c.guest_orders
+            )),
+        );
     }
     Ok(())
 }

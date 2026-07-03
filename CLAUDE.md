@@ -175,7 +175,8 @@ DATA          (persistence & model)
   schema [<table>] [--db]       indexers [<id>] [--db]
   extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>|<entity>] [--db]
   product <sku> [--id <n>] [--store <code>]   price <sku> [--id <n>]   (live DB)
-  category [<id>|<name>] [--store] [--products]   order <increment#> [--id]   (live DB)
+  category [<id>|<name>] [--store] [--products]   order <increment#> [--id]
+  customer <email> [--id]   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1257,6 +1258,23 @@ USD-on-EUR-base order with configurable parent/child lines, Mollie-style payment
 paid invoice, PostNL track, the grid-drift warning, and the fulfillment tags; plus a
 guest order (in-grid, red due) and the email search.
 
+### `customer` (one customer account, live DB, done)
+
+`magequery customer <email> [--id <entity_id>]` — the account-state card. Lookup: exact
+email (numeric = entity_id; no shadow case, emails aren't numeric), else substring over
+email + name → newest-first list. The card: name/group/website, `created_in` snapshot,
+**account-state tags** (red `[inactive]`, `[confirmation pending — can't log in]` from a
+non-NULL `confirmation` token, `[LOCKED]` with expiry — the "why can't this customer log
+in" answers), last login/logout from `customer_log`, dob/taxvat, addresses with
+default-billing/shipping tags, per-store **newsletter status** (`newsletter_subscriber`
+decoded, matched by customer_id OR email), **custom EAV values** (customer value tables —
+not store-scoped; vanilla installs have none, extensions add loyalty points etc.), the
+**order summary** (count, lifetime base sum, first/latest, last order increment+status),
+and **guest orders** — orders carrying this email but not linked to the account (the
+"customer says they ordered but their account shows nothing" answer). Validated on the
+scratchpad DB: full card incl. custom attribute + per-store newsletter, the
+locked+unconfirmed tags, search list.
+
 ### `admin-users` / `admin-roles` (live DB, done)
 
 Who can get into the admin and what they're allowed to do. Both are **pure-live** (like
@@ -1292,9 +1310,9 @@ role, and seeding one into a live DB was deliberately not done.
 Everything scoped during breadth has been built — the whole command surface above plus
 the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-roles`,
 `queue backlog`, `product`). New ideas go here.
-- **Entity cards in the `product` mold:** `customer <email>`, `quote <id>` (carts —
-  where checkout bugs live), and optional thin document cards
-  (`invoice`/`shipment`/`creditmemo <increment#>`).
+- **Entity cards in the `product` mold:** `quote <id>` (carts — where checkout bugs
+  live), and optional thin document cards (`invoice`/`shipment`/`creditmemo
+  <increment#>`).
 
 ## Build order
 
