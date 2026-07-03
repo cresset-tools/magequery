@@ -1462,6 +1462,23 @@ pub struct IndexedPrice {
     pub tier_price: Option<String>,
 }
 
+/// One configurable variant, identity-flavored: which option combination it is, whether
+/// it's enabled, and its (legacy) stock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductChild {
+    pub sku: String,
+    pub entity_id: u32,
+    /// `status` decoded; `None` = no status row.
+    pub enabled: Option<bool>,
+    /// The child's value per super attribute, resolved to option labels, in
+    /// super-attribute order (`["Blue", "32"]`). `-` for a missing value.
+    pub options: Vec<String>,
+    /// Legacy `cataloginventory_stock_item` qty; `None` = no row.
+    pub qty: Option<String>,
+    pub in_stock: Option<bool>,
+}
+
 /// One configurable variant's price summary — a configurable's storefront price is
 /// derived from its children, so these lines explain the parent's index min/max.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1584,8 +1601,8 @@ pub struct Product {
     pub parents: Vec<String>,
     /// The attributes a configurable is configured by (`catalog_product_super_attribute`).
     pub super_attributes: Vec<String>,
-    /// Configurable variant SKUs under this product.
-    pub children: Vec<String>,
+    /// Configurable variants under this product, with their identity essentials.
+    pub children: Vec<ProductChild>,
     /// The lookup resolved via entity_id, not SKU (numeric query, no SKU match).
     pub matched_by_id: bool,
 }

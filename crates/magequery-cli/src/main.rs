@@ -2009,6 +2009,9 @@ fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()>
 
     // Values: one line per attribute; store overrides indented below the default, or
     // folded to one resolved line with --store.
+    if p.values.is_empty() {
+        println!("{}", style::dim("(no attribute value rows)"));
+    }
     let wa = p.values.iter().map(|v| v.attribute.len()).max().unwrap_or(0);
     let wt = p.values.iter().map(|v| v.backend_type.len()).max().unwrap_or(0);
     for v in &p.values {
@@ -2131,13 +2134,34 @@ fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()>
         info_row("varies by", list.join(", "));
     }
     if !p.children.is_empty() {
-        let shown: Vec<String> = p.children.iter().take(16).map(|s| style::name(s)).collect();
-        let more = if p.children.len() > 16 {
-            style::dim(&format!("  … +{} more", p.children.len() - 16))
-        } else {
-            String::new()
-        };
-        info_row("variants", format!("{}: {}{more}", p.children.len(), shown.join(", ")));
+        println!("\n{}", style::dim(&format!("variants ({}):", p.children.len())));
+        let ws = p.children.iter().map(|ch| ch.sku.len()).max().unwrap_or(0);
+        let opts = |ch: &magequery_core::ProductChild| ch.options.join(" / ");
+        let wo = p.children.iter().map(|ch| opts(ch).len()).max().unwrap_or(0);
+        for ch in &p.children {
+            let o = opts(ch);
+            let stock = match (&ch.qty, ch.in_stock) {
+                (Some(q), Some(true)) => {
+                    format!("qty {} ({})", style::number(q), style::ok("in stock"))
+                }
+                (Some(q), _) => {
+                    format!("qty {} ({})", style::number(q), style::err("out of stock"))
+                }
+                _ => style::dim("(no stock row)"),
+            };
+            let disabled = if ch.enabled == Some(false) {
+                format!("  {}", style::err("[disabled]"))
+            } else {
+                String::new()
+            };
+            println!(
+                "  {}{}  {}{}  {stock}{disabled}",
+                style::name(&ch.sku),
+                " ".repeat(ws - ch.sku.len()),
+                style::target(&o),
+                " ".repeat(wo - o.len()),
+            );
+        }
     }
     if let (Some(c), Some(u)) = (&p.created_at, &p.updated_at) {
         info_row("created", style::dim(&format!("{c}  · updated {u}")));

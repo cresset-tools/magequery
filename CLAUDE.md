@@ -1177,7 +1177,9 @@ installs. Customer-group ids resolve to names via `customer_group`.
 final range — a `[disabled]` or red `not indexed` child explains the parent's min/max
 (children come from `catalog_product_super_link`; grouped/bundle composition not
 modeled). `product` correspondingly grew `varies by` (super attributes, from
-`catalog_product_super_attribute`) and the variant SKU list (capped at 16 shown).
+`catalog_product_super_attribute`) and a full `variants (N):` table — each child's SKU,
+its **super-attribute values resolved to option labels** ("Blue / 32" — which variant it
+IS), legacy stock qty + in/out-of-stock, and `[disabled]`.
 `Magento::product_prices_by_sku/by_id`. Validated on the same scratchpad MariaDB
 (customer_group/tier/rule/index/super_attribute tables added): website price scope read,
 per-scope special_price incl. the NULL row, percentage + ALL-GROUPS tiers, rule rows,

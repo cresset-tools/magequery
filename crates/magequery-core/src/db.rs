@@ -481,8 +481,9 @@ pub(crate) struct DbProduct {
     pub parents: Vec<String>,
     /// Attribute codes a configurable is configured by, in position order.
     pub super_attributes: Vec<String>,
-    /// Variant SKUs.
-    pub children: Vec<String>,
+    /// Variants: `(entity_id, sku, enabled, option labels, qty, in_stock)`.
+    #[allow(clippy::type_complexity)]
+    pub children: Vec<(u32, String, Option<bool>, Vec<String>, Option<String>, Option<bool>)>,
 }
 
 /// Fetch one product wholesale (identity + per-scope EAV values + option labels + stock
@@ -698,26 +699,98 @@ pub(crate) fn fetch_product(
             params! { "v" => entity_id },
         )
         .map_err(clean_err)?;
-    let super_attributes: Vec<String> = c
+    let super_attrs: Vec<(u32, String)> = c
         .exec(
             format!(
-                "SELECT a.attribute_code FROM {p}catalog_product_super_attribute sa \
+                "SELECT sa.attribute_id, a.attribute_code \
+                 FROM {p}catalog_product_super_attribute sa \
                  JOIN {p}eav_attribute a ON a.attribute_id = sa.attribute_id \
                  WHERE sa.product_id = :v ORDER BY sa.position, a.attribute_code"
             ),
             params! { "v" => entity_id },
         )
         .unwrap_or_default();
-    let children: Vec<String> = c
+    let super_attributes: Vec<String> = super_attrs.iter().map(|(_, c)| c.clone()).collect();
+
+    let child_rows: Vec<(u32, String)> = c
         .exec(
             format!(
-                "SELECT e.sku FROM {p}catalog_product_super_link l \
+                "SELECT e.entity_id, e.sku FROM {p}catalog_product_super_link l \
                  JOIN {p}catalog_product_entity e ON e.entity_id = l.product_id \
                  WHERE l.parent_id = :v ORDER BY e.sku"
             ),
             params! { "v" => entity_id },
         )
         .map_err(clean_err)?;
+    let mut children = Vec::with_capacity(child_rows.len());
+    if !child_rows.is_empty() {
+        let ids = child_rows.iter().map(|(i, _)| i.to_string()).collect::<Vec<_>>().join(",");
+        let status_attr = format!(
+            "(SELECT a.attribute_id FROM {p}eav_attribute a \
+             JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
+             WHERE a.attribute_code = 'status' AND t.entity_type_code = 'catalog_product')"
+        );
+        let statuses: Vec<(u32, Option<i64>)> = c
+            .query(format!(
+                "SELECT entity_id, value FROM {p}catalog_product_entity_int \
+                 WHERE entity_id IN ({ids}) AND store_id = 0 AND attribute_id = {status_attr}"
+            ))
+            .map_err(clean_err)?;
+        // Each child's value per super attribute, with the admin option label.
+        let mut super_values: HashMap<(u32, u32), String> = HashMap::new();
+        if !super_attrs.is_empty() {
+            let attr_ids =
+                super_attrs.iter().map(|(i, _)| i.to_string()).collect::<Vec<_>>().join(",");
+            let rows: Vec<(u32, u32, Option<u32>)> = c
+                .query(format!(
+                    "SELECT entity_id, attribute_id, value FROM {p}catalog_product_entity_int \
+                     WHERE entity_id IN ({ids}) AND store_id = 0 \
+                     AND attribute_id IN ({attr_ids})"
+                ))
+                .map_err(clean_err)?;
+            let labels: HashMap<u32, String> = c
+                .query(format!(
+                    "SELECT o.option_id, v.value FROM {p}eav_attribute_option o \
+                     JOIN {p}eav_attribute_option_value v \
+                     ON v.option_id = o.option_id AND v.store_id = 0 \
+                     WHERE o.attribute_id IN ({attr_ids})"
+                ))
+                .map(|rows: Vec<(u32, String)>| rows.into_iter().collect())
+                .unwrap_or_default();
+            for (child, attr, value) in rows {
+                if let Some(option) = value {
+                    let label =
+                        labels.get(&option).cloned().unwrap_or_else(|| option.to_string());
+                    super_values.insert((child, attr), label);
+                }
+            }
+        }
+        let stock_rows: Vec<(u32, Option<String>, i64)> = c
+            .query(format!(
+                "SELECT product_id, CAST(qty AS CHAR), is_in_stock \
+                 FROM {p}cataloginventory_stock_item WHERE product_id IN ({ids})"
+            ))
+            .map_err(clean_err)?;
+        for (id, child_sku) in child_rows {
+            let enabled =
+                statuses.iter().find(|(e, _)| *e == id).and_then(|(_, s)| *s).map(|s| s == 1);
+            let options: Vec<String> = super_attrs
+                .iter()
+                .map(|(attr_id, _)| {
+                    super_values.get(&(id, *attr_id)).cloned().unwrap_or_else(|| "-".to_string())
+                })
+                .collect();
+            let stock = stock_rows.iter().find(|(e, _, _)| *e == id);
+            children.push((
+                id,
+                child_sku,
+                enabled,
+                options,
+                stock.and_then(|(_, qty, _)| qty.clone()),
+                stock.map(|(_, _, s)| *s != 0),
+            ));
+        }
+    }
 
     Ok(Some(DbProduct {
         entity_id,

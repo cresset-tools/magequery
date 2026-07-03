@@ -56,7 +56,8 @@ pub use model::{
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
     MviewSubscription, Observer,
-    ChildPrice, IndexedPrice, Preference, PreferenceStep, Plugin, PluginMethod, Product, ProductCategory,
+    ChildPrice, IndexedPrice, Preference, PreferenceStep, Plugin, PluginMethod, Product,
+    ProductCategory, ProductChild,
     ProductHit, ProductLegacyStock, ProductPrices, ProductRewrite, ProductScopeValue,
     ProductSourceStock, ProductValue,
     RedisConfig, RedisInstance, RedisPing, RulePrice, TierPrice,
@@ -2764,7 +2765,18 @@ fn to_product(raw: db::DbProduct, matched_by_id: bool) -> Product {
             .collect(),
         parents: raw.parents,
         super_attributes: raw.super_attributes,
-        children: raw.children,
+        children: raw
+            .children
+            .into_iter()
+            .map(|(entity_id, sku, enabled, options, qty, in_stock)| ProductChild {
+                sku,
+                entity_id,
+                enabled,
+                options,
+                qty,
+                in_stock,
+            })
+            .collect(),
         matched_by_id,
     }
 }
