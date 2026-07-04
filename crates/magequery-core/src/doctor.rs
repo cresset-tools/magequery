@@ -120,7 +120,7 @@ impl Doctor<'_> {
             self.warn(
                 DoctorLint::ModuleNotRegistered,
                 format!(
-                    "module {} exists on disk ({}) but is not in config.php — run `bin/magento setup:upgrade`",
+                    "module {} exists on disk ({}) but is not in config.php; run `bin/magento setup:upgrade`",
                     m.name,
                     m.path.display()
                 ),
