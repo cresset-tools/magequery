@@ -21,8 +21,7 @@ quick-xml = "0.36"
 install-success-msg = """
 magequery is installed!
 
-Shell completions are self-serve — the 'completions' subcommand prints a script for your
-shell. Enable them with:
+To enable shell completions:
 
   bash:
     mkdir -p ~/.local/share/bash-completion/completions
@@ -36,5 +35,5 @@ shell. Enable them with:
     mkdir -p ~/.config/fish/completions
     magequery completions fish > ~/.config/fish/completions/magequery.fish
 
-Then restart your shell. (A man page is available too: magequery man > magequery.1)
+Then restart your shell.
 """
