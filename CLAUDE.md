@@ -206,8 +206,12 @@ they describe the CLI itself, not a Magento entity, so they'd violate the "noun 
 entity" grammar. Both are `#[command(hide = true)]` (absent from the grouped help screen but
 still `--help`-discoverable and tab-completable) and are dispatched **before**
 `Magento::open` so they work anywhere, no checkout needed. `completions` uses `clap_complete`
-(bash/zsh/fish/elvish/powershell → stdout), `man` uses `clap_mangen` (roff → stdout); a
-release step generates these and cargo-dist `include`s them in the archives. `main` also
+(bash/zsh/fish/elvish/powershell → stdout), `man` uses `clap_mangen` (roff → stdout).
+Distribution is the `curl | sh` cargo-dist installer, which **cannot run custom logic or
+place extra files** (confirmed: axodotdev/cargo-dist#1696), so completions are **self-serve**:
+`[workspace.metadata.dist] install-success-msg` (root `Cargo.toml`) prints per-shell
+`magequery completions <shell> > <dir>` instructions after install. The message is kept free
+of backticks/`$` so the installer can't misinterpret it when echoing. `main` also
 restores the default SIGPIPE handler on Unix (`libc::signal(SIGPIPE, SIG_DFL)`) so any command
 piped into `head`/`less` and quit early terminates cleanly instead of panicking on a broken
 pipe (Rust ignores SIGPIPE by default, which `println!`/clap_complete unwrap into a panic).

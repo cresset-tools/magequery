@@ -12,3 +12,29 @@ repository = "https://github.com/pingiun/magequery"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 quick-xml = "0.36"
+
+# cargo-dist / dist configuration. Only the installer success message is set here; the
+# rest is written by `dist init` (which preserves this key). The shell installer cannot run
+# custom logic or place extra files, so completions are self-serve: the message tells users
+# how to generate them from the `completions` subcommand into their shell's directory.
+[workspace.metadata.dist]
+install-success-msg = """
+magequery is installed!
+
+Shell completions are self-serve — the 'completions' subcommand prints a script for your
+shell. Enable them with:
+
+  bash:
+    mkdir -p ~/.local/share/bash-completion/completions
+    magequery completions bash > ~/.local/share/bash-completion/completions/magequery
+
+  zsh:
+    mkdir -p ~/.zfunc && magequery completions zsh > ~/.zfunc/_magequery
+    then add this to ~/.zshrc, before compinit runs:  fpath+=(~/.zfunc)
+
+  fish:
+    mkdir -p ~/.config/fish/completions
+    magequery completions fish > ~/.config/fish/completions/magequery.fish
+
+Then restart your shell. (A man page is available too: magequery man > magequery.1)
+"""
