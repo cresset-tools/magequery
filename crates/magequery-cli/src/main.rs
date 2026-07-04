@@ -3,7 +3,7 @@ mod style;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use magequery_core::model::ModuleSource;
 use magequery_core::{
     AclResource, ArgValue, Area, ChainStep, ClassName, ConfigSet, ConfigSourceKind, ConfigValue,
@@ -371,6 +371,21 @@ enum Command {
     Whatis(WhatisArgs),
     /// Setup patches on disk; applied/pending with --db.
     Patches(PatchesArgs),
+
+    // Tooling meta-commands: about the CLI itself, not a Magento entity, so they sit
+    // outside the seven locked groups and are hidden from the grouped help screen.
+    /// Print a shell completion script to stdout (bash|zsh|fish|elvish|powershell).
+    #[command(hide = true)]
+    Completions(CompletionsArgs),
+    /// Print a roff man page to stdout.
+    #[command(hide = true)]
+    Man,
+}
+
+#[derive(clap::Args)]
+struct CompletionsArgs {
+    /// The shell to generate for.
+    shell: clap_complete::Shell,
 }
 
 #[derive(clap::Args)]
@@ -670,6 +685,10 @@ struct IntegrationsArgs {
     /// Requires an unambiguous match.
     #[arg(long, num_args = 0..=1, default_missing_value = "access-token", value_name = "WHICH")]
     token: Option<String>,
+    /// With `--token`, decrypt the value using env.php's crypt key (Magento stores these
+    /// encrypted). Without it the raw stored value is printed as-is.
+    #[arg(long)]
+    decrypt: bool,
     #[arg(long)]
     json: bool,
 }
@@ -1024,6 +1043,14 @@ enum SourceFilter {
 }
 
 fn main() -> Result<()> {
+    // Restore the default SIGPIPE disposition: piping into `head`/`less` and quitting early
+    // should terminate us cleanly like any Unix tool. Rust otherwise ignores SIGPIPE, turning
+    // a closed reader into a write error that `println!`/clap_complete unwrap into a panic.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     // Take over the root `--help` / no-args screen (grouped + colored, via `print_help`)
     // before clap can render its flat one; every `magequery <command> --help` still uses
     // clap's native per-command help.
@@ -1036,6 +1063,23 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     style::init(cli.color);
+
+    // Tooling meta-commands describe the CLI itself — they must work anywhere, so handle
+    // them before opening a Magento root (which would otherwise fail outside a checkout).
+    match &cli.command {
+        Command::Completions(args) => {
+            let mut cmd = Cli::command();
+            let name = cmd.get_name().to_string();
+            clap_complete::generate(args.shell, &mut cmd, name, &mut std::io::stdout());
+            return Ok(());
+        }
+        Command::Man => {
+            clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout())?;
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let mage = Magento::open(&cli.root)
         .with_context(|| format!("opening Magento installation at {}", cli.root.display()))?;
 
@@ -1119,6 +1163,8 @@ fn main() -> Result<()> {
         Command::UrlRewrites(args) => url_rewrites(&mage, &args),
         Command::Stores(args) => stores(&mage, &args),
         Command::Config(args) => config(&mage, &args, &cli.root),
+        // Handled before Magento::open (they need no root).
+        Command::Completions(_) | Command::Man => unreachable!(),
     };
 
     // Diagnostics are non-fatal; surface them on stderr (so stdout stays pipeable) *after*
@@ -4588,12 +4634,14 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
             }
         };
         // Magento stores these through its Encryptor (envelope `keyVersion:cipher:…`), so a
-        // raw read hands back ciphertext — useless for scripting. Decrypt with env.php's
-        // crypt key, exactly like `config --decrypt`; plaintext values pass through untouched.
-        let dec = mage.decryptor().ok();
+        // raw read hands back ciphertext. Decrypt only when explicitly asked, mirroring
+        // `config --decrypt`; the default prints the value verbatim (with a stderr hint when
+        // it's encrypted, so a script doesn't silently pipe ciphertext into an API call).
+        let dec = if args.decrypt { mage.decryptor().ok() } else { None };
         let all_mode = which == "all";
         for (kind, raw) in &requested {
-            let shown = if !raw.is_empty() && magequery_core::Decryptor::is_encrypted(raw) {
+            let encrypted = !raw.is_empty() && magequery_core::Decryptor::is_encrypted(raw);
+            let shown = if encrypted && args.decrypt {
                 match dec.as_ref().and_then(|d| d.decrypt(raw)) {
                     Some(plain) => plain,
                     None => {
@@ -4617,6 +4665,12 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
                     }
                 }
             } else {
+                if encrypted {
+                    eprintln!(
+                        "{}",
+                        style::dim(&format!("note: {kind} is encrypted — pass --decrypt to reveal it"))
+                    );
+                }
                 raw.clone()
             };
             if all_mode {
