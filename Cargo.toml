@@ -15,25 +15,23 @@ quick-xml = "0.36"
 
 # cargo-dist / dist configuration. Only the installer success message is set here; the
 # rest is written by `dist init` (which preserves this key). The shell installer cannot run
-# custom logic or place extra files, so completions are self-serve: the message tells users
-# how to generate them from the `completions` subcommand into their shell's directory.
+# custom logic or place extra files, so the message tells users how to source completions
+# from the `completions` subcommand in their shell config. (bash/zsh use process
+# substitution `<(...)`; only fish's `source` reads a pipe.)
 [workspace.metadata.dist]
 install-success-msg = """
 magequery is installed!
 
-To enable shell completions:
+To enable shell completions, add one line to your shell config:
 
-  bash:
-    mkdir -p ~/.local/share/bash-completion/completions
-    magequery completions bash > ~/.local/share/bash-completion/completions/magequery
+  bash — in ~/.bashrc:
+    source <(magequery completions bash)
 
-  zsh:
-    mkdir -p ~/.zfunc && magequery completions zsh > ~/.zfunc/_magequery
-    then add this to ~/.zshrc, before compinit runs:  fpath+=(~/.zfunc)
+  zsh — in ~/.zshrc (after 'autoload -Uz compinit && compinit'):
+    source <(magequery completions zsh)
 
-  fish:
-    mkdir -p ~/.config/fish/completions
-    magequery completions fish > ~/.config/fish/completions/magequery.fish
+  fish — in ~/.config/fish/config.fish:
+    magequery completions fish | source
 
 Then restart your shell.
 """

@@ -208,10 +208,14 @@ still `--help`-discoverable and tab-completable) and are dispatched **before**
 `Magento::open` so they work anywhere, no checkout needed. `completions` uses `clap_complete`
 (bash/zsh/fish/elvish/powershell → stdout), `man` uses `clap_mangen` (roff → stdout).
 Distribution is the `curl | sh` cargo-dist installer, which **cannot run custom logic or
-place extra files** (confirmed: axodotdev/cargo-dist#1696), so completions are **self-serve**:
-`[workspace.metadata.dist] install-success-msg` (root `Cargo.toml`) prints per-shell
-`magequery completions <shell> > <dir>` instructions after install. The message is kept free
-of backticks/`$` so the installer can't misinterpret it when echoing. `main` also
+place extra files** (confirmed: axodotdev/cargo-dist#1696), so
+`[workspace.metadata.dist] install-success-msg` (root `Cargo.toml`) tells users to **source**
+completions from the subcommand in their shell config — `source <(magequery completions
+bash|zsh)` (process substitution; zsh after `compinit`) or `magequery completions fish |
+source` (only fish's `source` reads a pipe). Sourcing over writing a file: no `mkdir`/`fpath`
+setup and never stale, at the cost of running the binary once per shell start (vs the file's
+lazy load). The message is kept free of `"`/`$`/backticks/`\` so the installer can't
+misinterpret it when echoing. `main` also
 restores the default SIGPIPE handler on Unix (`libc::signal(SIGPIPE, SIG_DFL)`) so any command
 piped into `head`/`less` and quit early terminates cleanly instead of panicking on a broken
 pipe (Rust ignores SIGPIPE by default, which `println!`/clap_complete unwrap into a panic).
