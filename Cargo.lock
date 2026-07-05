@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "magequery"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "magequery-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
