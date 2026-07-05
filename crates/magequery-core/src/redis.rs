@@ -4,6 +4,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
@@ -39,11 +40,7 @@ pub(crate) fn ping(inst: &RedisInstance) -> RedisPing {
 
 fn try_ping(inst: &RedisInstance) -> Result<Option<String>, String> {
     if inst.host.starts_with('/') {
-        let s = UnixStream::connect(&inst.host)
-            .map_err(|e| format!("cannot connect to socket {}: {e}", inst.host))?;
-        s.set_read_timeout(Some(TIMEOUT)).ok();
-        s.set_write_timeout(Some(TIMEOUT)).ok();
-        talk(s, inst)
+        connect_socket(inst)
     } else {
         let port = inst.port.unwrap_or(6379);
         let addr = format!("{}:{}", inst.host, port);
@@ -58,6 +55,25 @@ fn try_ping(inst: &RedisInstance) -> Result<Option<String>, String> {
         s.set_write_timeout(Some(TIMEOUT)).ok();
         talk(s, inst)
     }
+}
+
+/// Connect over a unix domain socket. Unix-only; the DB/redis sockets Magento
+/// configures don't exist on Windows, where this reports cleanly instead.
+#[cfg(unix)]
+fn connect_socket(inst: &RedisInstance) -> Result<Option<String>, String> {
+    let s = UnixStream::connect(&inst.host)
+        .map_err(|e| format!("cannot connect to socket {}: {e}", inst.host))?;
+    s.set_read_timeout(Some(TIMEOUT)).ok();
+    s.set_write_timeout(Some(TIMEOUT)).ok();
+    talk(s, inst)
+}
+
+#[cfg(not(unix))]
+fn connect_socket(inst: &RedisInstance) -> Result<Option<String>, String> {
+    Err(format!(
+        "unix socket connections are not supported on this platform: {}",
+        inst.host
+    ))
 }
 
 fn talk<S: Read + Write>(mut s: S, inst: &RedisInstance) -> Result<Option<String>, String> {

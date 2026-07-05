@@ -1,0 +1,78 @@
+name: release-please
+
+# Conventional-commit-driven release automation. On every push to main,
+# release-please scans commits since the last `magequery-v*` tag and opens or
+# updates a release PR that bumps the workspace version in Cargo.toml (via the
+# `# x-release-please-version` marker) and prepends to CHANGELOG.md. Merging
+# that PR makes release-please publish the `magequery-v<version>` GitHub Release
+# (which creates the tag); the `release: published` event then triggers
+# `release.yml` (dist) to build the binary matrix and upload the artifacts.
+#
+# release-please publishes a NON-draft release so the tag is created within the
+# same step that computes the next candidate PR — otherwise release-please can't
+# anchor its baseline, rescans all history, and proposes a spurious major bump.
+# dist runs with `create-release = false` and only uploads binaries onto the
+# release release-please already published.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Don't cancel in-flight runs — a half-written release PR is worse than waiting
+# for the previous run to finish.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # GitHub-App token (not `GITHUB_TOKEN`) so the release PR is authored by
+      # an actor that *can* trigger downstream workflows — PRs and releases
+      # created with `GITHUB_TOKEN` are silenced by GitHub's anti-recursion
+      # rule, so `ci.yml` / `release.yml` would never run on them.
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      - name: release-please
+        id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # release-please rewrites the Cargo.toml version but doesn't understand
+      # Cargo.lock. Refresh the lockfile on the PR branch so CI builds aren't
+      # broken by stale [[package]] entries. Both workspace crates share the
+      # version, so bump both.
+      - name: Checkout release PR
+        if: ${{ steps.release.outputs.pr }}
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ fromJson(steps.release.outputs.pr).headBranchName }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Refresh Cargo.lock
+        if: ${{ steps.release.outputs.pr }}
+        run: |
+          VER="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          cargo update -p magequery-core --precise "$VER" \
+            && cargo update -p magequery --precise "$VER" \
+            || cargo update --workspace
+          if ! git diff --quiet Cargo.lock; then
+            git config user.email "${{ vars.BOT_EMAIL || 'noreply@cresset.tools' }}"
+            git config user.name "${{ vars.BOT_NAME || 'cresset-bot' }}"
+            git add Cargo.lock
+            git commit -m "chore(release): refresh Cargo.lock"
+            git push
+          fi

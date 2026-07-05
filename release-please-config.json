@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
+  "include-component-in-tag": true,
+  "separator": "-",
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false,
+  "changelog-path": "CHANGELOG.md",
+  "packages": {
+    ".": {
+      "package-name": "magequery",
+      "component": "magequery",
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "Cargo.toml"
+        }
+      ]
+    }
+  }
+}

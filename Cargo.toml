@@ -3,35 +3,22 @@ resolver = "2"
 members = ["crates/magequery-core", "crates/magequery-cli"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.0.0" # x-release-please-version
 edition = "2021"
 license = "EUPL-1.2"
-repository = "https://github.com/pingiun/magequery"
+repository = "https://github.com/cresset-tools/magequery"
 
 [workspace.dependencies]
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 quick-xml = "0.36"
 
-# cargo-dist / dist configuration. Only the installer success message is set here; the
-# rest is written by `dist init` (which preserves this key). The shell installer cannot run
-# custom logic or place extra files, so the message tells users how to source completions
-# from the `completions` subcommand in their shell config. (bash/zsh use process
-# substitution `<(...)`; only fish's `source` reads a pipe.)
-[workspace.metadata.dist]
-install-success-msg = """
-magequery is installed!
+[profile.release]
+lto = "thin"
+strip = true
 
-To enable shell completions, add one line to your shell config:
-
-  bash (~/.bashrc):
-    source <(magequery completions bash)
-
-  zsh (~/.zshrc, after 'autoload -Uz compinit && compinit'):
-    source <(magequery completions zsh)
-
-  fish (~/.config/fish/config.fish):
-    magequery completions fish | source
-
-Then restart your shell.
-"""
+# cargo-dist builds release artifacts with `--profile dist`. Inherit release;
+# dist expects this profile to exist (normally added by `dist init`).
+[profile.dist]
+inherits = "release"
+lto = "thin"

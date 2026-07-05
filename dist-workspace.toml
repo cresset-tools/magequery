@@ -1,0 +1,112 @@
+# dist configuration. Produces per-target binary archives plus shell/powershell
+# installers. release-please owns the whole release: it publishes the
+# `magequery-v<version>` GitHub Release (creating the tag), and the
+# `release: published` event triggers dist to build the binaries and upload
+# them onto that release.
+#
+# Edit this file when adding targets / installers, then regenerate the workflow
+# with:
+#     dist generate
+# which rewrites .github/workflows/release.yml. NOTE: `dist generate` emits an
+# `on: push: tags` trigger; we hand-edit it to `on: release: published`
+# (release-please creates tags via the API, which doesn't reliably fire
+# `push`). Re-apply that trigger edit after any regenerate. `allow-dirty =
+# ["ci"]` tells dist we own that file so its `generate --check` won't abort.
+
+[workspace]
+members = ["cargo:."]
+
+[dist]
+# Pin the dist version CI runs. Bumps come through PRs so the generated
+# release.yml stays in lockstep.
+cargo-dist-version = "0.32.0"
+
+# CI provider.
+ci = "github"
+
+# uv-style installers: `curl ... | sh` on Unix, `irm ... | iex` on Windows.
+installers = ["shell", "powershell"]
+
+# Archive formats per platform.
+windows-archive = ".zip"
+unix-archive = ".tar.gz"
+
+# Target triples we ship prebuilt binaries for. Linux gets both gnu and musl
+# (older distros and Alpine both work); macOS is Apple Silicon; Windows is x64.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+# Keep the tarballs to just the binary the installer drops on PATH.
+auto-includes = false
+
+# release-please publishes the GitHub Release (with the changelog body) and
+# creates the tag; dist only attaches the built binaries.
+create-release = false
+
+# We hand-edit release.yml's trigger to `on: release: published`, so tell dist
+# we own the CI file and skip its `generate --check`.
+allow-dirty = ["ci"]
+
+# Don't run dist on PRs. CI already covers building.
+pr-run-mode = "skip"
+
+# release-please tags as `magequery-v<version>` rather than the bare
+# `v<version>` dist defaults to.
+tag-namespace = "magequery"
+
+# Where the shell installer drops the binary. Matches uv's layout so installs
+# land on PATH without extra config.
+install-path = ["$XDG_BIN_HOME/", "$XDG_DATA_HOME/../bin", "~/.local/bin"]
+
+# Mirror first, GitHub fallback. The "simple" host MUST be listed in `hosting`
+# for it to reach the generated installer. Order here is the download
+# precedence the shell/powershell installers use (try the mirror, fall back to
+# the GitHub release if it's offline / hasn't ingested the new tag yet). Shared
+# cresset origin mirror (origin.bougie.tools; see publish-mirror.yml +
+# cresset-tools/infra).
+hosting = ["simple", "github"]
+simple-download-url = "https://releases.bougie.tools/github/magequery/releases/download/{tag}"
+
+# Run publish-mirror after the release is announced to fan the dist artifacts
+# out to the origin server. (release.yml is hand-edited, so this also exists as
+# an explicit `custom-publish-mirror` job there; keep them in sync.)
+post-announce-jobs = ["./publish-mirror"]
+
+# publish-mirror only needs to read the uploaded artifacts.
+github-custom-job-permissions = { "publish-mirror" = { contents = "read" } }
+
+# What the installers print after a successful install: how to turn on shell
+# completions (the installer can't place files itself).
+install-success-msg = """
+magequery is installed!
+
+To enable shell completions, add one line to your shell config:
+
+  bash (~/.bashrc):
+    source <(magequery completions bash)
+
+  zsh (~/.zshrc, after 'autoload -Uz compinit && compinit'):
+    source <(magequery completions zsh)
+
+  fish (~/.config/fish/config.fish):
+    magequery completions fish | source
+
+Then restart your shell.
+"""
+
+# The live-database commands compile a bundled MySQL client, which builds C via
+# CMake (mysql_common -> cc/cmake). Install the toolchain on each builder;
+# musl-tools provides the musl-targeting C compiler for the static Linux build.
+[dist.dependencies.apt]
+cmake = '*'
+musl-tools = '*'
+
+[dist.dependencies.homebrew]
+cmake = '*'
+
+[dist.binaries]
+"*" = ["magequery"]

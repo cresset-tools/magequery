@@ -26,21 +26,23 @@ unreachable. The static commands never touch it.
 
 ## Install
 
-There are no prebuilt binaries yet, so build from source. You need a Rust toolchain (stable),
-a C compiler, and CMake. The last two are for the bundled MySQL client used by the live
-commands.
+```console
+# Linux and macOS
+$ curl -LsSf https://bougie.tools/magequery.sh | sh
+
+# Windows (PowerShell)
+> irm https://bougie.tools/magequery.ps1 | iex
+```
+
+Prebuilt binaries (Linux gnu/musl, macOS arm64, Windows x64) are attached to every
+[GitHub Release](https://github.com/cresset-tools/magequery/releases) and mirrored to cresset
+infrastructure.
+
+Or build from source. This needs a Rust toolchain, a C compiler, and CMake (the last two for
+the bundled MySQL client used by the live commands):
 
 ```console
 $ cargo install --git https://github.com/cresset-tools/magequery magequery
-```
-
-Or from a clone:
-
-```console
-$ git clone https://github.com/cresset-tools/magequery
-$ cd magequery
-$ cargo build --release
-$ ./target/release/magequery --help
 ```
 
 Point it at a store with `--root <path-to-magento>`, or run it from inside the Magento root

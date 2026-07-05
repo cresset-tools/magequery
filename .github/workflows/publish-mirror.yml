@@ -1,0 +1,128 @@
+name: publish-mirror
+
+# Called by release.yml as a post-announce job. Copies the binary archives +
+# installers that dist just uploaded to the GitHub Release into the cresset
+# origin server's `/srv/releases/` tree, which nginx fronts at
+# https://releases.bougie.tools/ (the shared cresset-tools mirror; its
+# `/github/` and `/installers/` nginx location blocks are tool-agnostic, so
+# magequery reuses the same vhost under a `magequery/` prefix; see
+# cresset-tools/infra hosts/origin/{nginx,configuration}.nix).
+#
+# Ships via SSH to the `deploy` user on origin.bougie.tools; magequery's CI key
+# is pinned in that user's authorized_keys in the infra NixOS config.
+#
+# Layout written on the origin:
+#
+#   /srv/releases/github/magequery/releases/download/<tag>/<file>
+#       (immutable, 1y cache — versioned URL, bytes never change)
+#
+#   /srv/releases/installers/magequery/latest/magequery-installer.{sh,ps1}
+#       (5min cache — the `curl ... | sh` entry point)
+#
+# Stays inert until two secrets are configured on the `release` environment:
+# PUBLISH_SSH_KEY (the private key whose pub-half is in `deploy`'s
+# authorized_keys on origin) and PUBLISH_KNOWN_HOSTS (the host's SSH pubkey
+# for strict host-key checking).
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions: {}
+
+env:
+  RELEASES_HOST: origin.bougie.tools
+  RELEASES_USER: deploy
+  VERSIONED_BASE: /srv/releases/github/magequery/releases/download
+  INSTALLERS_BASE: /srv/releases/installers/magequery/latest
+
+jobs:
+  publish-mirror:
+    runs-on: ubuntu-latest
+    # The `release` environment scopes PUBLISH_SSH_KEY + PUBLISH_KNOWN_HOSTS so
+    # only this workflow can read them. Create the environment under Settings ->
+    # Environments -> release before adding the secrets.
+    environment:
+      name: release
+    env:
+      VERSION: ${{ fromJson(inputs.plan).announcement_tag }}
+      IS_PRERELEASE: ${{ fromJson(inputs.plan).announcement_is_prerelease }}
+    steps:
+      - name: "Download GitHub Artifacts"
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: "Set up SSH"
+        env:
+          PUBLISH_SSH_KEY: ${{ secrets.PUBLISH_SSH_KEY }}
+          PUBLISH_KNOWN_HOSTS: ${{ secrets.PUBLISH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -m 700 -p ~/.ssh
+          echo "$PUBLISH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          eval "$(ssh-agent -s)"
+          ssh-add - <<< "$PUBLISH_SSH_KEY"
+          {
+            echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK"
+            echo "SSH_AGENT_PID=$SSH_AGENT_PID"
+          } >> "$GITHUB_ENV"
+
+      - name: "Stage tarballs, zips, installers, checksums"
+        run: |
+          set -euo pipefail
+          mkdir -p staging
+          shopt -s nullglob
+          for f in \
+            artifacts/*.tar.gz \
+            artifacts/*.tar.gz.sha256 \
+            artifacts/*.zip \
+            artifacts/*.zip.sha256 \
+            artifacts/sha256.sum \
+            artifacts/*.sh \
+            artifacts/*.ps1 \
+          ; do
+            cp "$f" staging/
+          done
+          echo "Staged $(ls staging | wc -l) files:"
+          ls staging
+
+      - name: "Create destination directories on origin"
+        # `mkdir -p` is idempotent and creates the installers dir too, so a
+        # release works even if the origin hasn't rebuilt the infra config
+        # that pre-seeds these paths yet (the deploy user owns /srv).
+        run: |
+          ssh -o BatchMode=yes \
+            "${RELEASES_USER}@${RELEASES_HOST}" \
+            "mkdir -p '${VERSIONED_BASE}/${VERSION}' '${INSTALLERS_BASE}'"
+
+      - name: "Upload versioned artifacts"
+        run: |
+          rsync -av \
+            --partial \
+            --delay-updates \
+            -e "ssh -o BatchMode=yes" \
+            staging/ \
+            "${RELEASES_USER}@${RELEASES_HOST}:${VERSIONED_BASE}/${VERSION}/"
+
+      - name: "Promote installers to latest"
+        # Skip the rolling pointer for prereleases — `curl ... | sh` should
+        # land on a stable release.
+        if: ${{ !fromJson(inputs.plan).announcement_is_prerelease }}
+        run: |
+          set -euo pipefail
+          for installer in magequery-installer.sh magequery-installer.ps1; do
+            if [ ! -f "staging/${installer}" ]; then
+              echo "Missing ${installer} in staging — dist didn't emit it?" >&2
+              exit 1
+            fi
+            scp -o BatchMode=yes \
+              "staging/${installer}" \
+              "${RELEASES_USER}@${RELEASES_HOST}:${INSTALLERS_BASE}/${installer}"
+          done

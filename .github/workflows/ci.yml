@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel an in-flight run when the same ref gets a newer push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# No rustfmt/clippy gate yet: the codebase uses intentional hand-alignment (see
+# CLAUDE.md's output-styling notes) that rustfmt would rewrite, and carries
+# known clippy warnings. Add those gates after a dedicated formatting/lint pass.
+jobs:
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # macOS runners no longer ship a usable cargo on PATH, so install the
+      # toolchain explicitly. rust-toolchain.toml pins the channel + components
+      # and is read by this action. `cache-bin: false` avoids a recurring macOS
+      # failure where the cached `~/.cargo/bin/cargo` was the rustup-init
+      # multiplexer rather than the cargo proxy.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-bin: false
+          # This action defaults RUSTFLAGS to `-D warnings`; the codebase carries
+          # known warnings (e.g. an unused db field) and we don't gate on lint
+          # yet, so don't turn warnings into hard build errors.
+          rustflags: ""
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo build
+        run: cargo build --all-targets
+
+      - name: cargo test
+        run: cargo test
