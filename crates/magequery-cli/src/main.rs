@@ -60,7 +60,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("sequences", "Sales increment sequences: current value, next increment id"),
             ("sales-rule", "Why a coupon (won't) apply: a cart rule by coupon/id/name"),
             ("catalog-rule", "Catalog price rules: window, scopes, actually applied?"),
-            ("tax", "Tax classes, rules, and rates — incl. untaxed classes"),
+            ("tax", "Tax classes, rules, and rates, incl. untaxed classes"),
         ],
     ),
     (
@@ -1242,7 +1242,7 @@ fn config_section_or_unset(
         return Ok(());
     }
     let header = if path.is_empty() {
-        style::dim(&format!("all config — {} values", section.len()))
+        style::dim(&format!("all config, {} values", section.len()))
     } else {
         format!("{}{}  {}", style::name(path), style::dim("/*"), style::dim(&format!("({} values)", section.len())))
     };
@@ -1271,8 +1271,8 @@ fn show_val(value: &str, dec: Option<&magequery_core::Decryptor>) -> String {
             // Couldn't decrypt: either the one cipher we don't support (Blowfish), or (more
             // often) a DB imported from another environment whose crypt key isn't in env.php.
             let note = match magequery_core::Decryptor::cipher_version(value) {
-                Some(0) => "(encrypted — legacy Blowfish cipher unsupported)".to_string(),
-                _ => "(encrypted — crypt key mismatch?)".to_string(),
+                Some(0) => "(encrypted, legacy Blowfish cipher unsupported)".to_string(),
+                _ => "(encrypted, crypt key mismatch?)".to_string(),
             };
             return format!("{}  {}", val(value), style::err(&note));
         }
@@ -1341,7 +1341,7 @@ fn redis_ping(mage: &Magento, json: bool) -> Result<()> {
         let db = p.database.as_deref().map(|d| format!(" db{d}")).unwrap_or_default();
         if p.ok {
             println!(
-                "{}  {}{} — {} ({}ms)",
+                "{}  {}{}, {} ({}ms)",
                 style::ok("OK"),
                 style::area(&p.purpose),
                 style::dim(&db),
@@ -1350,7 +1350,7 @@ fn redis_ping(mage: &Magento, json: bool) -> Result<()> {
             );
         } else {
             println!(
-                "{}  {}{} — {}",
+                "{}  {}{}, {}",
                 style::err("FAIL"),
                 style::area(&p.purpose),
                 style::dim(&db),
@@ -1372,7 +1372,7 @@ fn redis_info(mage: &Magento, json: bool) -> Result<()> {
         return Ok(());
     }
     if cfg.instances.is_empty() {
-        println!("{}", style::dim("(no Redis/Valkey configured — cache & session use other backends)"));
+        println!("{}", style::dim("(no Redis/Valkey configured, cache & session use other backends)"));
         return Ok(());
     }
     for r in &cfg.instances {
@@ -1491,7 +1491,7 @@ fn queue_backlog(mage: &Magento, json: bool) -> Result<()> {
         return Ok(());
     }
     if rows.is_empty() {
-        println!("{}", style::dim("(no queues — neither static config nor the db driver knows any)"));
+        println!("{}", style::dim("(no queues, neither static config nor the db driver knows any)"));
         return Ok(());
     }
 
@@ -1507,7 +1507,7 @@ fn queue_backlog(mage: &Magento, json: bool) -> Result<()> {
             println!(
                 "{}{pad}  {}",
                 style::name(&r.queue),
-                style::dim("(not in the db driver's queue table — amqp-only, or setup:upgrade pending)"),
+                style::dim("(not in the db driver's queue table, amqp-only, or setup:upgrade pending)"),
             );
             continue;
         }
@@ -1526,7 +1526,7 @@ fn queue_backlog(mage: &Magento, json: bool) -> Result<()> {
         }
         let consumers = if r.consumers.is_empty() {
             if r.orphaned {
-                style::number("(no static config references this queue — removed module?)")
+                style::number("(no static config references this queue, removed module?)")
             } else if r.new + r.retry > 0 {
                 style::err("(no consumer reads this queue)")
             } else {
@@ -1544,7 +1544,7 @@ fn queue_backlog(mage: &Magento, json: bool) -> Result<()> {
     // this command can't see.
     if mage.queue_config().map(|q| !q.connections.is_empty()).unwrap_or(false) {
         eprintln!(
-            "note: env.php configures an amqp connection — these counts cover the MySQL \
+            "note: env.php configures an amqp connection, these counts cover the MySQL \
              (db) queue driver only; RabbitMQ-side backlog is not visible here."
         );
     }
@@ -1644,7 +1644,7 @@ fn render_topic_route(r: &magequery_core::MqTopicRoute, root: &Path) {
     if r.routes.is_empty() {
         println!(
             "  {}",
-            style::dim("(no queue route — no publisher queue= and no binding pattern matches)")
+            style::dim("(no queue route, no publisher queue= and no binding pattern matches)")
         );
         return;
     }
@@ -1841,7 +1841,7 @@ fn render_acl_detail(mage: &Magento, res: &AclResource, root: &Path) {
     // Children = the sub-permissions this resource grants.
     let children = mage.acl_children(&res.id);
     if children.is_empty() {
-        println!("  {}", style::dim("(leaf — grants no sub-resources)"));
+        println!("  {}", style::dim("(leaf, grants no sub-resources)"));
     } else {
         println!("  {}", style::dim(&format!("grants ({}):", children.len())));
         let w = children.iter().map(|c| c.id.len()).max().unwrap_or(0);
@@ -1892,7 +1892,7 @@ fn layout(mage: &Magento, args: &LayoutArgs, root: &Path) -> Result<()> {
         "{}  ({})  {}",
         style::name(&view.handle),
         style::area(&area.to_string()),
-        style::dim(&format!("— {} contributing file(s)", view.contributions.len())),
+        style::dim(&format!("{} contributing file(s)", view.contributions.len())),
     );
     for c in &view.contributions {
         let layer = match &c.layer {
@@ -1907,7 +1907,7 @@ fn layout(mage: &Magento, args: &LayoutArgs, root: &Path) -> Result<()> {
             println!("  {}", layout_op_line(op));
         }
         if c.ops.is_empty() {
-            println!("  {}", style::dim("(no structural operations — arguments/head only)"));
+            println!("  {}", style::dim("(no structural operations, arguments/head only)"));
         }
     }
     if !view.includes.is_empty() {
@@ -2025,7 +2025,7 @@ fn product(mage: &Magento, args: &ProductArgs) -> Result<()> {
                 );
             }
             if truncated {
-                eprintln!("\n(showing first {} — narrow the SKU filter)", hits.len());
+                eprintln!("\n(showing first {}, narrow the SKU filter)", hits.len());
             }
             eprintln!("\n{} product(s)", hits.len());
             Ok(())
@@ -2177,7 +2177,7 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
                     let others: Vec<&str> = v.scopes.iter().map(|s| s.store.as_str()).collect();
                     println!(
                         "{prefix}{}",
-                        style::dim(&format!("(not set here — only: {})", others.join(", ")))
+                        style::dim(&format!("(not set here, only: {})", others.join(", ")))
                     );
                 }
             }
@@ -2207,7 +2207,7 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
             let scopes = issue.scopes.join(", ");
             let line = match (&issue.ancestor_id, &issue.ancestor_name) {
                 (Some(id), Some(n)) => format!(
-                    "⚠ ancestor {n} ({id}) is inactive on {scopes} — the whole subtree is invisible there"
+                    "⚠ ancestor {n} ({id}) is inactive on {scopes}, the whole subtree is invisible there"
                 ),
                 _ => format!("⚠ inactive on {scopes} (own setting)"),
             };
@@ -2224,7 +2224,7 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
             .map(|i| {
                 let n = format!("{} on {}", i.products, style::area(&i.store));
                 if i.products == 0 && cat.direct_products > 0 {
-                    style::err(&format!("{} — stale index?", n))
+                    style::err(&format!("{}, stale index?", n))
                 } else {
                     n
                 }
@@ -2281,7 +2281,7 @@ fn render_category(cat: &magequery_core::Category, args: &CategoryArgs) -> Resul
             None => println!(
                 "\n{}",
                 style::err(&format!(
-                    "no index table for store `{store}` — the catalog:category_product \
+                    "no index table for store `{store}`, the catalog:category_product \
                      indexer has never run for it"
                 ))
             ),
@@ -2376,11 +2376,11 @@ fn stores(mage: &Magento, args: &StoresArgs) -> Result<()> {
                 );
             }
             if g.views.is_empty() {
-                println!("    {}", style::err("(no store views — group unusable)"));
+                println!("    {}", style::err("(no store views, group unusable)"));
             }
         }
         if w.groups.is_empty() {
-            println!("  {}", style::err("(no store groups — website unusable)"));
+            println!("  {}", style::err("(no store groups, website unusable)"));
         }
     }
     if !tree.currency_rates.is_empty() {
@@ -2412,7 +2412,7 @@ fn order_statuses(mage: &Magento, args: &OrderStatusesArgs) -> Result<()> {
     let wl = statuses.iter().map(|s| s.label.len()).max().unwrap_or(0);
     for s in &statuses {
         let mapping = if s.states.is_empty() {
-            style::number("(not mapped to any state — never set automatically)")
+            style::number("(not mapped to any state, never set automatically)")
         } else {
             s.states
                 .iter()
@@ -2484,7 +2484,7 @@ fn sequences(mage: &Magento, args: &SequencesArgs) -> Result<()> {
         );
     }
     eprintln!(
-        "\n{} sequence(s) — next increment computed with the default pattern (custom patterns not modeled)",
+        "\n{} sequence(s), next increment computed with the default pattern (custom patterns not modeled)",
         seqs.len()
     );
     Ok(())
@@ -2530,7 +2530,7 @@ fn tax(mage: &Magento, args: &TaxArgs) -> Result<()> {
             let unused = if c.in_rules {
                 String::new()
             } else if c.class_type == "PRODUCT" {
-                format!("  {}", style::err("(in no rule — products in it are UNTAXED)"))
+                format!("  {}", style::err("(in no rule, products in it are UNTAXED)"))
             } else {
                 format!("  {}", style::number("(in no rule)"))
             };
@@ -2545,7 +2545,7 @@ fn tax(mage: &Magento, args: &TaxArgs) -> Result<()> {
     }
 
     if info.rules.is_empty() {
-        println!("\n{}", style::err("no tax rules — nothing is ever taxed"));
+        println!("\n{}", style::err("no tax rules, nothing is ever taxed"));
     } else {
         println!("\n{}", style::dim("rules:"));
         for r in &info.rules {
@@ -2578,7 +2578,7 @@ fn tax(mage: &Magento, args: &TaxArgs) -> Result<()> {
                     .join(", "),
             );
             let rates = if r.rates.is_empty() {
-                style::err("(no rates — the rule taxes nothing)")
+                style::err("(no rates, the rule taxes nothing)")
             } else {
                 r.rates.iter().map(rate_line).collect::<Vec<_>>().join("  ·  ")
             };
@@ -2636,7 +2636,7 @@ fn render_catalog_rule_list(
         let applied = if h.matched_products > 0 {
             format!("{} product(s)", h.matched_products)
         } else if h.active {
-            style::number("0 products — not applied?")
+            style::number("0 products, not applied?")
         } else {
             style::dim("0 products")
         };
@@ -2659,7 +2659,7 @@ fn render_catalog_rule_list(
         );
     }
     if truncated {
-        eprintln!("\n(showing first {} — narrow the search)", hits.len());
+        eprintln!("\n(showing first {}, narrow the search)", hits.len());
     }
     eprintln!("\n{} rule(s)", hits.len());
     Ok(())
@@ -2695,7 +2695,7 @@ fn render_catalog_rule(r: &magequery_core::CatalogRule, args: &CatalogRuleArgs) 
         println!(
             "{}",
             style::number(
-                "⚠ no materialized product matches — \"Apply Rules\"/the catalogrule \
+                "⚠ no materialized product matches, \"Apply Rules\"/the catalogrule \
                  indexer never ran, or the conditions match nothing"
             )
         );
@@ -2728,7 +2728,7 @@ fn render_catalog_rule(r: &magequery_core::CatalogRule, args: &CatalogRuleArgs) 
     info_row(
         "websites",
         if websites.is_empty() {
-            style::err("(none — the rule can never apply)")
+            style::err("(none, the rule can never apply)")
         } else {
             websites.join(", ")
         },
@@ -2737,7 +2737,7 @@ fn render_catalog_rule(r: &magequery_core::CatalogRule, args: &CatalogRuleArgs) 
     info_row(
         "groups",
         if groups.is_empty() {
-            style::err("(none — the rule can never apply)")
+            style::err("(none, the rule can never apply)")
         } else {
             groups.join(", ")
         },
@@ -2747,7 +2747,7 @@ fn render_catalog_rule(r: &magequery_core::CatalogRule, args: &CatalogRuleArgs) 
         "applied",
         if r.matched_products > 0 {
             format!(
-                "{} — {}",
+                "{}, {}",
                 style::ok(&format!("{} product(s) matched", r.matched_products)),
                 style::dim("see them priced via `magequery price <sku>`"),
             )
@@ -2761,7 +2761,7 @@ fn render_catalog_rule(r: &magequery_core::CatalogRule, args: &CatalogRuleArgs) 
         let ellipsis = if cond.chars().count() > 200 { "…" } else { "" };
         println!(
             "\n{}\n  {}",
-            style::dim("conditions (displayed, not evaluated — --json for full):"),
+            style::dim("conditions (displayed, not evaluated, --json for full):"),
             style::dim(&format!("{compact}{ellipsis}")),
         );
     }
@@ -2826,7 +2826,7 @@ fn cms(mage: &Magento, kind: magequery_core::CmsKind, args: &CmsArgs) -> Result<
                 );
             }
             if truncated {
-                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+                eprintln!("\n(showing first {}, narrow the search)", hits.len());
             }
             eprintln!("\n{} match(es)", hits.len());
             Ok(())
@@ -2848,7 +2848,7 @@ fn render_cms_entries(entries: &[magequery_core::CmsEntry], args: &CmsArgs) -> R
                 .map(|e| format!("{} ({})", e.id, e.stores.join("/")))
                 .collect();
             return Err(anyhow!(
-                "`{}` matches {} store-scoped rows — pick one with --id: {}",
+                "`{}` matches {} store-scoped rows, pick one with --id: {}",
                 entries[0].identifier,
                 entries.len(),
                 ids.join(", "),
@@ -2926,7 +2926,7 @@ fn render_cms_entry(e: &magequery_core::CmsEntry) {
     info_row(
         "stores",
         if stores.is_empty() {
-            style::err("(no store assignment — invisible everywhere)")
+            style::err("(no store assignment, invisible everywhere)")
         } else {
             stores.join(", ")
         },
@@ -3008,7 +3008,7 @@ fn sales_rule(mage: &Magento, args: &SalesRuleArgs) -> Result<()> {
                 );
             }
             if truncated {
-                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+                eprintln!("\n(showing first {}, narrow the search)", hits.len());
             }
             eprintln!("\n{} rule(s)", hits.len());
             Ok(())
@@ -3082,7 +3082,7 @@ fn render_sales_rule(r: &magequery_core::SalesRule, args: &SalesRuleArgs) -> Res
     info_row(
         "websites",
         if websites.is_empty() {
-            style::err("(none — the rule can never apply)")
+            style::err("(none, the rule can never apply)")
         } else {
             websites.join(", ")
         },
@@ -3091,7 +3091,7 @@ fn render_sales_rule(r: &magequery_core::SalesRule, args: &SalesRuleArgs) -> Res
     info_row(
         "groups",
         if groups.is_empty() {
-            style::err("(none — the rule can never apply)")
+            style::err("(none, the rule can never apply)")
         } else {
             groups.join(", ")
         },
@@ -3157,12 +3157,12 @@ fn render_sales_rule(r: &magequery_core::SalesRule, args: &SalesRuleArgs) -> Res
         let ellipsis = if cond.chars().count() > 200 { "…" } else { "" };
         println!(
             "\n{}\n  {}",
-            style::dim("conditions (displayed, not evaluated — --json for full):"),
+            style::dim("conditions (displayed, not evaluated, --json for full):"),
             style::dim(&format!("{compact}{ellipsis}")),
         );
     }
     if blockers.is_empty() {
-        eprintln!("\nno blockers found — conditions are not evaluated statically");
+        eprintln!("\nno blockers found, conditions are not evaluated statically");
     }
     Ok(())
 }
@@ -3197,7 +3197,7 @@ fn sales_document(mage: &Magento, kind: SalesDocKind, args: &SalesDocArgs) -> Re
                 );
             }
             if truncated {
-                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+                eprintln!("\n(showing first {}, narrow the search)", hits.len());
             }
             eprintln!("\n{} {kind}(s)", hits.len());
             Ok(())
@@ -3338,7 +3338,7 @@ fn quote(mage: &Magento, args: &QuoteArgs) -> Result<()> {
                 );
             }
             if truncated {
-                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+                eprintln!("\n(showing first {}, narrow the search)", hits.len());
             }
             eprintln!("\n{} quote(s)", hits.len());
             Ok(())
@@ -3354,7 +3354,7 @@ fn render_quote(q: &magequery_core::Quote, args: &QuoteArgs) -> Result<()> {
 
     let state = if let Some(inc) = &q.order_increment {
         let stale = if q.active {
-            format!("  {}", style::number("[still active — checkout didn't deactivate it]"))
+            format!("  {}", style::number("[still active, checkout didn't deactivate it]"))
         } else {
             String::new()
         };
@@ -3434,7 +3434,7 @@ fn render_quote(q: &magequery_core::Quote, args: &QuoteArgs) -> Result<()> {
                         "{m}{}",
                         a.shipping_description
                             .as_deref()
-                            .map(|d| format!("  {}", style::dim(&format!("— {d}"))))
+                            .map(|d| format!("  {}", style::dim(d)))
                             .unwrap_or_default(),
                     ),
                 ),
@@ -3590,7 +3590,7 @@ fn customer(mage: &Magento, args: &CustomerArgs) -> Result<()> {
                 );
             }
             if truncated {
-                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+                eprintln!("\n(showing first {}, narrow the search)", hits.len());
             }
             eprintln!("\n{} customer(s)", hits.len());
             Ok(())
@@ -3609,7 +3609,7 @@ fn render_customer(c: &magequery_core::Customer, args: &CustomerArgs) -> Result<
         tags.push_str(&format!("  {}", style::err("[inactive]")));
     }
     if !c.confirmed {
-        tags.push_str(&format!("  {}", style::err("[confirmation pending — can't log in]")));
+        tags.push_str(&format!("  {}", style::err("[confirmation pending, can't log in]")));
     }
     if c.locked {
         tags.push_str(&format!("  {}", style::err("[LOCKED]")));
@@ -3815,7 +3815,7 @@ fn order(mage: &Magento, args: &OrderArgs) -> Result<()> {
                 );
             }
             if truncated {
-                eprintln!("\n(showing first {} — narrow the search)", hits.len());
+                eprintln!("\n(showing first {}, narrow the search)", hits.len());
             }
             eprintln!("\n{} order(s)", hits.len());
             Ok(())
@@ -3830,7 +3830,7 @@ fn render_order(o: &magequery_core::Order, args: &OrderArgs) -> Result<()> {
     }
 
     let matched = if o.matched_by_id && args.id.is_none() {
-        format!("  {}", style::dim("(matched by entity_id — no such increment id)"))
+        format!("  {}", style::dim("(matched by entity_id, no such increment id)"))
     } else {
         String::new()
     };
@@ -3857,7 +3857,7 @@ fn render_order(o: &magequery_core::Order, args: &OrderArgs) -> Result<()> {
     if !o.in_grid {
         println!(
             "{}",
-            style::err("⚠ not in sales_order_grid — invisible in the admin grid (grid indexer behind?)")
+            style::err("⚠ not in sales_order_grid, invisible in the admin grid (grid indexer behind?)")
         );
     }
     println!();
@@ -3908,7 +3908,7 @@ fn render_order(o: &magequery_core::Order, args: &OrderArgs) -> Result<()> {
                 o.shipping_method.as_deref().unwrap_or("?"),
                 o.shipping_description
                     .as_deref()
-                    .map(|d| format!("  {}", style::dim(&format!("— {d}"))))
+                    .map(|d| format!("  {}", style::dim(d)))
                     .unwrap_or_default(),
             ),
         );
@@ -4123,7 +4123,7 @@ fn shadow_note(mage: &Magento, query: &str, matched_entity_id: u32) -> Result<()
         if id != matched_entity_id {
             if let Some(sku) = mage.product_sku_of_id(id)? {
                 eprintln!(
-                    "note: entity_id {id} is a different product (SKU \"{sku}\") — use --id {id}"
+                    "note: entity_id {id} is a different product (SKU \"{sku}\"), use --id {id}"
                 );
             }
         }
@@ -4163,7 +4163,7 @@ fn price(mage: &Magento, args: &PriceArgs) -> Result<()> {
     }
 
     let matched = if p.matched_by_id && args.id.is_none() {
-        format!("  {}", style::dim("(matched by entity_id — no SKU equals it)"))
+        format!("  {}", style::dim("(matched by entity_id, no SKU equals it)"))
     } else {
         String::new()
     };
@@ -4288,7 +4288,7 @@ fn price(mage: &Magento, args: &PriceArgs) -> Result<()> {
         println!(
             "{}",
             style::err(
-                "no price index rows — the product is invisible on the storefront \
+                "no price index rows, the product is invisible on the storefront \
                  (reindex catalog_product_price, and check website assignment/status)"
             )
         );
@@ -4331,7 +4331,7 @@ fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()>
     // Only note the id-resolution when it was *inferred* from a numeric positional —
     // an explicit --id lookup needs no explanation.
     let matched = if p.matched_by_id && args.id.is_none() {
-        format!("  {}", style::dim("(matched by entity_id — no SKU equals it)"))
+        format!("  {}", style::dim("(matched by entity_id, no SKU equals it)"))
     } else {
         String::new()
     };
@@ -4349,7 +4349,7 @@ fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()>
         let list: Vec<String> = p.websites.iter().map(|w| style::area(w)).collect();
         info_row("websites", list.join(", "));
     } else {
-        info_row("websites", style::err("(none — invisible on every storefront)"));
+        info_row("websites", style::err("(none, invisible on every storefront)"));
     }
     println!();
 
@@ -4390,7 +4390,7 @@ fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()>
                         v.scopes.iter().map(|s| s.store.as_str()).collect();
                     println!(
                         "{prefix}{}",
-                        style::dim(&format!("(not set here — only: {})", others.join(", ")))
+                        style::dim(&format!("(not set here, only: {})", others.join(", ")))
                     );
                 }
             }
@@ -4549,7 +4549,7 @@ fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()>
                 );
             }
             if o.selections.is_empty() {
-                println!("    {}", style::err("(no selections — the option can't be satisfied)"));
+                println!("    {}", style::err("(no selections, the option can't be satisfied)"));
             }
         }
     }
@@ -4589,7 +4589,7 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
             many => {
                 let names: Vec<_> = many.iter().map(|i| i.name.as_str()).collect();
                 return Err(anyhow!(
-                    "`{name}` matches {} integrations ({}) — name one",
+                    "`{name}` matches {} integrations ({}), name one",
                     many.len(),
                     names.join(", ")
                 ));
@@ -4605,7 +4605,7 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
             eprintln!(
                 "{}",
                 style::err(&format!(
-                    "warning: `{}`'s access token is revoked — it won't authenticate",
+                    "warning: `{}`'s access token is revoked, it won't authenticate",
                     i.name
                 ))
             );
@@ -4628,7 +4628,7 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
             ],
             other => {
                 return Err(anyhow!(
-                    "unknown credential `{other}` — expected access-token, access-secret, \
+                    "unknown credential `{other}`, expected access-token, access-secret, \
                      consumer-key, consumer-secret, or all"
                 ));
             }
@@ -4668,7 +4668,7 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
                 if encrypted {
                     eprintln!(
                         "{}",
-                        style::dim(&format!("note: {kind} is encrypted — pass --decrypt to reveal it"))
+                        style::dim(&format!("note: {kind} is encrypted, pass --decrypt to reveal it"))
                     );
                 }
                 raw.clone()
@@ -4715,7 +4715,7 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
         let token = match i.token.as_str() {
             "active" => style::ok("access token active"),
             "revoked" => style::err("access token revoked"),
-            _ => style::dim("no access token — never activated"),
+            _ => style::dim("no access token, never activated"),
         };
         info_row("token", token);
         info_row(
@@ -4727,11 +4727,11 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
             )),
         );
         if i.all_resources {
-            info_row("access", style::err("full (Magento_Backend::all) — every API"));
+            info_row("access", style::err("full (Magento_Backend::all), every API"));
             return Ok(());
         }
         if i.rules.is_empty() {
-            info_row("access", style::dim("(no resources granted — the API rejects it)"));
+            info_row("access", style::dim("(no resources granted, the API rejects it)"));
             return Ok(());
         }
         info_row("access", format!("{} resource(s):", i.rules.len()));
@@ -4741,7 +4741,7 @@ fn integrations(mage: &Magento, args: &IntegrationsArgs) -> Result<()> {
                 Some(t) => format!("  {t}"),
                 None => format!(
                     "  {}",
-                    style::number("(not declared in any acl.xml — module removed?)")
+                    style::number("(not declared in any acl.xml, module removed?)")
                 ),
             };
             println!("  {mark} {}{title}", style::name(&rule.resource));
@@ -4933,7 +4933,7 @@ fn admin_roles(mage: &Magento, args: &AdminRolesArgs) -> Result<()> {
                 Some(t) => format!("  {t}"),
                 None => format!(
                     "  {}",
-                    style::number("(not declared in any acl.xml — module removed?)")
+                    style::number("(not declared in any acl.xml, module removed?)")
                 ),
             };
             println!("  {mark} {}{title}", style::name(&rule.resource));
@@ -5251,7 +5251,7 @@ fn eav_static(mage: &Magento, args: &EavArgs, root: &Path) -> Result<()> {
         return match &args.query {
             Some(q) => Err(anyhow!(
                 "no setup script adds or modifies an attribute matching `{q}`\n  \
-                 Core attributes are installed from data arrays, not addAttribute — \
+                 Core attributes are installed from data arrays, not addAttribute, \
                  the live row: `magequery eav {q} --db`."
             )),
             None => {
@@ -5293,7 +5293,7 @@ fn eav_static(mage: &Magento, args: &EavArgs, root: &Path) -> Result<()> {
                 println!("    {} => {value}", style::string_lit(&format!("'{}'", p.key)));
             }
         }
-        eprintln!("\n(setup-script view — the live attribute row: `magequery eav {} --db`)", refs[0].code);
+        eprintln!("\n(setup-script view, the live attribute row: `magequery eav {} --db`)", refs[0].code);
         return Ok(());
     }
 
@@ -5317,7 +5317,7 @@ fn eav_static(mage: &Magento, args: &EavArgs, root: &Path) -> Result<()> {
         );
     }
     eprintln!(
-        "\n{} setup call(s) — static view; live attribute data: `magequery eav --db`",
+        "\n{} setup call(s), static view; live attribute data: `magequery eav --db`",
         refs.len()
     );
     Ok(())
@@ -5394,7 +5394,7 @@ fn render_ui_component(
         style::name(&view.name),
         style::kind(&view.kind),
         style::area(&view.area.to_string()),
-        style::dim(&format!("— {} contributing file(s)", view.contributions.len())),
+        style::dim(&format!("{} contributing file(s)", view.contributions.len())),
     );
     for c in &view.contributions {
         let layer = match &c.layer {
@@ -5409,7 +5409,7 @@ fn render_ui_component(
             println!("  {}{}", "  ".repeat(op.depth as usize), ui_op_line(op));
         }
         if c.ops.is_empty() {
-            println!("  {}", style::dim("(no named nodes — arguments/settings only)"));
+            println!("  {}", style::dim("(no named nodes, arguments/settings only)"));
         }
     }
     Ok(())
@@ -5455,7 +5455,7 @@ fn catalog_attributes(mage: &Magento, args: &CatalogAttrsArgs, root: &Path) -> R
             println!(
                 "{}  {}",
                 style::name(&g.name),
-                style::dim(&format!("— {} attribute(s):", g.attributes.len())),
+                style::dim(&format!("{} attribute(s):", g.attributes.len())),
             );
             let w = g.attributes.iter().map(|a| a.name.len()).max().unwrap_or(0);
             for a in &g.attributes {
@@ -5552,7 +5552,7 @@ fn translations(mage: &Magento, args: &TranslationsArgs, root: &Path) -> Result<
             println!(
                 "{}",
                 style::dim(&format!(
-                    "(no dictionary row matches across {} {} dictionaries — untranslated phrases have none)",
+                    "(no dictionary row matches across {} {} dictionaries, untranslated phrases have none)",
                     result.dictionaries_scanned, result.locale
                 ))
             );
@@ -5592,7 +5592,7 @@ fn translations(mage: &Magento, args: &TranslationsArgs, root: &Path) -> Result<
                 style::dim(&format!("{} row(s)", m.entries.len())),
             );
         }
-        eprintln!("\n{} phrase(s) — pass the exact phrase for the layered view", matches.len());
+        eprintln!("\n{} phrase(s), pass the exact phrase for the layered view", matches.len());
         return Ok(());
     };
 
@@ -5626,7 +5626,7 @@ fn render_translation(m: &magequery_core::TranslationMatch, root: &Path) {
             L::Db => ("db    ", style::dim(&format!("store {}", e.store_id.unwrap_or(0)))),
         };
         let value = if e.reset {
-            style::err("(identity row — deletes earlier translations)")
+            style::err("(identity row, deletes earlier translations)")
         } else {
             style::string_lit(&format!("\"{}\"", e.value))
         };
@@ -5640,7 +5640,7 @@ fn render_translation(m: &magequery_core::TranslationMatch, root: &Path) {
     }
 
     if effective.is_none() {
-        println!("  {}", style::dim("(untranslated — the phrase renders as-is)"));
+        println!("  {}", style::dim("(untranslated, the phrase renders as-is)"));
     }
     if module_entries > 1 {
         println!(
@@ -5731,7 +5731,7 @@ fn render_email_template(t: &magequery_core::EmailTemplate, root: &Path) {
             "  {} {}  {}",
             style::dim("file"),
             t.file,
-            style::err("(missing — declared but not on disk)"),
+            style::err("(missing, declared but not on disk)"),
         ),
     }
     if t.theme_overrides.is_empty() {
@@ -5879,7 +5879,7 @@ fn render_extended_type(t: &magequery_core::ExtendedType, root: &Path) {
     println!(
         "{}  {}",
         style::class(t.for_type.as_str()),
-        style::dim(&format!("— extension attributes ({}):", t.attributes.len())),
+        style::dim(&format!("extension attributes ({}):", t.attributes.len())),
     );
     let w = t.attributes.iter().map(|a| a.code.len()).max().unwrap_or(0);
     for a in &t.attributes {
@@ -6084,7 +6084,7 @@ fn schema(mage: &Magento, args: &SchemaArgs, root: &Path) -> Result<()> {
 
 fn render_schema_drift(d: &magequery_core::SchemaDrift) -> Result<()> {
     if d.is_clean() {
-        println!("{}", style::ok("OK — the live schema matches db_schema.xml (and its whitelist)"));
+        println!("{}", style::ok("OK, the live schema matches db_schema.xml (and its whitelist)"));
     }
     let section = |header: String, tables: &[String], cols: &[magequery_core::TableColumn]| {
         if tables.is_empty() && cols.is_empty() {
@@ -6100,7 +6100,7 @@ fn render_schema_drift(d: &magequery_core::SchemaDrift) -> Result<()> {
     };
     section(
         style::err(&format!(
-            "declared but missing live ({} table(s), {} column(s)) — setup:upgrade would create:",
+            "declared but missing live ({} table(s), {} column(s)), setup:upgrade would create:",
             d.missing_tables.len(),
             d.missing_columns.len()
         )),
@@ -6109,7 +6109,7 @@ fn render_schema_drift(d: &magequery_core::SchemaDrift) -> Result<()> {
     );
     section(
         style::err(&format!(
-            "whitelisted but no longer declared ({} table(s), {} column(s)) — setup:upgrade would DROP:",
+            "whitelisted but no longer declared ({} table(s), {} column(s)), setup:upgrade would DROP:",
             d.would_drop_tables.len(),
             d.would_drop_columns.len()
         )),
@@ -6118,7 +6118,7 @@ fn render_schema_drift(d: &magequery_core::SchemaDrift) -> Result<()> {
     );
     section(
         style::area(&format!(
-            "declared but not in any db_schema_whitelist.json ({} table(s), {} column(s)) — run setup:db-declaration:generate-whitelist:",
+            "declared but not in any db_schema_whitelist.json ({} table(s), {} column(s)), run setup:db-declaration:generate-whitelist:",
             d.not_whitelisted_tables.len(),
             d.not_whitelisted_columns.len()
         )),
@@ -6127,7 +6127,7 @@ fn render_schema_drift(d: &magequery_core::SchemaDrift) -> Result<()> {
     );
     section(
         style::area(&format!(
-            "live but unmanaged ({} table(s), {} column(s)) — legacy install scripts or non-declarative modules:",
+            "live but unmanaged ({} table(s), {} column(s)), legacy install scripts or non-declarative modules:",
             d.undeclared_tables.len(),
             d.undeclared_columns.len()
         )),
@@ -6149,7 +6149,7 @@ fn render_schema_drift(d: &magequery_core::SchemaDrift) -> Result<()> {
 /// Drift markers for one table, appended under its DDL view.
 fn render_table_drift(name: &str, d: &magequery_core::SchemaDrift) {
     if d.missing_tables.iter().any(|t| t == name) {
-        println!("  {}", style::err("TABLE MISSING LIVE — setup:upgrade would create it"));
+        println!("  {}", style::err("TABLE MISSING LIVE, setup:upgrade would create it"));
         return;
     }
     let missing: Vec<&str> = d
@@ -6275,7 +6275,7 @@ fn url_rewrites(mage: &Magento, args: &UrlRewritesArgs) -> Result<()> {
     if set.truncated {
         eprintln!(
             "\n{}",
-            style::dim(&format!("showing first {shown} (more exist — narrow with a filter or raise --limit)"))
+            style::dim(&format!("showing first {shown} (more exist, narrow with a filter or raise --limit)"))
         );
     } else {
         eprintln!("\n{shown} rewrite(s)");
@@ -6337,7 +6337,7 @@ fn db_ping(mage: &Magento, connection: Option<&str>, json: bool) -> Result<()> {
 
     if ping.ok {
         println!(
-            "{}  {} — server {} ({}ms)",
+            "{}  {}, server {} ({}ms)",
             style::ok("OK"),
             style::area(&ping.connection),
             style::number(ping.server_version.as_deref().unwrap_or("?")),
@@ -6345,7 +6345,7 @@ fn db_ping(mage: &Magento, connection: Option<&str>, json: bool) -> Result<()> {
         );
     } else {
         println!(
-            "{}  {} — {}",
+            "{}  {}, {}",
             style::err("FAIL"),
             style::area(&ping.connection),
             ping.error.as_deref().unwrap_or("unknown error"),
@@ -6560,7 +6560,7 @@ fn cron_job_detail(
         .as_deref()
         .map(|s| style::number(s))
         .or_else(|| job.config_path.as_deref().map(|c| format!("config: {c}")))
-        .unwrap_or_else(|| style::dim("(no schedule — runs only when triggered in code)"));
+        .unwrap_or_else(|| style::dim("(no schedule, runs only when triggered in code)"));
     info_row("schedule", when);
 
     let Some(l) = &job.live else {
@@ -6670,7 +6670,7 @@ fn uses(mage: &Magento, args: &UsesArgs, root: &Path) -> Result<()> {
         // Honest about scope: autowired constructor type-hints have no di.xml declaration.
         println!(
             "  {}",
-            style::dim("(nothing in di.xml references it — autowired constructor type-hints aren't declared there)")
+            style::dim("(nothing in di.xml references it, autowired constructor type-hints aren't declared there)")
         );
         return Ok(());
     }
@@ -6686,7 +6686,7 @@ fn uses(mage: &Magento, args: &UsesArgs, root: &Path) -> Result<()> {
     };
     if !u.preferred_for.is_empty() {
         let n = u.preferred_for.len();
-        println!("\n{}", style::dim(&format!("preferred for ({n}) — these resolve to it:")));
+        println!("\n{}", style::dim(&format!("preferred for ({n}), these resolve to it:")));
         for r in &u.preferred_for {
             println!("{}", use_ref_line(r));
         }
@@ -6766,7 +6766,7 @@ fn graphql(mage: &Magento, args: &GraphqlArgs, root: &Path) -> Result<()> {
         return Ok(());
     }
     if list.is_empty() {
-        println!("{}", style::dim("(no GraphQL type matches — from the modules' schema.graphqls)"));
+        println!("{}", style::dim("(no GraphQL type matches, from the modules' schema.graphqls)"));
         return Ok(());
     }
     let w = list.iter().map(|t| t.name.len()).max().unwrap_or(0);
@@ -6774,7 +6774,7 @@ fn graphql(mage: &Magento, args: &GraphqlArgs, root: &Path) -> Result<()> {
         let count = match t.kind {
             magequery_core::GqlKind::Enum => format!("{:>3} values", t.values.len()),
             magequery_core::GqlKind::Union => format!("{:>3} members", t.members.len()),
-            magequery_core::GqlKind::Scalar => "         —".to_string(),
+            magequery_core::GqlKind::Scalar => "         -".to_string(),
             _ => format!("{:>3} fields", t.fields.len()),
         };
         let pad = " ".repeat(w.saturating_sub(t.name.len()));
@@ -6916,7 +6916,7 @@ fn render_gql_field_detail(
         ),
         None => println!(
             "  {}",
-            style::dim("(no @resolver — served from the parent resolver's output)")
+            style::dim("(no @resolver, served from the parent resolver's output)")
         ),
     }
 }
@@ -7077,7 +7077,7 @@ fn render_indexer(mage: &Magento, ix: &Indexer, root: &Path) {
     }
 
     if ix.subscriptions.is_empty() {
-        println!("  {}", style::dim("(no mview subscriptions — reindexes on demand only)"));
+        println!("  {}", style::dim("(no mview subscriptions, reindexes on demand only)"));
         return;
     }
     println!("  {}", style::dim(&format!("subscriptions ({}):", ix.subscriptions.len())));
@@ -7186,7 +7186,7 @@ fn render_resolution(res: &Resolution, root: &Path) {
         .preference_chain
         .last()
         .map(|s| style::path(&short_loc(&s.source, root)))
-        .unwrap_or_else(|| style::dim("(no preference — concrete class)"));
+        .unwrap_or_else(|| style::dim("(no preference, concrete class)"));
     println!("  → {}   {}", style::class(res.concrete.as_str()), pref);
     if let Some(base) = &res.instantiates {
         println!(
@@ -7222,7 +7222,7 @@ fn render_resolution(res: &Resolution, root: &Path) {
         }
     }
 
-    println!("\n{}", style::dim(&format!("plugins ({})  — run order", res.plugins.len())));
+    println!("\n{}", style::dim(&format!("plugins ({}) , run order", res.plugins.len())));
     for p in &res.plugins {
         let kinds: Vec<String> =
             p.methods.iter().map(|m| format!("{} {}", style::kind(&m.kind.to_string()), m.target)).collect();
@@ -7408,7 +7408,7 @@ fn preference(mage: &Magento, args: &PreferenceArgs, root: &Path) -> Result<()> 
             .chain
             .last()
             .map(|step| style::path(&short_loc(&step.source, root)))
-            .unwrap_or_else(|| style::dim("(no preference — concrete class)"));
+            .unwrap_or_else(|| style::dim("(no preference, concrete class)"));
         let area = format!("{:<11}", p.area.to_string());
         println!("{} {}\n            {}", style::area(&area), style::class(p.concrete.as_str()), loc);
     }
@@ -7549,7 +7549,7 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         (Some(v), Some(p)) => {
             info_row("magento", format!("{}  {}", style::number(v), style::dim(&format!("({p})"))))
         }
-        _ => info_row("magento", style::dim("(version unknown — no product package found)")),
+        _ => info_row("magento", style::dim("(version unknown, no product package found)")),
     }
     // Absent MAGE_MODE = Magento's "default" mode; no env.php at all = not installed.
     match &i.mode {
@@ -7594,7 +7594,7 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         format!(
             "  {}",
             style::dim(&format!(
-                "(+{} store/website overrides — see `config web/unsecure/base_url`)",
+                "(+{} store/website overrides, see `config web/unsecure/base_url`)",
                 i.base_url_overrides
             ))
         )
@@ -7736,10 +7736,10 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
         }
         (Some(secs), _) => info_row(
             "cron",
-            style::err(&format!("STALE — last success {} ago", humanize_secs(*secs))),
+            style::err(&format!("STALE, last success {} ago", humanize_secs(*secs))),
         ),
         (None, None) => {
-            info_row("cron", style::err("(no successful runs recorded — is cron running?)"))
+            info_row("cron", style::err("(no successful runs recorded, is cron running?)"))
         }
         (None, Some(_)) => {} // DB unreachable: unknown, not alarming
     }
@@ -7762,7 +7762,7 @@ fn info(mage: &Magento, args: &InfoCmdArgs) -> Result<()> {
     // missing from config.php count as disabled — with the reason called out.
     let disabled = i.modules_total - i.modules_enabled + i.modules_unregistered;
     let unregistered = if i.modules_unregistered > 0 {
-        format!(" · {} not in config.php — run setup:upgrade", i.modules_unregistered)
+        format!(" · {} not in config.php, run setup:upgrade", i.modules_unregistered)
     } else {
         String::new()
     };
@@ -7801,7 +7801,7 @@ fn base_url(mage: &Magento, secure: bool) -> Result<()> {
             Ok(())
         }
         Some(u) => Err(anyhow!(
-            "{label} is the auto-detect placeholder `{u}` — not configured in any reachable \
+            "{label} is the auto-detect placeholder `{u}`, not configured in any reachable \
              source{}",
             i.db_error.as_deref().map(|e| format!(" (database unreachable: {e})")).unwrap_or_default()
         )),
@@ -7820,9 +7820,9 @@ fn admin_url(mage: &Magento) -> Result<()> {
         None => match &i.admin_front_name {
             Some(f) => Err(anyhow!(
                 "no concrete base URL to build the admin URL from (frontName is `{f}`){}",
-                i.db_error.as_deref().map(|e| format!(" — database unreachable: {e}")).unwrap_or_default()
+                i.db_error.as_deref().map(|e| format!(", database unreachable: {e}")).unwrap_or_default()
             )),
-            None => Err(anyhow!("no backend/frontName in env.php — is this installed?")),
+            None => Err(anyhow!("no backend/frontName in env.php, is this installed?")),
         },
     }
 }
@@ -7971,9 +7971,9 @@ fn whatis(mage: &Magento, args: &WhatisArgs, root: &Path) -> Result<()> {
         .map(|f| style::path(&format!("# {}", f.strip_prefix(root).unwrap_or(f).display())))
         .unwrap_or_else(|| {
             if w.is_virtual_type {
-                style::dim("(virtual type — no source file)")
+                style::dim("(virtual type, no source file)")
             } else {
-                style::dim("(no source file — generated?)")
+                style::dim("(no source file, generated?)")
             }
         });
     println!("{}   {loc}", style::class(w.class.as_str()));
@@ -8095,7 +8095,7 @@ fn whatis(mage: &Magento, args: &WhatisArgs, root: &Path) -> Result<()> {
     if !w.is_referenced() {
         println!(
             "\n{}",
-            style::dim("(no configuration references this class — candidate dead code, or wired only in PHP)")
+            style::dim("(no configuration references this class, candidate dead code, or wired only in PHP)")
         );
     }
     Ok(())
@@ -8111,7 +8111,7 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else if report.findings.is_empty() {
-        println!("{}", style::ok("OK — nothing to report"));
+        println!("{}", style::ok("OK, nothing to report"));
     } else {
         for f in &report.findings {
             let tag = match f.severity {
@@ -8154,7 +8154,7 @@ fn modules_check(mage: &Magento, json: bool) -> Result<()> {
     } else {
         for m in &check.on_disk_not_in_config {
             println!(
-                "unregistered  {} ({}) — on disk but not in config.php; run `bin/magento setup:upgrade`\n              {}",
+                "unregistered  {} ({}), on disk but not in config.php; run `bin/magento setup:upgrade`\n              {}",
                 m.name,
                 match m.source {
                     ModuleSource::App => "app",
@@ -8165,7 +8165,7 @@ fn modules_check(mage: &Magento, json: bool) -> Result<()> {
             );
         }
         for name in &check.in_config_not_on_disk {
-            println!("missing       {name} — listed in config.php but no module.xml found on disk");
+            println!("missing       {name}, listed in config.php but no module.xml found on disk");
         }
     }
 
