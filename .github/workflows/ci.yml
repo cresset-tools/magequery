@@ -36,6 +36,10 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache-bin: false
+          # This action defaults RUSTFLAGS to `-D warnings`; the codebase carries
+          # known warnings (e.g. an unused db field) and we don't gate on lint
+          # yet, so don't turn warnings into hard build errors.
+          rustflags: ""
 
       - uses: Swatinem/rust-cache@v2
 
