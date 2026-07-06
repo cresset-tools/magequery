@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.2.0...magequery-v0.3.0) (2026-07-06)
+
+
+### Features
+
+* **composer:** declare native-binary metadata for bougie prefetch ([#10](https://github.com/cresset-tools/magequery/issues/10)) ([1a642be](https://github.com/cresset-tools/magequery/commit/1a642be73027f8cf05e0f0c6b174f20617531be6))
+
 ## [0.2.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.1.0...magequery-v0.2.0) (2026-07-06)
 
 
