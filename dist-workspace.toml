@@ -72,12 +72,16 @@ hosting = ["simple", "github"]
 simple-download-url = "https://releases.bougie.tools/github/magequery/releases/download/{tag}"
 
 # Run publish-mirror after the release is announced to fan the dist artifacts
-# out to the origin server. (release.yml is hand-edited, so this also exists as
-# an explicit `custom-publish-mirror` job there; keep them in sync.)
-post-announce-jobs = ["./publish-mirror"]
+# out to the origin server, and composer-branch to publish the Packagist tag --
+# post-announce so the composer tag can only exist once every binary is
+# attached to the release. (release.yml is hand-edited, so these also exist as
+# explicit `custom-publish-mirror`/`custom-composer-branch` jobs there; keep
+# them in sync.)
+post-announce-jobs = ["./publish-mirror", "./composer-branch"]
 
-# publish-mirror only needs to read the uploaded artifacts.
-github-custom-job-permissions = { "publish-mirror" = { contents = "read" } }
+# publish-mirror only needs to read the uploaded artifacts; composer-branch
+# pushes the composer branch + v* tag.
+github-custom-job-permissions = { "publish-mirror" = { contents = "read" }, "composer-branch" = { contents = "write" } }
 
 # What the installers print after a successful install: how to turn on shell
 # completions (the installer can't place files itself).

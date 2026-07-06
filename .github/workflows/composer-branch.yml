@@ -6,6 +6,13 @@ name: composer-branch
 # fetches the magequery-vX.Y.Z binary at runtime. Packagist's GitHub webhook
 # picks up the new tag automatically.
 #
+# Runs as a dist post-announce job (workflow_call from release.yml), so the
+# composer tag only publishes AFTER every binary is built and attached to
+# the GitHub release. Triggering on `release: published` directly raced the
+# ~8-minute dist build: Packagist offered the new version within seconds
+# while its binaries 404'd — and a failed build would have left it broken
+# permanently.
+#
 # Also runnable manually (workflow_dispatch) to re-publish a version or to
 # verify the generator end-to-end without cutting a release.
 #
@@ -15,8 +22,12 @@ name: composer-branch
 # release).
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      plan:
+        description: "dist plan (unused — the caller's release event context supplies the version)"
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       version:
@@ -33,7 +44,8 @@ concurrency:
 
 jobs:
   publish:
-    # The tool's own releases, or any manual dispatch.
+    # The tool's own releases (github.event is the caller's `release`
+    # event when invoked via workflow_call), or any manual dispatch.
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'magequery-v') }}
     runs-on: ubuntu-latest
     env:

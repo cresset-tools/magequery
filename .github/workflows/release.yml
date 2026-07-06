@@ -308,3 +308,17 @@ jobs:
     secrets: inherit
     permissions:
       "contents": "read"
+
+  # Publish the Packagist composer branch + v* tag. Post-announce so the tag
+  # can only exist once every binary is attached to the GitHub release (a
+  # `release: published` trigger raced the ~8-minute build).
+  custom-composer-branch:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/composer-branch.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+    permissions:
+      "contents": "write"
