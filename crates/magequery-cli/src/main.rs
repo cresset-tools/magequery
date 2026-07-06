@@ -380,6 +380,9 @@ enum Command {
     /// Print a roff man page to stdout.
     #[command(hide = true)]
     Man,
+    /// Print the agent skill (SKILL.md) to stdout, for `.claude/skills/`.
+    #[command(hide = true)]
+    Skill,
 }
 
 #[derive(clap::Args)]
@@ -1077,6 +1080,12 @@ fn main() -> Result<()> {
             clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout())?;
             return Ok(());
         }
+        Command::Skill => {
+            // The canonical SKILL.md is embedded so it always matches this binary's
+            // command surface; `magequery skill > .claude/skills/magequery/SKILL.md`.
+            print!("{}", include_str!("../../../assets/skill/SKILL.md"));
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -1164,7 +1173,7 @@ fn main() -> Result<()> {
         Command::Stores(args) => stores(&mage, &args),
         Command::Config(args) => config(&mage, &args, &cli.root),
         // Handled before Magento::open (they need no root).
-        Command::Completions(_) | Command::Man => unreachable!(),
+        Command::Completions(_) | Command::Man | Command::Skill => unreachable!(),
     };
 
     // Diagnostics are non-fatal; surface them on stderr (so stdout stays pipeable) *after*

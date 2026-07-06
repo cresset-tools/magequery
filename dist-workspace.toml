@@ -96,6 +96,11 @@ To enable shell completions, add one line to your shell config:
     magequery completions fish | source
 
 Then restart your shell.
+
+Using an AI coding agent? Install the magequery skill into your project:
+
+    mkdir -p .claude/skills/magequery
+    magequery skill > .claude/skills/magequery/SKILL.md
 """
 
 # The live-database commands compile a bundled MySQL client, which builds C via
