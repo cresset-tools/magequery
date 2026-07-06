@@ -298,10 +298,30 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+  # Sign every archive with cosign keyless OIDC and attach the `.sig`
+  # Sigstore bundles to the release. Both jobs below `needs` this one:
+  # the mirror so it rsyncs the bundles, composer-branch so the
+  # Packagist tag can only exist once the binaries are signed (bougie's
+  # prefetch verifies fail-closed).
+  custom-sign-release:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/sign-release.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+    permissions:
+      "contents": "write"
+      "id-token": "write"
+
+  # Needs sign-release so the `.sig` bundles land on the mirror alongside
+  # the archives.
   custom-publish-mirror:
     needs:
       - plan
       - announce
+      - custom-sign-release
     uses: ./.github/workflows/publish-mirror.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
@@ -311,11 +331,13 @@ jobs:
 
   # Publish the Packagist composer branch + v* tag. Post-announce so the tag
   # can only exist once every binary is attached to the GitHub release (a
-  # `release: published` trigger raced the ~8-minute build).
+  # `release: published` trigger raced the ~8-minute build), and after
+  # sign-release so it can only exist once every binary is signed.
   custom-composer-branch:
     needs:
       - plan
       - announce
+      - custom-sign-release
     uses: ./.github/workflows/composer-branch.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
