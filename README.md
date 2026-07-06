@@ -165,6 +165,21 @@ magequery completions fish | source
 
 `magequery man` prints a man page.
 
+## Agent skill
+
+magequery ships a skill that teaches an AI coding agent when and how to use it on a Magento
+codebase, so the agent reaches for magequery on wiring questions instead of grepping or booting
+the framework. Install it into a project (or your home directory) with:
+
+```console
+$ mkdir -p .claude/skills/magequery
+$ magequery skill > .claude/skills/magequery/SKILL.md
+```
+
+The `skill` subcommand emits the file from the installed binary, so it always matches your
+version. It is plain markdown with YAML frontmatter, so it drops into a Cursor rule or your own
+docs just as well.
+
 ## Scope
 
 The target is Magento 2.4 Open Source. Adobe Commerce, Mage-OS, OpenMage, and similar forks
