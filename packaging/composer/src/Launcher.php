@@ -15,6 +15,13 @@ require __DIR__ . '/version.php';
  * from the magequery GitHub release (cresset mirror first), SHA-256-verified
  * against the `.sha256` sidecar, cached per-version, and exec'd. Mirrors
  * `uv format` and Mago's `composer/bin/mago`.
+ *
+ * The same download layout (URL bases, tag prefix, targets, cache path)
+ * is declared machine-readably in composer.json under
+ * `extra.bougie.native-binary`, so bougie can prefetch the binary at
+ * `bougie tool install` time instead of paying this download on first
+ * run. Keep that block in sync with this class and with
+ * dist-workspace.toml's target list.
  */
 final class Launcher
 {
