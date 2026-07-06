@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/magequery-core", "crates/magequery-cli"]
 
 [workspace.package]
-version = "0.1.0" # x-release-please-version
+version = "0.2.0" # x-release-please-version
 edition = "2021"
 license = "EUPL-1.2"
 repository = "https://github.com/cresset-tools/magequery"
