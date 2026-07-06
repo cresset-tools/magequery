@@ -157,7 +157,9 @@ flat invocation), and its `help_template` can't color literal text — so `main.
 styled through the `style` module, so it's grouped *and* colored, and plain when piped). It's
 intercepted by `wants_root_help` *before* clap parses; every `magequery <command> --help`
 still uses clap's native per-command help. Keep `HELP_GROUPS` in sync with the enum. New
-commands MUST slot into a group, never append to the end ad hoc:
+commands MUST slot into a group, never append to the end ad hoc — and be reflected in the
+`skill` command's `assets/skill/SKILL.md` too (the hard sync rule is under *Tooling
+meta-commands* below):
 
 ```
 WIRING        (object manager — how a class is assembled)
@@ -201,12 +203,26 @@ PROJECT       (the codebase itself)
   deps <module>             doctor [--source]          whatis <class>   patches [--db|--pending]
 ```
 
-**Tooling meta-commands** (`completions <shell>`, `man`) sit *outside* the seven groups —
-they describe the CLI itself, not a Magento entity, so they'd violate the "noun = Magento
-entity" grammar. Both are `#[command(hide = true)]` (absent from the grouped help screen but
-still `--help`-discoverable and tab-completable) and are dispatched **before**
+**Tooling meta-commands** (`completions <shell>`, `man`, `skill`) sit *outside* the seven
+groups — they describe the CLI itself, not a Magento entity, so they'd violate the "noun =
+Magento entity" grammar. All three are `#[command(hide = true)]` (absent from the grouped
+help screen but still `--help`-discoverable and tab-completable) and are dispatched **before**
 `Magento::open` so they work anywhere, no checkout needed. `completions` uses `clap_complete`
-(bash/zsh/fish/elvish/powershell → stdout), `man` uses `clap_mangen` (roff → stdout).
+(bash/zsh/fish/elvish/powershell → stdout), `man` uses `clap_mangen` (roff → stdout), and
+`skill` prints `assets/skill/SKILL.md` (embedded via `include_str!`, so it always matches this
+binary's command surface) — the Claude Code agent skill that teaches an AI agent to reach for
+magequery on "how is this wired" questions instead of grepping; users install it with
+`magequery skill > .claude/skills/magequery/SKILL.md`.
+
+**Keeping `SKILL.md` in sync is a hard rule.** Unlike `completions`/`man` (generated from the
+`Command` enum, so always current), the skill is **hand-maintained**: its frontmatter
+`description` (the trigger phrases an agent matches on) and its body (a question→command map
+over the whole surface, plus the `--json`/`--area`/`--db` conventions) must be updated by hand
+whenever a command is added, renamed, removed, or has its args/flags/behavior changed —
+otherwise `magequery skill` emits a stale map that silently steers agents to the wrong
+command. Treat `assets/skill/SKILL.md` as part of the command-surface contract, alongside
+`HELP_GROUPS`.
+
 Distribution is the `curl | sh` cargo-dist installer, which **cannot run custom logic or
 place extra files** (confirmed: axodotdev/cargo-dist#1696), so
 `[workspace.metadata.dist] install-success-msg` (root `Cargo.toml`) tells users to **source**
