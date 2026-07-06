@@ -1,0 +1,112 @@
+name: sign-release
+
+# Sign every release archive with cosign keyless OIDC (Sigstore),
+# producing a `<archive>.sig` bundle (signature + Fulcio certificate +
+# Rekor transparency-log inclusion proof) attached to the GitHub release
+# next to the `.sha256` sidecar — the same recipe php-build-standalone
+# uses for index.json.sig, which bougie already verifies in production.
+#
+# bougie's `tool install` prefetch verifies these bundles against this
+# repository's GitHub Actions identity, fail-closed, per the
+# `extra.bougie.native-binary.sigstore` block in
+# packaging/composer/composer.json. The PHP launcher itself does not
+# verify them (composer-only installs stay sha256-sidecar-only).
+#
+# Runs as a dist post-announce job (workflow_call from release.yml).
+# custom-composer-branch `needs` this job, so the Packagist tag can only
+# exist once every archive is signed — a release where signing failed
+# never reaches Packagist.
+#
+# Also runnable manually (workflow_dispatch) to backfill signatures for
+# an existing release: that path downloads the release assets instead of
+# the in-run build artifacts.
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: "dist plan (unused — the caller's release event context supplies the tag)"
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release tag to backfill signatures for, e.g. magequery-v0.1.0 (default: latest release)"
+        required: false
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: sign-release
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'magequery-v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # upload the .sig assets onto the release
+      id-token: write  # cosign keyless OIDC
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag='${{ inputs.tag }}'
+            if [ -z "$tag" ]; then
+              tag="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)"
+            fi
+          else
+            tag='${{ github.event.release.tag_name }}'
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Signing release: $tag"
+
+      - name: Download archives (dist build artifacts)
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Download archives (existing release assets)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          mkdir -p artifacts
+          gh release download "${{ steps.tag.outputs.tag }}" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'magequery-*.tar.gz' --pattern 'magequery-*.zip' --dir artifacts
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4
+
+      - name: Sign archives (cosign keyless via OIDC)
+        run: |
+          shopt -s nullglob
+          cd artifacts
+          files=(magequery-*.tar.gz magequery-*.zip)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "no release archives found to sign" >&2
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            echo "signing $f"
+            cosign sign-blob --yes --bundle "$f.sig" "$f"
+          done
+
+      - name: Upload signature bundles to the release
+        run: |
+          gh release upload "${{ steps.tag.outputs.tag }}" --repo "$GITHUB_REPOSITORY" \
+            --clobber artifacts/*.sig
+
+      # Matches publish-mirror's `artifacts-*` download pattern, so the
+      # mirror rsyncs the bundles alongside the archives.
+      - name: Expose bundles to later post-announce jobs
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifacts-sigstore-bundles
+          path: artifacts/*.sig

@@ -15,5 +15,27 @@
         "ext-curl": "Faster, more reliable binary downloads",
         "ext-zip": "Required to install on Windows (the binary ships as a .zip)"
     },
-    "bin": ["bin/magequery"]
+    "bin": ["bin/magequery"],
+    "extra": {
+        "bougie": {
+            "native-binary": {
+                "spec": 1,
+                "name": "magequery",
+                "tag-prefix": "magequery-v",
+                "base-urls": [
+                    "https://releases.bougie.tools/github/magequery/releases/download",
+                    "https://github.com/cresset-tools/magequery/releases/download"
+                ],
+                "targets": [
+                    "x86_64-unknown-linux-gnu",
+                    "x86_64-unknown-linux-musl",
+                    "aarch64-apple-darwin",
+                    "x86_64-pc-windows-msvc"
+                ],
+                "sigstore": {
+                    "repository": "cresset-tools/magequery"
+                }
+            }
+        }
+    }
 }
