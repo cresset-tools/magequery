@@ -1,0 +1,65 @@
+name: composer-branch
+
+# On each magequery release, (re)generate the orphan `composer` branch + the
+# matching vX.Y.Z tag that Packagist serves for cresset/magequery. That
+# branch contains only the PHP launcher (no Rust source); the launcher
+# fetches the magequery-vX.Y.Z binary at runtime. Packagist's GitHub webhook
+# picks up the new tag automatically.
+#
+# Also runnable manually (workflow_dispatch) to re-publish a version or to
+# verify the generator end-to-end without cutting a release.
+#
+# Pushing the composer branch / v* tag does not trigger any other workflow:
+# ci.yml and release-please.yml only run on push to `main`, and release.yml
+# only runs on `release: published` (the v* tag is not a `magequery-v*`
+# release).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "magequery version to (re)publish, e.g. 0.1.0 (default: latest release)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: composer-branch
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # The tool's own releases, or any manual dispatch.
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'magequery-v') }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            version='${{ github.event.release.tag_name }}'
+          else
+            version='${{ inputs.version }}'
+            if [ -z "$version" ]; then
+              version="$(gh release view --json tagName -q .tagName)"
+            fi
+          fi
+          version="${version#magequery-v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved magequery version: $version"
+
+      - name: Publish composer branch + tag
+        run: |
+          git config user.name "cresset-bot"
+          git config user.email "noreply@cresset.tools"
+          scripts/publish-composer-branch.sh "${{ steps.ver.outputs.version }}"
