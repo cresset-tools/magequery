@@ -81,7 +81,7 @@ jobs:
             --pattern 'magequery-*.tar.gz' --pattern 'magequery-*.zip' --dir artifacts
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@v4
+        uses: sigstore/cosign-installer@v4.1.2
 
       - name: Sign archives (cosign keyless via OIDC)
         run: |
