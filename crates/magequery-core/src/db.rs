@@ -993,6 +993,27 @@ pub(crate) fn fetch_order_statuses(
     ))
 }
 
+/// Customer groups joined with their tax class, plus a member count from
+/// `customer_entity`. `(group_id, code, tax_class_id, tax_class_name, members)`.
+#[allow(clippy::type_complexity)]
+pub(crate) fn fetch_customer_groups(
+    conn: &DbConnection,
+    table_prefix: &str,
+) -> Result<Vec<(i64, String, u32, Option<String>, u64)>, String> {
+    use mysql::prelude::Queryable;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+    c.query(format!(
+        "SELECT g.customer_group_id, g.customer_group_code, g.tax_class_id, t.class_name, \
+                (SELECT COUNT(*) FROM {p}customer_entity e \
+                 WHERE e.group_id = g.customer_group_id) \
+         FROM {p}customer_group g \
+         LEFT JOIN {p}tax_class t ON t.class_id = g.tax_class_id \
+         ORDER BY g.customer_group_id"
+    ))
+    .map_err(clean_err)
+}
+
 /// One row per (entity type × store) sequence: profile + the sequence table's high-water
 /// mark. `(entity_type, store_id, sequence_table, prefix, suffix, step, active,
 /// max_value, warning_value, current)`.
@@ -2894,6 +2915,8 @@ pub(crate) struct DbProduct {
     pub categories: Vec<(u32, String)>,
     /// `(request_path, store code, redirect_type)`.
     pub rewrites: Vec<(String, String, u16)>,
+    /// Media gallery: `(file, media_type, store-0 label, position, disabled)`.
+    pub media: Vec<(String, String, Option<String>, i32, bool)>,
     pub parents: Vec<String>,
     /// Attribute codes a configurable is configured by, in position order.
     pub super_attributes: Vec<String>,
@@ -3345,6 +3368,34 @@ pub(crate) fn fetch_product(
         }
     }
 
+    // Media gallery: the gallery rows linked to this entity, with the store-0
+    // label/position. The tables are core catalog but may be absent on a stripped
+    // synthetic DB — degrade quietly, like MSI stock above.
+    let media: Vec<(String, String, Option<String>, i32, bool)> = c
+        .exec(
+            format!(
+                "SELECT mg.value, mg.media_type, mgv.label, mgv.position, \
+                        mg.disabled, mgv.disabled \
+                 FROM {p}catalog_product_entity_media_gallery mg \
+                 JOIN {p}catalog_product_entity_media_gallery_value_to_entity mgvte \
+                   ON mgvte.value_id = mg.value_id \
+                 LEFT JOIN {p}catalog_product_entity_media_gallery_value mgv \
+                   ON mgv.value_id = mg.value_id AND mgv.store_id = 0 \
+                 WHERE mgvte.entity_id = :v \
+                 ORDER BY mgv.position, mg.value_id"
+            ),
+            params! { "v" => entity_id },
+        )
+        .map(|rows: Vec<(String, String, Option<String>, Option<i32>, i64, Option<i64>)>| {
+            rows.into_iter()
+                .map(|(file, media_type, label, pos, mg_dis, mgv_dis)| {
+                    let disabled = mg_dis != 0 || mgv_dis.unwrap_or(0) != 0;
+                    (file, media_type, label, pos.unwrap_or(0), disabled)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     Ok(Some(DbProduct {
         entity_id,
         sku,
@@ -3361,6 +3412,7 @@ pub(crate) fn fetch_product(
         legacy_stock,
         categories,
         rewrites,
+        media,
         parents,
         super_attributes,
         children,

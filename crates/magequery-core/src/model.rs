@@ -1957,6 +1957,21 @@ pub struct OrderStatus {
     pub states: Vec<OrderStatusState>,
 }
 
+/// One customer group with its tax class and how many accounts belong to it. The
+/// built-in `NOT LOGGED IN` group (id 0) is the guest bucket: it has no stored
+/// members, so `members` is 0 by design. Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct CustomerGroup {
+    pub id: i64,
+    pub code: String,
+    pub tax_class_id: u32,
+    /// The tax class name (`tax_class.class_name`); `None` if the id resolves to no row.
+    pub tax_class: Option<String>,
+    /// Accounts in `customer_entity` whose `group_id` is this group.
+    pub members: u64,
+}
+
 /// One sales increment sequence (per entity type × store).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
@@ -2410,6 +2425,25 @@ pub struct ProductRewrite {
     pub redirect: u16,
 }
 
+/// One entry of a product's media gallery (`catalog_product_entity_media_gallery`),
+/// with the store-0 label/position and the image roles it fills.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductMedia {
+    /// The stored file path (e.g. `/a/b/shoe.jpg`) or the external-video url.
+    pub file: String,
+    /// `image` or `external-video`.
+    pub media_type: String,
+    /// The store-0 (default) label, if any.
+    pub label: Option<String>,
+    pub position: i32,
+    /// Hidden from the gallery (`disabled` on the gallery row or its store-0 value).
+    pub disabled: bool,
+    /// Image roles this file fills, from the product's role attributes: any of
+    /// `base` (`image`), `small` (`small_image`), `thumbnail`, `swatch` (`swatch_image`).
+    pub roles: Vec<String>,
+}
+
 /// One product as the database stores it: identity, per-scope EAV values, stock (MSI +
 /// legacy), categories, rewrites, and configurable links. Live DB.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2429,6 +2463,8 @@ pub struct Product {
     pub legacy_stock: Option<ProductLegacyStock>,
     pub categories: Vec<ProductCategory>,
     pub rewrites: Vec<ProductRewrite>,
+    /// Media gallery entries, in position order.
+    pub media: Vec<ProductMedia>,
     /// Configurable parents this product is a variant of (SKUs).
     pub parents: Vec<String>,
     /// The attributes a configurable is configured by (`catalog_product_super_attribute`).

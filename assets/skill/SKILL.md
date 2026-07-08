@@ -76,6 +76,9 @@ the cited file: magequery itself is read-only and never modifies anything.
   `price <sku>`, `category <id|name>`, `invoice|shipment|creditmemo <increment#>`,
   `sales-rule <coupon|id>`, `tax`, `stores`, `url-rewrites <path>`.
   These read the database directly and report a clean error if it is unreachable.
+- What customer groups exist, their tax class and member counts? →
+  `customer-groups [<filter>]`. (`product <sku>` also lists the media gallery, with
+  each image's base/thumbnail/swatch role.)
 
 **Health and whole-class views**
 - Is anything in the merged config broken (missing classes, cycles, forgotten

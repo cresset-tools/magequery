@@ -52,6 +52,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("category", "The category tree; one category's visibility & product counts"),
             ("order", "One order: item lifecycle, totals, payment, documents, history"),
             ("customer", "One customer: account state, addresses, orders, newsletter"),
+            ("customer-groups", "Customer groups: tax class and member count per group"),
             ("quote", "One cart as checkout computed it: items, totals, chosen methods"),
             ("invoice", "One invoice by increment id (→ its order)"),
             ("shipment", "One shipment by increment id: items, tracking (→ its order)"),
@@ -280,6 +281,8 @@ enum Command {
     Order(OrderArgs),
     /// One customer: account state, addresses, order summary, newsletter.
     Customer(CustomerArgs),
+    /// Customer groups: tax class and member count per group.
+    CustomerGroups(CustomerGroupsArgs),
     /// One quote (cart) as checkout computed it: items, totals, chosen methods.
     Quote(QuoteArgs),
     /// One invoice by increment id, with its order cross-link.
@@ -595,6 +598,14 @@ struct CustomerArgs {
     /// Look up by entity_id.
     #[arg(long)]
     id: Option<u32>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct CustomerGroupsArgs {
+    /// A code/id/tax-class substring. Omit to list all.
+    filter: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -1132,6 +1143,7 @@ fn main() -> Result<()> {
         Command::Category(args) => category(&mage, &args),
         Command::Order(args) => order(&mage, &args),
         Command::Customer(args) => customer(&mage, &args),
+        Command::CustomerGroups(args) => customer_groups(&mage, &args),
         Command::Quote(args) => quote(&mage, &args),
         Command::Invoice(args) => sales_document(&mage, SalesDocKind::Invoice, &args),
         Command::Shipment(args) => sales_document(&mage, SalesDocKind::Shipment, &args),
@@ -2447,6 +2459,44 @@ fn order_statuses(mage: &Magento, args: &OrderStatusesArgs) -> Result<()> {
         );
     }
     eprintln!("\n{} status(es)", statuses.len());
+    Ok(())
+}
+
+fn customer_groups(mage: &Magento, args: &CustomerGroupsArgs) -> Result<()> {
+    let groups = mage.customer_groups(args.filter.as_deref())?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&groups)?);
+        return Ok(());
+    }
+    if groups.is_empty() {
+        println!("{}", style::dim("(no group matches)"));
+        return Ok(());
+    }
+    let wi = groups.iter().map(|g| g.id.to_string().len()).max().unwrap_or(0);
+    let wc = groups.iter().map(|g| g.code.len()).max().unwrap_or(0);
+    for g in &groups {
+        let id = g.id.to_string();
+        let tax = g
+            .tax_class
+            .as_deref()
+            .map(|t| style::string_lit(&format!("\"{t}\"")))
+            .unwrap_or_else(|| style::err(&format!("(tax_class_id {}?)", g.tax_class_id)));
+        let members = if g.members == 0 {
+            style::dim("0 member(s)")
+        } else {
+            format!("{} member(s)", style::number(&g.members.to_string()))
+        };
+        println!(
+            "{}{}  {}{}  {} {}  {members}",
+            " ".repeat(wi - id.len()),
+            style::number(&id),
+            style::name(&g.code),
+            " ".repeat(wc - g.code.len()),
+            style::dim("tax:"),
+            tax,
+        );
+    }
+    eprintln!("\n{} group(s)", groups.len());
     Ok(())
 }
 
@@ -4479,6 +4529,35 @@ fn render_product(p: &magequery_core::Product, args: &ProductArgs) -> Result<()>
             String::new()
         };
         info_row("rewrites", format!("{}: {}{more}", p.rewrites.len(), shown.join(", ")));
+    }
+    if !p.media.is_empty() {
+        println!("\n{}", style::dim(&format!("media ({}):", p.media.len())));
+        let wf = p.media.iter().map(|m| m.file.len()).max().unwrap_or(0);
+        for m in &p.media {
+            let label = m
+                .label
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|l| format!("  {}", style::string_lit(&format!("\"{l}\""))))
+                .unwrap_or_default();
+            let roles = if m.roles.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", style::area(&format!("[{}]", m.roles.join(", "))))
+            };
+            let disabled = if m.disabled {
+                format!("  {}", style::err("✕ disabled"))
+            } else {
+                String::new()
+            };
+            println!(
+                "  {}{}  {}  {}{label}{roles}{disabled}",
+                m.file,
+                " ".repeat(wf - m.file.len()),
+                style::dim(&format!("pos {}", m.position)),
+                style::dim(&m.media_type),
+            );
+        }
     }
     if !p.parents.is_empty() {
         let list: Vec<String> = p.parents.iter().map(|s| style::name(s)).collect();

@@ -60,7 +60,7 @@ pub use model::{
     CategoryIndexedProduct, CategoryProduct,
     CategoryTreeNode, CategoryVisibilityIssue,
     CatalogRule, CatalogRuleHit,
-    ChildPrice, CmsEntry, CmsHit, CmsKind, Customer, CustomerAddress, CustomerHit,
+    ChildPrice, CmsEntry, CmsHit, CmsKind, Customer, CustomerAddress, CustomerGroup, CustomerHit,
     CustomerNewsletter, CustomerOrders,
     IndexedPrice, Order, OrderAddress, OrderComment, OrderDocument, OrderHit,
     OrderItem, OrderPayment, OrderShipment, OrderStatus, OrderStatusState, OrderTotal,
@@ -71,7 +71,7 @@ pub use model::{
     SalesDocKind, SalesDocument, SalesDocumentHit, SalesDocumentItem, SalesRule, SalesRuleHit,
     StoreGroupNode, StoreTree, StoreViewNode, TaxClassInfo, TaxInfo, TaxRate, TaxRule,
     WebsiteNode,
-    ProductHit, ProductLegacyStock, ProductPrices, ProductRewrite, ProductScopeValue,
+    ProductHit, ProductLegacyStock, ProductMedia, ProductPrices, ProductRewrite, ProductScopeValue,
     ProductSourceStock, ProductValue,
     RedisConfig, RedisInstance, RedisPing, RulePrice, TierPrice,
     Resolution, Route, SchemaDrift, TableColumn, TranslationEntry, TranslationLayer,
@@ -1546,6 +1546,34 @@ impl Magento {
             key(a).cmp(&key(b))
         });
         Ok(out)
+    }
+
+    /// Every customer group with its tax class and member count, filtered by a
+    /// code/id/tax-class substring. Live DB.
+    #[cfg(feature = "db")]
+    pub fn customer_groups(&self, filter: Option<&str>) -> Result<Vec<CustomerGroup>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let rows = db::fetch_customer_groups(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let needle = filter.map(str::to_lowercase);
+        Ok(rows
+            .into_iter()
+            .map(|(id, code, tax_class_id, tax_class, members)| CustomerGroup {
+                id,
+                code,
+                tax_class_id,
+                tax_class,
+                members,
+            })
+            .filter(|g| match &needle {
+                Some(n) => {
+                    g.code.to_lowercase().contains(n)
+                        || g.id.to_string() == *n
+                        || g.tax_class.as_deref().is_some_and(|t| t.to_lowercase().contains(n))
+                }
+                None => true,
+            })
+            .collect())
     }
 
     /// The sales increment sequences (per entity type × store): the profile plus the
@@ -4188,6 +4216,33 @@ fn to_product(raw: db::DbProduct, matched_by_id: bool) -> Product {
         rank(&a.attribute).cmp(&rank(&b.attribute)).then_with(|| a.attribute.cmp(&b.attribute))
     });
 
+    // Image roles come for free from the product's role attributes (default scope): the
+    // file a gallery entry fills as base/small/thumbnail/swatch. `no_selection` = unset.
+    let roles_by_file: Vec<(String, &str)> =
+        [("image", "base"), ("small_image", "small"), ("thumbnail", "thumbnail"), ("swatch_image", "swatch")]
+            .iter()
+            .filter_map(|(attr, role)| {
+                raw.values
+                    .iter()
+                    .find(|v| v.attribute == *attr && v.store_id == 0)
+                    .and_then(|v| v.value.as_deref())
+                    .filter(|s| !s.is_empty() && *s != "no_selection")
+                    .map(|f| (f.to_string(), *role))
+            })
+            .collect();
+    let media: Vec<ProductMedia> = raw
+        .media
+        .into_iter()
+        .map(|(file, media_type, label, position, disabled)| {
+            let roles = roles_by_file
+                .iter()
+                .filter(|(f, _)| *f == file)
+                .map(|(_, r)| r.to_string())
+                .collect();
+            ProductMedia { file, media_type, label, position, disabled, roles }
+        })
+        .collect();
+
     Product {
         entity_id: raw.entity_id,
         sku: raw.sku,
@@ -4215,6 +4270,7 @@ fn to_product(raw: db::DbProduct, matched_by_id: bool) -> Product {
             .into_iter()
             .map(|(request_path, store, redirect)| ProductRewrite { request_path, store, redirect })
             .collect(),
+        media,
         parents: raw.parents,
         super_attributes: raw.super_attributes,
         children: raw
