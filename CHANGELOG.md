@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.3.0...magequery-v0.4.0) (2026-07-08)
+
+
+### Features
+
+* add product media gallery and customer-groups command ([#14](https://github.com/cresset-tools/magequery/issues/14)) ([1e6ac1d](https://github.com/cresset-tools/magequery/commit/1e6ac1d06e7a278faed3f59fbabd6b4266768949))
+* add product-links command (related/up-sell/cross-sell) ([#17](https://github.com/cresset-tools/magequery/issues/17)) ([0f8f4b6](https://github.com/cresset-tools/magequery/commit/0f8f4b63e7a6763af60615de196f6784c6f07bf3))
+
 ## [0.3.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.2.0...magequery-v0.3.0) (2026-07-06)
 
 
