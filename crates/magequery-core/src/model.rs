@@ -2489,6 +2489,43 @@ pub struct ProductHit {
     pub enabled: Option<bool>,
 }
 
+/// One product a link points at (or, in a reverse view, that points at this product),
+/// enriched with the state that decides whether it actually renders in the block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductLinkTarget {
+    /// The `position` link attribute (0 when unset); the block's display order.
+    pub position: i32,
+    pub sku: String,
+    pub name: Option<String>,
+    /// `status` decoded; `None` = no status row (treated as enabled by Magento).
+    pub enabled: Option<bool>,
+    /// Decoded visibility label (e.g. `Catalog, Search`).
+    pub visibility: Option<String>,
+    /// Legacy `is_in_stock`; `None` = no stock row.
+    pub in_stock: Option<bool>,
+    /// The product won't render in the block: disabled, or Not Visible Individually.
+    pub hidden: bool,
+}
+
+/// The merchandising links of one product: related, up-sells, cross-sells
+/// (`catalog_product_link` types 1/4/5). Live DB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct ProductLinks {
+    pub entity_id: u32,
+    pub sku: String,
+    pub type_id: String,
+    pub name: Option<String>,
+    /// `true` = the reverse view: products that link *to* this one.
+    pub reverse: bool,
+    pub related: Vec<ProductLinkTarget>,
+    pub up_sells: Vec<ProductLinkTarget>,
+    pub cross_sells: Vec<ProductLinkTarget>,
+    /// The lookup resolved via entity_id, not SKU (numeric query, no SKU match).
+    pub matched_by_id: bool,
+}
+
 /// One queue's live backlog (MysqlMq driver tables) joined with the static topology.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
