@@ -71,7 +71,8 @@ pub use model::{
     SalesDocKind, SalesDocument, SalesDocumentHit, SalesDocumentItem, SalesRule, SalesRuleHit,
     StoreGroupNode, StoreTree, StoreViewNode, TaxClassInfo, TaxInfo, TaxRate, TaxRule,
     WebsiteNode,
-    ProductHit, ProductLegacyStock, ProductMedia, ProductPrices, ProductRewrite, ProductScopeValue,
+    ProductHit, ProductLegacyStock, ProductLinks, ProductLinkTarget, ProductMedia, ProductPrices,
+    ProductRewrite, ProductScopeValue,
     ProductSourceStock, ProductValue,
     RedisConfig, RedisInstance, RedisPing, RulePrice, TierPrice,
     Resolution, Route, SchemaDrift, TableColumn, TranslationEntry, TranslationLayer,
@@ -994,6 +995,29 @@ impl Magento {
         let raw = db::fetch_product(conn, &cfg.table_prefix, db::ProductIdent::Id(id))
             .map_err(Error::Db)?;
         Ok(raw.map(|r| to_product(r, true)))
+    }
+
+    /// A product's related / up-sell / cross-sell links by SKU. `reverse` flips to
+    /// the products that link *to* this one. Live DB.
+    #[cfg(feature = "db")]
+    pub fn product_links_by_sku(&self, sku: &str, reverse: bool) -> Result<Option<ProductLinks>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw =
+            db::fetch_product_links(conn, &cfg.table_prefix, db::ProductIdent::Sku(sku), reverse)
+                .map_err(Error::Db)?;
+        Ok(raw.map(|r| to_product_links(r, false)))
+    }
+
+    /// A product's links by entity_id (`matched_by_id` is set on the result). Live DB.
+    #[cfg(feature = "db")]
+    pub fn product_links_by_id(&self, id: u32, reverse: bool) -> Result<Option<ProductLinks>> {
+        let cfg = self.db_config()?;
+        let conn = default_connection(&cfg)?;
+        let raw =
+            db::fetch_product_links(conn, &cfg.table_prefix, db::ProductIdent::Id(id), reverse)
+                .map_err(Error::Db)?;
+        Ok(raw.map(|r| to_product_links(r, true)))
     }
 
     /// The category tree, pre-order flattened (`level` 1 = a root tree), each root
@@ -4130,6 +4154,44 @@ fn to_product_prices(raw: db::DbProductPrices, matched_by_id: bool) -> ProductPr
 /// core), tax classes from `tax_class`, and admin option labels for table-source
 /// select/multiselect values.
 #[cfg(feature = "db")]
+fn to_product_links(raw: db::DbProductLinks, matched_by_id: bool) -> ProductLinks {
+    let conv = |t: db::DbLinkTarget| {
+        let enabled = t.status.map(|s| s == 1);
+        let visibility = t.visibility.map(|v| {
+            match v {
+                1 => "Not Visible Individually",
+                2 => "Catalog",
+                3 => "Search",
+                4 => "Catalog, Search",
+                _ => "?",
+            }
+            .to_string()
+        });
+        // Won't render in the block: disabled, or Not Visible Individually.
+        let hidden = enabled == Some(false) || t.visibility == Some(1);
+        ProductLinkTarget {
+            position: t.position,
+            sku: t.sku,
+            name: t.name,
+            enabled,
+            visibility,
+            in_stock: t.in_stock,
+            hidden,
+        }
+    };
+    ProductLinks {
+        entity_id: raw.entity_id,
+        sku: raw.sku,
+        type_id: raw.type_id,
+        name: raw.name,
+        reverse: raw.reverse,
+        related: raw.related.into_iter().map(conv).collect(),
+        up_sells: raw.up_sells.into_iter().map(conv).collect(),
+        cross_sells: raw.cross_sells.into_iter().map(conv).collect(),
+        matched_by_id,
+    }
+}
+
 fn to_product(raw: db::DbProduct, matched_by_id: bool) -> Product {
     let label_of = |v: &db::DbProductValue, value: &str| -> Option<String> {
         match (v.attribute.as_str(), v.input.as_deref()) {
