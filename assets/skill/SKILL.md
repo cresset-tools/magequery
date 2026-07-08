@@ -79,6 +79,9 @@ the cited file: magequery itself is read-only and never modifies anything.
 - What customer groups exist, their tax class and member counts? →
   `customer-groups [<filter>]`. (`product <sku>` also lists the media gallery, with
   each image's base/thumbnail/swatch role.)
+- What related / up-sell / cross-sell products does a SKU link to (and why isn't a
+  link showing)? → `product-links <sku>`. Add `--reverse` for the products that link
+  *to* it.
 
 **Health and whole-class views**
 - Is anything in the merged config broken (missing classes, cycles, forgotten

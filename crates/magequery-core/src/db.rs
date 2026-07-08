@@ -2597,6 +2597,166 @@ pub(crate) fn fetch_product_identity(
     .map_err(clean_err)
 }
 
+/// One link target, raw: position + sku + the enrichment attributes (decoded later).
+pub(crate) struct DbLinkTarget {
+    pub position: i32,
+    pub sku: String,
+    pub name: Option<String>,
+    pub status: Option<i64>,
+    pub visibility: Option<i64>,
+    pub in_stock: Option<bool>,
+}
+
+pub(crate) struct DbProductLinks {
+    pub entity_id: u32,
+    pub sku: String,
+    pub type_id: String,
+    pub name: Option<String>,
+    pub reverse: bool,
+    pub related: Vec<DbLinkTarget>,
+    pub up_sells: Vec<DbLinkTarget>,
+    pub cross_sells: Vec<DbLinkTarget>,
+}
+
+/// Related / up-sell / cross-sell links for one product (`catalog_product_link`
+/// types 1/4/5), each target enriched with name/status/visibility/stock. `reverse`
+/// flips the direction to "products that link *to* this one".
+pub(crate) fn fetch_product_links(
+    conn: &DbConnection,
+    table_prefix: &str,
+    ident: ProductIdent<'_>,
+    reverse: bool,
+) -> Result<Option<DbProductLinks>, String> {
+    use mysql::params;
+    use mysql::prelude::Queryable;
+    use std::collections::HashMap;
+    let mut c = connect(conn)?;
+    let p = table_prefix;
+
+    let base = format!("SELECT entity_id, sku, type_id FROM {p}catalog_product_entity");
+    let row: Option<(u32, String, String)> = match ident {
+        ProductIdent::Sku(sku) => {
+            c.exec_first(format!("{base} WHERE sku = :v"), params! { "v" => sku })
+        }
+        ProductIdent::Id(id) => {
+            c.exec_first(format!("{base} WHERE entity_id = :v"), params! { "v" => id })
+        }
+    }
+    .map_err(clean_err)?;
+    let Some((entity_id, sku, type_id)) = row else { return Ok(None) };
+
+    // The product attribute ids we enrich targets with (name/status/visibility).
+    let attr_ids: HashMap<String, u32> = c
+        .query(format!(
+            "SELECT a.attribute_code, a.attribute_id FROM {p}eav_attribute a \
+             JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
+             WHERE t.entity_type_code = 'catalog_product' \
+             AND a.attribute_code IN ('name','status','visibility')"
+        ))
+        .map_err(clean_err)?
+        .into_iter()
+        .collect();
+
+    // Each link type -> its (target_id, sku, position) rows, position-ordered.
+    let (own, other) = if reverse {
+        ("linked_product_id", "product_id")
+    } else {
+        ("product_id", "linked_product_id")
+    };
+    let mut per_type: Vec<Vec<(u32, String, i32)>> = Vec::new();
+    for t in [1u32, 4, 5] {
+        let rows: Vec<(u32, String, Option<i32>)> = c
+            .exec(
+                format!(
+                    "SELECT e.entity_id, e.sku, i.value \
+                     FROM {p}catalog_product_link l \
+                     JOIN {p}catalog_product_entity e ON e.entity_id = l.{other} \
+                     LEFT JOIN {p}catalog_product_link_attribute_int i \
+                       ON i.link_id = l.link_id AND i.product_link_attribute_id = ( \
+                          SELECT product_link_attribute_id FROM {p}catalog_product_link_attribute \
+                          WHERE link_type_id = {t} AND product_link_attribute_code = 'position' \
+                          LIMIT 1) \
+                     WHERE l.{own} = :v AND l.link_type_id = {t} \
+                     ORDER BY i.value, e.sku"
+                ),
+                params! { "v" => entity_id },
+            )
+            .map_err(clean_err)?;
+        per_type.push(rows.into_iter().map(|(id, sku, pos)| (id, sku, pos.unwrap_or(0))).collect());
+    }
+
+    // Batch the enrichment over every target id (+ the base, for its name).
+    let mut ids: Vec<u32> = per_type.iter().flatten().map(|(id, _, _)| *id).collect();
+    ids.push(entity_id);
+    ids.sort_unstable();
+    ids.dedup();
+    let id_list = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+
+    let names: HashMap<u32, String> = match attr_ids.get("name") {
+        Some(nid) => c
+            .query(format!(
+                "SELECT entity_id, value FROM {p}catalog_product_entity_varchar \
+                 WHERE store_id = 0 AND attribute_id = {nid} AND entity_id IN ({id_list})"
+            ))
+            .map(|r: Vec<(u32, Option<String>)>| {
+                r.into_iter().filter_map(|(i, v)| v.map(|v| (i, v))).collect()
+            })
+            .unwrap_or_default(),
+        None => HashMap::new(),
+    };
+    let int_attr = |c: &mut mysql::Conn, code: &str| -> HashMap<u32, i64> {
+        match attr_ids.get(code) {
+            Some(aid) => c
+                .query(format!(
+                    "SELECT entity_id, value FROM {p}catalog_product_entity_int \
+                     WHERE store_id = 0 AND attribute_id = {aid} AND entity_id IN ({id_list})"
+                ))
+                .map(|r: Vec<(u32, Option<i64>)>| {
+                    r.into_iter().filter_map(|(i, v)| v.map(|v| (i, v))).collect()
+                })
+                .unwrap_or_default(),
+            None => HashMap::new(),
+        }
+    };
+    let statuses = int_attr(&mut c, "status");
+    let visibilities = int_attr(&mut c, "visibility");
+    let stock: HashMap<u32, bool> = c
+        .query(format!(
+            "SELECT product_id, is_in_stock FROM {p}cataloginventory_stock_item \
+             WHERE product_id IN ({id_list})"
+        ))
+        .map(|r: Vec<(u32, i64)>| r.into_iter().map(|(i, s)| (i, s != 0)).collect())
+        .unwrap_or_default();
+
+    let build = |rows: Vec<(u32, String, i32)>| -> Vec<DbLinkTarget> {
+        rows.into_iter()
+            .map(|(id, sku, position)| DbLinkTarget {
+                position,
+                sku,
+                name: names.get(&id).cloned(),
+                status: statuses.get(&id).copied(),
+                visibility: visibilities.get(&id).copied(),
+                in_stock: stock.get(&id).copied(),
+            })
+            .collect()
+    };
+    let mut built: Vec<Vec<DbLinkTarget>> = per_type.into_iter().map(build).collect();
+    let cross_sells = built.pop().unwrap_or_default();
+    let up_sells = built.pop().unwrap_or_default();
+    let related = built.pop().unwrap_or_default();
+
+    Ok(Some(DbProductLinks {
+        name: names.get(&entity_id).cloned(),
+        entity_id,
+        sku,
+        type_id,
+        reverse,
+        related,
+        up_sells,
+        cross_sells,
+    }))
+}
+
 /// Everything price-shaped for one product, raw.
 pub(crate) struct DbProductPrices {
     pub entity_id: u32,

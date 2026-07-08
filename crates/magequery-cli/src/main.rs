@@ -49,6 +49,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("eav", "EAV attributes: type, models, flags, sets, creator patch (--db)"),
             ("product", "One product as the DB stores it: values per scope, stock, categories"),
             ("price", "Every price of a product: attributes, tiers, rules, the price index"),
+            ("product-links", "Related / up-sell / cross-sell links for a SKU (--reverse)"),
             ("category", "The category tree; one category's visibility & product counts"),
             ("order", "One order: item lifecycle, totals, payment, documents, history"),
             ("customer", "One customer: account state, addresses, orders, newsletter"),
@@ -275,6 +276,8 @@ enum Command {
     Product(ProductArgs),
     /// Every price of a product: EAV attributes, tier prices, catalog rules, the index.
     Price(PriceArgs),
+    /// A product's related / up-sell / cross-sell links (`--reverse` for who links to it).
+    ProductLinks(ProductLinksArgs),
     /// The category tree, or one category: visibility diagnosis, product counts, URLs.
     Category(CategoryArgs),
     /// One order: item lifecycle, totals, payment, documents, status history.
@@ -555,6 +558,20 @@ struct PriceArgs {
     /// Look up by entity_id — unambiguous when SKUs are numeric.
     #[arg(long)]
     id: Option<u32>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct ProductLinksArgs {
+    /// A SKU (exact match). A numeric value with no matching SKU is an entity_id.
+    query: Option<String>,
+    /// Look up by entity_id — unambiguous when SKUs are numeric.
+    #[arg(long)]
+    id: Option<u32>,
+    /// Show the reverse direction: products that link *to* this one.
+    #[arg(long)]
+    reverse: bool,
     #[arg(long)]
     json: bool,
 }
@@ -1140,6 +1157,7 @@ fn main() -> Result<()> {
         Command::Eav(args) => eav(&mage, &args, &cli.root),
         Command::Product(args) => product(&mage, &args),
         Command::Price(args) => price(&mage, &args),
+        Command::ProductLinks(args) => product_links(&mage, &args),
         Command::Category(args) => category(&mage, &args),
         Command::Order(args) => order(&mage, &args),
         Command::Customer(args) => customer(&mage, &args),
@@ -2052,6 +2070,159 @@ fn product(mage: &Magento, args: &ProductArgs) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn product_links(mage: &Magento, args: &ProductLinksArgs) -> Result<()> {
+    let rev = args.reverse;
+    // Same lookup rule as `product`: --id is unambiguous; a positional is an exact SKU
+    // first, then (if numeric, no SKU) an entity_id, then a SKU substring.
+    let found: Option<magequery_core::ProductLinks> = if let Some(id) = args.id {
+        let p = mage.product_links_by_id(id, rev)?;
+        if p.is_none() {
+            return Err(anyhow!("no product with entity_id {id}"));
+        }
+        p
+    } else {
+        let Some(q) = &args.query else {
+            return Err(anyhow!("give a SKU (or --id <entity_id>)"));
+        };
+        if let Some(hit) = mage.product_links_by_sku(q, rev)? {
+            shadow_note(mage, q, hit.entity_id)?;
+            Some(hit)
+        } else if let Ok(id) = q.parse::<u32>() {
+            mage.product_links_by_id(id, rev)?
+        } else {
+            None
+        }
+    };
+    if let Some(pl) = found {
+        return render_product_links(&pl, args);
+    }
+
+    let q = args.query.as_deref().unwrap_or_default();
+    let (hits, truncated) = mage.products_like(q, 50)?;
+    match hits.len() {
+        0 => Err(anyhow!("no product matches `{q}`")),
+        1 => {
+            let pl = mage.product_links_by_sku(&hits[0].sku, rev)?.expect("listed product");
+            render_product_links(&pl, args)
+        }
+        _ => {
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&hits)?);
+                return Ok(());
+            }
+            let ws = hits.iter().map(|h| h.sku.len()).max().unwrap_or(0);
+            let wt = hits.iter().map(|h| h.type_id.len()).max().unwrap_or(0);
+            for h in &hits {
+                let disabled = match h.enabled {
+                    Some(false) => format!("  {}", style::err("[disabled]")),
+                    _ => String::new(),
+                };
+                println!(
+                    "{}{}  {:>6}  {}{}  {}{disabled}",
+                    style::name(&h.sku),
+                    " ".repeat(ws - h.sku.len()),
+                    h.entity_id,
+                    style::kind(&h.type_id),
+                    " ".repeat(wt - h.type_id.len()),
+                    h.name.as_deref().unwrap_or(""),
+                );
+            }
+            if truncated {
+                eprintln!("\n(showing first {}, narrow the SKU filter)", hits.len());
+            }
+            eprintln!("\n{} product(s)", hits.len());
+            Ok(())
+        }
+    }
+}
+
+fn render_product_links(pl: &magequery_core::ProductLinks, args: &ProductLinksArgs) -> Result<()> {
+    use magequery_core::ProductLinkTarget;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(pl)?);
+        return Ok(());
+    }
+    let matched = if pl.matched_by_id && args.id.is_none() {
+        format!("  {}", style::dim("(matched by entity_id, no SKU equals it)"))
+    } else {
+        String::new()
+    };
+    let name = pl.name.as_deref().map(|n| format!("  {}", style::target(n))).unwrap_or_default();
+    println!(
+        "{}  ({}, entity_id {}){name}{matched}",
+        style::name(&pl.sku),
+        style::kind(&pl.type_id),
+        pl.entity_id,
+    );
+    if pl.reverse {
+        println!("{}", style::dim("(reverse: products that link to this one)"));
+    }
+
+    let section = |title: &str, items: &[ProductLinkTarget]| {
+        println!();
+        if items.is_empty() {
+            println!("{} {}", style::dim(&format!("{title}:")), style::dim("(none)"));
+            return;
+        }
+        println!("{}", style::dim(&format!("{title} ({}):", items.len())));
+        let status_txt = |t: &ProductLinkTarget| match t.enabled {
+            Some(true) => "enabled",
+            Some(false) => "disabled",
+            None => "no status",
+        };
+        let stock_txt = |t: &ProductLinkTarget| match t.in_stock {
+            Some(true) => "in stock",
+            Some(false) => "out of stock",
+            None => "no stock row",
+        };
+        let ws = items.iter().map(|t| t.sku.len()).max().unwrap_or(0);
+        let wn = items.iter().map(|t| t.name.as_deref().unwrap_or("").len()).max().unwrap_or(0);
+        let wst = items.iter().map(|t| status_txt(t).len()).max().unwrap_or(0);
+        let wv = items.iter().map(|t| t.visibility.as_deref().unwrap_or("").len()).max().unwrap_or(0);
+        for t in items {
+            let n = t.name.as_deref().unwrap_or("");
+            let st = status_txt(t);
+            let status = match t.enabled {
+                Some(true) => style::ok(st),
+                Some(false) => style::err(st),
+                None => style::dim(st),
+            };
+            let sk = stock_txt(t);
+            let stock = match t.in_stock {
+                Some(true) => style::ok(sk),
+                Some(false) => style::err(sk),
+                None => style::dim(sk),
+            };
+            let vis = t.visibility.as_deref().unwrap_or("");
+            let flag = if t.hidden {
+                format!("  {}", style::err("← won't display"))
+            } else {
+                String::new()
+            };
+            println!(
+                "  {:>3}  {}{}  {}{}  {}{}  {}{}  {}{flag}",
+                t.position,
+                style::name(&t.sku),
+                " ".repeat(ws - t.sku.len()),
+                n,
+                " ".repeat(wn - n.len()),
+                status,
+                " ".repeat(wst - st.len()),
+                style::dim(vis),
+                " ".repeat(wv - vis.len()),
+                stock,
+            );
+        }
+    };
+    section("related", &pl.related);
+    section("up-sells", &pl.up_sells);
+    section("cross-sells", &pl.cross_sells);
+
+    let total = pl.related.len() + pl.up_sells.len() + pl.cross_sells.len();
+    eprintln!("\n{total} link(s)");
+    Ok(())
 }
 
 fn category(mage: &Magento, args: &CategoryArgs) -> Result<()> {
