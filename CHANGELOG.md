@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.4.0...magequery-v0.5.0) (2026-07-10)
+
+
+### Features
+
+* LSP server + VS Code and Zed extensions ([#18](https://github.com/cresset-tools/magequery/issues/18)) ([ad42edc](https://github.com/cresset-tools/magequery/commit/ad42edcbad1f0f2da0a0b2093aef1fe029c5c64f))
+
 ## [0.4.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.3.0...magequery-v0.4.0) (2026-07-08)
 
 
