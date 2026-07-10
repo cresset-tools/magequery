@@ -3,10 +3,10 @@
 //! This crate's relationship to core mirrors the CLI's: core computes owned, structured
 //! data; this is a renderer, speaking LSP instead of ANSI. Three properties are locked:
 //!
-//! - **Save-based, disk only.** Core reads files from disk; so does every handler here.
-//!   Diagnostics and answers refresh on save / watched-file changes, not per keystroke.
-//!   (As-you-type would need a content-overlay VFS through core's reads — a deliberate
-//!   non-goal for now.)
+//! - **Open buffers overlay the checkout.** Every content read in core goes through a
+//!   [`magequery_core::Magento::open_with_overlay`] overlay of the open buffers
+//!   (full-text sync), so diagnostics and answers reflect what the editor shows —
+//!   as-you-type, debounced. Files nobody has open read from disk as before.
 //! - **No async runtime, no incrementality.** A full [`magequery_core::Magento::open`]
 //!   is the rebuild — tens of ms warm on a real install, cheaper than any invalidation
 //!   scheme is worth. The server is a single-threaded event loop over `lsp-server`'s

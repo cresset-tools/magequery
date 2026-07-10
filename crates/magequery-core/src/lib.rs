@@ -23,6 +23,7 @@ pub mod source;
 
 mod breadth;
 mod composer;
+mod vfs;
 #[cfg(feature = "db")]
 mod db;
 mod decrypt;
@@ -151,7 +152,20 @@ impl Magento {
     /// retrieved via [`diagnostics`](Magento::diagnostics) — a single broken file does not
     /// fail the build.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let index = index::Index::build(root.as_ref())?;
+        Self::open_with_overlay(root, std::collections::HashMap::new())
+    }
+
+    /// [`open`](Magento::open) with unsaved-buffer contents overlaid on the checkout:
+    /// every content read of a source file prefers `overlay` (keyed by absolute path)
+    /// over disk, so an editor frontend can analyze what's in its buffers. The overlay
+    /// affects file *content* only — discovery and existence checks stay on the real
+    /// filesystem, so a never-saved new file is invisible until saved. Like `open`, the
+    /// handle is immutable: on buffer change, rebuild.
+    pub fn open_with_overlay(
+        root: impl AsRef<Path>,
+        overlay: std::collections::HashMap<PathBuf, String>,
+    ) -> Result<Self> {
+        let index = index::Index::build(root.as_ref(), std::sync::Arc::new(vfs::Vfs::new(overlay)))?;
         Ok(Self {
             index,
             di: OnceLock::new(),
@@ -217,7 +231,7 @@ impl Magento {
             .di
             .get_or_init(|| {
                 let mut diagnostics = Vec::new();
-                let index = di::build(&self.index.root, &self.index.modules, &mut diagnostics);
+                let index = di::build(&self.index.root, &self.index.modules, &self.index.vfs, &mut diagnostics);
                 DiBuilt { index, diagnostics }
             })
             .index
@@ -237,6 +251,13 @@ impl Magento {
     /// The installation root this handle was opened on.
     pub fn root(&self) -> &Path {
         &self.index.root
+    }
+
+    /// A source file's content as this handle sees it: the overlay's version for paths
+    /// opened via [`open_with_overlay`](Magento::open_with_overlay), disk otherwise.
+    /// Frontends read files through this so their answers match the index.
+    pub fn read_source(&self, path: &Path) -> std::io::Result<String> {
+        self.index.vfs.read_to_string(path)
     }
 
     /// The on-disk PHP file `class` resolves to via the composer PSR-4/PSR-0 maps (plus
@@ -511,7 +532,7 @@ impl Magento {
     /// Cron jobs, optionally restricted to one group.
     pub fn cron_jobs(&self, group: Option<&str>, include_db: bool) -> Result<CronJobs> {
         let mut jobs =
-            self.cron.get_or_init(|| breadth::CronIndex::build(&self.index.modules)).jobs(group);
+            self.cron.get_or_init(|| breadth::CronIndex::build(&self.index.modules, &self.index.vfs)).jobs(group);
         let mut orphaned_codes = Vec::new();
         if include_db {
             orphaned_codes = self.attach_cron_live(&mut jobs)?;
@@ -602,16 +623,16 @@ impl Magento {
 
     /// Frontend/adminhtml routes (frontName → modules) in `area`.
     pub fn routes(&self, area: Area) -> Vec<Route> {
-        self.routes.get_or_init(|| breadth::RouteIndex::build(&self.index.modules)).routes(area)
+        self.routes.get_or_init(|| breadth::RouteIndex::build(&self.index.modules, &self.index.vfs)).routes(area)
     }
 
     /// REST endpoints from `webapi.xml`, optionally filtered by a URL substring.
     pub fn webapi(&self, url_filter: Option<&str>) -> Vec<WebapiRoute> {
-        self.webapi.get_or_init(|| breadth::WebapiIndex::build(&self.index.modules)).routes(url_filter)
+        self.webapi.get_or_init(|| breadth::WebapiIndex::build(&self.index.modules, &self.index.vfs)).routes(url_filter)
     }
 
     fn schema_index(&self) -> &breadth::SchemaIndex {
-        self.schema.get_or_init(|| breadth::SchemaIndex::build(&self.index.modules))
+        self.schema.get_or_init(|| breadth::SchemaIndex::build(&self.index.modules, &self.index.vfs))
     }
 
     /// Database tables from declarative `db_schema.xml`, merged across modules in load order
@@ -745,7 +766,7 @@ impl Magento {
         let mut out: std::collections::HashMap<String, std::collections::HashSet<String>> =
             std::collections::HashMap::new();
         for m in self.index.modules.iter().filter(|m| m.enabled) {
-            let Ok(text) = std::fs::read_to_string(m.path.join("etc/db_schema_whitelist.json"))
+            let Ok(text) = self.index.vfs.read_to_string(&m.path.join("etc/db_schema_whitelist.json"))
             else {
                 continue;
             };
@@ -779,12 +800,12 @@ impl Magento {
     /// path.
     pub fn system_config(&self, filter: Option<&str>) -> Vec<SystemField> {
         self.system_config
-            .get_or_init(|| breadth::SystemConfigIndex::build(&self.index.modules))
+            .get_or_init(|| breadth::SystemConfigIndex::build(&self.index.modules, &self.index.vfs))
             .fields(filter)
     }
 
     fn acl_index(&self) -> &breadth::AclIndex {
-        self.acl.get_or_init(|| breadth::AclIndex::build(&self.index.modules))
+        self.acl.get_or_init(|| breadth::AclIndex::build(&self.index.modules, &self.index.vfs))
     }
 
     /// Admin ACL resources from `acl.xml`, merged across modules in load order (a module can
@@ -943,7 +964,7 @@ impl Magento {
     }
 
     fn indexer_index(&self) -> &breadth::IndexerIndex {
-        self.indexers.get_or_init(|| breadth::IndexerIndex::build(&self.index.modules))
+        self.indexers.get_or_init(|| breadth::IndexerIndex::build(&self.index.modules, &self.index.vfs))
     }
 
     /// Indexers from `indexer.xml`, each joined (on `view_id`) with its `mview.xml` view —
@@ -2030,7 +2051,7 @@ impl Magento {
     }
 
     fn eav_setup_index(&self) -> &eav::EavSetupIndex {
-        self.eav_setup.get_or_init(|| eav::EavSetupIndex::build(&self.index.modules))
+        self.eav_setup.get_or_init(|| eav::EavSetupIndex::build(&self.index.modules, &self.index.vfs))
     }
 
     /// Setup-script attribute calls (`addAttribute`/`updateAttribute`/`removeAttribute`
@@ -2186,7 +2207,7 @@ impl Magento {
                 self.index.packages.iter().find(|p| p.name.ends_with(suffix))
             });
 
-        let env = deploy::read_env(&self.index.root).ok();
+        let env = deploy::read_env(&self.index.root, &self.index.vfs).ok();
         let mode = env
             .as_ref()
             .and_then(|e| e.get("MAGE_MODE"))
@@ -2452,7 +2473,7 @@ impl Magento {
         let (websites, store_groups, store_views) = match db_counts {
             Some((w, g, s)) => (Some(w), Some(g), Some(s)),
             None => {
-                let config_php = deploy::read_config_php(&self.index.root).ok();
+                let config_php = deploy::read_config_php(&self.index.root, &self.index.vfs).ok();
                 let section = |name: &str| {
                     config_php.as_ref()?.get("scopes")?.get(name)?.as_array()
                 };
@@ -2554,7 +2575,7 @@ impl Magento {
                     require: p.require.clone(),
                     file: p.root.join("composer.json"),
                 }),
-                None => read_app_composer(&x.path),
+                None => read_app_composer(&x.path, &self.index.vfs),
             })
             .collect();
 
@@ -2641,7 +2662,7 @@ impl Magento {
     }
 
     fn mq_index(&self) -> &breadth::MqIndex {
-        self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
+        self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules, &self.index.vfs))
     }
 
     /// Every dictionary row whose phrase key contains `needle` (case-insensitive), in
@@ -2697,7 +2718,7 @@ impl Magento {
         let parsed: Vec<Vec<(String, String, u32)>> = jobs
             .par_iter()
             .map(|(_, path, _)| {
-                std::fs::read_to_string(path)
+                self.index.vfs.read_to_string(path)
                     .map(|t| {
                         parse::i18n_csv(&t)
                             .into_iter()
@@ -2780,7 +2801,7 @@ impl Magento {
     fn discover_language_packs(&self, locale: &str) -> Vec<(String, i32, std::path::PathBuf)> {
         let mut out = Vec::new();
         let mut probe = |name: String, dir: &std::path::Path| {
-            let Ok(text) = std::fs::read_to_string(dir.join("language.xml")) else { return };
+            let Ok(text) = self.index.vfs.read_to_string(&dir.join("language.xml")) else { return };
             let (code, sort) = parse::language_xml(&text);
             if code.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(locale)) {
                 out.push((name, sort.unwrap_or(0), dir.to_path_buf()));
@@ -2820,7 +2841,7 @@ impl Magento {
     }
 
     fn catalog_attr_index(&self) -> &breadth::CatalogAttrIndex {
-        self.catalog_attrs.get_or_init(|| breadth::CatalogAttrIndex::build(&self.index.modules))
+        self.catalog_attrs.get_or_init(|| breadth::CatalogAttrIndex::build(&self.index.modules, &self.index.vfs))
     }
 
     /// The `catalog_attributes.xml` groups — which attributes load in each context
@@ -2836,7 +2857,7 @@ impl Magento {
 
     fn email_template_index(&self) -> &breadth::EmailTemplateIndex {
         self.email_templates.get_or_init(|| {
-            breadth::EmailTemplateIndex::build(&self.index.modules, &self.discover_themes())
+            breadth::EmailTemplateIndex::build(&self.index.modules, &self.index.vfs, &self.discover_themes())
         })
     }
 
@@ -2853,7 +2874,7 @@ impl Magento {
     }
 
     fn widget_index(&self) -> &breadth::WidgetIndex {
-        self.widgets.get_or_init(|| breadth::WidgetIndex::build(&self.index.modules))
+        self.widgets.get_or_init(|| breadth::WidgetIndex::build(&self.index.modules, &self.index.vfs))
     }
 
     /// Widget types declared in `etc/widget.xml` (what the admin's "Insert Widget"
@@ -2869,7 +2890,7 @@ impl Magento {
 
     fn layout_index(&self) -> &breadth::LayoutIndex {
         self.layout.get_or_init(|| {
-            breadth::LayoutIndex::build(&self.index.modules, &self.discover_themes())
+            breadth::LayoutIndex::build(&self.index.modules, &self.index.vfs, &self.discover_themes())
         })
     }
 
@@ -2881,7 +2902,7 @@ impl Magento {
             if !p.root.join("theme.xml").is_file() {
                 continue;
             }
-            let Ok(reg) = std::fs::read_to_string(p.root.join("registration.php")) else {
+            let Ok(reg) = self.index.vfs.read_to_string(&p.root.join("registration.php")) else {
                 continue;
             };
             // ComponentRegistrar::register(THEME, 'frontend/Vendor/name', __DIR__)
@@ -2929,7 +2950,7 @@ impl Magento {
 
     fn ui_component_index(&self) -> &breadth::UiComponentIndex {
         self.ui_components.get_or_init(|| {
-            breadth::UiComponentIndex::build(&self.index.modules, &self.discover_themes())
+            breadth::UiComponentIndex::build(&self.index.modules, &self.index.vfs, &self.discover_themes())
         })
     }
 
@@ -2947,7 +2968,7 @@ impl Magento {
     }
 
     fn ext_attr_index(&self) -> &breadth::ExtAttrIndex {
-        self.ext_attrs.get_or_init(|| breadth::ExtAttrIndex::build(&self.index.modules))
+        self.ext_attrs.get_or_init(|| breadth::ExtAttrIndex::build(&self.index.modules, &self.index.vfs))
     }
 
     /// API data interfaces extended via `extension_attributes.xml`, each with every
@@ -2963,7 +2984,7 @@ impl Magento {
     }
 
     fn menu_index(&self) -> &breadth::MenuIndex {
-        self.menu.get_or_init(|| breadth::MenuIndex::build(&self.index.modules))
+        self.menu.get_or_init(|| breadth::MenuIndex::build(&self.index.modules, &self.index.vfs))
     }
 
     /// Admin menu items from `adminhtml/menu.xml`, merged across modules in load order
@@ -2989,7 +3010,7 @@ impl Magento {
     }
 
     fn gql_index(&self) -> &breadth::GqlIndex {
-        self.gql.get_or_init(|| breadth::GqlIndex::build(&self.index.modules))
+        self.gql.get_or_init(|| breadth::GqlIndex::build(&self.index.modules, &self.index.vfs))
     }
 
     /// GraphQL schema types merged from every module's `schema.graphqls` (fields union by
@@ -3078,7 +3099,7 @@ impl Magento {
 
     /// The database configuration from `app/etc/env.php` (`db` section).
     pub fn db_config(&self) -> Result<DbConfig> {
-        let env = deploy::read_env(&self.index.root)?;
+        let env = deploy::read_env(&self.index.root, &self.index.vfs)?;
         Ok(deploy::db_config(&env))
     }
 
@@ -3088,12 +3109,12 @@ impl Magento {
     /// a reachable database; the DB layer sits above config.xml and below the `system`
     /// overrides).
     pub fn config(&self, include_db: bool) -> Result<ConfigSet> {
-        let env = deploy::read_env(&self.index.root).unwrap_or(phparray::PhpValue::Null);
+        let env = deploy::read_env(&self.index.root, &self.index.vfs).unwrap_or(phparray::PhpValue::Null);
         let config_php =
-            deploy::read_config_php(&self.index.root).unwrap_or(phparray::PhpValue::Null);
+            deploy::read_config_php(&self.index.root, &self.index.vfs).unwrap_or(phparray::PhpValue::Null);
         let db_values = if include_db { self.fetch_core_config_data()? } else { Vec::new() };
         let order = self.system_config_source_order();
-        Ok(ConfigSet::build(&self.index.root, &self.index.modules, &env, &config_php, db_values, &order))
+        Ok(ConfigSet::build(&self.index.root, &self.index.modules, &self.index.vfs, &env, &config_php, db_values, &order))
     }
 
     /// The recognized system-config sources in ascending `sortOrder`, as declared by the
@@ -3242,39 +3263,39 @@ impl Magento {
     /// A [`Decryptor`] loaded with the `crypt.key`(s) from `env.php`, to decrypt encrypted
     /// config values (ChaCha20-Poly1305).
     pub fn decryptor(&self) -> Result<Decryptor> {
-        let env = deploy::read_env(&self.index.root)?;
+        let env = deploy::read_env(&self.index.root, &self.index.vfs)?;
         Ok(Decryptor::new(deploy::crypt_keys(&env)))
     }
 
     /// Redis/Valkey usages from `app/etc/env.php` (cache, page cache, session).
     pub fn redis_config(&self) -> Result<RedisConfig> {
-        let env = deploy::read_env(&self.index.root)?;
+        let env = deploy::read_env(&self.index.root, &self.index.vfs)?;
         Ok(deploy::redis_config(&env))
     }
 
     /// Session storage configuration (`session` section of `env.php`): the save handler and,
     /// for Redis/file handlers, where sessions live.
     pub fn session_config(&self) -> Result<SessionConfig> {
-        let env = deploy::read_env(&self.index.root)?;
+        let env = deploy::read_env(&self.index.root, &self.index.vfs)?;
         Ok(deploy::session_config(&env))
     }
 
     /// Cache configuration (`cache`/`cache_types` of `env.php`): the backend per frontend and
     /// the per-type enable flags.
     pub fn cache_config(&self) -> Result<CacheConfig> {
-        let env = deploy::read_env(&self.index.root)?;
+        let env = deploy::read_env(&self.index.root, &self.index.vfs)?;
         Ok(deploy::cache_config(&env))
     }
 
     /// Locking backend (`lock` section of `env.php`): the provider and its settings.
     pub fn lock_config(&self) -> Result<LockConfig> {
-        let env = deploy::read_env(&self.index.root)?;
+        let env = deploy::read_env(&self.index.root, &self.index.vfs)?;
         Ok(deploy::lock_config(&env))
     }
 
     /// Message-queue connections (`queue` section of `env.php`).
     pub fn queue_config(&self) -> Result<QueueConfig> {
-        let env = deploy::read_env(&self.index.root)?;
+        let env = deploy::read_env(&self.index.root, &self.index.vfs)?;
         Ok(deploy::queue_config(&env))
     }
 
@@ -3349,7 +3370,7 @@ impl Magento {
     }
 
     fn events_index(&self) -> &breadth::EventIndex {
-        self.events.get_or_init(|| breadth::EventIndex::build(&self.index.modules))
+        self.events.get_or_init(|| breadth::EventIndex::build(&self.index.modules, &self.index.vfs))
     }
 
     /// The flagship: full DI resolution of `class` in a single `area` — the concrete type,
@@ -4638,7 +4659,7 @@ struct DepPkgInfo {
 }
 
 /// Read an app/code module's own `composer.json` (they're not in installed.json).
-fn read_app_composer(dir: &Path) -> Option<DepPkgInfo> {
+fn read_app_composer(dir: &Path, vfs: &vfs::Vfs) -> Option<DepPkgInfo> {
     #[derive(serde::Deserialize)]
     struct Cj {
         name: Option<String>,
@@ -4646,7 +4667,7 @@ fn read_app_composer(dir: &Path) -> Option<DepPkgInfo> {
         require: std::collections::HashMap<String, serde::de::IgnoredAny>,
     }
     let file = dir.join("composer.json");
-    let cj: Cj = serde_json::from_str(&std::fs::read_to_string(&file).ok()?).ok()?;
+    let cj: Cj = serde_json::from_str(&vfs.read_to_string(&file).ok()?).ok()?;
     let mut require: Vec<String> = cj.require.into_keys().collect();
     require.sort();
     Some(DepPkgInfo { name: cj.name.unwrap_or_default(), require, file })
@@ -4875,5 +4896,45 @@ mod handle_tests {
         tree.touch("src/main.rs");
 
         assert_eq!(super::Magento::find_root(tree.0.join("src")), None);
+    }
+
+    /// The buffer overlay wins over disk: the same root answers differently when a
+    /// di.xml is overlaid — the editor's unsaved state, analyzed without saving.
+    #[test]
+    fn overlay_content_overrides_disk() {
+        let tree = TempTree::new("overlay");
+        let write = |rel: &str, content: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write("app/etc/config.php", "<?php\nreturn ['modules' => ['Acme_Widget' => 1]];\n");
+        write(
+            "app/code/Acme/Widget/etc/module.xml",
+            r#"<config><module name="Acme_Widget"/></config>"#,
+        );
+        let di_path = tree.0.join("app/code/Acme/Widget/etc/di.xml");
+        write(
+            "app/code/Acme/Widget/etc/di.xml",
+            r#"<config><preference for="Acme\Widget\Api\ThingInterface" type="Acme\Widget\Model\Disk"/></config>"#,
+        );
+
+        let iface = crate::ClassName::new("Acme\\Widget\\Api\\ThingInterface");
+        let on_disk = super::Magento::open(&tree.0).unwrap();
+        assert_eq!(
+            on_disk.preference(&iface, crate::Area::Global).unwrap().concrete.as_str(),
+            "Acme\\Widget\\Model\\Disk"
+        );
+
+        let overlay = std::collections::HashMap::from([(
+            di_path,
+            r#"<config><preference for="Acme\Widget\Api\ThingInterface" type="Acme\Widget\Model\Buffer"/></config>"#
+                .to_string(),
+        )]);
+        let overlaid = super::Magento::open_with_overlay(&tree.0, overlay).unwrap();
+        assert_eq!(
+            overlaid.preference(&iface, crate::Area::Global).unwrap().concrete.as_str(),
+            "Acme\\Widget\\Model\\Buffer"
+        );
     }
 }

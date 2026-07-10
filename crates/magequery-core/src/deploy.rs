@@ -11,20 +11,21 @@ use crate::model::{
     CacheConfig, CacheFrontend, CacheType, DbConfig, DbConnection, LockConfig, QueueConfig,
     QueueConnection, RedisConfig, RedisInstance, SessionConfig,
 };
+use crate::vfs::Vfs;
 use crate::phparray::{self, PhpValue};
 
 /// Parse `app/etc/env.php` into its `PhpValue` tree.
-pub(crate) fn read_env(root: &Path) -> Result<PhpValue> {
-    read_php(&root.join("app/etc/env.php"))
+pub(crate) fn read_env(root: &Path, vfs: &Vfs) -> Result<PhpValue> {
+    read_php(&root.join("app/etc/env.php"), vfs)
 }
 
 /// Parse `app/etc/config.php` into its `PhpValue` tree (whole file, for the `system` node).
-pub(crate) fn read_config_php(root: &Path) -> Result<PhpValue> {
-    read_php(&root.join("app/etc/config.php"))
+pub(crate) fn read_config_php(root: &Path, vfs: &Vfs) -> Result<PhpValue> {
+    read_php(&root.join("app/etc/config.php"), vfs)
 }
 
-fn read_php(path: &Path) -> Result<PhpValue> {
-    let text = std::fs::read_to_string(path)
+fn read_php(path: &Path, vfs: &Vfs) -> Result<PhpValue> {
+    let text = vfs.read_to_string(&path)
         .map_err(|source| Error::Io { file: path.to_path_buf(), source })?;
     phparray::parse(&text).map_err(|detail| Error::Parse { file: path.to_path_buf(), detail })
 }

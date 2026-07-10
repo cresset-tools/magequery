@@ -12,9 +12,14 @@ use crate::ids::ModuleName;
 use crate::model::{Module, ModuleCheck, ModuleSource, UnregisteredModule};
 use crate::parse;
 use crate::resolver;
+use crate::vfs::Vfs;
+
+use std::sync::Arc;
 
 pub(crate) struct Index {
     pub root: PathBuf,
+    /// Unsaved-buffer overlay; every content read of a source file goes through it.
+    pub vfs: Arc<Vfs>,
     pub modules: Vec<Module>,
     pub check: ModuleCheck,
     pub resolver: resolver::ClassResolver,
@@ -39,7 +44,7 @@ struct Discovered {
 }
 
 impl Index {
-    pub fn build(root: &Path) -> Result<Index> {
+    pub fn build(root: &Path, vfs: Arc<Vfs>) -> Result<Index> {
         let config_php = root.join("app/etc/config.php");
         if !config_php.is_file() {
             return Err(Error::NotMagentoRoot {
@@ -50,7 +55,7 @@ impl Index {
         let mut diagnostics = Vec::new();
         let _p = std::time::Instant::now();
 
-        let text = std::fs::read_to_string(&config_php).map_err(|source| Error::Io {
+        let text = vfs.read_to_string(&config_php).map_err(|source| Error::Io {
             file: config_php.clone(),
             source,
         })?;
@@ -84,13 +89,13 @@ impl Index {
         // copy of the same module name, matching Magento's app/code precedence.
         let mut discovered: HashMap<ModuleName, Discovered> = HashMap::new();
         let _p = std::time::Instant::now();
-        discover_app_code(root, &mut discovered, &mut diagnostics);
+        discover_app_code(root, &mut discovered, &mut diagnostics, &vfs);
         prof("app/code discovery", &_p);
         let _p = std::time::Instant::now();
         if !packages.is_empty() {
-            discover_vendor(&packages, &mut discovered, &mut diagnostics);
+            discover_vendor(&packages, &mut discovered, &mut diagnostics, &vfs);
         } else if vendor.is_dir() {
-            scan(&vendor, ModuleSource::Vendor, 0, &mut discovered, &mut diagnostics);
+            scan(&vendor, ModuleSource::Vendor, 0, &mut discovered, &mut diagnostics, &vfs);
         }
         prof("vendor discovery", &_p);
 
@@ -124,7 +129,7 @@ impl Index {
         // The di.xml index is built lazily (see `Magento`) — it's the expensive part and
         // commands like `modules`/`events` don't need it. The resolver is cheap (PSR-4 maps
         // only; PHP parsing is lazy), so it stays eager.
-        let resolver = resolver::ClassResolver::build(&packages, &modules, root);
+        let resolver = resolver::ClassResolver::build(&packages, &modules, root, Arc::clone(&vfs));
 
         // Keep the slim package facts (already parsed) for the lazy `deps` graph.
         let packages = packages
@@ -141,6 +146,7 @@ impl Index {
 
         Ok(Index {
             root: root.to_path_buf(),
+            vfs,
             modules,
             check: ModuleCheck { on_disk_not_in_config, in_config_not_on_disk },
             resolver,
@@ -160,11 +166,12 @@ fn discover_app_code(
     root: &Path,
     out: &mut HashMap<ModuleName, Discovered>,
     diags: &mut Vec<Diagnostic>,
+    vfs: &Vfs,
 ) {
     // app/code is small and not composer-managed; a pruned recursive scan is cheap here.
     let base = root.join("app/code");
     if base.is_dir() {
-        scan(&base, ModuleSource::App, 0, out, diags);
+        scan(&base, ModuleSource::App, 0, out, diags, vfs);
     }
 }
 
@@ -172,6 +179,7 @@ fn discover_vendor(
     packages: &[composer::ComposerPackage],
     out: &mut HashMap<ModuleName, Discovered>,
     diags: &mut Vec<Diagnostic>,
+    vfs: &Vfs,
 ) {
     // Probe every package's candidate module roots in parallel (the cost is ~500 file
     // reads + parses). `read_module_root` is pure, so this is a clean map; rayon preserves
@@ -181,7 +189,7 @@ fn discover_vendor(
         .flat_map_iter(|pkg| {
             candidate_roots(pkg)
                 .into_iter()
-                .map(|r| read_module_root(&r, ModuleSource::Vendor))
+                .map(|r| read_module_root(&r, ModuleSource::Vendor, &vfs))
         })
         .collect();
 
@@ -222,12 +230,12 @@ enum Probe {
 }
 
 /// Read+parse `dir/etc/module.xml` if present. Does no insertion — returns a [`Probe`].
-fn read_module_root(dir: &Path, source: ModuleSource) -> Probe {
+fn read_module_root(dir: &Path, source: ModuleSource, vfs: &Vfs) -> Probe {
     let module_xml = dir.join("etc/module.xml");
     if !module_xml.is_file() {
         return Probe::None;
     }
-    match std::fs::read_to_string(&module_xml) {
+    match vfs.read_to_string(&module_xml) {
         Ok(text) => match parse::module_xml(&text) {
             Ok(parsed) => Probe::Found(
                 parsed.name,
@@ -269,8 +277,9 @@ fn try_module_root(
     source: ModuleSource,
     out: &mut HashMap<ModuleName, Discovered>,
     diags: &mut Vec<Diagnostic>,
+    vfs: &Vfs,
 ) -> bool {
-    match read_module_root(dir, source) {
+    match read_module_root(dir, source, vfs) {
         Probe::None => false,
         Probe::Found(name, d) => {
             merge(out, diags, name, d);
@@ -291,11 +300,12 @@ fn scan(
     depth: usize,
     out: &mut HashMap<ModuleName, Discovered>,
     diags: &mut Vec<Diagnostic>,
+    vfs: &Vfs,
 ) {
     if depth > 6 {
         return;
     }
-    if try_module_root(dir, source, out, diags) {
+    if try_module_root(dir, source, out, diags, vfs) {
         return; // a module root does not contain nested modules
     }
 
@@ -319,6 +329,6 @@ fn scan(
         ) {
             continue;
         }
-        scan(&entry.path(), source, depth + 1, out, diags);
+        scan(&entry.path(), source, depth + 1, out, diags, vfs);
     }
 }

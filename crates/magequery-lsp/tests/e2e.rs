@@ -395,6 +395,91 @@ fn diagnostics_definition_hover_and_invalidation() {
     };
     assert_eq!(parts[0].value, "→ Thing::save()");
 
+    // --- as-you-type: an open buffer overlays disk. The buffer fixes the preference
+    // (disk still broken) → the diagnostic clears without saving; an edit that breaks
+    // it again brings the diagnostic back; closing the buffer reverts to disk state.
+    let di_uri_typed = fixture.uri("app/code/Acme/Widget/etc/di.xml");
+    let await_di_publish = |client: &Client| -> Vec<lsp_types::Diagnostic> {
+        loop {
+            match client.recv() {
+                Message::Notification(notification)
+                    if notification.method
+                        == lsp_types::notification::PublishDiagnostics::METHOD =>
+                {
+                    let params: lsp_types::PublishDiagnosticsParams =
+                        serde_json::from_value(notification.params).unwrap();
+                    if params.uri == di_uri_typed {
+                        return params.diagnostics;
+                    }
+                }
+                Message::Request(request) => client.ack(request),
+                _ => {}
+            }
+        }
+    };
+    let fixed = r#"<?xml version="1.0"?>
+<config>
+    <preference for="Acme\Widget\Api\ThingInterface" type="Acme\Widget\Observer\Recalc"/>
+    <type name="Acme\Widget\Model\Thing">
+        <plugin name="acme_registered" type="Acme\Widget\Plugin\Registered"/>
+    </type>
+</config>
+"#;
+    let broken = std::fs::read_to_string(fixture.path("app/code/Acme/Widget/etc/di.xml")).unwrap();
+
+    client.notify::<lsp_types::notification::DidOpenTextDocument>(
+        lsp_types::DidOpenTextDocumentParams {
+            text_document: lsp_types::TextDocumentItem {
+                uri: di_uri_typed.clone(),
+                language_id: "xml".to_string(),
+                version: 1,
+                text: fixed.to_string(),
+            },
+        },
+    );
+    let cleared = await_di_publish(&client);
+    assert!(cleared.is_empty(), "buffer fix should clear unsaved: {cleared:?}");
+
+    client.notify::<lsp_types::notification::DidChangeTextDocument>(
+        lsp_types::DidChangeTextDocumentParams {
+            text_document: lsp_types::VersionedTextDocumentIdentifier {
+                uri: di_uri_typed.clone(),
+                version: 2,
+            },
+            content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: broken.clone(),
+            }],
+        },
+    );
+    let returned = await_di_publish(&client);
+    assert!(!returned.is_empty(), "breaking the buffer should re-flag it");
+
+    // Close with the buffer differing from the last-indexed state → revert to disk
+    // (which is still broken, so the diagnostic must still be there after rebuild).
+    client.notify::<lsp_types::notification::DidChangeTextDocument>(
+        lsp_types::DidChangeTextDocumentParams {
+            text_document: lsp_types::VersionedTextDocumentIdentifier {
+                uri: di_uri_typed.clone(),
+                version: 3,
+            },
+            content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: fixed.to_string(),
+            }],
+        },
+    );
+    assert!(await_di_publish(&client).is_empty());
+    client.notify::<lsp_types::notification::DidCloseTextDocument>(
+        lsp_types::DidCloseTextDocumentParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: di_uri_typed.clone() },
+        },
+    );
+    let after_close = await_di_publish(&client);
+    assert!(!after_close.is_empty(), "closing reverts to the broken disk state");
+
     // --- fixing the broken preference + a watched-file event clears the diagnostic.
     std::fs::write(
         fixture.path("app/code/Acme/Widget/etc/di.xml"),

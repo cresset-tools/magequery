@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use crate::composer::ComposerPackage;
 use crate::ids::ClassName;
 use crate::model::{InterceptKind, Module, ModuleSource, PluginMethod};
+use crate::vfs::Vfs;
 use crate::php::{self, PhpClass};
 
 /// Base types that mark a controller action (an implementation of any of these is an
@@ -35,6 +36,8 @@ pub(crate) struct ClassResolver {
     psr0: Vec<(String, Vec<PathBuf>)>,
     /// Lazily parsed PHP headers, keyed by class name (`None` = file missing/unparseable).
     headers: Mutex<HashMap<ClassName, Option<Arc<PhpClass>>>>,
+    /// Content reads (headers, plugin methods, command names) honor the buffer overlay.
+    vfs: std::sync::Arc<Vfs>,
 }
 
 impl ClassResolver {
@@ -42,6 +45,7 @@ impl ClassResolver {
         packages: &[ComposerPackage],
         modules: &[Module],
         root: &std::path::Path,
+        vfs: std::sync::Arc<Vfs>,
     ) -> Self {
         let mut prefixes: Vec<(String, Vec<PathBuf>)> = Vec::new();
         let mut psr0: Vec<(String, Vec<PathBuf>)> = Vec::new();
@@ -71,7 +75,7 @@ impl ClassResolver {
 
         prefixes.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
         psr0.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
-        Self { prefixes, psr0, headers: Mutex::new(HashMap::new()) }
+        Self { prefixes, psr0, headers: Mutex::new(HashMap::new()), vfs }
     }
 
     /// The on-disk file a class maps to, if any PSR-4/PSR-0 prefix resolves it to an
@@ -141,7 +145,7 @@ impl ClassResolver {
         }
         let parsed = self
             .file_for(class)
-            .and_then(|f| std::fs::read_to_string(f).ok())
+            .and_then(|f| self.vfs.read_to_string(&f).ok())
             .and_then(|src| php::parse_header(&src))
             .map(Arc::new);
         self.headers.lock().unwrap().insert(class.clone(), parsed.clone());
@@ -187,7 +191,7 @@ impl ClassResolver {
                 class = ClassName::new(real);
             }
         }
-        let Some(src) = self.file_for(&class).and_then(|f| std::fs::read_to_string(f).ok()) else {
+        let Some(src) = self.file_for(&class).and_then(|f| self.vfs.read_to_string(&f).ok()) else {
             return (None, None);
         };
         let info = php::command_info(&src);
@@ -206,7 +210,7 @@ impl ClassResolver {
             }
             // Inherited: scan ancestor files (nearest-first) for the constant/property.
             self.ancestors(&class).iter().find_map(|a| {
-                let src = std::fs::read_to_string(self.file_for(a)?).ok()?;
+                let src = self.vfs.read_to_string(&self.file_for(a)?).ok()?;
                 get(&php::command_info(&src))
             })
         };
@@ -216,7 +220,7 @@ impl ClassResolver {
     /// The interception methods a plugin class defines (`before*`/`around*`/`after*`), each
     /// with the target method it intercepts. Empty if the file can't be read.
     pub fn plugin_methods(&self, plugin: &ClassName) -> Vec<PluginMethod> {
-        let Some(src) = self.file_for(plugin).and_then(|f| std::fs::read_to_string(f).ok()) else {
+        let Some(src) = self.file_for(plugin).and_then(|f| self.vfs.read_to_string(&f).ok()) else {
             return Vec::new();
         };
         php::plugin_methods(&src)

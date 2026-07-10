@@ -6,7 +6,7 @@
 
 /// Line-start offsets for one text, like core's `LineMap` but bidirectional and
 /// UTF-16-aware. Built per request on the file being queried — a few µs, not worth
-/// caching under the save-based model.
+/// caching — the text is handed in per request.
 pub(crate) struct LineIndex<'t> {
     text: &'t str,
     /// Byte offset of the start of each line.
