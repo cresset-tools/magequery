@@ -38,6 +38,10 @@ pub(crate) struct ClassResolver {
     headers: Mutex<HashMap<ClassName, Option<Arc<PhpClass>>>>,
     /// Content reads (headers, plugin methods, command names) honor the buffer overlay.
     vfs: std::sync::Arc<Vfs>,
+    /// The installation root — runtime-dir filtering in `class_names` is judged
+    /// relative to it (an absolute check false-positives on stores deployed under
+    /// `/var/www` and on macOS temp dirs under `/var/folders`).
+    root: PathBuf,
 }
 
 impl ClassResolver {
@@ -75,7 +79,7 @@ impl ClassResolver {
 
         prefixes.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
         psr0.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
-        Self { prefixes, psr0, headers: Mutex::new(HashMap::new()), vfs }
+        Self { prefixes, psr0, headers: Mutex::new(HashMap::new()), vfs, root: root.to_path_buf() }
     }
 
     /// The on-disk file a class maps to, if any PSR-4/PSR-0 prefix resolves it to an
@@ -235,5 +239,103 @@ impl ClassResolver {
                 PluginMethod { kind, target, plugin_method: m.name }
             })
             .collect()
+    }
+
+    /// Every class name derivable from the autoload maps: each PSR-4/PSR-0 source dir
+    /// walked in parallel, paths mapped back to FQCNs. Names are derived from paths, not
+    /// parsed headers — cheap, but a file whose class diverges from its path is
+    /// misnamed here (the same convention bet the whole resolver makes). Sorted,
+    /// deduped. This is the expensive enumeration (`file_for` in reverse, in bulk);
+    /// callers cache it — the result only changes when PHP files appear or disappear.
+    pub fn class_names(&self) -> Vec<ClassName> {
+        use rayon::prelude::*;
+        // Skip autoload roots inside the checkout's generated/ and var/: runtime-written
+        // code (interceptors, proxies, factories) is never something a human types into
+        // config. Judged relative to the root — an absolute-path check would
+        // false-positive on stores deployed under /var/www (and macOS temp dirs).
+        let is_runtime_dir = |dir: &PathBuf| {
+            dir.strip_prefix(&self.root).is_ok_and(|rel| {
+                rel.components()
+                    .any(|c| c.as_os_str() == "generated" || c.as_os_str() == "var")
+            })
+        };
+        let mut jobs: Vec<(&str, &PathBuf, bool)> = Vec::new();
+        for (prefix, dirs) in &self.prefixes {
+            for dir in dirs.iter().filter(|d| !is_runtime_dir(d)) {
+                jobs.push((prefix.as_str(), dir, false));
+            }
+        }
+        for (prefix, dirs) in &self.psr0 {
+            for dir in dirs.iter().filter(|d| !is_runtime_dir(d)) {
+                jobs.push((prefix.as_str(), dir, true));
+            }
+        }
+        let lists: Vec<Vec<ClassName>> = jobs
+            .par_iter()
+            .map(|(prefix, dir, psr0)| {
+                let mut out = Vec::new();
+                collect_php_classes(dir, &mut String::new(), 0, &mut |rel_class| {
+                    let name = if *psr0 {
+                        // PSR-0 keeps the prefix inside the path; only names under the
+                        // registered prefix belong to it.
+                        if !rel_class.starts_with(prefix) {
+                            return;
+                        }
+                        rel_class.to_string()
+                    } else {
+                        format!("{prefix}{rel_class}")
+                    };
+                    out.push(ClassName::new(name));
+                });
+                out
+            })
+            .collect();
+        let set: std::collections::BTreeSet<ClassName> = lists.into_iter().flatten().collect();
+        set.into_iter().collect()
+    }
+}
+
+/// Recursive `.php` walk, calling `push` with the `\`-joined relative class name (no
+/// extension). Skips test fixtures and non-class files (PSR class files start with an
+/// uppercase letter; `registration.php`, `functions.php` and friends don't).
+fn collect_php_classes(
+    dir: &std::path::Path,
+    rel: &mut String,
+    depth: usize,
+    push: &mut impl FnMut(&str),
+) {
+    if depth > 12 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let path = entry.path();
+        if path.is_dir() {
+            // `generated`/`var`/`pub` also guard the *descent*: filtering only the
+            // autoload roots misses stores whose root composer.json maps a prefix to an
+            // ancestor of generated/ — the walk would rediscover every interceptor and
+            // proxy from below (seen live on a real store).
+            if matches!(
+                name,
+                "Test" | "Tests" | "_files" | "node_modules" | "generated" | "var" | "pub" | "dev"
+            ) || name.starts_with('.')
+            {
+                continue;
+            }
+            let len = rel.len();
+            rel.push_str(name);
+            rel.push('\\');
+            collect_php_classes(&path, rel, depth + 1, push);
+            rel.truncate(len);
+        } else if let Some(stem) = name.strip_suffix(".php") {
+            if stem.starts_with(|c: char| c.is_ascii_uppercase()) {
+                let len = rel.len();
+                rel.push_str(stem);
+                push(rel);
+                rel.truncate(len);
+            }
+        }
     }
 }

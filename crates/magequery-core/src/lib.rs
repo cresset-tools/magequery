@@ -454,6 +454,28 @@ impl Magento {
         self.index.resolver.ancestors(class)
     }
 
+    /// Every class name derivable from the composer autoload maps and the app/code
+    /// convention — the completion candidate set, sorted and deduped. A parallel
+    /// directory walk (~100ms on a real install), so long-lived frontends cache the
+    /// result outside the handle: it only changes when PHP files are created or
+    /// deleted, never on content edits or handle rebuilds.
+    pub fn class_names(&self) -> Vec<ClassName> {
+        self.index.resolver.class_names()
+    }
+
+    /// Every virtual type name declared in any area's merged DI config — completion
+    /// candidates alongside [`class_names`](Magento::class_names) (virtual types are
+    /// valid wherever di.xml expects a type).
+    pub fn virtual_type_names(&self) -> Vec<ClassName> {
+        let mut names = std::collections::BTreeSet::new();
+        for area in Area::ALL {
+            for name in self.di_index().config(area).virtual_types.keys() {
+                names.insert(name.clone());
+            }
+        }
+        names.into_iter().collect()
+    }
+
     /// Collect plugins for `targets` in one area, keyed sort-order + declaration order.
     /// Dedups by name nearest-target-first (concrete wins over an ancestor).
     fn collect_plugins(
@@ -4896,6 +4918,43 @@ mod handle_tests {
         tree.touch("src/main.rs");
 
         assert_eq!(super::Magento::find_root(tree.0.join("src")), None);
+    }
+
+    #[test]
+    fn class_names_enumerates_the_convention_tree() {
+        let tree = TempTree::new("class-names");
+        let write = |rel: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "<?php\n").unwrap();
+        };
+        std::fs::create_dir_all(tree.0.join("app/code/Acme/Widget/etc")).unwrap();
+        std::fs::create_dir_all(tree.0.join("app/etc")).unwrap();
+        std::fs::write(
+            tree.0.join("app/etc/config.php"),
+            "<?php\nreturn ['modules' => ['Acme_Widget' => 1]];\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tree.0.join("app/code/Acme/Widget/etc/module.xml"),
+            r#"<config><module name="Acme_Widget"/></config>"#,
+        )
+        .unwrap();
+        write("app/code/Acme/Widget/Model/Thing.php");
+        write("app/code/Acme/Widget/Api/ThingInterface.php");
+        write("app/code/Acme/Widget/registration.php"); // lowercase stem: not a class
+        write("app/code/Acme/Widget/Test/Unit/ThingTest.php"); // test tree: skipped
+        // Runtime-written code below an autoload-covered dir: never a candidate.
+        write("app/code/Acme/Widget/generated/Thing/Interceptor.php");
+
+        let magento = super::Magento::open(&tree.0).unwrap();
+        let names: Vec<String> =
+            magento.class_names().iter().map(|c| c.as_str().to_string()).collect();
+        assert!(names.contains(&"Acme\\Widget\\Model\\Thing".to_string()), "{names:?}");
+        assert!(names.contains(&"Acme\\Widget\\Api\\ThingInterface".to_string()));
+        assert!(!names.iter().any(|n| n.contains("registration")));
+        assert!(!names.iter().any(|n| n.contains("ThingTest")));
+        assert!(!names.iter().any(|n| n.contains("Interceptor")), "{names:?}");
     }
 
     /// The buffer overlay wins over disk: the same root answers differently when a

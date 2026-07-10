@@ -6,6 +6,10 @@ of the checkout — no database, no `setup:di:compile`, no working PHP needed.
 
 ## What you get
 
+- **Completions** — context-aware as you type: class and virtual-type names in
+  `di.xml`/`events.xml`/`system.xml` attributes and text values, event names, config
+  paths, ACL resource ids, module names in `<sequence>`, db_schema table references —
+  and inside PHP strings behind `dispatch()`/`getValue()`/`isAllowed()`.
 - **Diagnostics** — `magequery doctor` as squiggles: a `<preference>` pointing at a
   missing class, a di argument injecting a class that doesn't exist, a webapi
   `<resource>` no acl.xml declares, module-set drift, malformed config XML. Refreshed on

@@ -37,6 +37,14 @@ pub(crate) fn capabilities() -> lsp_types::ServerCapabilities {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         references_provider: Some(OneOf::Left(true)),
         code_lens_provider: Some(CodeLensOptions { resolve_provider: Some(false) }),
+        completion_provider: Some(CompletionOptions {
+            // `\` and `/` aren't word characters, so clients only re-query on them
+            // when told to; quotes open attribute values, `>` opens text nodes.
+            trigger_characters: Some(
+                ["\"", "'", "\\", "/", "_", ">"].map(str::to_string).to_vec(),
+            ),
+            ..Default::default()
+        }),
         // The lens data as inline annotations — the plugin indicator editors without
         // code-lens rendering (Zed) can show.
         inlay_hint_provider: Some(OneOf::Left(true)),
@@ -78,6 +86,10 @@ pub(crate) struct Server<'a> {
     /// Open buffers' current contents (full-text sync), keyed by file path. These form
     /// the overlay each rebuild hands to [`Magento::open_with_overlay`].
     buffers: std::collections::HashMap<PathBuf, String>,
+    /// Class-name enumerations per workspace root, for completion. Built on first use
+    /// (~100ms walk) and kept across rebuilds — the set only changes when PHP files are
+    /// created or deleted (watched-file events evict it), never on content edits.
+    class_catalogs: std::collections::HashMap<PathBuf, Arc<Vec<magequery_core::ClassName>>>,
     next_request_id: i32,
 }
 
@@ -104,6 +116,7 @@ impl<'a> Server<'a> {
                 .and_then(|c| c.refresh_support)
                 .unwrap_or(false),
             buffers: std::collections::HashMap::new(),
+            class_catalogs: std::collections::HashMap::new(),
             next_request_id: 0,
         };
 
@@ -196,6 +209,15 @@ impl<'a> Server<'a> {
                 {
                     for event in params.changes {
                         if let Ok(path) = event.uri.to_file_path() {
+                            // A PHP file appearing/disappearing changes the class set.
+                            if event.typ != lsp_types::FileChangeType::CHANGED
+                                && path.extension().is_some_and(|e| e == "php")
+                            {
+                                if let Some(index) = self.workspace_of(&path) {
+                                    let root = self.workspaces[index].root.clone();
+                                    self.class_catalogs.remove(&root);
+                                }
+                            }
                             self.mark_dirty(&path);
                         }
                     }
@@ -274,6 +296,31 @@ impl<'a> Server<'a> {
             overlay.insert(path.clone(), text.clone());
         }
         overlay
+    }
+
+    /// The class enumeration for a workspace, built once and reused across rebuilds.
+    fn class_catalog(
+        &mut self,
+        workspace: usize,
+        magento: &Magento,
+    ) -> Arc<Vec<magequery_core::ClassName>> {
+        let root = self.workspaces[workspace].root.clone();
+        if let Some(catalog) = self.class_catalogs.get(&root) {
+            return Arc::clone(catalog);
+        }
+        let started = std::time::Instant::now();
+        let catalog = Arc::new(magento.class_names());
+        self.log(
+            lsp_types::MessageType::INFO,
+            format!(
+                "class catalog for {}: {} names in {}ms",
+                root.display(),
+                catalog.len(),
+                started.elapsed().as_millis(),
+            ),
+        );
+        self.class_catalogs.insert(root, Arc::clone(&catalog));
+        catalog
     }
 
     /// A buffer opened, changed, or closed: update the overlay and invalidate when the
@@ -413,6 +460,22 @@ impl<'a> Server<'a> {
                     let path = p.text_document.uri.to_file_path().ok()?;
                     let magento = self.handle_for(&path)?;
                     serde_json::to_value(features::code_lens(&magento, &path)).ok()
+                })
+            }
+            lsp_types::request::Completion::METHOD => {
+                let params: Option<lsp_types::CompletionParams> =
+                    serde_json::from_value(request.params).ok();
+                params.and_then(|p| {
+                    let doc = p.text_document_position;
+                    let path = doc.text_document.uri.to_file_path().ok()?;
+                    let workspace = self.workspace_of(&path)?;
+                    let magento = self.workspaces[workspace].handle.clone()?;
+                    let catalog = self.class_catalog(workspace, &magento);
+                    serde_json::to_value(
+                        features::completions(&magento, &catalog, &path, doc.position)
+                            .map(lsp_types::CompletionResponse::List),
+                    )
+                    .ok()
                 })
             }
             lsp_types::request::InlayHintRequest::METHOD => {

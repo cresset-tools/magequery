@@ -9,6 +9,9 @@ The server attaches to the **PHP** and **XML** languages (install those extensio
 running alongside the language's primary server. Open buffers overlay the checkout,
 so diagnostics and answers follow your unsaved edits as you type.
 
+Completions are context-aware: class/virtual-type names, event names, config paths,
+ACL ids, module names, and db_schema tables, in both config XML and PHP strings.
+
 Plugin indicators render as **inlay hints** (`« 7 plugin(s) »` at the end of an
 intercepted method's signature, `→ Save::execute()` on a plugin's interception
 methods — hover the hint for the breakdown). Enable them in Zed's settings:

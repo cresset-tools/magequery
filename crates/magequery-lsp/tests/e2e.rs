@@ -244,6 +244,47 @@ fn diagnostics_definition_hover_and_invalidation() {
     assert_eq!(broken.range.start.line, 2); // 1-based line 3 in the fixture file
     assert!(broken.message.contains("Acme\\Widget\\Model\\Missing"));
 
+    // --- completion: classes after a partial `type="Acme` in di.xml, events after a
+    // partial `name="acme` in events.xml. Position = right after the typed prefix.
+    let position_after = |rel: &str, needle: &str| -> lsp_types::Position {
+        let content = std::fs::read_to_string(fixture.path(rel)).unwrap();
+        let offset = content.find(needle).unwrap() + needle.len();
+        let line = content[..offset].matches('\n').count() as u32;
+        let line_start = content[..offset].rfind('\n').map_or(0, |i| i + 1);
+        lsp_types::Position::new(line, (offset - line_start) as u32)
+    };
+    let complete = |client: &mut Client, rel: &str, needle: &str| -> Vec<String> {
+        let response = client.request::<lsp_types::request::Completion>(
+            lsp_types::CompletionParams {
+                text_document_position: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier {
+                        uri: fixture.uri(rel),
+                    },
+                    position: position_after(rel, needle),
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: None,
+            },
+        );
+        match response {
+            Some(lsp_types::CompletionResponse::List(list)) => {
+                list.items.into_iter().map(|item| item.label).collect()
+            }
+            other => panic!("expected a completion list, got {other:?}"),
+        }
+    };
+
+    let labels = complete(&mut client, "app/code/Acme/Widget/etc/di.xml", "type=\"Acme");
+    assert!(
+        labels.contains(&"Acme\\Widget\\Model\\Thing".to_string()),
+        "class completion missing Thing: {labels:?}"
+    );
+    assert!(labels.contains(&"Acme\\Widget\\Plugin\\Registered".to_string()));
+
+    let labels = complete(&mut client, "app/code/Acme/Widget/etc/events.xml", "name=\"acme");
+    assert_eq!(labels, vec!["acme_thing_saved".to_string()]);
+
     // --- definition on the observer instance in events.xml → Recalc.php's class line.
     let events_uri = fixture.uri("app/code/Acme/Widget/etc/events.xml");
     let definition = client.request::<lsp_types::request::GotoDefinition>(
