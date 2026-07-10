@@ -22,7 +22,35 @@ const REPO = "cresset-tools/magequery";
 
 let client: LanguageClient | undefined;
 
-export async function activate(context: vscode.ExtensionContext): Promise<void> {
+export function activate(context: vscode.ExtensionContext): void {
+  // Code lenses arrive with this command; convert the plain-JSON arguments into the
+  // types VS Code's built-in peek view expects.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "magequery.showReferences",
+      async (uri: string, position: { line: number; character: number }, locations: unknown[]) => {
+        if (!client) {
+          return;
+        }
+        await vscode.commands.executeCommand(
+          "editor.action.showReferences",
+          vscode.Uri.parse(uri),
+          new vscode.Position(position.line, position.character),
+          locations.map((location) => client!.protocol2CodeConverter.asLocation(location as never)),
+        );
+      },
+    ),
+  );
+
+  // Never block activation on the bootstrap: findServer may ask the user a question
+  // (the download prompt), and an unanswered notification would otherwise pin the
+  // extension in "Activating…" forever.
+  void bootstrap(context).catch((error) => {
+    void vscode.window.showErrorMessage(`magequery failed to start: ${String(error)}`);
+  });
+}
+
+async function bootstrap(context: vscode.ExtensionContext): Promise<void> {
   const binary = await findServer(context);
   if (!binary) {
     return; // findServer already surfaced the reason
@@ -40,23 +68,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ],
   };
   client = new LanguageClient("magequery", "magequery", serverOptions, clientOptions);
-
-  // Code lenses arrive with this command; convert the plain-JSON arguments into the
-  // types VS Code's built-in peek view expects.
-  context.subscriptions.push(
-    vscode.commands.registerCommand(
-      "magequery.showReferences",
-      async (uri: string, position: { line: number; character: number }, locations: unknown[]) => {
-        await vscode.commands.executeCommand(
-          "editor.action.showReferences",
-          vscode.Uri.parse(uri),
-          new vscode.Position(position.line, position.character),
-          locations.map((location) => client!.protocol2CodeConverter.asLocation(location as never)),
-        );
-      },
-    ),
-  );
-
   await client.start();
 }
 
