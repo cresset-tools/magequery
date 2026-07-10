@@ -180,6 +180,23 @@ The `skill` subcommand emits the file from the installed binary, so it always ma
 version. It is plain markdown with YAML frontmatter, so it drops into a Cursor rule or your own
 docs just as well.
 
+## Editor integration (LSP)
+
+The binary doubles as a language server: `magequery lsp` speaks LSP over stdio. Inside the
+editor that gives you `doctor` findings as diagnostics on save, go-to-definition and hover on
+class names in `di.xml`/`events.xml`/`webapi.xml`/`system.xml`/`schema.graphqls` (definition on
+an interface also jumps to the class its `<preference>` resolves to), find-references over the
+whole config graph (injections, virtual types, observers, cron, webapi, GraphQL, queues), and
+code lenses on PHP classes (`N plugin(s)`, `wired in N config place(s)`).
+
+- **VS Code** — the extension in [`editors/vscode`](editors/vscode); it finds `magequery` on
+  PATH or downloads the release binary itself.
+- **Zed** — the extension in [`editors/zed`](editors/zed), same binary resolution.
+- **Anything else** — point your editor's LSP client at `magequery lsp` for PHP and XML files.
+
+The server analyzes the checkout from disk, so answers refresh on save. It complements a PHP
+language server rather than replacing one — magequery covers the XML config layer.
+
 ## Scope
 
 The target is Magento 2.4 Open Source. Adobe Commerce, Mage-OS, OpenMage, and similar forks
