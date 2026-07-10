@@ -59,6 +59,12 @@ impl Fixture {
             "app/code/Acme/Widget/Observer/Recalc.php",
             "<?php\nnamespace Acme\\Widget\\Observer;\n\nclass Recalc\n{\n}\n",
         );
+        // An interception-shaped class no di.xml declares: the plugin-unregistered
+        // warning, which must land on the class declaration line, not line 1.
+        write(
+            "app/code/Acme/Widget/Plugin/Tweak.php",
+            "<?php\nnamespace Acme\\Widget\\Plugin;\n\nclass Tweak\n{\n    public function beforeSave($subject)\n    {\n        return null;\n    }\n}\n",
+        );
         Self(root)
     }
 
@@ -197,8 +203,17 @@ fn diagnostics_definition_hover_and_invalidation() {
     let fixture = Fixture::new();
     let (mut client, handle) = start(&fixture);
 
-    // --- initial diagnostics: the broken preference must land on di.xml, line 3.
-    let published = client.collect_diagnostics(1);
+    // --- initial diagnostics: the broken preference on di.xml line 3, and the
+    // unregistered plugin on its *class declaration* line (never line 1).
+    let published = client.collect_diagnostics(2);
+    let plugin_uri = fixture.uri("app/code/Acme/Widget/Plugin/Tweak.php");
+    let unregistered = published.get(&plugin_uri).expect("diagnostics on Tweak.php");
+    assert_eq!(
+        unregistered[0].code,
+        Some(lsp_types::NumberOrString::String("plugin-unregistered".to_string()))
+    );
+    assert_eq!(unregistered[0].range.start.line, 3); // `class Tweak` is on line 4
+
     let di_uri = fixture.uri("app/code/Acme/Widget/etc/di.xml");
     let diagnostics = published.get(&di_uri).expect("diagnostics on di.xml");
     let broken = diagnostics
