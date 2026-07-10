@@ -50,7 +50,18 @@ pub(crate) fn definition(
             .map(|module| file_location(module.path.join("etc/module.xml"), None))
             .into_iter()
             .collect(),
-        Entity::PluginMethod(method) => plugin_method_locations(magento, path, &method),
+        Entity::PluginMethod(method) => {
+            // Forward jump to the intercepted implementation; a Magento model's own
+            // beforeSave/afterSave is interception-*shaped* but not a plugin — fall
+            // back to the reverse lookup (who intercepts it) for those.
+            let forward = plugin_method_locations(magento, path, &method);
+            if forward.is_empty() {
+                interceptor_locations(magento, path, &method)
+            } else {
+                forward
+            }
+        }
+        Entity::Method(method) => interceptor_locations(magento, path, &method),
     };
     match locations.len() {
         0 => None,
@@ -179,6 +190,90 @@ fn find_method_span(text: &str, name: &str) -> Option<Range<usize>> {
     None
 }
 
+/// A plugin method intercepting the method under the cursor — the reverse direction.
+struct Interceptor {
+    kind: magequery_core::InterceptKind,
+    plugin_method: String,
+    plugin_name: String,
+    class: ClassName,
+    disabled: bool,
+    /// The di.xml `<plugin>` declaration.
+    source: Source,
+}
+
+/// Plugins whose `before*/around*/after*` methods target `method` on the class this
+/// file declares. `plugins_all_areas` already resolves the preference and collects
+/// declarations on ancestors/interfaces, so interface-declared plugins show up on the
+/// concrete class's methods.
+fn interceptors_of(magento: &Magento, path: &Path, method: &str) -> Vec<Interceptor> {
+    let Some(class) = class_of_file(magento, path) else {
+        return Vec::new();
+    };
+    let Ok(plugins) = magento.plugins_all_areas(&class) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for plugin in plugins {
+        for plugin_method in &plugin.methods {
+            // PHP method names are case-insensitive.
+            if plugin_method.target.eq_ignore_ascii_case(method) {
+                out.push(Interceptor {
+                    kind: plugin_method.kind,
+                    plugin_method: plugin_method.plugin_method.clone(),
+                    plugin_name: plugin.name.clone(),
+                    class: plugin.class.clone(),
+                    disabled: plugin.disabled,
+                    source: plugin.source.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Jump targets for the reverse direction: the plugin method's own declaration, falling
+/// back to the di.xml `<plugin>` line when the plugin file can't be read.
+fn interceptor_locations(magento: &Magento, path: &Path, method: &str) -> Vec<Location> {
+    let locations = interceptors_of(magento, path, method)
+        .into_iter()
+        .map(|interceptor| {
+            magento
+                .class_file(&interceptor.class)
+                .and_then(|file| {
+                    let text = std::fs::read_to_string(&file).ok()?;
+                    let span = find_method_span(&text, &interceptor.plugin_method)?;
+                    Some(file_location_at(&file, &text, span))
+                })
+                .unwrap_or_else(|| source_location(magento, &interceptor.source))
+        })
+        .collect();
+    dedup_locations(locations)
+}
+
+/// Hover for a method that plugins intercept: who fires around it, in execution order.
+fn method_hover(magento: &Magento, path: &Path, method: &str) -> Option<String> {
+    let interceptors = interceptors_of(magento, path, method);
+    if interceptors.is_empty() {
+        return None;
+    }
+    let mut md = format!(
+        "**`{method}()`** — intercepted by {} plugin method(s)\n",
+        interceptors.len()
+    );
+    for interceptor in interceptors.iter().take(12) {
+        let _ = write!(
+            md,
+            "\n- {} `{}` — `{}` (plugin `{}`{})",
+            interceptor.kind,
+            interceptor.plugin_method,
+            interceptor.class,
+            interceptor.plugin_name,
+            if interceptor.disabled { ", disabled" } else { "" },
+        );
+    }
+    Some(md)
+}
+
 fn observer_locations(magento: &Magento, event: &EventName) -> Vec<Location> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -225,7 +320,9 @@ pub(crate) fn hover(magento: &Magento, path: &Path, position: Position) -> Optio
         Entity::ConfigPath(config_path) => config_hover(magento, config_path),
         Entity::Acl(id) => acl_hover(magento, id),
         Entity::Module(name) => module_hover(magento, name),
-        Entity::PluginMethod(method) => plugin_method_hover(magento, path, method),
+        Entity::PluginMethod(method) => plugin_method_hover(magento, path, method)
+            .or_else(|| method_hover(magento, path, method)),
+        Entity::Method(method) => method_hover(magento, path, method),
     }?;
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -400,15 +497,15 @@ fn acl_hover(magento: &Magento, id: &str) -> Option<String> {
 }
 
 /// What this interception method fires on: each target type, the concrete it resolves
-/// to, and the plugin declaration behind it.
+/// to, and the plugin declaration behind it. `None` when no di.xml declares the class
+/// as a plugin — the caller falls back to the reverse (who-intercepts-me) hover, which
+/// covers a model's own interception-shaped `beforeSave`.
 fn plugin_method_hover(magento: &Magento, path: &Path, method: &str) -> Option<String> {
     let plugin_class = class_of_file(magento, path)?;
     let target_method = intercepted_method(method)?;
     let targets = magento.plugin_targets(&plugin_class);
     if targets.is_empty() {
-        return Some(format!(
-            "**`{method}`** — interception-shaped, but no di.xml declares `{plugin_class}` as a plugin"
-        ));
+        return None;
     }
     let mut md = format!("**`{method}`** — intercepts `{target_method}()` on\n");
     for target in targets.iter().take(8) {
@@ -472,15 +569,32 @@ pub(crate) fn references(
                 .collect(),
             Err(_) => Vec::new(),
         },
-        // The di.xml `<plugin>` declarations wiring this method's class in.
-        Entity::PluginMethod(_) => match class_of_file(magento, path) {
-            Some(plugin_class) => magento
-                .plugin_targets(&plugin_class)
-                .iter()
-                .map(|target| source_location(magento, &target.source))
-                .collect(),
-            None => Vec::new(),
-        },
+        // The di.xml `<plugin>` declarations wiring this method's class in — or, when
+        // there are none, the plugin methods intercepting a method of this name.
+        Entity::PluginMethod(method) => {
+            let declarations: Vec<Location> = match class_of_file(magento, path) {
+                Some(plugin_class) => magento
+                    .plugin_targets(&plugin_class)
+                    .iter()
+                    .map(|target| source_location(magento, &target.source))
+                    .collect(),
+                None => Vec::new(),
+            };
+            if declarations.is_empty() {
+                interceptor_locations(magento, path, &method)
+            } else {
+                declarations
+            }
+        }
+        // Everything wired around this method: the intercepting plugin methods plus
+        // their di.xml declarations.
+        Entity::Method(method) => {
+            let mut locations = interceptor_locations(magento, path, &method);
+            for interceptor in interceptors_of(magento, path, &method) {
+                locations.push(source_location(magento, &interceptor.source));
+            }
+            locations
+        }
     };
     let deduped = dedup_locations(locations);
     (!deduped.is_empty()).then_some(deduped)

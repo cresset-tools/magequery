@@ -298,6 +298,28 @@ fn diagnostics_definition_hover_and_invalidation() {
     assert_eq!(location.uri, fixture.uri("app/code/Acme/Widget/Model/Thing.php"));
     assert_eq!(location.range.start.line, 5); // `public function save` is on line 6
 
+    // --- and the reverse: definition on Thing::save itself → the aroundSave plugin
+    // method intercepting it.
+    let reverse = client.request::<lsp_types::request::GotoDefinition>(
+        lsp_types::GotoDefinitionParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier {
+                    uri: fixture.uri("app/code/Acme/Widget/Model/Thing.php"),
+                },
+                // line 6 (0-based 5): inside `function save(`.
+                position: lsp_types::Position::new(5, 22),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    );
+    let location = match reverse {
+        Some(lsp_types::GotoDefinitionResponse::Scalar(location)) => location,
+        other => panic!("expected the intercepting plugin method, got {other:?}"),
+    };
+    assert_eq!(location.uri, fixture.uri("app/code/Acme/Widget/Plugin/Registered.php"));
+    assert_eq!(location.range.start.line, 5); // `function aroundSave` is on line 6
+
     // --- fixing the broken preference + a watched-file event clears the diagnostic.
     std::fs::write(
         fixture.path("app/code/Acme/Widget/etc/di.xml"),

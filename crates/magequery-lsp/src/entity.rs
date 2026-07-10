@@ -23,6 +23,10 @@ pub(crate) enum Entity {
     /// name, e.g. `aroundSave`). Definition jumps to the intercepted method on the
     /// plugin's target type(s).
     PluginMethod(String),
+    /// Any other method *declaration*. Definition/references resolve the plugins that
+    /// intercept it (the reverse of [`Entity::PluginMethod`]); nothing when the class
+    /// has none, leaving the verb to the PHP language server.
+    Method(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -330,10 +334,15 @@ fn php_entity_at(text: &str, offset: usize) -> Option<EntityAt> {
             span,
         });
     }
-    // An interception method being *declared* (`function aroundSave`).
-    if is_intercept_shaped(token) && text[..span.start].trim_end().ends_with("function") {
+    // A method being *declared*: interception-shaped names are (probable) plugin
+    // methods, everything else is a potential interception target.
+    if text[..span.start].trim_end().ends_with("function") {
         return Some(EntityAt {
-            entity: Entity::PluginMethod(token.to_string()),
+            entity: if is_intercept_shaped(token) {
+                Entity::PluginMethod(token.to_string())
+            } else {
+                Entity::Method(token.to_string())
+            },
             span,
         });
     }
@@ -631,10 +640,14 @@ class Tweak
             at("Tweak.php", php, "aroundSave($subject"),
             Some(Entity::PluginMethod("aroundSave".to_string()))
         );
-        // …a *call* to it is not (only `function`-preceded names count), and neither is
-        // a non-interception method declaration.
+        // …a *call* to it is not (only `function`-preceded names count)…
         assert_eq!(at("Tweak.php", php, "aroundSave($input"), None);
-        assert_eq!(at("Tweak.php", php, "execute($input"), None);
+        // …and a non-interception declaration is a Method (the reverse lookup:
+        // which plugins intercept it).
+        assert_eq!(
+            at("Tweak.php", php, "execute($input"),
+            Some(Entity::Method("execute".to_string()))
+        );
     }
 
     #[test]

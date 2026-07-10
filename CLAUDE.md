@@ -1560,7 +1560,15 @@ use this class; the old private helper of that name is now `plugin_lookup_chain`
 preference-resolve each target → walk `Magento::ancestors` nearest-first for the file
 whose `function <name>(` actually defines it. Hover on the method says what it intercepts
 (target → concrete, plugin name, disabled tag); references are the declaring di.xml
-`<plugin>` lines. Both APIs are public on `Magento` for exactly this.
+`<plugin>` lines. Both APIs are public on `Magento` for exactly this. **And the
+reverse**: any other method *declaration* (`Entity::Method`) resolves the plugins
+intercepting it — definition/references land on the `before*/around*/after*` methods in
+the plugin classes (via `plugins_all_areas`, so interface/ancestor-declared plugins show
+up on the concrete's methods — validated live: `Save::execute` → 7 interceptors incl.
+the ActionInterface-declared ones), hover lists them in execution order. An
+interception-*shaped* name that isn't a declared plugin (a model's own `beforeSave`)
+falls back to this reverse lookup; when a class has no plugins every verb returns None
+and the PHP language server keeps the floor.
 
 `entity.rs` is the position→entity inversion layer, deliberately **pure text** (no DOM,
 no `Magento` handle): a line-local scan finds the attribute value / text node / PHP token
