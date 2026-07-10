@@ -188,6 +188,9 @@ fn start(fixture: &Fixture) -> (Client, std::thread::JoinHandle<()>) {
                         relative_pattern_support: Some(true),
                     },
                 ),
+                inlay_hint: Some(lsp_types::InlayHintWorkspaceClientCapabilities {
+                    refresh_support: Some(true),
+                }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -411,6 +414,8 @@ fn diagnostics_definition_hover_and_invalidation() {
         },
     );
     // The rebuild republishes; di.xml's entry must now be the empty clearing publish.
+    // The rebuild must also ask us to re-query inlay hints (they're disk-computed).
+    let mut hint_refresh_requested = false;
     let cleared = loop {
         match client.recv() {
             Message::Notification(notification)
@@ -422,11 +427,17 @@ fn diagnostics_definition_hover_and_invalidation() {
                     break params.diagnostics;
                 }
             }
-            Message::Request(request) => client.ack(request),
+            Message::Request(request) => {
+                if request.method == "workspace/inlayHint/refresh" {
+                    hint_refresh_requested = true;
+                }
+                client.ack(request);
+            }
             _ => {}
         }
     };
     assert!(cleared.is_empty(), "diagnostic should clear after the fix: {cleared:?}");
+    assert!(hint_refresh_requested, "rebuild should trigger an inlay-hint refresh");
 
     shutdown(client, handle);
 }

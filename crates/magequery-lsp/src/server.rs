@@ -8,7 +8,6 @@ use std::time::Duration;
 use crossbeam_channel::RecvTimeoutError;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::Notification as _;
-use lsp_types::request::Request as _;
 use lsp_types::Url;
 use magequery_core::Magento;
 
@@ -71,6 +70,11 @@ pub(crate) struct Server<'a> {
     can_watch: bool,
     /// Client understands `RelativePattern` watchers (LSP 3.17).
     relative_patterns: bool,
+    /// Client re-queries inlay hints / code lenses when asked (LSP 3.17 refresh
+    /// requests) — sent after every rebuild, since hints are computed from disk and
+    /// the client can't otherwise know a save changed them.
+    refresh_inlay_hints: bool,
+    refresh_code_lenses: bool,
     next_request_id: i32,
 }
 
@@ -82,11 +86,20 @@ impl<'a> Server<'a> {
             .as_ref()
             .and_then(|w| w.did_change_watched_files.as_ref());
 
+        let workspace_caps = init.capabilities.workspace.as_ref();
         let mut server = Server {
             connection,
             workspaces: Vec::new(),
             can_watch: watched.and_then(|w| w.dynamic_registration).unwrap_or(false),
             relative_patterns: watched.and_then(|w| w.relative_pattern_support).unwrap_or(false),
+            refresh_inlay_hints: workspace_caps
+                .and_then(|w| w.inlay_hint.as_ref())
+                .and_then(|c| c.refresh_support)
+                .unwrap_or(false),
+            refresh_code_lenses: workspace_caps
+                .and_then(|w| w.code_lens.as_ref())
+                .and_then(|c| c.refresh_support)
+                .unwrap_or(false),
             next_request_id: 0,
         };
 
@@ -207,10 +220,12 @@ impl<'a> Server<'a> {
     }
 
     fn rebuild_dirty(&mut self) {
+        let mut rebuilt = false;
         for index in 0..self.workspaces.len() {
             if !self.workspaces[index].dirty {
                 continue;
             }
+            rebuilt = true;
             let root = self.workspaces[index].root.clone();
             let handle = match Magento::open(&root) {
                 Ok(magento) => Some(Arc::new(magento)),
@@ -226,6 +241,26 @@ impl<'a> Server<'a> {
             self.workspaces[index].dirty = false;
             self.workspaces[index].needs_publish = true;
         }
+        if rebuilt {
+            // Hints/lenses are computed from disk; tell the client the save it just
+            // made (or the external change) invalidated what it renders.
+            if self.refresh_inlay_hints {
+                self.send_request::<lsp_types::request::InlayHintRefreshRequest>(());
+            }
+            if self.refresh_code_lenses {
+                self.send_request::<lsp_types::request::CodeLensRefresh>(());
+            }
+        }
+    }
+
+    fn send_request<R: lsp_types::request::Request>(&mut self, params: R::Params) {
+        self.next_request_id += 1;
+        let request = Request::new(
+            RequestId::from(self.next_request_id),
+            R::METHOD.to_string(),
+            params,
+        );
+        let _ = self.connection.sender.send(Message::Request(request));
     }
 
     fn publish_pending(&mut self) {
@@ -371,10 +406,7 @@ impl<'a> Server<'a> {
                 })
             })
             .collect();
-        self.next_request_id += 1;
-        let request = Request::new(
-            RequestId::from(self.next_request_id),
-            lsp_types::request::RegisterCapability::METHOD.to_string(),
+        self.send_request::<lsp_types::request::RegisterCapability>(
             lsp_types::RegistrationParams {
                 registrations: vec![lsp_types::Registration {
                     id: "magequery-watch".to_string(),
@@ -386,7 +418,6 @@ impl<'a> Server<'a> {
                 }],
             },
         );
-        let _ = self.connection.sender.send(Message::Request(request));
     }
 
     fn notify<N: lsp_types::notification::Notification>(&self, params: N::Params) {
