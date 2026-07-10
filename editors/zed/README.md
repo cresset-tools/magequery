@@ -37,6 +37,12 @@ Until a magequery release with the `lsp` subcommand is on GitHub, the binary mus
 be on PATH (`cargo install --path crates/magequery-cli --locked` from this repo) — the
 extension's release-download fallback would fetch one without it.
 
+## License
+
+This extension shim is MIT-licensed (the Zed extension registry requires a license from
+its allowlist, which excludes the repository's EUPL-1.2). The magequery binary the
+extension downloads and runs remains EUPL-1.2.
+
 ## Publishing
 
 Zed extensions are distributed via a PR to
