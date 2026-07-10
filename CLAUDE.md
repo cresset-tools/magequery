@@ -1553,7 +1553,14 @@ config path = admin breadcrumb + per-scope static values, ACL = title/breadcrumb
 deduped by (uri, line); **code lens** — on a PHP class declaration: `N plugin(s)` (with
 "via ancestors" split) and `wired in N config place(s)`, command
 `magequery.showReferences` (the VS Code client maps it onto the peek view; clients
-without it show inert text).
+without it show inert text); **plugin-method jump** — definition on a
+`before*/around*/after*` *declaration* in a plugin class lands on the intercepted method:
+`Magento::plugin_targets(class)` (the reverse of `plugins` — which `<plugin>` declarations
+use this class; the old private helper of that name is now `plugin_lookup_chain`) →
+preference-resolve each target → walk `Magento::ancestors` nearest-first for the file
+whose `function <name>(` actually defines it. Hover on the method says what it intercepts
+(target → concrete, plugin name, disabled tag); references are the declaring di.xml
+`<plugin>` lines. Both APIs are public on `Magento` for exactly this.
 
 `entity.rs` is the position→entity inversion layer, deliberately **pure text** (no DOM,
 no `Magento` handle): a line-local scan finds the attribute value / text node / PHP token

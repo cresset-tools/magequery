@@ -348,6 +348,19 @@ pub struct PluginMethod {
     pub plugin_method: String,
 }
 
+/// One `<plugin>` declaration *using* a class — the flip side of [`Plugin`]: given the
+/// plugin's own class, the type it is attached to. `declared_on` is the type as written
+/// in di.xml (often an interface or parent); resolve it with `preference` for the
+/// concrete class that actually runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct PluginTarget {
+    pub declared_on: ClassName,
+    pub plugin_name: String,
+    pub disabled: bool,
+    pub source: Source,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
 pub struct Plugin {

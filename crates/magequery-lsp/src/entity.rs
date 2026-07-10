@@ -19,6 +19,10 @@ pub(crate) enum Entity {
     ConfigPath(String),
     Acl(String),
     Module(ModuleName),
+    /// A `before*/around*/after*` method *declaration* in a plugin class (the method
+    /// name, e.g. `aroundSave`). Definition jumps to the intercepted method on the
+    /// plugin's target type(s).
+    PluginMethod(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -326,11 +330,27 @@ fn php_entity_at(text: &str, offset: usize) -> Option<EntityAt> {
             span,
         });
     }
+    // An interception method being *declared* (`function aroundSave`).
+    if is_intercept_shaped(token) && text[..span.start].trim_end().ends_with("function") {
+        return Some(EntityAt {
+            entity: Entity::PluginMethod(token.to_string()),
+            span,
+        });
+    }
     // A bare identifier: the class this file declares, or a `use`-imported name.
     if let Some(class) = own_class_at(text, &span, token).or_else(|| use_import(text, token)) {
         return Some(EntityAt { entity: Entity::Class(class), span });
     }
     None
+}
+
+/// `beforeX`/`aroundX`/`afterX` with an uppercase target — Magento's interception naming.
+fn is_intercept_shaped(name: &str) -> bool {
+    ["before", "around", "after"].iter().any(|prefix| {
+        name.strip_prefix(prefix)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|c| c.is_ascii_uppercase())
+    })
 }
 
 /// The single-quoted or double-quoted string content containing `offset`, line-local.
@@ -586,6 +606,35 @@ class Recalc implements ObserverInterface
             at("Recalc.php", php, "acme_recalc_done"),
             Some(Entity::Event(EventName::new("acme_recalc_done")))
         );
+    }
+
+    #[test]
+    fn php_plugin_method_declarations() {
+        let php = r#"<?php
+namespace Acme\Widget\Plugin;
+
+class Tweak
+{
+    public function aroundSave($subject, callable $proceed)
+    {
+        return $proceed();
+    }
+
+    public function execute($input)
+    {
+        return $this->aroundSave($input, fn () => null);
+    }
+}
+"#;
+        // The declaration is a plugin method…
+        assert_eq!(
+            at("Tweak.php", php, "aroundSave($subject"),
+            Some(Entity::PluginMethod("aroundSave".to_string()))
+        );
+        // …a *call* to it is not (only `function`-preceded names count), and neither is
+        // a non-interception method declaration.
+        assert_eq!(at("Tweak.php", php, "aroundSave($input"), None);
+        assert_eq!(at("Tweak.php", php, "execute($input"), None);
     }
 
     #[test]

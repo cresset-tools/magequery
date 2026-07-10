@@ -55,7 +55,7 @@ pub use model::{
     Indexer, IndexerLive, InstanceInfo, Integration, InterceptKind,
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
-    MviewSubscription, Observer,
+    MviewSubscription, Observer, PluginTarget,
     BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount,
     CategoryIndexedProduct, CategoryProduct,
     CategoryTreeNode, CategoryVisibilityIssue,
@@ -346,7 +346,7 @@ impl Magento {
     /// declaration order (module load order, then position in file) — not by name.
     pub fn plugins(&self, class: &ClassName, area: Area) -> Result<Vec<Plugin>> {
         let concrete = self.preference(class, area)?.concrete;
-        let targets = self.plugin_targets(&concrete);
+        let targets = self.plugin_lookup_chain(&concrete);
         let mut collected = self.collect_plugins(area, &targets);
         // Execution order: sort_order, then declaration order (load order, then line).
         collected.sort_by(|a, b| a.0.cmp(&b.0));
@@ -359,7 +359,7 @@ impl Magento {
     /// Targets are taken from the global concrete (preference rarely differs per area).
     pub fn plugins_all_areas(&self, class: &ClassName) -> Result<Vec<Plugin>> {
         let concrete = self.preference(class, Area::Global)?.concrete;
-        let targets = self.plugin_targets(&concrete);
+        let targets = self.plugin_lookup_chain(&concrete);
 
         use std::collections::{BTreeSet, HashMap};
         let mut best: HashMap<String, ((i32, (u8, u32, u32)), Plugin)> = HashMap::new();
@@ -387,10 +387,50 @@ impl Magento {
 
     /// The concrete type plus its ancestors/interfaces — the set of types whose plugins
     /// apply to the concrete.
-    fn plugin_targets(&self, concrete: &ClassName) -> Vec<ClassName> {
+    fn plugin_lookup_chain(&self, concrete: &ClassName) -> Vec<ClassName> {
         let mut targets = vec![concrete.clone()];
         targets.extend(self.index.resolver.ancestors(concrete));
         targets
+    }
+
+    /// Every `<plugin>` declaration whose *class* is `class` — the reverse of
+    /// [`plugins`](Magento::plugins): given a plugin class, the types it intercepts.
+    /// Merged across all areas, deduped by (type, plugin name), sorted. `declared_on` is
+    /// the type as written in di.xml (often an interface/parent); resolve it with
+    /// [`preference`](Magento::preference) for the concrete class that actually runs.
+    pub fn plugin_targets(&self, class: &ClassName) -> Vec<PluginTarget> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for area in Area::ALL {
+            let cfg = self.di_index().config(area);
+            for (target, plugins) in &cfg.plugins {
+                for (name, plugin) in plugins {
+                    if plugin.class.as_ref() != Some(class) {
+                        continue;
+                    }
+                    if seen.insert((target.clone(), name.clone())) {
+                        out.push(PluginTarget {
+                            declared_on: target.clone(),
+                            plugin_name: name.clone(),
+                            disabled: plugin.disabled,
+                            source: plugin.source.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            (a.declared_on.as_str(), &a.plugin_name).cmp(&(b.declared_on.as_str(), &b.plugin_name))
+        });
+        out
+    }
+
+    /// The full ancestor set of a class (parents + interfaces, transitively,
+    /// nearest-first) — the hierarchy plugin resolution walks, exposed for frontends
+    /// that need it themselves (the LSP's jump from a plugin method to the intercepted
+    /// implementation searches it for the method's defining file).
+    pub fn ancestors(&self, class: &ClassName) -> Vec<ClassName> {
+        self.index.resolver.ancestors(class)
     }
 
     /// Collect plugins for `targets` in one area, keyed sort-order + declaration order.

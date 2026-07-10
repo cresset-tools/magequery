@@ -42,8 +42,20 @@ impl Fixture {
             r#"<?xml version="1.0"?>
 <config>
     <preference for="Acme\Widget\Api\ThingInterface" type="Acme\Widget\Model\Missing"/>
+    <type name="Acme\Widget\Model\Thing">
+        <plugin name="acme_registered" type="Acme\Widget\Plugin\Registered"/>
+    </type>
 </config>
 "#,
+        );
+        write(
+            "app/code/Acme/Widget/Model/Thing.php",
+            "<?php\nnamespace Acme\\Widget\\Model;\n\nclass Thing\n{\n    public function save($input)\n    {\n        return $input;\n    }\n}\n",
+        );
+        // A *registered* plugin: its aroundSave must jump to Thing::save.
+        write(
+            "app/code/Acme/Widget/Plugin/Registered.php",
+            "<?php\nnamespace Acme\\Widget\\Plugin;\n\nclass Registered\n{\n    public function aroundSave($subject, callable $proceed)\n    {\n        return $proceed();\n    }\n}\n",
         );
         write(
             "app/code/Acme/Widget/etc/events.xml",
@@ -263,6 +275,28 @@ fn diagnostics_definition_hover_and_invalidation() {
     };
     assert!(markup.value.contains("acme_thing_saved"));
     assert!(markup.value.contains("Acme\\Widget\\Observer\\Recalc"));
+
+    // --- definition on the plugin's `aroundSave` declaration → the intercepted
+    // Thing::save implementation.
+    let jump = client.request::<lsp_types::request::GotoDefinition>(
+        lsp_types::GotoDefinitionParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier {
+                    uri: fixture.uri("app/code/Acme/Widget/Plugin/Registered.php"),
+                },
+                // line 6 (0-based 5): inside `function aroundSave(`.
+                position: lsp_types::Position::new(5, 25),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    );
+    let location = match jump {
+        Some(lsp_types::GotoDefinitionResponse::Scalar(location)) => location,
+        other => panic!("expected the intercepted method, got {other:?}"),
+    };
+    assert_eq!(location.uri, fixture.uri("app/code/Acme/Widget/Model/Thing.php"));
+    assert_eq!(location.range.start.line, 5); // `public function save` is on line 6
 
     // --- fixing the broken preference + a watched-file event clears the diagnostic.
     std::fs::write(

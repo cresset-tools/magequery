@@ -50,6 +50,7 @@ pub(crate) fn definition(
             .map(|module| file_location(module.path.join("etc/module.xml"), None))
             .into_iter()
             .collect(),
+        Entity::PluginMethod(method) => plugin_method_locations(magento, path, &method),
     };
     match locations.len() {
         0 => None,
@@ -108,6 +109,76 @@ pub(crate) fn find_decl_span(text: &str, name: &str) -> Option<Range<usize>> {
     None
 }
 
+/// `aroundSave` → `save`: strip the interception prefix, lowercase the first letter.
+fn intercepted_method(plugin_method: &str) -> Option<String> {
+    for prefix in ["before", "around", "after"] {
+        if let Some(rest) = plugin_method.strip_prefix(prefix) {
+            let mut chars = rest.chars();
+            if let Some(first) = chars.next().filter(|c| c.is_ascii_uppercase()) {
+                return Some(format!("{}{}", first.to_ascii_lowercase(), chars.as_str()));
+            }
+        }
+    }
+    None
+}
+
+/// The jump from a plugin's `aroundSave` to the `save()` it intercepts: every type this
+/// class is declared as a plugin on, preference-resolved to the concrete, then the
+/// hierarchy walked nearest-first for the file that actually defines the method.
+fn plugin_method_locations(magento: &Magento, path: &Path, method: &str) -> Vec<Location> {
+    let Some(plugin_class) = class_of_file(magento, path) else {
+        return Vec::new();
+    };
+    let Some(target_method) = intercepted_method(method) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for target in magento.plugin_targets(&plugin_class) {
+        let concrete = magento
+            .preference(&target.declared_on, Area::Global)
+            .map(|preference| preference.concrete)
+            .unwrap_or_else(|_| target.declared_on.clone());
+        let chain = std::iter::once(concrete.clone()).chain(magento.ancestors(&concrete));
+        for class in chain {
+            let Some(file) = magento.class_file(&class) else { continue };
+            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            if let Some(span) = find_method_span(&text, &target_method) {
+                out.push(file_location_at(&file, &text, span));
+                break; // nearest definition in the hierarchy wins
+            }
+        }
+    }
+    dedup_locations(out)
+}
+
+/// The byte span of `name` in a `function <name>(` declaration. PHP method names are
+/// case-insensitive, so the search is too (ASCII — method names always are).
+fn find_method_span(text: &str, name: &str) -> Option<Range<usize>> {
+    let bytes = text.as_bytes();
+    let needle = name.as_bytes();
+    let mut i = 0;
+    while i + needle.len() <= bytes.len() {
+        if bytes[i..i + needle.len()].eq_ignore_ascii_case(needle) {
+            let end = i + needle.len();
+            let prefix = text[..i].trim_end();
+            let after_function = prefix.len() >= 8
+                && prefix.as_bytes()[prefix.len() - 8..].eq_ignore_ascii_case(b"function")
+                && !prefix.as_bytes().get(prefix.len().wrapping_sub(9)).is_some_and(|b| {
+                    b.is_ascii_alphanumeric() || *b == b'_'
+                });
+            let boundary = !bytes
+                .get(end)
+                .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+            let called = text[end..].trim_start().starts_with('(');
+            if after_function && boundary && called {
+                return Some(i..end);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 fn observer_locations(magento: &Magento, event: &EventName) -> Vec<Location> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -154,6 +225,7 @@ pub(crate) fn hover(magento: &Magento, path: &Path, position: Position) -> Optio
         Entity::ConfigPath(config_path) => config_hover(magento, config_path),
         Entity::Acl(id) => acl_hover(magento, id),
         Entity::Module(name) => module_hover(magento, name),
+        Entity::PluginMethod(method) => plugin_method_hover(magento, path, method),
     }?;
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -327,6 +399,34 @@ fn acl_hover(magento: &Magento, id: &str) -> Option<String> {
     Some(md)
 }
 
+/// What this interception method fires on: each target type, the concrete it resolves
+/// to, and the plugin declaration behind it.
+fn plugin_method_hover(magento: &Magento, path: &Path, method: &str) -> Option<String> {
+    let plugin_class = class_of_file(magento, path)?;
+    let target_method = intercepted_method(method)?;
+    let targets = magento.plugin_targets(&plugin_class);
+    if targets.is_empty() {
+        return Some(format!(
+            "**`{method}`** — interception-shaped, but no di.xml declares `{plugin_class}` as a plugin"
+        ));
+    }
+    let mut md = format!("**`{method}`** — intercepts `{target_method}()` on\n");
+    for target in targets.iter().take(8) {
+        let _ = write!(md, "\n- `{}`", target.declared_on);
+        if let Ok(preference) = magento.preference(&target.declared_on, Area::Global) {
+            if preference.concrete != target.declared_on {
+                let _ = write!(md, " → `{}`", preference.concrete);
+            }
+        }
+        let _ = write!(md, " (plugin `{}`", target.plugin_name);
+        if target.disabled {
+            let _ = write!(md, ", disabled");
+        }
+        let _ = write!(md, ")");
+    }
+    Some(md)
+}
+
 fn module_hover(magento: &Magento, name: &magequery_core::ModuleName) -> Option<String> {
     let module = magento.modules().iter().find(|module| module.name == *name)?;
     let source = match module.source {
@@ -371,6 +471,15 @@ pub(crate) fn references(
                 .map(|edge| source_location(magento, &edge.source))
                 .collect(),
             Err(_) => Vec::new(),
+        },
+        // The di.xml `<plugin>` declarations wiring this method's class in.
+        Entity::PluginMethod(_) => match class_of_file(magento, path) {
+            Some(plugin_class) => magento
+                .plugin_targets(&plugin_class)
+                .iter()
+                .map(|target| source_location(magento, &target.source))
+                .collect(),
+            None => Vec::new(),
         },
     };
     let deduped = dedup_locations(locations);

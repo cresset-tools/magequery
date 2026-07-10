@@ -20,6 +20,9 @@ of the checkout — no database, no `setup:di:compile`, no working PHP needed.
   cron job, webapi route, GraphQL resolver and queue handler referencing a class.
 - **Code lens** — on a PHP class declaration: `N plugin(s)` and
   `wired in N config place(s)`, peeking straight into the declaring XML.
+- **Plugin-method jump** — go-to-definition on a `before*`/`around*`/`after*` method
+  declaration in a plugin class lands on the method it intercepts, resolved through the
+  di.xml plugin declaration and the preference chain.
 
 The server analyzes from disk: answers refresh on **save**, not per keystroke. It
 complements a PHP language server (Intelephense, PHP Tools, Phpactor) rather than
