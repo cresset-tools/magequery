@@ -57,6 +57,9 @@ pub(crate) struct Workspace {
     /// Files whose diagnostics we last published, so a rebuild clears the stale ones.
     published: HashSet<Url>,
     dirty: bool,
+    /// Rebuilt but diagnostics not yet recomputed — published after the pending request
+    /// is answered, so doctor never sits on a definition/hover's critical path.
+    needs_publish: bool,
 }
 
 pub(crate) struct Server<'a> {
@@ -104,6 +107,7 @@ impl<'a> Server<'a> {
                             handle: None,
                             published: HashSet::new(),
                             dirty: true,
+                            needs_publish: false,
                         });
                     }
                 }
@@ -123,6 +127,7 @@ impl<'a> Server<'a> {
         self.register_watchers();
         // Initial build + project-wide diagnostics for every workspace.
         self.rebuild_dirty();
+        self.publish_pending();
 
         loop {
             let message = if self.workspaces.iter().any(|ws| ws.dirty) {
@@ -143,9 +148,11 @@ impl<'a> Server<'a> {
                         return Ok(());
                     }
                     // Answer from fresh state: a pending invalidation rebuilds now
-                    // rather than after the debounce window.
+                    // rather than after the debounce window — but diagnostics
+                    // (doctor, the expensive part) wait until the answer is out.
                     self.rebuild_dirty();
                     self.handle_request(request);
+                    self.publish_pending();
                 }
                 Some(Message::Notification(notification)) => {
                     self.handle_notification(notification);
@@ -153,7 +160,10 @@ impl<'a> Server<'a> {
                 // Only acks of our own client requests (watcher registration) come back.
                 Some(Message::Response(_)) => {}
                 // Debounce window passed with no further events.
-                None => self.rebuild_dirty(),
+                None => {
+                    self.rebuild_dirty();
+                    self.publish_pending();
+                }
             }
         }
     }
@@ -214,7 +224,16 @@ impl<'a> Server<'a> {
             };
             self.workspaces[index].handle = handle;
             self.workspaces[index].dirty = false;
-            self.publish_diagnostics(index);
+            self.workspaces[index].needs_publish = true;
+        }
+    }
+
+    fn publish_pending(&mut self) {
+        for index in 0..self.workspaces.len() {
+            if self.workspaces[index].needs_publish {
+                self.workspaces[index].needs_publish = false;
+                self.publish_diagnostics(index);
+            }
         }
     }
 
