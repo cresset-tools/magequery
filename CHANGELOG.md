@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.5.0...magequery-v0.6.0) (2026-07-10)
+
+
+### Features
+
+* analyze unsaved buffers — the VFS overlay ([#21](https://github.com/cresset-tools/magequery/issues/21)) ([d26e04d](https://github.com/cresset-tools/magequery/commit/d26e04de5835e41d6ebdf567b6353b31d0b042f8))
+* **lsp:** context-aware completions ([#23](https://github.com/cresset-tools/magequery/issues/23)) ([6ff3b8c](https://github.com/cresset-tools/magequery/commit/6ff3b8c6849604c77797fa626b14fa8214e7bfd4))
+
 ## [0.5.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.4.0...magequery-v0.5.0) (2026-07-10)
 
 
