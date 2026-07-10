@@ -16,6 +16,7 @@ use crate::ids::{Area, ClassName, ModuleName};
 use crate::model::Module;
 use crate::parse;
 use crate::source::Source;
+use crate::vfs::Vfs;
 
 /// A value plus where it was declared.
 #[derive(Clone)]
@@ -93,7 +94,7 @@ struct Parsed {
     file: Result<parse::DiFile, String>,
 }
 
-pub(crate) fn build(root: &Path, modules: &[Module], diags: &mut Vec<Diagnostic>) -> DiIndex {
+pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<Diagnostic>) -> DiIndex {
     // Enumerate di.xml files: Magento's "primary" config (where the framework-level
     // preferences live, e.g. CommandListInterface → CommandList) merged first, then each
     // module's global `etc/di.xml` plus `etc/<area>/di.xml`. Module load orders are
@@ -134,7 +135,7 @@ pub(crate) fn build(root: &Path, modules: &[Module], diags: &mut Vec<Diagnostic>
     let parsed: Vec<Parsed> = jobs
         .par_iter()
         .map(|j| {
-            let file = std::fs::read_to_string(&j.path)
+            let file = vfs.read_to_string(&j.path)
                 .map_err(|e| format!("reading {}: {e}", j.path.display()))
                 .and_then(|text| parse::di_xml(&text));
             Parsed {

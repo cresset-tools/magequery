@@ -30,7 +30,8 @@ of the checkout — no database, no `setup:di:compile`, no working PHP needed.
   go-to-definition on an intercepted method lands on the plugin methods wrapping it,
   including plugins declared on interfaces and parent classes.
 
-The server analyzes from disk: answers refresh on **save**, not per keystroke. It
+Open buffers overlay the checkout, so diagnostics and answers follow your unsaved
+edits as you type (debounced). It
 complements a PHP language server (Intelephense, PHP Tools, Phpactor) rather than
 replacing it — magequery answers the XML config layer PHP servers can't see.
 

@@ -6,8 +6,8 @@ diagnostics as you save, go-to-definition and hover on class names in
 `di.xml`/`events.xml`/`webapi.xml`, reverse-DI find-references.
 
 The server attaches to the **PHP** and **XML** languages (install those extensions),
-running alongside the language's primary server. It analyzes the checkout from disk —
-answers refresh on save.
+running alongside the language's primary server. Open buffers overlay the checkout,
+so diagnostics and answers follow your unsaved edits as you type.
 
 Plugin indicators render as **inlay hints** (`« 7 plugin(s) »` at the end of an
 intercepted method's signature, `→ Save::execute()` on a plugin's interception

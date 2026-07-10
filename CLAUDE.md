@@ -1526,10 +1526,17 @@ ANSI, the LSP renders LSP. Stack: `lsp-server` + `lsp-types` **pinned `0.95`** (
 swapped `Url` for a bare `Uri` type and lost the file-path conversions) — the
 rust-analyzer stack: sync, channel-based, no async runtime, matching core's philosophy.
 Three locked design properties:
-- **Save-based, disk only.** Core reads disk; so does every handler. Content sync is
-  `None` (didChange never requested); diagnostics/answers refresh on save and
-  watched-file events. As-you-type would need a content-overlay VFS through core's file
-  reads — deliberate non-goal.
+- **Open buffers overlay the checkout (the VFS overlay).** Content sync is FULL;
+  didOpen/didChange/didClose maintain a buffers map that every rebuild hands to
+  `Magento::open_with_overlay` — core's `Vfs` (vfs.rs) serves overlay content for open
+  buffers, disk for everything else, so diagnostics/answers are **as-you-type**
+  (didChange marks dirty; the 300ms debounce is the typing cadence). Scope is content
+  only: discovery/existence stay on the real filesystem (a never-saved new file is
+  invisible until saved); composer metadata + `var/.maintenance.ip` deliberately stay
+  disk-only. Overlay keys are inserted under both the URI path and its canonicalized
+  form (macOS `/private`). Frontends read files via `Magento::read_source` so their
+  positions match the index. Pristine didOpen doesn't rebuild; didClose with unsaved
+  changes reverts to disk.
 - **Full rebuild is the invalidation.** Single-threaded event loop over the crossbeam
   channels; per-workspace dirty flag; a `recv_timeout(300ms)` quiet period is the whole
   debounce, and a request arriving mid-burst forces the rebuild first so answers never

@@ -10,6 +10,7 @@ use rayon::prelude::*;
 
 use crate::doctor;
 use crate::ids::Area;
+use crate::vfs::Vfs;
 use crate::model::{EavSetupKind, EavSetupProp, EavSetupRef, EavValueKind, Module};
 use crate::parse::LineMap;
 use crate::php;
@@ -21,7 +22,7 @@ pub(crate) struct EavSetupIndex {
 }
 
 impl EavSetupIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let refs: Vec<EavSetupRef> = modules
             .par_iter()
             .filter(|m| m.enabled)
@@ -35,7 +36,7 @@ impl EavSetupIndex {
                 files.sort();
                 let mut out = Vec::new();
                 for path in files {
-                    let Ok(src) = std::fs::read_to_string(&path) else { continue };
+                    let Ok(src) = vfs.read_to_string(&path) else { continue };
                     if !src.contains("Attribute(") {
                         continue;
                     }

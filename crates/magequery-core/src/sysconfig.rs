@@ -17,6 +17,7 @@ use std::path::PathBuf;
 
 use rayon::prelude::*;
 
+use crate::vfs::Vfs;
 use crate::model::{ConfigSourceKind, ConfigValue, Module};
 use crate::parse;
 use crate::phparray::PhpValue;
@@ -55,6 +56,7 @@ impl ConfigSet {
     pub(crate) fn build(
         root: &std::path::Path,
         modules: &[Module],
+        vfs: &Vfs,
         env: &PhpValue,
         config_php: &PhpValue,
         db_values: Vec<(String, String, String)>,
@@ -65,7 +67,7 @@ impl ConfigSet {
 
         for src in order {
             match src {
-                SysCfgSource::Modular => apply_modular(&mut map, modules),
+                SysCfgSource::Modular => apply_modular(&mut map, modules, vfs),
                 SysCfgSource::Dynamic => {
                     for (scope, path, value) in db_values.take().unwrap_or_default() {
                         insert(&mut map, scope, path, value, ConfigSourceKind::Database, None, 0);
@@ -163,13 +165,13 @@ fn scope_parents(config_php: &PhpValue) -> HashMap<String, String> {
 }
 
 /// Apply module `config.xml` `<default>` values (parsed in parallel, applied in load order).
-fn apply_modular(map: &mut HashMap<(String, String), ConfigValue>, modules: &[Module]) {
+fn apply_modular(map: &mut HashMap<(String, String), ConfigValue>, modules: &[Module], vfs: &Vfs) {
     let parsed: Vec<(PathBuf, Vec<(String, String, String, u32)>)> = modules
         .par_iter()
         .filter(|m| m.enabled) // Magento only loads enabled modules' configuration
         .map(|m| {
             let path = m.path.join("etc/config.xml");
-            let leaves = std::fs::read_to_string(&path)
+            let leaves = vfs.read_to_string(&path)
                 .ok()
                 .map(|t| parse::config_xml_defaults(&t))
                 .unwrap_or_default();

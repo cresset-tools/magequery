@@ -17,10 +17,14 @@ use magequery_core::{Area, ClassName, ConfigSourceKind, EventName, Magento, Sour
 use crate::entity::{entity_at, Entity, EntityAt};
 use crate::textpos::LineIndex;
 
-/// Disk read + entity extraction shared by every position-based handler. Save-based
-/// model: the buffer's unsaved state is invisible on purpose.
-fn entity_under_cursor(path: &Path, position: Position) -> Option<(String, EntityAt)> {
-    let text = std::fs::read_to_string(path).ok()?;
+/// Source read + entity extraction shared by every position-based handler. Reads go
+/// through the handle, so unsaved buffer contents (the overlay) are what get analyzed.
+fn entity_under_cursor(
+    magento: &Magento,
+    path: &Path,
+    position: Position,
+) -> Option<(String, EntityAt)> {
+    let text = magento.read_source(path).ok()?;
     let offset = LineIndex::new(&text).offset(position)?;
     let found = entity_at(path.file_name()?.to_str()?, &text, offset)?;
     Some((text, found))
@@ -33,7 +37,7 @@ pub(crate) fn definition(
     path: &Path,
     position: Position,
 ) -> Option<GotoDefinitionResponse> {
-    let (_, found) = entity_under_cursor(path, position)?;
+    let (_, found) = entity_under_cursor(magento, path, position)?;
     let mut locations = match found.entity {
         Entity::Class(class) => class_locations(magento, &class),
         Entity::Event(event) => observer_locations(magento, &event),
@@ -75,12 +79,12 @@ pub(crate) fn definition(
 fn class_locations(magento: &Magento, class: &ClassName) -> Vec<Location> {
     let mut out = Vec::new();
     if let Some(file) = magento.class_file(class) {
-        out.push(decl_location(file, class));
+        out.push(decl_location(magento, file, class));
     }
     if let Ok(preference) = magento.preference(class, Area::Global) {
         if preference.concrete != *class {
             if let Some(file) = magento.class_file(&preference.concrete) {
-                out.push(decl_location(file, &preference.concrete));
+                out.push(decl_location(magento, file, &preference.concrete));
             }
         }
     }
@@ -88,9 +92,10 @@ fn class_locations(magento: &Magento, class: &ClassName) -> Vec<Location> {
 }
 
 /// Point into the file at `class Foo` / `interface Foo` rather than line 0.
-fn decl_location(file: PathBuf, class: &ClassName) -> Location {
+fn decl_location(magento: &Magento, file: PathBuf, class: &ClassName) -> Location {
     let short = class.as_str().rsplit('\\').next().unwrap_or(class.as_str());
-    let span = std::fs::read_to_string(&file)
+    let span = magento
+        .read_source(&file)
         .ok()
         .and_then(|text| find_decl_span(&text, short).map(|span| (text, span)));
     match span {
@@ -152,7 +157,7 @@ fn plugin_method_locations(magento: &Magento, path: &Path, method: &str) -> Vec<
         let chain = std::iter::once(concrete.clone()).chain(magento.ancestors(&concrete));
         for class in chain {
             let Some(file) = magento.class_file(&class) else { continue };
-            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            let Ok(text) = magento.read_source(&file) else { continue };
             if let Some(span) = find_method_span(&text, &target_method) {
                 out.push(file_location_at(&file, &text, span));
                 break; // nearest definition in the hierarchy wins
@@ -247,7 +252,7 @@ fn interceptor_sites(magento: &Magento, interceptors: Vec<Interceptor>) -> Vec<L
             magento
                 .class_file(&interceptor.class)
                 .and_then(|file| {
-                    let text = std::fs::read_to_string(&file).ok()?;
+                    let text = magento.read_source(&file).ok()?;
                     let span = find_method_span(&text, &interceptor.plugin_method)?;
                     Some(file_location_at(&file, &text, span))
                 })
@@ -319,7 +324,7 @@ fn config_locations(magento: &Magento, config_path: &str) -> Vec<Location> {
 // ---- hover -------------------------------------------------------------------------
 
 pub(crate) fn hover(magento: &Magento, path: &Path, position: Position) -> Option<Hover> {
-    let (text, found) = entity_under_cursor(path, position)?;
+    let (text, found) = entity_under_cursor(magento, path, position)?;
     let range = LineIndex::new(&text).range(found.span.clone());
     let markdown = match &found.entity {
         Entity::Class(class) => class_hover(magento, class),
@@ -562,7 +567,7 @@ pub(crate) fn references(
     path: &Path,
     position: Position,
 ) -> Option<Vec<Location>> {
-    let (_, found) = entity_under_cursor(path, position)?;
+    let (_, found) = entity_under_cursor(magento, path, position)?;
     let locations = match found.entity {
         Entity::Class(class) => class_references(magento, &class),
         Entity::Event(event) => observer_locations(magento, &event),
@@ -683,7 +688,7 @@ pub(crate) fn code_lens(magento: &Magento, path: &Path) -> Option<Vec<CodeLens>>
         return None;
     }
     let class = class_of_file(magento, path)?;
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = magento.read_source(path).ok()?;
     let index = LineIndex::new(&text);
     let short = class.as_str().rsplit('\\').next().unwrap_or(class.as_str());
     let range = index.range(find_decl_span(&text, short)?);
@@ -809,7 +814,7 @@ pub(crate) fn inlay_hints(
         return None;
     }
     let class = class_of_file(magento, path)?;
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = magento.read_source(path).ok()?;
     let index = LineIndex::new(&text);
     let plugins = magento.plugins_all_areas(&class).unwrap_or_default();
     let plugin_targets = magento.plugin_targets(&class);

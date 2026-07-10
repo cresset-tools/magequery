@@ -22,6 +22,7 @@ use crate::model::{
 };
 use crate::parse;
 use crate::source::Source;
+use crate::vfs::Vfs;
 
 const REAL_AREAS: [Area; 6] = [
     Area::Frontend,
@@ -45,6 +46,7 @@ fn area_path(m: &Module, area: Area, file: &str) -> PathBuf {
 /// sequentially and deterministically. `rayon` preserves the collect order.
 fn read_parse<T: Send>(
     modules: &[Module],
+    vfs: &Vfs,
     area: Area,
     file: &str,
     parse: impl Fn(&str) -> T + Sync,
@@ -57,7 +59,7 @@ fn read_parse<T: Send>(
         .collect();
     let parsed: Vec<Option<T>> = jobs
         .par_iter()
-        .map(|(_, p)| std::fs::read_to_string(p).ok().map(|t| parse(t.as_str())))
+        .map(|(_, p)| vfs.read_to_string(p).ok().map(|t| parse(t.as_str())))
         .collect();
     jobs.into_iter()
         .zip(parsed)
@@ -74,13 +76,13 @@ pub(crate) struct EventIndex {
 }
 
 impl EventIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut global = EventMap::new();
-        apply_events(&mut global, modules, Area::Global);
+        apply_events(&mut global, modules, vfs, Area::Global);
         let mut by_area = HashMap::new();
         for area in REAL_AREAS {
             let mut cfg = global.clone();
-            apply_events(&mut cfg, modules, area);
+            apply_events(&mut cfg, modules, vfs, area);
             by_area.insert(area, cfg);
         }
         by_area.insert(Area::Global, global);
@@ -110,8 +112,8 @@ impl EventIndex {
     }
 }
 
-fn apply_events(out: &mut EventMap, modules: &[Module], area: Area) {
-    for (i, path, observers) in read_parse(modules, area, "events.xml", parse::events_xml) {
+fn apply_events(out: &mut EventMap, modules: &[Module], vfs: &Vfs, area: Area) {
+    for (i, path, observers) in read_parse(modules, vfs, area, "events.xml", parse::events_xml) {
         let module = &modules[i].name;
         for (event, obs) in observers {
             let source = Source { module: module.clone(), file: path.clone(), line: obs.line, area };
@@ -153,9 +155,9 @@ pub(crate) struct CronIndex {
 }
 
 impl CronIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut groups: HashMap<String, HashMap<String, CronJob>> = HashMap::new();
-        for (i, path, jobs) in read_parse(modules, Area::Global, "crontab.xml", parse::crontab_xml) {
+        for (i, path, jobs) in read_parse(modules, vfs, Area::Global, "crontab.xml", parse::crontab_xml) {
             let module = &modules[i].name;
             for job in jobs {
                 let source =
@@ -199,11 +201,11 @@ pub(crate) struct RouteIndex {
 }
 
 impl RouteIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut by_area = HashMap::new();
         for area in [Area::Global, Area::Frontend, Area::Adminhtml, Area::WebapiRest, Area::Graphql] {
             let mut map: HashMap<(String, String), Route> = HashMap::new();
-            for (i, path, parsed) in read_parse(modules, area, "routes.xml", parse::routes_xml) {
+            for (i, path, parsed) in read_parse(modules, vfs, area, "routes.xml", parse::routes_xml) {
                 let module = &modules[i].name;
                 for r in parsed {
                     let key = (r.router.clone(), r.id.clone());
@@ -251,9 +253,9 @@ pub(crate) struct WebapiIndex {
 }
 
 impl WebapiIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut routes = HashMap::new();
-        for (i, path, parsed) in read_parse(modules, Area::Global, "webapi.xml", parse::webapi_xml) {
+        for (i, path, parsed) in read_parse(modules, vfs, Area::Global, "webapi.xml", parse::webapi_xml) {
             let module = &modules[i].name;
             for r in parsed {
                 let source =
@@ -294,9 +296,9 @@ pub(crate) struct SchemaIndex {
 }
 
 impl SchemaIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut tables: HashMap<String, DbTable> = HashMap::new();
-        for (i, path, raw_tables) in read_parse(modules, Area::Global, "db_schema.xml", parse::db_schema_xml) {
+        for (i, path, raw_tables) in read_parse(modules, vfs, Area::Global, "db_schema.xml", parse::db_schema_xml) {
             let module = &modules[i].name;
             for rt in raw_tables {
                 // A disabled table is dropped entirely (a later module can re-add it).
@@ -424,10 +426,10 @@ pub(crate) struct CatalogAttrIndex {
 }
 
 impl CatalogAttrIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut groups: HashMap<String, CatalogAttributeGroup> = HashMap::new();
         for (i, path, raws) in
-            read_parse(modules, Area::Global, "catalog_attributes.xml", parse::catalog_attributes_xml)
+            read_parse(modules, vfs, Area::Global, "catalog_attributes.xml", parse::catalog_attributes_xml)
         {
             let module = &modules[i].name;
             for r in raws {
@@ -473,13 +475,13 @@ pub(crate) struct EmailTemplateIndex {
 
 impl EmailTemplateIndex {
     /// `themes` as in [`LayoutIndex::build`].
-    pub fn build(modules: &[Module], themes: &[(String, PathBuf)]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs, themes: &[(String, PathBuf)]) -> Self {
         let paths: HashMap<&str, &Path> =
             modules.iter().map(|m| (m.name.as_str(), m.path.as_path())).collect();
 
         let mut by_id: HashMap<String, EmailTemplate> = HashMap::new();
         for (i, path, raws) in
-            read_parse(modules, Area::Global, "email_templates.xml", parse::email_templates_xml)
+            read_parse(modules, vfs, Area::Global, "email_templates.xml", parse::email_templates_xml)
         {
             let declaring = &modules[i].name;
             for r in raws {
@@ -556,9 +558,9 @@ pub(crate) struct WidgetIndex {
 }
 
 impl WidgetIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut by_id: HashMap<String, Widget> = HashMap::new();
-        for (i, path, raws) in read_parse(modules, Area::Global, "widget.xml", parse::widget_xml) {
+        for (i, path, raws) in read_parse(modules, vfs, Area::Global, "widget.xml", parse::widget_xml) {
             let module = &modules[i].name;
             for r in raws {
                 let source = Source {
@@ -642,7 +644,7 @@ pub(crate) struct LayoutIndex {
 
 impl LayoutIndex {
     /// `themes` = discovered theme roots as `(id like "frontend/Magento/luma", dir)`.
-    pub fn build(modules: &[Module], themes: &[(String, PathBuf)]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs, themes: &[(String, PathBuf)]) -> Self {
         // Enumerate every layout file with its layer and target areas. `view/base`
         // applies to both frontend and adminhtml.
         struct Job {
@@ -697,7 +699,7 @@ impl LayoutIndex {
         let parsed: Vec<Vec<parse::RawLayoutOp>> = jobs
             .par_iter()
             .map(|j| {
-                std::fs::read_to_string(&j.path)
+                vfs.read_to_string(&j.path)
                     .map(|t| parse::layout_xml(&t))
                     .unwrap_or_default()
             })
@@ -803,7 +805,7 @@ impl UiComponentIndex {
     /// `themes` as in [`LayoutIndex::build`]. Component name = file stem; `view/base`
     /// applies to both areas. Only direct children of `ui_component/` are components
     /// (Magento_Ui's `ui_component/etc/definition/` holds component *type* definitions).
-    pub fn build(modules: &[Module], themes: &[(String, PathBuf)]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs, themes: &[(String, PathBuf)]) -> Self {
         struct Job {
             layer: LayoutLayer,
             areas: Vec<Area>,
@@ -854,7 +856,7 @@ impl UiComponentIndex {
         let parsed: Vec<parse::RawUiComponent> = jobs
             .par_iter()
             .map(|j| {
-                std::fs::read_to_string(&j.path)
+                vfs.read_to_string(&j.path)
                     .map(|t| parse::ui_component_xml(&t))
                     .unwrap_or(parse::RawUiComponent { kind: None, ops: Vec::new() })
             })
@@ -937,10 +939,10 @@ pub(crate) struct ExtAttrIndex {
 }
 
 impl ExtAttrIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut by_type: HashMap<ClassName, ExtendedType> = HashMap::new();
         for (i, path, raws) in
-            read_parse(modules, Area::Global, "extension_attributes.xml", parse::extension_attributes_xml)
+            read_parse(modules, vfs, Area::Global, "extension_attributes.xml", parse::extension_attributes_xml)
         {
             let module = &modules[i].name;
             for r in raws {
@@ -1007,10 +1009,10 @@ pub(crate) struct MenuIndex {
 }
 
 impl MenuIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut by_id: HashMap<String, MenuItem> = HashMap::new();
 
-        for (i, path, ops) in read_parse(modules, Area::Adminhtml, "menu.xml", parse::menu_xml) {
+        for (i, path, ops) in read_parse(modules, vfs, Area::Adminhtml, "menu.xml", parse::menu_xml) {
             let module = &modules[i].name;
             for op in ops {
                 match op {
@@ -1166,10 +1168,10 @@ pub(crate) struct GqlIndex {
 }
 
 impl GqlIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut types: HashMap<String, GqlType> = HashMap::new();
         for (i, path, raws) in
-            read_parse(modules, Area::Global, "schema.graphqls", crate::graphql::schema_graphqls)
+            read_parse(modules, vfs, Area::Global, "schema.graphqls", crate::graphql::schema_graphqls)
         {
             let module = &modules[i].name;
             let src = |line: u32| Source {
@@ -1333,7 +1335,7 @@ struct MqPublisherBuild {
 }
 
 impl MqIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let src = |module: &ModuleName, path: &PathBuf, line: u32| Source {
             module: module.clone(),
             file: path.clone(),
@@ -1345,7 +1347,7 @@ impl MqIndex {
         // (attribute-level, like plugins — a later `disabled="true"` keeps the class).
         let mut topics: HashMap<String, MqTopic> = HashMap::new();
         for (i, path, raws) in
-            read_parse(modules, Area::Global, "communication.xml", parse::communication_xml)
+            read_parse(modules, vfs, Area::Global, "communication.xml", parse::communication_xml)
         {
             let module = &modules[i].name;
             for r in raws {
@@ -1396,7 +1398,7 @@ impl MqIndex {
         // queue_consumer.xml: consumers by name, merge non-empty.
         let mut consumers: HashMap<String, MqConsumer> = HashMap::new();
         for (i, path, raws) in
-            read_parse(modules, Area::Global, "queue_consumer.xml", parse::queue_consumer_xml)
+            read_parse(modules, vfs, Area::Global, "queue_consumer.xml", parse::queue_consumer_xml)
         {
             let module = &modules[i].name;
             for r in raws {
@@ -1433,7 +1435,7 @@ impl MqIndex {
         // name on amqp and db is two different exchanges. Bindings by id, last-wins.
         let mut exchanges: HashMap<(String, String), MqExchangeBuild> = HashMap::new();
         for (i, path, raws) in
-            read_parse(modules, Area::Global, "queue_topology.xml", parse::queue_topology_xml)
+            read_parse(modules, vfs, Area::Global, "queue_topology.xml", parse::queue_topology_xml)
         {
             let module = &modules[i].name;
             for r in raws {
@@ -1458,7 +1460,7 @@ impl MqIndex {
         // queue_publisher.xml: publishers by topic; connections merged by name.
         let mut publishers: HashMap<String, MqPublisherBuild> = HashMap::new();
         for (i, path, raws) in
-            read_parse(modules, Area::Global, "queue_publisher.xml", parse::queue_publisher_xml)
+            read_parse(modules, vfs, Area::Global, "queue_publisher.xml", parse::queue_publisher_xml)
         {
             let module = &modules[i].name;
             for r in raws {
@@ -1673,12 +1675,12 @@ pub(crate) struct IndexerIndex {
 }
 
 impl IndexerIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         // indexer.xml: indexers keyed by id, merged non-empty (a later module may re-state
         // an indexer only to override its class or add dependencies). `source` keeps the
         // first declaration; dependencies accumulate (deduped).
         let mut by_id: HashMap<String, Indexer> = HashMap::new();
-        for (i, path, raws) in read_parse(modules, Area::Global, "indexer.xml", parse::indexer_xml)
+        for (i, path, raws) in read_parse(modules, vfs, Area::Global, "indexer.xml", parse::indexer_xml)
         {
             let module = &modules[i].name;
             for r in raws {
@@ -1726,7 +1728,7 @@ impl IndexerIndex {
         // mview.xml: views keyed by id; subscriptions merged by table name, each keeping the
         // *adding* module's source (a module can subscribe extra tables to another's view).
         let mut views: HashMap<String, Vec<MviewSubscription>> = HashMap::new();
-        for (i, path, raws) in read_parse(modules, Area::Global, "mview.xml", parse::mview_xml) {
+        for (i, path, raws) in read_parse(modules, vfs, Area::Global, "mview.xml", parse::mview_xml) {
             let module = &modules[i].name;
             for v in raws {
                 let subs = views.entry(v.id).or_default();
@@ -1814,11 +1816,11 @@ pub(crate) struct SystemConfigIndex {
 }
 
 impl SystemConfigIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut tabs: HashMap<String, String> = HashMap::new();
         let mut sections: HashMap<String, SectionBuild> = HashMap::new();
 
-        for (i, path, raw) in read_parse(modules, Area::Adminhtml, "system.xml", parse::system_xml) {
+        for (i, path, raw) in read_parse(modules, vfs, Area::Adminhtml, "system.xml", parse::system_xml) {
             let module = &modules[i].name;
             for tab in raw.tabs {
                 if !tab.label.is_empty() {
@@ -1929,11 +1931,11 @@ pub(crate) struct AclIndex {
 }
 
 impl AclIndex {
-    pub fn build(modules: &[Module]) -> Self {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
         let mut by_id: HashMap<String, AclResource> = HashMap::new();
 
         // acl.xml is a global file (`etc/acl.xml`); tag provenance as adminhtml — its domain.
-        for (i, path, raws) in read_parse(modules, Area::Global, "acl.xml", parse::acl_xml) {
+        for (i, path, raws) in read_parse(modules, vfs, Area::Global, "acl.xml", parse::acl_xml) {
             let module = &modules[i].name;
             for r in raws {
                 let source =

@@ -21,12 +21,12 @@ const DEBOUNCE: Duration = Duration::from_millis(300);
 pub(crate) fn capabilities() -> lsp_types::ServerCapabilities {
     use lsp_types::*;
     ServerCapabilities {
-        // Save-based model: we want didOpen/didSave notifications, never didChange
-        // content (core reads from disk).
+        // Full-content sync: open buffers overlay the checkout, so analysis (and the
+        // as-you-type diagnostics) reflect what the editor shows, not what's saved.
         text_document_sync: Some(TextDocumentSyncCapability::Options(
             TextDocumentSyncOptions {
                 open_close: Some(true),
-                change: Some(TextDocumentSyncKind::NONE),
+                change: Some(TextDocumentSyncKind::FULL),
                 save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
                     include_text: Some(false),
                 })),
@@ -75,6 +75,9 @@ pub(crate) struct Server<'a> {
     /// the client can't otherwise know a save changed them.
     refresh_inlay_hints: bool,
     refresh_code_lenses: bool,
+    /// Open buffers' current contents (full-text sync), keyed by file path. These form
+    /// the overlay each rebuild hands to [`Magento::open_with_overlay`].
+    buffers: std::collections::HashMap<PathBuf, String>,
     next_request_id: i32,
 }
 
@@ -100,6 +103,7 @@ impl<'a> Server<'a> {
                 .and_then(|w| w.code_lens.as_ref())
                 .and_then(|c| c.refresh_support)
                 .unwrap_or(false),
+            buffers: std::collections::HashMap::new(),
             next_request_id: 0,
         };
 
@@ -197,6 +201,40 @@ impl<'a> Server<'a> {
                     }
                 }
             }
+            lsp_types::notification::DidOpenTextDocument::METHOD => {
+                if let Ok(params) = serde_json::from_value::<
+                    lsp_types::DidOpenTextDocumentParams,
+                >(notification.params)
+                {
+                    if let Ok(path) = params.text_document.uri.to_file_path() {
+                        self.buffer_updated(path, Some(params.text_document.text));
+                    }
+                }
+            }
+            lsp_types::notification::DidChangeTextDocument::METHOD => {
+                if let Ok(params) = serde_json::from_value::<
+                    lsp_types::DidChangeTextDocumentParams,
+                >(notification.params)
+                {
+                    // Full-content sync: the last change event carries the whole text.
+                    if let (Ok(path), Some(change)) = (
+                        params.text_document.uri.to_file_path(),
+                        params.content_changes.into_iter().last(),
+                    ) {
+                        self.buffer_updated(path, Some(change.text));
+                    }
+                }
+            }
+            lsp_types::notification::DidCloseTextDocument::METHOD => {
+                if let Ok(params) = serde_json::from_value::<
+                    lsp_types::DidCloseTextDocumentParams,
+                >(notification.params)
+                {
+                    if let Ok(path) = params.text_document.uri.to_file_path() {
+                        self.buffer_updated(path, None);
+                    }
+                }
+            }
             lsp_types::notification::DidSaveTextDocument::METHOD => {
                 if let Ok(params) = serde_json::from_value::<
                     lsp_types::DidSaveTextDocumentParams,
@@ -219,6 +257,55 @@ impl<'a> Server<'a> {
         }
     }
 
+    /// The buffers under `root`, each inserted under its own path *and* the
+    /// canonicalized form, so core's root-joined paths match whichever spelling the
+    /// editor's URIs use (macOS `/private` symlinks and friends).
+    fn overlay_for(&self, root: &Path) -> std::collections::HashMap<PathBuf, String> {
+        let mut overlay = std::collections::HashMap::new();
+        for (path, text) in &self.buffers {
+            if !path.starts_with(root) {
+                continue;
+            }
+            if let Ok(canonical) = path.canonicalize() {
+                if canonical != *path {
+                    overlay.insert(canonical, text.clone());
+                }
+            }
+            overlay.insert(path.clone(), text.clone());
+        }
+        overlay
+    }
+
+    /// A buffer opened, changed, or closed: update the overlay and invalidate when the
+    /// buffer diverges from (or reverts toward) what the index last saw.
+    fn buffer_updated(&mut self, path: PathBuf, text: Option<String>) {
+        if !is_interesting(&path) || self.workspace_of(&path).is_none() {
+            return;
+        }
+        match text {
+            Some(text) => {
+                let previous = self.buffers.insert(path.clone(), text.clone());
+                // didOpen with pristine content changes nothing; every other
+                // transition (edit, revert, restored unsaved buffer) invalidates.
+                let baseline = match &previous {
+                    Some(previous) => previous.clone(),
+                    None => std::fs::read_to_string(&path).unwrap_or_default(),
+                };
+                if baseline != text {
+                    self.mark_dirty(&path);
+                }
+            }
+            None => {
+                if let Some(last) = self.buffers.remove(&path) {
+                    // Closed with unsaved changes: the index must revert to disk.
+                    if std::fs::read_to_string(&path).ok().as_deref() != Some(last.as_str()) {
+                        self.mark_dirty(&path);
+                    }
+                }
+            }
+        }
+    }
+
     fn rebuild_dirty(&mut self) {
         let mut rebuilt = false;
         for index in 0..self.workspaces.len() {
@@ -227,7 +314,8 @@ impl<'a> Server<'a> {
             }
             rebuilt = true;
             let root = self.workspaces[index].root.clone();
-            let handle = match Magento::open(&root) {
+            let overlay = self.overlay_for(&root);
+            let handle = match Magento::open_with_overlay(&root, overlay) {
                 Ok(magento) => Some(Arc::new(magento)),
                 Err(error) => {
                     self.log(
