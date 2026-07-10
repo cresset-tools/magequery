@@ -38,6 +38,10 @@ pub(crate) struct ClassResolver {
     headers: Mutex<HashMap<ClassName, Option<Arc<PhpClass>>>>,
     /// Content reads (headers, plugin methods, command names) honor the buffer overlay.
     vfs: std::sync::Arc<Vfs>,
+    /// The installation root — runtime-dir filtering in `class_names` is judged
+    /// relative to it (an absolute check false-positives on stores deployed under
+    /// `/var/www` and on macOS temp dirs under `/var/folders`).
+    root: PathBuf,
 }
 
 impl ClassResolver {
@@ -75,7 +79,7 @@ impl ClassResolver {
 
         prefixes.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
         psr0.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
-        Self { prefixes, psr0, headers: Mutex::new(HashMap::new()), vfs }
+        Self { prefixes, psr0, headers: Mutex::new(HashMap::new()), vfs, root: root.to_path_buf() }
     }
 
     /// The on-disk file a class maps to, if any PSR-4/PSR-0 prefix resolves it to an
@@ -245,12 +249,15 @@ impl ClassResolver {
     /// callers cache it — the result only changes when PHP files appear or disappear.
     pub fn class_names(&self) -> Vec<ClassName> {
         use rayon::prelude::*;
-        // Skip autoload roots inside generated/ and var/: runtime-written code
-        // (interceptors, proxies, factories) is never something a human types into
-        // config, and it doesn't exist on a fresh checkout anyway.
+        // Skip autoload roots inside the checkout's generated/ and var/: runtime-written
+        // code (interceptors, proxies, factories) is never something a human types into
+        // config. Judged relative to the root — an absolute-path check would
+        // false-positive on stores deployed under /var/www (and macOS temp dirs).
         let is_runtime_dir = |dir: &PathBuf| {
-            dir.components()
-                .any(|c| c.as_os_str() == "generated" || c.as_os_str() == "var")
+            dir.strip_prefix(&self.root).is_ok_and(|rel| {
+                rel.components()
+                    .any(|c| c.as_os_str() == "generated" || c.as_os_str() == "var")
+            })
         };
         let mut jobs: Vec<(&str, &PathBuf, bool)> = Vec::new();
         for (prefix, dirs) in &self.prefixes {
