@@ -14,8 +14,143 @@ use lsp_types::{
 use magequery_core::model::ModuleSource;
 use magequery_core::{Area, ClassName, ConfigSourceKind, EventName, Magento, Source};
 
-use crate::entity::{entity_at, Entity, EntityAt};
+use crate::entity::{completion_context, entity_at, CompletionKind, Entity, EntityAt};
 use crate::textpos::LineIndex;
+
+// ---- completion --------------------------------------------------------------------
+
+/// Cap on returned items; `is_incomplete` makes the client re-query as typing narrows.
+const COMPLETION_LIMIT: usize = 200;
+
+/// Completions for the value under the cursor. `class_catalog` is the (expensive,
+/// caller-cached) class enumeration; every other candidate set enumerates cheaply from
+/// the handle's indexes per request.
+pub(crate) fn completions(
+    magento: &Magento,
+    class_catalog: &[ClassName],
+    path: &Path,
+    position: Position,
+) -> Option<lsp_types::CompletionList> {
+    let text = magento.read_source(path).ok()?;
+    let index = LineIndex::new(&text);
+    let offset = index.offset(position)?;
+    let ctx = completion_context(path.file_name()?.to_str()?, &text, offset)?;
+    let range = index.range(ctx.span.clone());
+
+    use lsp_types::CompletionItemKind as K;
+    let mut candidates: Vec<(String, K, Option<&'static str>)> = Vec::new();
+    match ctx.kind {
+        CompletionKind::Class => {
+            candidates.extend(
+                class_catalog
+                    .iter()
+                    .map(|class| (class.as_str().to_string(), K::CLASS, None)),
+            );
+            candidates.extend(
+                magento
+                    .virtual_type_names()
+                    .into_iter()
+                    .map(|name| (name.as_str().to_string(), K::REFERENCE, Some("virtual type"))),
+            );
+        }
+        CompletionKind::Event => {
+            let mut names = std::collections::BTreeSet::new();
+            for area in Area::ALL {
+                for (event, _) in magento.events(area) {
+                    names.insert(event.as_str().to_string());
+                }
+            }
+            candidates.extend(names.into_iter().map(|name| (name, K::EVENT, None)));
+        }
+        CompletionKind::ConfigPath => {
+            let mut paths = std::collections::BTreeSet::new();
+            for field in magento.system_config(None) {
+                paths.insert(field.path);
+            }
+            candidates.extend(paths.into_iter().map(|path| (path, K::VALUE, None)));
+        }
+        CompletionKind::Acl => {
+            candidates.extend(
+                magento
+                    .acl(None)
+                    .into_iter()
+                    .map(|resource| (resource.id, K::CONSTANT, None)),
+            );
+        }
+        CompletionKind::Module => {
+            candidates.extend(
+                magento
+                    .modules()
+                    .iter()
+                    .map(|module| (module.name.as_str().to_string(), K::MODULE, None)),
+            );
+        }
+        CompletionKind::Table => {
+            candidates.extend(
+                magento
+                    .schema(None)
+                    .into_iter()
+                    .map(|table| (table.name, K::STRUCT, None)),
+            );
+        }
+    }
+
+    // Rank: whole-value prefix, then short-name prefix, then substring; all
+    // case-insensitive. An empty prefix offers everything (capped).
+    let typed = ctx.typed.to_lowercase();
+    let mut scored: Vec<(u8, String, K, Option<&'static str>)> = candidates
+        .into_iter()
+        .filter_map(|(label, kind, detail)| {
+            let lower = label.to_lowercase();
+            let rank = if typed.is_empty() {
+                3
+            } else if lower.starts_with(&typed) {
+                // Prefer completions that continue at a segment boundary: typing
+                // `Magento\Quote` should list `Magento\Quote\…` before
+                // `Magento\QuoteGraphQl\…` (whose `G` would byte-sort first).
+                let boundary = lower.len() == typed.len()
+                    || typed.ends_with('\\')
+                    || lower.as_bytes().get(typed.len()) == Some(&b'\\');
+                if boundary {
+                    0
+                } else {
+                    1
+                }
+            } else if lower.rsplit('\\').next().is_some_and(|short| short.starts_with(&typed)) {
+                2
+            } else if lower.contains(&typed) {
+                3
+            } else {
+                return None;
+            };
+            Some((rank, label, kind, detail))
+        })
+        .collect();
+    scored.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    let total = scored.len();
+
+    let items: Vec<lsp_types::CompletionItem> = scored
+        .into_iter()
+        .take(COMPLETION_LIMIT)
+        .enumerate()
+        .map(|(rank, (_, label, kind, detail))| lsp_types::CompletionItem {
+            label: label.clone(),
+            kind: Some(kind),
+            detail: detail.map(str::to_string),
+            filter_text: Some(label.clone()),
+            sort_text: Some(format!("{rank:04}")),
+            text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+                range,
+                new_text: label,
+            })),
+            ..Default::default()
+        })
+        .collect();
+    Some(lsp_types::CompletionList {
+        is_incomplete: total > COMPLETION_LIMIT,
+        items,
+    })
+}
 
 /// Source read + entity extraction shared by every position-based handler. Reads go
 /// through the handle, so unsaved buffer contents (the overlay) are what get analyzed.

@@ -449,6 +449,159 @@ fn gql_entity_at(text: &str, offset: usize) -> Option<EntityAt> {
     })
 }
 
+// ---- completion --------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletionKind {
+    /// FQCNs and virtual type names.
+    Class,
+    Event,
+    ConfigPath,
+    Acl,
+    Module,
+    /// db_schema table names (`referenceTable=`).
+    Table,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CompletionCtx {
+    pub kind: CompletionKind,
+    /// What's typed of the value so far — the filter, and the span the completion
+    /// replaces (value start .. cursor).
+    pub typed: String,
+    pub span: Range<usize>,
+}
+
+/// The completion context at `offset`, tolerant of mid-edit states: an unterminated
+/// attribute value (`type="Mag`), an auto-paired one (`type="Mag|"`), or a partial
+/// text node. Position rules mirror [`entity_at`]'s classification.
+pub(crate) fn completion_context(
+    file_name: &str,
+    text: &str,
+    offset: usize,
+) -> Option<CompletionCtx> {
+    if offset > text.len() {
+        return None;
+    }
+    if file_name.ends_with(".xml") {
+        xml_completion_context(text, offset)
+    } else if file_name.ends_with(".php") {
+        php_completion_context(text, offset)
+    } else {
+        None
+    }
+}
+
+fn xml_completion_context(text: &str, offset: usize) -> Option<CompletionCtx> {
+    let (line_start, line) = line_around(text, offset);
+    let cursor = offset - line_start;
+    // Walk the line up to the cursor with quote state: if we end inside a quote, the
+    // cursor sits in an attribute value opened at `open`.
+    let bytes = line.as_bytes();
+    let mut open: Option<usize> = None;
+    let mut quote = 0u8;
+    for (i, &b) in bytes.iter().enumerate().take_while(|(i, _)| *i < cursor) {
+        match open {
+            None if b == b'"' || b == b'\'' => {
+                open = Some(i);
+                quote = b;
+            }
+            Some(_) if b == quote => open = None,
+            _ => {}
+        }
+    }
+    if let Some(open) = open {
+        let attr = attribute_name_before(line, open)?;
+        let value_start = line_start + open + 1;
+        let typed = text[value_start..offset].to_string();
+        let tag = enclosing_tag(text, value_start);
+        let element = tag.as_deref().map(tag_name).unwrap_or("");
+        let kind = match attr.as_str() {
+            "type" | "instance" | "class" | "service" | "for" | "handler" => {
+                Some(CompletionKind::Class)
+            }
+            "name" if matches!(element, "type" | "virtualType") => Some(CompletionKind::Class),
+            "name" if element == "event" => Some(CompletionKind::Event),
+            "name" if element == "module" => Some(CompletionKind::Module),
+            "ref" | "resource" => Some(CompletionKind::Acl),
+            "referenceTable" => Some(CompletionKind::Table),
+            _ => None,
+        }?;
+        return Some(CompletionCtx { kind, typed, span: value_start..offset });
+    }
+
+    // Text-node context: between `>` and the cursor with no intervening `<`/`>`.
+    let run_start = {
+        let mut i = offset;
+        loop {
+            if i == 0 {
+                return None;
+            }
+            match text.as_bytes()[i - 1] {
+                b'>' => break i,
+                b'<' => return None,
+                _ => i -= 1,
+            }
+        }
+    };
+    let run = &text[run_start..offset];
+    let typed_start = run_start + (run.len() - run.trim_start().len());
+    let typed = text[typed_start..offset].to_string();
+    let tag = enclosing_tag(text, run_start)?;
+    let element = tag_name(&tag);
+    let kind = match element {
+        "source_model" | "backend_model" | "frontend_model" => CompletionKind::Class,
+        "config_path" => CompletionKind::ConfigPath,
+        "resource" => CompletionKind::Acl,
+        "argument" | "item"
+            if tag.contains("\"object\"") || tag.contains("'object'") =>
+        {
+            CompletionKind::Class
+        }
+        _ => return None,
+    };
+    Some(CompletionCtx { kind, typed, span: typed_start..offset })
+}
+
+fn php_completion_context(text: &str, offset: usize) -> Option<CompletionCtx> {
+    let (line_start, line) = line_around(text, offset);
+    let cursor = offset - line_start;
+    let bytes = line.as_bytes();
+    let mut open: Option<usize> = None;
+    let mut quote = 0u8;
+    let mut i = 0;
+    while i < cursor.min(bytes.len()) {
+        let b = bytes[i];
+        match open {
+            None if b == b'"' || b == b'\'' => {
+                open = Some(i);
+                quote = b;
+            }
+            Some(_) if b == b'\\' => i += 1, // escape inside the string
+            Some(_) if b == quote => open = None,
+            _ => {}
+        }
+        i += 1;
+    }
+    let open = open?;
+    let before = &line[..open];
+    let kind = if before.contains("dispatch") {
+        CompletionKind::Event
+    } else if before.contains("getValue") || before.contains("isSetFlag") {
+        CompletionKind::ConfigPath
+    } else if before.contains("isAllowed") || before.contains("ADMIN_RESOURCE") {
+        CompletionKind::Acl
+    } else {
+        return None;
+    };
+    let value_start = line_start + open + 1;
+    Some(CompletionCtx {
+        kind,
+        typed: text[value_start..offset].to_string(),
+        span: value_start..offset,
+    })
+}
+
 // ---- shared ------------------------------------------------------------------------
 
 /// The line containing `offset`, as (line start offset, line text without newline).
@@ -648,6 +801,68 @@ class Tweak
             at("Tweak.php", php, "execute($input"),
             Some(Entity::Method("execute".to_string()))
         );
+    }
+
+    #[test]
+    fn completion_contexts() {
+        let ctx = |file: &str, text: &str, cursor_after: &str| {
+            let offset = text.find(cursor_after).unwrap() + cursor_after.len();
+            completion_context(file, text, offset)
+        };
+
+        // Unterminated attribute value mid-typing.
+        let di = r#"<config>
+    <preference for="Acme\Widget\Api\ThingInterface" type="Acme\Wid
+</config>"#;
+        let got = ctx("di.xml", di, "type=\"Acme\\Wid").unwrap();
+        assert_eq!(got.kind, CompletionKind::Class);
+        assert_eq!(got.typed, "Acme\\Wid");
+
+        // Auto-paired quotes: cursor between them.
+        let di = r#"<type name="Mag"></type>"#;
+        let got = ctx("di.xml", di, "name=\"Mag").unwrap();
+        assert_eq!(got.kind, CompletionKind::Class);
+        assert_eq!(got.typed, "Mag");
+
+        // Event name attribute.
+        let events = r#"<event name="acme_">"#;
+        let got = ctx("events.xml", events, "name=\"acme_").unwrap();
+        assert_eq!(got.kind, CompletionKind::Event);
+        assert_eq!(got.typed, "acme_");
+
+        // Text node of a source_model.
+        let system = r#"<field><source_model>Magento\Se</source_model></field>"#;
+        let got = ctx("system.xml", system, "<source_model>Magento\\Se").unwrap();
+        assert_eq!(got.kind, CompletionKind::Class);
+        assert_eq!(got.typed, "Magento\\Se");
+
+        // config_path text node.
+        let system = r#"<field><config_path>catalog/se</config_path></field>"#;
+        let got = ctx("system.xml", system, "<config_path>catalog/se").unwrap();
+        assert_eq!(got.kind, CompletionKind::ConfigPath);
+        assert_eq!(got.typed, "catalog/se");
+
+        // Module in a sequence.
+        let module = r#"<sequence><module name="Magento_Ca"/></sequence>"#;
+        let got = ctx("module.xml", module, "name=\"Magento_Ca").unwrap();
+        assert_eq!(got.kind, CompletionKind::Module);
+
+        // PHP: config path behind getValue, event behind dispatch; a plain string is
+        // no context.
+        let php = r#"<?php
+$v = $this->config->getValue('web/sec');
+$this->events->dispatch('acme_th');
+$x = 'not_a_context';
+"#;
+        let got = ctx("X.php", php, "getValue('web/sec").unwrap();
+        assert_eq!(got.kind, CompletionKind::ConfigPath);
+        assert_eq!(got.typed, "web/sec");
+        let got = ctx("X.php", php, "dispatch('acme_th").unwrap();
+        assert_eq!(got.kind, CompletionKind::Event);
+        assert!(ctx("X.php", php, "'not_a").is_none());
+
+        // Outside any value: no context.
+        assert!(ctx("di.xml", "<config>  </config>", "<config> ").is_none());
     }
 
     #[test]

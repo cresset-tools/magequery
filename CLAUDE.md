@@ -1614,6 +1614,26 @@ canonical watch list, LSP glob semantics), and a compile-time `Send + Sync` asse
 otherwise never builds core **without** `db` — that exact configuration had already
 broken silently once (an ungated `to_product`, fixed alongside).
 
+**Completions** — the daily-driver feature. `entity.rs::completion_context` detects the
+value being typed, tolerant of mid-edit states (an unterminated `type="Mag`, an
+auto-paired `type="Mag|"`, a partial text node) — position rules mirror `entity_at`:
+class-valued attributes/text, `<event name=`, `<module name=` in sequences,
+`ref`/`resource` ACL attrs, `referenceTable`, `<config_path>`, and PHP strings behind
+`dispatch`/`getValue`/`isSetFlag`/`isAllowed`. Candidates: **classes** from
+`Magento::class_names()` — a new parallel resolver walk mapping every PSR-4/PSR-0 dir's
+`.php` files back to FQCNs (Test/_files skipped, `generated/`+`var/` autoload roots
+excluded — runtime-written interceptors/proxies are never typed into config; ~24k names
+in ~25-230ms on lite) — plus `virtual_type_names()` (all areas, tagged "virtual type");
+events/config-paths/ACL/modules/tables enumerate cheaply from existing indexes per
+request. **The catalog is cached in the LSP outside the handle** (critical under
+as-you-type rebuilds: the handle dies per keystroke, the class *set* only changes when
+PHP files are created/deleted — watched-file events evict it). Ranking:
+segment-boundary prefix (`Magento\Quote` lists `Quote\Api\…` before `QuoteGraphQl\…`,
+whose `G` would byte-sort first) → plain prefix → short-name prefix → substring, capped
+at 200 with `is_incomplete` so clients re-query; items carry a `TextEdit` over the
+typed span (client word-boundary heuristics break on backslashes). Validated live:
+catalog 21,899 names, 2-28ms per request, full-name query → exactly 1 item.
+
 **Editors live in `editors/` (monorepo, locked); publisher identity is `cresset-tools`.**
 - `editors/vscode` — TypeScript client (`vscode-languageclient` 9, esbuild bundle).
   Activation `workspaceContains:**/app/etc/config.php` (never wakes in non-Magento

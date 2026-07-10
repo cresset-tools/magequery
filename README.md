@@ -183,7 +183,8 @@ docs just as well.
 ## Editor integration (LSP)
 
 The binary doubles as a language server: `magequery lsp` speaks LSP over stdio. Inside the
-editor that gives you `doctor` findings as diagnostics while you type, go-to-definition and hover on
+editor that gives you context-aware completions (classes, events, config paths, ACL ids),
+`doctor` findings as diagnostics while you type, go-to-definition and hover on
 class names in `di.xml`/`events.xml`/`webapi.xml`/`system.xml`/`schema.graphqls` (definition on
 an interface also jumps to the class its `<preference>` resolves to), find-references over the
 whole config graph (injections, virtual types, observers, cron, webapi, GraphQL, queues), and

@@ -236,4 +236,91 @@ impl ClassResolver {
             })
             .collect()
     }
+
+    /// Every class name derivable from the autoload maps: each PSR-4/PSR-0 source dir
+    /// walked in parallel, paths mapped back to FQCNs. Names are derived from paths, not
+    /// parsed headers — cheap, but a file whose class diverges from its path is
+    /// misnamed here (the same convention bet the whole resolver makes). Sorted,
+    /// deduped. This is the expensive enumeration (`file_for` in reverse, in bulk);
+    /// callers cache it — the result only changes when PHP files appear or disappear.
+    pub fn class_names(&self) -> Vec<ClassName> {
+        use rayon::prelude::*;
+        // Skip autoload roots inside generated/ and var/: runtime-written code
+        // (interceptors, proxies, factories) is never something a human types into
+        // config, and it doesn't exist on a fresh checkout anyway.
+        let is_runtime_dir = |dir: &PathBuf| {
+            dir.components()
+                .any(|c| c.as_os_str() == "generated" || c.as_os_str() == "var")
+        };
+        let mut jobs: Vec<(&str, &PathBuf, bool)> = Vec::new();
+        for (prefix, dirs) in &self.prefixes {
+            for dir in dirs.iter().filter(|d| !is_runtime_dir(d)) {
+                jobs.push((prefix.as_str(), dir, false));
+            }
+        }
+        for (prefix, dirs) in &self.psr0 {
+            for dir in dirs.iter().filter(|d| !is_runtime_dir(d)) {
+                jobs.push((prefix.as_str(), dir, true));
+            }
+        }
+        let lists: Vec<Vec<ClassName>> = jobs
+            .par_iter()
+            .map(|(prefix, dir, psr0)| {
+                let mut out = Vec::new();
+                collect_php_classes(dir, &mut String::new(), 0, &mut |rel_class| {
+                    let name = if *psr0 {
+                        // PSR-0 keeps the prefix inside the path; only names under the
+                        // registered prefix belong to it.
+                        if !rel_class.starts_with(prefix) {
+                            return;
+                        }
+                        rel_class.to_string()
+                    } else {
+                        format!("{prefix}{rel_class}")
+                    };
+                    out.push(ClassName::new(name));
+                });
+                out
+            })
+            .collect();
+        let set: std::collections::BTreeSet<ClassName> = lists.into_iter().flatten().collect();
+        set.into_iter().collect()
+    }
+}
+
+/// Recursive `.php` walk, calling `push` with the `\`-joined relative class name (no
+/// extension). Skips test fixtures and non-class files (PSR class files start with an
+/// uppercase letter; `registration.php`, `functions.php` and friends don't).
+fn collect_php_classes(
+    dir: &std::path::Path,
+    rel: &mut String,
+    depth: usize,
+    push: &mut impl FnMut(&str),
+) {
+    if depth > 12 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let path = entry.path();
+        if path.is_dir() {
+            if matches!(name, "Test" | "Tests" | "_files" | "node_modules") || name.starts_with('.') {
+                continue;
+            }
+            let len = rel.len();
+            rel.push_str(name);
+            rel.push('\\');
+            collect_php_classes(&path, rel, depth + 1, push);
+            rel.truncate(len);
+        } else if let Some(stem) = name.strip_suffix(".php") {
+            if stem.starts_with(|c: char| c.is_ascii_uppercase()) {
+                let len = rel.len();
+                rel.push_str(stem);
+                push(rel);
+                rel.truncate(len);
+            }
+        }
+    }
 }
