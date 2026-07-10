@@ -1513,6 +1513,8 @@ impl MqIndex {
 
     /// Every queue the static config knows — consumer `queue=`, publisher direct
     /// `queue=`, binding destinations — with the consumers reading each. Sorted by name.
+    /// Only `queue_backlog` (the live-count join) consumes it, hence the gate.
+    #[cfg(feature = "db")]
     pub fn queues(&self) -> Vec<(String, Vec<String>)> {
         let mut map: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();

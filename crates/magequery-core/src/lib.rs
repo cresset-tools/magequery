@@ -4192,6 +4192,7 @@ fn to_product_links(raw: db::DbProductLinks, matched_by_id: bool) -> ProductLink
     }
 }
 
+#[cfg(feature = "db")]
 fn to_product(raw: db::DbProduct, matched_by_id: bool) -> Product {
     let label_of = |v: &db::DbProductValue, value: &str| -> Option<String> {
         match (v.attribute.as_str(), v.input.as_deref()) {
