@@ -4944,6 +4944,8 @@ mod handle_tests {
         write("app/code/Acme/Widget/Api/ThingInterface.php");
         write("app/code/Acme/Widget/registration.php"); // lowercase stem: not a class
         write("app/code/Acme/Widget/Test/Unit/ThingTest.php"); // test tree: skipped
+        // Runtime-written code below an autoload-covered dir: never a candidate.
+        write("app/code/Acme/Widget/generated/Thing/Interceptor.php");
 
         let magento = super::Magento::open(&tree.0).unwrap();
         let names: Vec<String> =
@@ -4952,6 +4954,7 @@ mod handle_tests {
         assert!(names.contains(&"Acme\\Widget\\Api\\ThingInterface".to_string()));
         assert!(!names.iter().any(|n| n.contains("registration")));
         assert!(!names.iter().any(|n| n.contains("ThingTest")));
+        assert!(!names.iter().any(|n| n.contains("Interceptor")), "{names:?}");
     }
 
     /// The buffer overlay wins over disk: the same root answers differently when a

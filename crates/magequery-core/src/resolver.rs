@@ -306,7 +306,15 @@ fn collect_php_classes(
         let Some(name) = name.to_str() else { continue };
         let path = entry.path();
         if path.is_dir() {
-            if matches!(name, "Test" | "Tests" | "_files" | "node_modules") || name.starts_with('.') {
+            // `generated`/`var`/`pub` also guard the *descent*: filtering only the
+            // autoload roots misses stores whose root composer.json maps a prefix to an
+            // ancestor of generated/ — the walk would rediscover every interceptor and
+            // proxy from below (seen live on a real store).
+            if matches!(
+                name,
+                "Test" | "Tests" | "_files" | "node_modules" | "generated" | "var" | "pub" | "dev"
+            ) || name.starts_with('.')
+            {
                 continue;
             }
             let len = rel.len();
