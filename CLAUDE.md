@@ -1551,9 +1551,12 @@ counts, wired-in count, observes/cron/webapi/command roles), event = observer li
 config path = admin breadcrumb + per-scope static values, ACL = title/breadcrumb/grants;
 **references** — `uses()` reverse DI + the whatis sweep + plugins declared on the class,
 deduped by (uri, line); **code lens** — on a PHP class declaration: `N plugin(s)` (with
-"via ancestors" split) and `wired in N config place(s)`, command
-`magequery.showReferences` (the VS Code client maps it onto the peek view; clients
-without it show inert text); **plugin-method jump** — definition on a
+"via ancestors" split) and `wired in N config place(s)`; per *method*: `intercepted by N
+plugin method(s)` on each targeted method and `intercepts Save::execute()` on each
+interception method of a plugin class (`method_decl_spans` scans the file's `function
+<name>(` declarations; the plugin set is fetched once per file). All lenses carry the
+command `magequery.showReferences` (the VS Code client maps it onto the peek view;
+clients without it show inert text); **plugin-method jump** — definition on a
 `before*/around*/after*` *declaration* in a plugin class lands on the intercepted method:
 `Magento::plugin_targets(class)` (the reverse of `plugins` — which `<plugin>` declarations
 use this class; the old private helper of that name is now `plugin_lookup_chain`) →

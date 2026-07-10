@@ -19,7 +19,9 @@ of the checkout — no database, no `setup:di:compile`, no working PHP needed.
 - **Find references** — every di.xml injection, virtual type, observer registration,
   cron job, webapi route, GraphQL resolver and queue handler referencing a class.
 - **Code lens** — on a PHP class declaration: `N plugin(s)` and
-  `wired in N config place(s)`, peeking straight into the declaring XML.
+  `wired in N config place(s)`; on each intercepted method: `intercepted by N plugin
+  method(s)`; on a plugin's interception methods: `intercepts Save::execute()` — all
+  peeking straight into the other side.
 - **Plugin-method jump, both directions** — go-to-definition on a
   `before*`/`around*`/`after*` declaration in a plugin class lands on the method it
   intercepts (resolved through the di.xml plugin declaration and the preference chain);

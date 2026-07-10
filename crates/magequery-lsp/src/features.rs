@@ -209,13 +209,16 @@ fn interceptors_of(magento: &Magento, path: &Path, method: &str) -> Vec<Intercep
     let Some(class) = class_of_file(magento, path) else {
         return Vec::new();
     };
-    let Ok(plugins) = magento.plugins_all_areas(&class) else {
-        return Vec::new();
-    };
+    let plugins = magento.plugins_all_areas(&class).unwrap_or_default();
+    method_interceptors(&plugins, method)
+}
+
+/// The subset of `plugins` intercepting `method` (PHP method names are
+/// case-insensitive). Split out so code lens can fetch the plugin set once per file.
+fn method_interceptors(plugins: &[magequery_core::Plugin], method: &str) -> Vec<Interceptor> {
     let mut out = Vec::new();
     for plugin in plugins {
         for plugin_method in &plugin.methods {
-            // PHP method names are case-insensitive.
             if plugin_method.target.eq_ignore_ascii_case(method) {
                 out.push(Interceptor {
                     kind: plugin_method.kind,
@@ -234,7 +237,11 @@ fn interceptors_of(magento: &Magento, path: &Path, method: &str) -> Vec<Intercep
 /// Jump targets for the reverse direction: the plugin method's own declaration, falling
 /// back to the di.xml `<plugin>` line when the plugin file can't be read.
 fn interceptor_locations(magento: &Magento, path: &Path, method: &str) -> Vec<Location> {
-    let locations = interceptors_of(magento, path, method)
+    interceptor_sites(magento, interceptors_of(magento, path, method))
+}
+
+fn interceptor_sites(magento: &Magento, interceptors: Vec<Interceptor>) -> Vec<Location> {
+    let locations = interceptors
         .into_iter()
         .map(|interceptor| {
             magento
@@ -677,28 +684,32 @@ pub(crate) fn code_lens(magento: &Magento, path: &Path) -> Option<Vec<CodeLens>>
     }
     let class = class_of_file(magento, path)?;
     let text = std::fs::read_to_string(path).ok()?;
+    let index = LineIndex::new(&text);
     let short = class.as_str().rsplit('\\').next().unwrap_or(class.as_str());
-    let range = LineIndex::new(&text).range(find_decl_span(&text, short)?);
+    let range = index.range(find_decl_span(&text, short)?);
+
+    // Fetched once per file: the plugins firing on this class (feeds the class lens and
+    // every intercepted-method lens) and the types this class is a plugin on.
+    let plugins = magento.plugins_all_areas(&class).unwrap_or_default();
+    let plugin_targets = magento.plugin_targets(&class);
 
     let mut lenses = Vec::new();
-    if let Ok(plugins) = magento.plugins_all_areas(&class) {
-        let active: Vec<_> = plugins.iter().filter(|plugin| !plugin.disabled).collect();
-        if !active.is_empty() {
-            let inherited = active
-                .iter()
-                .filter(|plugin| plugin.declared_on != class)
-                .count();
-            let title = if inherited > 0 {
-                format!("{} plugin(s), {inherited} via ancestors", active.len())
-            } else {
-                format!("{} plugin(s)", active.len())
-            };
-            let locations: Vec<Location> = active
-                .iter()
-                .map(|plugin| source_location(magento, &plugin.source))
-                .collect();
-            lenses.push(lens(path, range, title, locations));
-        }
+    let active: Vec<_> = plugins.iter().filter(|plugin| !plugin.disabled).collect();
+    if !active.is_empty() {
+        let inherited = active
+            .iter()
+            .filter(|plugin| plugin.declared_on != class)
+            .count();
+        let title = if inherited > 0 {
+            format!("{} plugin(s), {inherited} via ancestors", active.len())
+        } else {
+            format!("{} plugin(s)", active.len())
+        };
+        let locations: Vec<Location> = active
+            .iter()
+            .map(|plugin| source_location(magento, &plugin.source))
+            .collect();
+        lenses.push(lens(path, range, title, locations));
     }
     let references = dedup_locations(class_references(magento, &class));
     if !references.is_empty() {
@@ -709,7 +720,80 @@ pub(crate) fn code_lens(magento: &Magento, path: &Path) -> Option<Vec<CodeLens>>
             references,
         ));
     }
+
+    // Per-method lenses. In a plugin class: what each interception method fires on. In
+    // any class with plugins: who intercepts each targeted method.
+    for (name, span) in method_decl_spans(&text) {
+        let method_range = index.range(span);
+        if !plugin_targets.is_empty() && intercepted_method(&name).is_some() {
+            let locations = plugin_method_locations(magento, path, &name);
+            if locations.is_empty() {
+                continue;
+            }
+            let target = intercepted_method(&name).expect("checked above");
+            let title = if let [only] = plugin_targets.as_slice() {
+                let concrete = magento
+                    .preference(&only.declared_on, Area::Global)
+                    .map(|preference| preference.concrete)
+                    .unwrap_or_else(|_| only.declared_on.clone());
+                let short = concrete.as_str().rsplit('\\').next().unwrap_or(concrete.as_str());
+                format!("intercepts {short}::{target}()")
+            } else {
+                format!("intercepts {target}() on {} types", plugin_targets.len())
+            };
+            lenses.push(lens(path, method_range, title, locations));
+            continue;
+        }
+        let interceptors = method_interceptors(&plugins, &name);
+        if !interceptors.is_empty() {
+            let title = format!("intercepted by {} plugin method(s)", interceptors.len());
+            let locations = interceptor_sites(magento, interceptors);
+            lenses.push(lens(path, method_range, title, locations));
+        }
+    }
     (!lenses.is_empty()).then_some(lenses)
+}
+
+/// Every named `function <name>(` declaration in the file, in order. Closures (no name)
+/// and arrow functions never match; a mention inside a comment is the accepted noise.
+fn method_decl_spans(text: &str) -> Vec<(String, Range<usize>)> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(relative) = text[from..].find("function") {
+        let keyword = from + relative;
+        from = keyword + "function".len();
+        let bounded = keyword == 0
+            || !(bytes[keyword - 1].is_ascii_alphanumeric() || bytes[keyword - 1] == b'_');
+        if !bounded {
+            continue;
+        }
+        let mut i = from;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'&' {
+            i += 1; // by-ref return
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+        }
+        let name_start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+            i += 1;
+        }
+        if i == name_start {
+            continue; // anonymous function
+        }
+        let mut j = i;
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if bytes.get(j) == Some(&b'(') {
+            out.push((text[name_start..i].to_string(), name_start..i));
+        }
+    }
+    out
 }
 
 fn lens(path: &Path, range: lsp_types::Range, title: String, locations: Vec<Location>) -> CodeLens {

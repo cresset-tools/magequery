@@ -320,6 +320,43 @@ fn diagnostics_definition_hover_and_invalidation() {
     assert_eq!(location.uri, fixture.uri("app/code/Acme/Widget/Plugin/Registered.php"));
     assert_eq!(location.range.start.line, 5); // `function aroundSave` is on line 6
 
+    // --- code lens on the intercepted class: a method-level "intercepted by" lens on
+    // save(), pointing at the plugin method.
+    let lenses = client
+        .request::<lsp_types::request::CodeLensRequest>(lsp_types::CodeLensParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: fixture.uri("app/code/Acme/Widget/Model/Thing.php"),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .expect("lenses on Thing.php");
+    let save_lens = lenses
+        .iter()
+        .find(|lens| lens.range.start.line == 5)
+        .expect("lens on the save() line");
+    let command = save_lens.command.as_ref().expect("lens command");
+    assert_eq!(command.title, "intercepted by 1 plugin method(s)");
+
+    // And on the plugin class: the forward lens naming the intercepted method.
+    let lenses = client
+        .request::<lsp_types::request::CodeLensRequest>(lsp_types::CodeLensParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: fixture.uri("app/code/Acme/Widget/Plugin/Registered.php"),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .expect("lenses on Registered.php");
+    let around_lens = lenses
+        .iter()
+        .find(|lens| lens.range.start.line == 5)
+        .expect("lens on the aroundSave() line");
+    assert_eq!(
+        around_lens.command.as_ref().expect("lens command").title,
+        "intercepts Thing::save()"
+    );
+
     // --- fixing the broken preference + a watched-file event clears the diagnostic.
     std::fs::write(
         fixture.path("app/code/Acme/Widget/etc/di.xml"),
