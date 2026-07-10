@@ -796,6 +796,101 @@ fn method_decl_spans(text: &str) -> Vec<(String, Range<usize>)> {
     out
 }
 
+/// The lens facts as inline annotations, for editors that render inlay hints but not
+/// code lenses (Zed): `« N plugins »` at the end of each intercepted method's signature
+/// line, `→ Save::execute()` on a plugin's interception methods. The tooltip carries
+/// the hover-style breakdown; the label links to the first location on the other side.
+pub(crate) fn inlay_hints(
+    magento: &Magento,
+    path: &Path,
+    range: lsp_types::Range,
+) -> Option<Vec<lsp_types::InlayHint>> {
+    if path.extension()?.to_str() != Some("php") {
+        return None;
+    }
+    let class = class_of_file(magento, path)?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let index = LineIndex::new(&text);
+    let plugins = magento.plugins_all_areas(&class).unwrap_or_default();
+    let plugin_targets = magento.plugin_targets(&class);
+    if plugins.is_empty() && plugin_targets.is_empty() {
+        return None;
+    }
+
+    let mut hints = Vec::new();
+    for (name, span) in method_decl_spans(&text) {
+        // Anchor at the end of the signature's first line.
+        let eol = text[span.end..]
+            .find('\n')
+            .map(|i| span.end + i)
+            .unwrap_or(text.len());
+        let position = index.position(eol);
+        if position.line < range.start.line || position.line > range.end.line {
+            continue;
+        }
+
+        if !plugin_targets.is_empty() && intercepted_method(&name).is_some() {
+            let locations = plugin_method_locations(magento, path, &name);
+            let Some(first) = locations.first() else { continue };
+            let target = intercepted_method(&name).expect("checked above");
+            let label = if let [only] = plugin_targets.as_slice() {
+                let concrete = magento
+                    .preference(&only.declared_on, Area::Global)
+                    .map(|preference| preference.concrete)
+                    .unwrap_or_else(|_| only.declared_on.clone());
+                let short = concrete.as_str().rsplit('\\').next().unwrap_or(concrete.as_str());
+                format!("→ {short}::{target}()")
+            } else {
+                format!("→ {target}() on {} types", plugin_targets.len())
+            };
+            hints.push(hint(
+                position,
+                label,
+                plugin_method_hover(magento, path, &name),
+                Some(first.clone()),
+            ));
+            continue;
+        }
+
+        let interceptors = method_interceptors(&plugins, &name);
+        if !interceptors.is_empty() {
+            let label = format!("« {} plugin(s) »", interceptors.len());
+            let tooltip = method_hover(magento, path, &name);
+            let first = interceptor_sites(magento, interceptors).into_iter().next();
+            hints.push(hint(position, label, tooltip, first));
+        }
+    }
+    (!hints.is_empty()).then_some(hints)
+}
+
+fn hint(
+    position: Position,
+    label: String,
+    tooltip: Option<String>,
+    location: Option<Location>,
+) -> lsp_types::InlayHint {
+    lsp_types::InlayHint {
+        position,
+        label: lsp_types::InlayHintLabel::LabelParts(vec![lsp_types::InlayHintLabelPart {
+            value: label,
+            tooltip: tooltip.map(|markdown| {
+                lsp_types::InlayHintLabelPartTooltip::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: markdown,
+                })
+            }),
+            location,
+            command: None,
+        }]),
+        kind: None,
+        text_edits: None,
+        tooltip: None,
+        padding_left: Some(true),
+        padding_right: Some(false),
+        data: None,
+    }
+}
+
 fn lens(path: &Path, range: lsp_types::Range, title: String, locations: Vec<Location>) -> CodeLens {
     let arguments = Url::from_file_path(path).ok().map(|uri| {
         vec![

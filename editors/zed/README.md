@@ -9,6 +9,14 @@ The server attaches to the **PHP** and **XML** languages (install those extensio
 running alongside the language's primary server. It analyzes the checkout from disk —
 answers refresh on save.
 
+Plugin indicators render as **inlay hints** (`« 7 plugin(s) »` at the end of an
+intercepted method's signature, `→ Save::execute()` on a plugin's interception
+methods — hover the hint for the breakdown). Enable them in Zed's settings:
+
+```json
+"inlay_hints": { "enabled": true }
+```
+
 ## Server binary
 
 `magequery` from `PATH` when present; otherwise the extension downloads the current

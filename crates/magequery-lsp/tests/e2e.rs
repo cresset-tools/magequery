@@ -357,6 +357,41 @@ fn diagnostics_definition_hover_and_invalidation() {
         "intercepts Thing::save()"
     );
 
+    // --- inlay hints: the Zed-visible plugin indicators on both sides.
+    let full_range = lsp_types::Range::new(
+        lsp_types::Position::new(0, 0),
+        lsp_types::Position::new(999, 0),
+    );
+    let hints = client
+        .request::<lsp_types::request::InlayHintRequest>(lsp_types::InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: fixture.uri("app/code/Acme/Widget/Model/Thing.php"),
+            },
+            range: full_range,
+            work_done_progress_params: Default::default(),
+        })
+        .expect("hints on Thing.php");
+    assert_eq!(hints.len(), 1);
+    assert_eq!(hints[0].position.line, 5); // end of the save() signature line
+    let lsp_types::InlayHintLabel::LabelParts(parts) = &hints[0].label else {
+        panic!("label parts expected");
+    };
+    assert_eq!(parts[0].value, "« 1 plugin(s) »");
+
+    let hints = client
+        .request::<lsp_types::request::InlayHintRequest>(lsp_types::InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: fixture.uri("app/code/Acme/Widget/Plugin/Registered.php"),
+            },
+            range: full_range,
+            work_done_progress_params: Default::default(),
+        })
+        .expect("hints on Registered.php");
+    let lsp_types::InlayHintLabel::LabelParts(parts) = &hints[0].label else {
+        panic!("label parts expected");
+    };
+    assert_eq!(parts[0].value, "→ Thing::save()");
+
     // --- fixing the broken preference + a watched-file event clears the diagnostic.
     std::fs::write(
         fixture.path("app/code/Acme/Widget/etc/di.xml"),

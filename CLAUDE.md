@@ -1556,7 +1556,11 @@ plugin method(s)` on each targeted method and `intercepts Save::execute()` on ea
 interception method of a plugin class (`method_decl_spans` scans the file's `function
 <name>(` declarations; the plugin set is fetched once per file). All lenses carry the
 command `magequery.showReferences` (the VS Code client maps it onto the peek view;
-clients without it show inert text); **plugin-method jump** — definition on a
+clients without it show inert text); **inlay hints** mirror the per-method lens facts
+inline (`« N plugin(s) »` at the end of an intercepted method's signature line,
+`→ Save::execute()` on interception methods; tooltip = the hover breakdown, label part
+links to the first location) — the indicator Zed can render, since it has no code-lens
+support (behind Zed's `"inlay_hints": {"enabled": true}` setting); **plugin-method jump** — definition on a
 `before*/around*/after*` *declaration* in a plugin class lands on the intercepted method:
 `Magento::plugin_targets(class)` (the reverse of `plugins` — which `<plugin>` declarations
 use this class; the old private helper of that name is now `plugin_lookup_chain`) →

@@ -38,6 +38,9 @@ pub(crate) fn capabilities() -> lsp_types::ServerCapabilities {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         references_provider: Some(OneOf::Left(true)),
         code_lens_provider: Some(CodeLensOptions { resolve_provider: Some(false) }),
+        // The lens data as inline annotations — the plugin indicator editors without
+        // code-lens rendering (Zed) can show.
+        inlay_hint_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -268,6 +271,15 @@ impl<'a> Server<'a> {
                     let path = p.text_document.uri.to_file_path().ok()?;
                     let magento = self.handle_for(&path)?;
                     serde_json::to_value(features::code_lens(&magento, &path)).ok()
+                })
+            }
+            lsp_types::request::InlayHintRequest::METHOD => {
+                let params: Option<lsp_types::InlayHintParams> =
+                    serde_json::from_value(request.params).ok();
+                params.and_then(|p| {
+                    let path = p.text_document.uri.to_file_path().ok()?;
+                    let magento = self.handle_for(&path)?;
+                    serde_json::to_value(features::inlay_hints(&magento, &path, p.range)).ok()
                 })
             }
             _ => None,

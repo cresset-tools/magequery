@@ -22,6 +22,8 @@ of the checkout — no database, no `setup:di:compile`, no working PHP needed.
   `wired in N config place(s)`; on each intercepted method: `intercepted by N plugin
   method(s)`; on a plugin's interception methods: `intercepts Save::execute()` — all
   peeking straight into the other side.
+- **Inlay hints** — the same plugin facts inline at the end of the signature line
+  (`« 7 plugin(s) »` / `→ Save::execute()`), with the breakdown on hover.
 - **Plugin-method jump, both directions** — go-to-definition on a
   `before*`/`around*`/`after*` declaration in a plugin class lands on the method it
   intercepts (resolved through the di.xml plugin declaration and the preference chain);
