@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 magequery-core = { path = "../magequery-core", features = ["db"] }
+magequery-lsp = { path = "../magequery-lsp" }
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 clap_mangen = "0.2"

@@ -566,7 +566,7 @@ impl Doctor<'_> {
                             format!(
                                 "{class} extends Symfony Command but is not registered on CommandListInterface in di.xml"
                             ),
-                            Some(src(m, path)),
+                            Some(src(m, path, h.decl_line)),
                         );
                     }
                 }
@@ -591,7 +591,7 @@ impl Doctor<'_> {
                     self.warn(
                         DoctorLint::ObserverUnregistered,
                         format!("{class} implements ObserverInterface but no events.xml registers it"),
-                        Some(src(m, path)),
+                        Some(src(m, path, h.decl_line)),
                     );
                 }
             }
@@ -610,7 +610,7 @@ impl Doctor<'_> {
                         format!(
                             "{class} defines before/around/after methods but no di.xml declares it as a plugin"
                         ),
-                        Some(src(m, path)),
+                        Some(src(m, path, h.decl_line)),
                     );
                 }
             }
@@ -646,8 +646,8 @@ impl Doctor<'_> {
     }
 }
 
-fn src(module: &Module, file: PathBuf) -> Source {
-    Source { module: module.name.clone(), file, line: 0, area: Area::Global }
+fn src(module: &Module, file: PathBuf, line: u32) -> Source {
+    Source { module: module.name.clone(), file, line, area: Area::Global }
 }
 
 pub(crate) fn same_file(a: &Path, b: &Path) -> bool {

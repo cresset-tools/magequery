@@ -55,7 +55,7 @@ pub use model::{
     Indexer, IndexerLive, InstanceInfo, Integration, InterceptKind,
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
-    MviewSubscription, Observer,
+    MviewSubscription, Observer, PluginTarget,
     BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount,
     CategoryIndexedProduct, CategoryProduct,
     CategoryTreeNode, CategoryVisibilityIssue,
@@ -90,7 +90,7 @@ pub use decrypt::Decryptor;
 pub use sysconfig::ConfigSet;
 pub use source::Source;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// An opened Magento installation. Holds the parsed module index and merged per-area DI
@@ -176,6 +176,41 @@ impl Magento {
         })
     }
 
+    /// Locate the Magento root for an arbitrary path inside (or beside) an installation:
+    /// the directory itself, then each ancestor, then — for monorepos that keep the shop
+    /// in a subdirectory — each direct child, in name order so the answer is
+    /// deterministic. A directory is a root iff `app/etc/config.php` exists, the same
+    /// probe [`open`](Magento::open) requires. Editor frontends get handed workspace
+    /// folders, not roots; the CLI's `--root` stays exact.
+    pub fn find_root(start: impl AsRef<Path>) -> Option<PathBuf> {
+        let start = start.as_ref();
+        let is_root = |dir: &Path| dir.join("app/etc/config.php").is_file();
+        for dir in start.ancestors() {
+            if is_root(dir) {
+                return Some(dir.to_path_buf());
+            }
+        }
+        let mut children: Vec<PathBuf> = std::fs::read_dir(start)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        children.sort();
+        children.into_iter().find(|child| is_root(child))
+    }
+
+    /// [`find_root`](Magento::find_root) + [`open`](Magento::open): open the installation
+    /// that contains `start`. `Error::NotMagentoRoot` when neither `start`, an ancestor,
+    /// nor a direct child is a Magento root.
+    pub fn discover(start: impl AsRef<Path>) -> Result<Self> {
+        let start = start.as_ref();
+        let root = Self::find_root(start).ok_or_else(|| Error::NotMagentoRoot {
+            path: start.to_path_buf(),
+        })?;
+        Self::open(root)
+    }
+
     /// The merged DI config, built (and its diagnostics collected) on first DI query.
     fn di_index(&self) -> &di::DiIndex {
         &self
@@ -197,6 +232,46 @@ impl Magento {
             all.extend(di.diagnostics.iter().cloned());
         }
         all
+    }
+
+    /// The installation root this handle was opened on.
+    pub fn root(&self) -> &Path {
+        &self.index.root
+    }
+
+    /// The on-disk PHP file `class` resolves to via the composer PSR-4/PSR-0 maps (plus
+    /// the app/code naming convention), if it exists. The jump-to-source primitive for
+    /// editor frontends. `None` for PHP built-ins, generated code that hasn't been
+    /// generated, and virtual types.
+    pub fn class_file(&self, class: &ClassName) -> Option<PathBuf> {
+        self.index.resolver.file_for(class)
+    }
+
+    /// Glob patterns (relative to [`root`](Magento::root), LSP watcher semantics: `**`
+    /// matches zero or more path segments) of the files the index is computed from. A
+    /// change to a matching file invalidates an open handle; there is no in-place refresh
+    /// — a full [`open`](Magento::open) is the rebuild (~tens of ms warm, by design). One
+    /// canonical list so every long-lived frontend registers the same watches.
+    pub fn watch_globs() -> &'static [&'static str] {
+        &[
+            // Class headers, patches, EAV setup calls, console command names, and
+            // config.php/env.php/registration.php — PHP is parsed on demand, so any .php
+            // edit can change an answer (extends, plugin methods, addAttribute, …).
+            "**/*.php",
+            // Every module + primary config file (di, events, routes, webapi, acl, menu,
+            // system, db_schema, crontab, widget, indexer, mview, queue_*, config.xml).
+            "**/etc/**/*.xml",
+            "**/etc/*.graphqls",
+            // Package metadata: module discovery + the PSR-4 maps.
+            "vendor/composer/installed.json",
+            // Frontend indexes: layout, ui components, module email templates.
+            "**/view/**/*.xml",
+            "**/view/**/email/**",
+            // Themes (layout/email/i18n overrides live outside view/).
+            "app/design/**",
+            // Translations.
+            "**/i18n/*.csv",
+        ]
     }
 
     /// All modules, in `config.php` load order.
@@ -271,7 +346,7 @@ impl Magento {
     /// declaration order (module load order, then position in file) — not by name.
     pub fn plugins(&self, class: &ClassName, area: Area) -> Result<Vec<Plugin>> {
         let concrete = self.preference(class, area)?.concrete;
-        let targets = self.plugin_targets(&concrete);
+        let targets = self.plugin_lookup_chain(&concrete);
         let mut collected = self.collect_plugins(area, &targets);
         // Execution order: sort_order, then declaration order (load order, then line).
         collected.sort_by(|a, b| a.0.cmp(&b.0));
@@ -284,7 +359,7 @@ impl Magento {
     /// Targets are taken from the global concrete (preference rarely differs per area).
     pub fn plugins_all_areas(&self, class: &ClassName) -> Result<Vec<Plugin>> {
         let concrete = self.preference(class, Area::Global)?.concrete;
-        let targets = self.plugin_targets(&concrete);
+        let targets = self.plugin_lookup_chain(&concrete);
 
         use std::collections::{BTreeSet, HashMap};
         let mut best: HashMap<String, ((i32, (u8, u32, u32)), Plugin)> = HashMap::new();
@@ -312,10 +387,50 @@ impl Magento {
 
     /// The concrete type plus its ancestors/interfaces — the set of types whose plugins
     /// apply to the concrete.
-    fn plugin_targets(&self, concrete: &ClassName) -> Vec<ClassName> {
+    fn plugin_lookup_chain(&self, concrete: &ClassName) -> Vec<ClassName> {
         let mut targets = vec![concrete.clone()];
         targets.extend(self.index.resolver.ancestors(concrete));
         targets
+    }
+
+    /// Every `<plugin>` declaration whose *class* is `class` — the reverse of
+    /// [`plugins`](Magento::plugins): given a plugin class, the types it intercepts.
+    /// Merged across all areas, deduped by (type, plugin name), sorted. `declared_on` is
+    /// the type as written in di.xml (often an interface/parent); resolve it with
+    /// [`preference`](Magento::preference) for the concrete class that actually runs.
+    pub fn plugin_targets(&self, class: &ClassName) -> Vec<PluginTarget> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for area in Area::ALL {
+            let cfg = self.di_index().config(area);
+            for (target, plugins) in &cfg.plugins {
+                for (name, plugin) in plugins {
+                    if plugin.class.as_ref() != Some(class) {
+                        continue;
+                    }
+                    if seen.insert((target.clone(), name.clone())) {
+                        out.push(PluginTarget {
+                            declared_on: target.clone(),
+                            plugin_name: name.clone(),
+                            disabled: plugin.disabled,
+                            source: plugin.source.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            (a.declared_on.as_str(), &a.plugin_name).cmp(&(b.declared_on.as_str(), &b.plugin_name))
+        });
+        out
+    }
+
+    /// The full ancestor set of a class (parents + interfaces, transitively,
+    /// nearest-first) — the hierarchy plugin resolution walks, exposed for frontends
+    /// that need it themselves (the LSP's jump from a plugin method to the intercepted
+    /// implementation searches it for the method's defining file).
+    pub fn ancestors(&self, class: &ClassName) -> Vec<ClassName> {
+        self.index.resolver.ancestors(class)
     }
 
     /// Collect plugins for `targets` in one area, keyed sort-order + declaration order.
@@ -4192,6 +4307,7 @@ fn to_product_links(raw: db::DbProductLinks, matched_by_id: bool) -> ProductLink
     }
 }
 
+#[cfg(feature = "db")]
 fn to_product(raw: db::DbProduct, matched_by_id: bool) -> Product {
     let label_of = |v: &db::DbProductValue, value: &str| -> Option<String> {
         match (v.attribute.as_str(), v.input.as_deref()) {
@@ -4689,4 +4805,75 @@ fn chains_from(plugins: &[Plugin], only: Option<&str>) -> Vec<MethodChain> {
         chains.push(MethodChain { method, steps });
     }
     chains
+}
+
+#[cfg(test)]
+mod handle_tests {
+    use std::path::PathBuf;
+
+    /// Long-lived frontends (the LSP server) share one handle across threads and swap it
+    /// on rebuild; a field that isn't `Send + Sync` (an `Rc`, a `RefCell`) must fail here
+    /// at compile time, not at the editor integration.
+    #[test]
+    fn magento_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<super::Magento>();
+    }
+
+    /// A unique throwaway directory tree, removed on drop. std-only on purpose — the
+    /// crate has no dev-dependencies and two tests don't justify one.
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "magequery-test-{}-{}",
+                std::process::id(),
+                name
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn touch(&self, rel: &str) {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn find_root_walks_up_from_a_nested_folder() {
+        let tree = TempTree::new("find-root-up");
+        tree.touch("app/etc/config.php");
+        tree.touch("app/code/Acme/Widget/etc/module.xml");
+
+        let found = super::Magento::find_root(tree.0.join("app/code/Acme/Widget"));
+        assert_eq!(found.as_deref(), Some(tree.0.as_path()));
+    }
+
+    #[test]
+    fn find_root_probes_direct_children_of_a_monorepo_folder() {
+        let tree = TempTree::new("find-root-down");
+        tree.touch("docs/readme.md");
+        tree.touch("shop/app/etc/config.php");
+
+        let found = super::Magento::find_root(&tree.0);
+        assert_eq!(found.as_deref(), Some(tree.0.join("shop").as_path()));
+    }
+
+    #[test]
+    fn find_root_returns_none_outside_an_installation() {
+        let tree = TempTree::new("find-root-none");
+        tree.touch("src/main.rs");
+
+        assert_eq!(super::Magento::find_root(tree.0.join("src")), None);
+    }
 }

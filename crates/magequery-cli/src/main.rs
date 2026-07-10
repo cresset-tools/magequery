@@ -389,6 +389,9 @@ enum Command {
     /// Print the agent skill (SKILL.md) to stdout, for `.claude/skills/`.
     #[command(hide = true)]
     Skill,
+    /// Run the LSP server on stdio (spawned by editor plugins, not by hand).
+    #[command(hide = true)]
+    Lsp,
 }
 
 #[derive(clap::Args)]
@@ -1114,6 +1117,12 @@ fn main() -> Result<()> {
             print!("{}", include_str!("../../../assets/skill/SKILL.md"));
             return Ok(());
         }
+        Command::Lsp => {
+            // The server discovers Magento roots per workspace folder itself (an editor
+            // may hand it several), so it too runs before Magento::open.
+            return magequery_lsp::run_stdio()
+                .map_err(|e| anyhow::anyhow!("lsp server: {e}"));
+        }
         _ => {}
     }
 
@@ -1203,7 +1212,7 @@ fn main() -> Result<()> {
         Command::Stores(args) => stores(&mage, &args),
         Command::Config(args) => config(&mage, &args, &cli.root),
         // Handled before Magento::open (they need no root).
-        Command::Completions(_) | Command::Man | Command::Skill => unreachable!(),
+        Command::Completions(_) | Command::Man | Command::Skill | Command::Lsp => unreachable!(),
     };
 
     // Diagnostics are non-fatal; surface them on stderr (so stdout stays pipeable) *after*

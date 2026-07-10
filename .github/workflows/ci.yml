@@ -48,3 +48,9 @@ jobs:
 
       - name: cargo test
         run: cargo test
+
+      # Workspace builds unify features, so core always gets `db` via the CLI
+      # above. magequery-lsp depends on core *without* db — check that exact
+      # configuration standalone or it can silently break (it has).
+      - name: cargo check (magequery-lsp, core without db)
+        run: cargo check -p magequery-lsp

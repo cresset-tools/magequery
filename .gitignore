@@ -1,2 +1,6 @@
 /target
 .claude/
+editors/vscode/node_modules/
+editors/vscode/dist/
+editors/vscode/*.vsix
+editors/zed/target/

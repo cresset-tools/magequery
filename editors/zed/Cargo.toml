@@ -1,0 +1,19 @@
+# The Zed extension shim: compiled to WASM by Zed itself (wasm32-wasip1/2), so this
+# crate deliberately stands alone — the empty [workspace] table detaches it from the
+# repository workspace and its native targets.
+
+[package]
+name = "zed-magequery"
+version = "0.1.0"
+edition = "2021"
+license = "EUPL-1.2"
+publish = false
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.1.0"
