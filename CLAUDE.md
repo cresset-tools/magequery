@@ -1621,6 +1621,11 @@ broken silently once (an ungated `to_product`, fixed alongside).
   language, alongside the primary server). PATH first, else `latest_github_release` +
   `download_file`, one directory per version, older versions swept. Published via PR to
   zed-industries/extensions (submodule + `path = "editors/zed"` for the monorepo).
+  **MIT-licensed, deliberately unlike the repo's EUPL-1.2**: the Zed registry validates
+  the extension *directory's* LICENSE (verified in their `package-extensions.js`:
+  candidates come from `join(submodule, path)`) against an allowlist — Apache-2.0,
+  BSD-2/3, CC-BY-4.0, GPLv3, LGPLv3, MIT, Unlicense, zlib — that excludes EUPL. Only the
+  shim is MIT; the binary it downloads stays EUPL (explicitly allowed by their docs).
 
 Validated end-to-end against mageos-lite with a python LSP-stdio driver (scratchpad):
 initialize/capabilities, watcher registration (8 globs), the exact 4 doctor findings as
