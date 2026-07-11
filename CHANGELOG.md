@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.6.0...magequery-v0.7.0) (2026-07-11)
+
+
+### Features
+
+* **lsp:** layout navigation, symbols, observer lens, table nav ([#24](https://github.com/cresset-tools/magequery/issues/24)) ([e842115](https://github.com/cresset-tools/magequery/commit/e8421150e7d19cb18e6a1acf5045cd667baff9bd))
+
 ## [0.6.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.5.0...magequery-v0.6.0) (2026-07-10)
 
 
