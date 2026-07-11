@@ -13,7 +13,7 @@ use rayon::prelude::*;
 
 use crate::error::Diagnostic;
 use crate::ids::{Area, ClassName, ModuleName};
-use crate::model::Module;
+use crate::model::{DiExport, Module, PluginDecl, PreferenceDecl, TypeArgDecl, VirtualTypeDecl};
 use crate::parse;
 use crate::source::Source;
 
@@ -51,6 +51,76 @@ pub(crate) struct AreaConfig {
     pub virtual_types: HashMap<ClassName, Located>,
     /// type/virtualType name -> (argument name -> value). Per-argument last-wins.
     pub type_args: HashMap<ClassName, HashMap<String, LocatedArg>>,
+}
+
+impl AreaConfig {
+    /// Export the merged config wholesale as sorted, owned declarations.
+    pub(crate) fn export(&self, area: Area) -> DiExport {
+        let mut preferences: Vec<PreferenceDecl> = self
+            .preferences
+            .iter()
+            .map(|(for_type, located)| PreferenceDecl {
+                for_type: for_type.clone(),
+                prefer: located.value.clone(),
+                source: located.source.clone(),
+            })
+            .collect();
+        preferences.sort_by(|a, b| a.for_type.cmp(&b.for_type));
+
+        let mut virtual_types: Vec<VirtualTypeDecl> = self
+            .virtual_types
+            .iter()
+            .map(|(name, located)| VirtualTypeDecl {
+                name: name.clone(),
+                base: located.value.clone(),
+                source: located.source.clone(),
+            })
+            .collect();
+        virtual_types.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Per target: Magento's execution order — sort_order ascending, ties
+        // by declaration order (the stored order_key).
+        let mut plugins: Vec<(i32, (u8, u32, u32), PluginDecl)> = Vec::new();
+        for (target, by_name) in &self.plugins {
+            for (name, plugin) in by_name {
+                plugins.push((
+                    plugin.sort_order,
+                    plugin.order_key,
+                    PluginDecl {
+                        target: target.clone(),
+                        name: name.clone(),
+                        class: plugin.class.clone(),
+                        sort_order: plugin.sort_order,
+                        disabled: plugin.disabled,
+                        source: plugin.source.clone(),
+                    },
+                ));
+            }
+        }
+        plugins.sort_by(|a, b| (&a.2.target, a.0, a.1).cmp(&(&b.2.target, b.0, b.1)));
+        let plugins = plugins.into_iter().map(|(_, _, decl)| decl).collect();
+
+        let mut arguments: Vec<TypeArgDecl> = Vec::new();
+        for (type_name, by_arg) in &self.type_args {
+            for (arg, located) in by_arg {
+                arguments.push(TypeArgDecl {
+                    type_name: type_name.clone(),
+                    arg: arg.clone(),
+                    value: located.value.clone(),
+                    source: located.source.clone(),
+                });
+            }
+        }
+        arguments.sort_by(|a, b| (&a.type_name, &a.arg).cmp(&(&b.type_name, &b.arg)));
+
+        DiExport {
+            area,
+            preferences,
+            virtual_types,
+            plugins,
+            arguments,
+        }
+    }
 }
 
 pub(crate) struct DiIndex {
@@ -292,5 +362,96 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    fn src(line: u32) -> Source {
+        Source {
+            module: ModuleName::new("Acme_Test"),
+            file: PathBuf::from("app/code/Acme/Test/etc/di.xml"),
+            line,
+            area: Area::Global,
+        }
+    }
+
+    fn located(class: &str, line: u32) -> Located {
+        Located {
+            value: ClassName::new(class),
+            source: src(line),
+        }
+    }
+
+    #[test]
+    fn export_is_sorted_and_complete() {
+        let mut config = AreaConfig::default();
+        config
+            .preferences
+            .insert(ClassName::new("Z\\Iface"), located("Z\\Impl", 3));
+        config
+            .preferences
+            .insert(ClassName::new("A\\Iface"), located("A\\Impl", 7));
+        config
+            .virtual_types
+            .insert(ClassName::new("myVirtual"), located("Real\\Base", 9));
+
+        // Three plugins on one target: sort_order wins, declaration order
+        // (order_key) breaks the tie — NOT alphabetical by name.
+        let mut by_name = HashMap::new();
+        by_name.insert(
+            "zz_first_declared".to_owned(),
+            LocatedPlugin {
+                class: Some(ClassName::new("P\\One")),
+                sort_order: 10,
+                disabled: false,
+                source: src(1),
+                order_key: (0, 1, 1),
+            },
+        );
+        by_name.insert(
+            "aa_later_declared".to_owned(),
+            LocatedPlugin {
+                class: Some(ClassName::new("P\\Two")),
+                sort_order: 10,
+                disabled: false,
+                source: src(2),
+                order_key: (0, 2, 2),
+            },
+        );
+        by_name.insert(
+            "runs_first".to_owned(),
+            LocatedPlugin {
+                class: Some(ClassName::new("P\\Zero")),
+                sort_order: 0,
+                disabled: true,
+                source: src(5),
+                order_key: (0, 3, 5),
+            },
+        );
+        config.plugins.insert(ClassName::new("T\\Target"), by_name);
+
+        let export = config.export(Area::Global);
+
+        let prefs: Vec<&str> = export
+            .preferences
+            .iter()
+            .map(|p| p.for_type.as_str())
+            .collect();
+        assert_eq!(prefs, ["A\\Iface", "Z\\Iface"]);
+        assert_eq!(export.preferences[0].prefer, ClassName::new("A\\Impl"));
+
+        assert_eq!(export.virtual_types.len(), 1);
+        assert_eq!(export.virtual_types[0].base, ClassName::new("Real\\Base"));
+
+        let plugin_order: Vec<&str> = export.plugins.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            plugin_order,
+            ["runs_first", "zz_first_declared", "aa_later_declared"]
+        );
+        assert!(export.plugins[0].disabled);
+        assert_eq!(export.plugins[1].class, Some(ClassName::new("P\\One")));
     }
 }

@@ -47,7 +47,7 @@ pub use model::{
     ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ConsoleCommand, ControllerAction, CronJob, CronJobLive, CronJobs, CronRun,
     DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
-    DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, EavAttribute, EavAttributeCard,
+    DbTable, DepEdge, DiExport, DoctorFinding, DoctorLint, DoctorReport, EavAttribute, EavAttributeCard,
     EavCatalogFlags, EavEntityType, EavScope, EavSetMembership, EavSetupKind, EavSetupProp,
     EavSetupRef, EavValueKind, EmailTemplate,
     EmailTemplateOverride, ExtendedType, ExtensionAttribute,
@@ -86,6 +86,7 @@ pub use model::{
     SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses, Whatis,
 };
 pub use model::{CatalogAttribute, CatalogAttributeGroup, ClassRef};
+pub use model::{PluginDecl, PreferenceDecl, TypeArgDecl, VirtualTypeDecl};
 pub use decrypt::Decryptor;
 pub use sysconfig::ConfigSet;
 pub use source::Source;
@@ -208,6 +209,19 @@ impl Magento {
     /// non-clean result usually means `bin/magento setup:upgrade` was not run.
     pub fn module_check(&self) -> &ModuleCheck {
         &self.index.check
+    }
+
+    /// The fully merged DI configuration of `area`, exported wholesale: every
+    /// preference, virtual type, plugin, and constructor argument as sorted,
+    /// owned declarations with provenance.
+    ///
+    /// This is the bulk primitive for consumers that iterate the whole config
+    /// (a DI compiler) rather than asking about one class at a time —
+    /// [`preference`](Self::preference)/[`plugins`](Self::plugins) stay the
+    /// per-class, resolution-applying views. `Area::Global` exports the base
+    /// config; a real area exports the base overlaid by that area's files.
+    pub fn di_export(&self, area: Area) -> DiExport {
+        self.di_index().config(area).export(area)
     }
 
     /// The concrete type Magento instantiates for `class` in `area`, with the full

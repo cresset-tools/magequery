@@ -316,6 +316,82 @@ pub struct Preference {
     pub area: Area,
 }
 
+/// One `<preference for= type=>` in the merged config. A declaration, not a
+/// resolution: no fixpoint is followed (that's [`Preference`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct PreferenceDecl {
+    pub for_type: ClassName,
+    pub prefer: ClassName,
+    pub source: Source,
+}
+
+/// One `<virtualType name= type=>` in the merged config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct VirtualTypeDecl {
+    pub name: ClassName,
+    pub base: ClassName,
+    pub source: Source,
+}
+
+/// One `<plugin>` as declared on its target in the merged config. Raw: no
+/// ancestor logic is applied — a consumer walking the class hierarchy (a DI
+/// compiler) collects these per ancestor itself; [`Magento::plugins`] is the
+/// resolved per-class view.
+///
+/// [`Magento::plugins`]: crate::Magento::plugins
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct PluginDecl {
+    /// The type the `<plugin>` element sits on (class, interface, or virtual type).
+    pub target: ClassName,
+    pub name: String,
+    /// `None` when attribute-level merging never supplied a `type=` (broken config).
+    pub class: Option<ClassName>,
+    pub sort_order: i32,
+    pub disabled: bool,
+    pub source: Source,
+}
+
+/// One constructor `<argument>` on a type/virtualType in the merged config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct TypeArgDecl {
+    /// The type (or virtual type) the `<arguments>` block sits on.
+    pub type_name: ClassName,
+    pub arg: String,
+    pub value: ArgValue,
+    pub source: Source,
+}
+
+/// The fully merged DI configuration of one area, exported wholesale — the
+/// bulk primitive a DI compiler iterates, where the per-class queries
+/// ([`Magento::preference`], [`Magento::plugins`]) answer one name at a time.
+/// Deterministically sorted; every declaration carries provenance.
+///
+/// [`Magento::preference`]: crate::Magento::preference
+/// [`Magento::plugins`]: crate::Magento::plugins
+#[derive(Debug, Clone)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct DiExport {
+    pub area: Area,
+    /// Sorted by `for_type`.
+    pub preferences: Vec<PreferenceDecl>,
+    /// Sorted by `name`.
+    pub virtual_types: Vec<VirtualTypeDecl>,
+    /// Sorted by `target`, then Magento's execution order (`sort_order`
+    /// ascending, ties by declaration order).
+    pub plugins: Vec<PluginDecl>,
+    /// Sorted by `type_name`, then `arg`.
+    pub arguments: Vec<TypeArgDecl>,
+}
+
 /// The kind of interception a plugin method performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[derive(serde::Serialize)]
