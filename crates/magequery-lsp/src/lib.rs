@@ -19,7 +19,9 @@
 mod diag;
 mod entity;
 mod features;
+mod layout;
 mod server;
+mod symbols;
 mod textpos;
 
 use lsp_server::Connection;

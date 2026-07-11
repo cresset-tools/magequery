@@ -292,6 +292,8 @@ impl Magento {
             "app/design/**",
             // Translations.
             "**/i18n/*.csv",
+            // Templates: create/delete changes the template catalog and override chains.
+            "**/*.phtml",
         ]
     }
 
@@ -2914,6 +2916,13 @@ impl Magento {
         self.layout.get_or_init(|| {
             breadth::LayoutIndex::build(&self.index.modules, &self.index.vfs, &self.discover_themes())
         })
+    }
+
+    /// Themes on disk as `(id, dir)` — the public face of theme discovery, for frontends
+    /// that resolve template overrides themselves (which override *applies* is active-
+    /// theme runtime state; the set of candidates is static).
+    pub fn themes(&self) -> Vec<(String, PathBuf)> {
+        self.discover_themes()
     }
 
     /// Themes on disk as `(id, dir)`: composer packages whose root holds a `theme.xml`
