@@ -49,6 +49,7 @@ pub(crate) fn capabilities() -> lsp_types::ServerCapabilities {
         // code-lens rendering (Zed) can show.
         inlay_hint_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
@@ -477,6 +478,23 @@ impl<'a> Server<'a> {
                         features::completions(&magento, &catalog, &path, doc.position)
                             .map(lsp_types::CompletionResponse::List),
                     )
+                    .ok()
+                })
+            }
+            lsp_types::request::CodeActionRequest::METHOD => {
+                let params: Option<lsp_types::CodeActionParams> =
+                    serde_json::from_value(request.params).ok();
+                params.and_then(|p| {
+                    let path = p.text_document.uri.to_file_path().ok()?;
+                    let workspace = self.workspace_of(&path)?;
+                    let magento = self.workspaces[workspace].handle.clone()?;
+                    let catalog = self.class_catalog(workspace, &magento);
+                    serde_json::to_value(crate::actions::code_actions(
+                        &magento,
+                        &catalog,
+                        &path,
+                        &p.context.diagnostics,
+                    ))
                     .ok()
                 })
             }

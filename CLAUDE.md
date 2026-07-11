@@ -1658,6 +1658,21 @@ tables (same rank-and-cap as completions, min 2 chars). **Observer lens**: `exec
 in a registered observer gets `→ event_name` (events.xml locations). Skipped
 deliberately: short template paths (no module prefix), magic-method gd, XSD/URN.
 
+**Quick fixes (code actions)** — `actions.rs`, driven by structured diagnostic data:
+`DoctorFinding` gained `subject: Option<String>` (the class/module/ACL id the finding is
+*about*; populated at the fix-relevant emission sites via `error_on`/`warn_on`) and
+diag.rs round-trips it as the LSP diagnostic's `data`, so fixes never parse messages.
+Fixes: **did-you-mean** replacements on all ten missing-class lints + `acl-resource-
+unknown` (bounded Levenshtein, early-abandon + length prefilter, against the cached
+class catalog ∪ virtual types / the ACL index; top 3, distance-capped); **remove from
+config.php** on `module-missing-on-disk` (whose finding now carries a real config.php
+line as its Source — it previously had none and was invisible in editors); **register
+boilerplate** on the unregistered trio — `command-unregistered` is fully mechanical
+(CommandListInterface item), observers/plugins insert with an `EVENT_NAME_TODO`/
+`TARGET_CLASS_TODO` placeholder — inserting before `</config>` of the owning module's
+etc file, or CreateFile + full content when absent. Vendor-module fixes are offered
+knowingly (composer wipes them; the edit preview shows the path).
+
 **Editors live in `editors/` (monorepo, locked); publisher identity is `cresset-tools`.**
 - `editors/vscode` — TypeScript client (`vscode-languageclient` 9, esbuild bundle).
   Activation `workspaceContains:**/app/etc/config.php` (never wakes in non-Magento

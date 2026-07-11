@@ -25,11 +25,27 @@ pub(crate) fn diagnostics_by_file(
         let code = serde_json::to_value(finding.lint)
             .ok()
             .and_then(|v| v.as_str().map(str::to_string));
-        push(&mut by_file, magento.root(), source, finding.severity, finding.message, code);
+        push(
+            &mut by_file,
+            magento.root(),
+            source,
+            finding.severity,
+            finding.message,
+            code,
+            finding.subject,
+        );
     }
     for diagnostic in magento.diagnostics() {
         let Some(source) = diagnostic.source else { continue };
-        push(&mut by_file, magento.root(), source, diagnostic.severity, diagnostic.message, None);
+        push(
+            &mut by_file,
+            magento.root(),
+            source,
+            diagnostic.severity,
+            diagnostic.message,
+            None,
+            None,
+        );
     }
     by_file
 }
@@ -41,6 +57,7 @@ fn push(
     severity: Severity,
     message: String,
     code: Option<String>,
+    subject: Option<String>,
 ) {
     // Source lines are 1-based with 0 = "known file, unknown line"; either way the range
     // is the whole line (core has no column provenance), which clients clamp for us.
@@ -54,6 +71,8 @@ fn push(
         code: code.map(NumberOrString::String),
         source: Some("magequery".to_string()),
         message,
+        // Structured facts for quick fixes (round-tripped into codeAction requests).
+        data: subject.map(|subject| serde_json::json!({ "subject": subject })),
         ..Default::default()
     };
     let file = if source.file.is_absolute() {

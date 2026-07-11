@@ -51,19 +51,47 @@ struct Doctor<'a> {
 }
 
 impl Doctor<'_> {
-    fn push(&mut self, lint: DoctorLint, severity: Severity, message: String, source: Option<Source>) {
+    fn push(
+        &mut self,
+        lint: DoctorLint,
+        severity: Severity,
+        message: String,
+        source: Option<Source>,
+        subject: Option<String>,
+    ) {
         let key = (lint, message.clone(), source.as_ref().map(|s| (s.file.clone(), s.line)));
         if self.seen.insert(key) {
-            self.findings.push(DoctorFinding { lint, severity, message, source });
+            self.findings.push(DoctorFinding { lint, severity, message, source, subject });
         }
     }
 
     fn error(&mut self, lint: DoctorLint, message: String, source: Option<Source>) {
-        self.push(lint, Severity::Error, message, source);
+        self.push(lint, Severity::Error, message, source, None);
     }
 
     fn warn(&mut self, lint: DoctorLint, message: String, source: Option<Source>) {
-        self.push(lint, Severity::Warning, message, source);
+        self.push(lint, Severity::Warning, message, source, None);
+    }
+
+    /// Like [`error`](Self::error)/[`warn`](Self::warn) with the finding's subject.
+    fn error_on(
+        &mut self,
+        lint: DoctorLint,
+        subject: impl std::fmt::Display,
+        message: String,
+        source: Option<Source>,
+    ) {
+        self.push(lint, Severity::Error, message, source, Some(subject.to_string()));
+    }
+
+    fn warn_on(
+        &mut self,
+        lint: DoctorLint,
+        subject: impl std::fmt::Display,
+        message: String,
+        source: Option<Source>,
+    ) {
+        self.push(lint, Severity::Warning, message, source, Some(subject.to_string()));
     }
 
     /// Whether a config-referenced class is resolvable: a real source file, a virtual
@@ -110,10 +138,29 @@ impl Doctor<'_> {
     fn check_module_set(&mut self) {
         let check = self.mage.module_check();
         for name in &check.in_config_not_on_disk {
-            self.error(
+            // Anchor the finding on the module's own line in config.php so editors can
+            // point (and quick-fix) there.
+            let config_php = self.mage.root().join("app/etc/config.php");
+            let line = self
+                .mage
+                .read_source(&config_php)
+                .ok()
+                .and_then(|text| {
+                    let needle = format!("'{name}'");
+                    text.lines().position(|l| l.contains(&needle)).map(|i| i as u32 + 1)
+                })
+                .unwrap_or(0);
+            let source = Source {
+                module: crate::ids::ModuleName::new(name.as_str()),
+                file: config_php,
+                line,
+                area: Area::Global,
+            };
+            self.error_on(
                 DoctorLint::ModuleMissingOnDisk,
+                name,
                 format!("module {name} is enabled in config.php but has no module.xml on disk"),
-                None,
+                Some(source),
             );
         }
         for m in &check.on_disk_not_in_config {
@@ -196,8 +243,9 @@ impl Doctor<'_> {
 
             for (for_, located) in &cfg.preferences {
                 if !self.class_known(&located.value) {
-                    self.error(
+                    self.error_on(
                         DoctorLint::PreferenceTargetMissing,
+                        &located.value,
                         format!("preference for {for_} points at missing class {}", located.value),
                         Some(located.source.clone()),
                     );
@@ -223,8 +271,9 @@ impl Doctor<'_> {
 
             for (name, vt) in &cfg.virtual_types {
                 if !self.class_known(&vt.value) {
-                    self.error(
+                    self.error_on(
                         DoctorLint::VirtualTypeBaseMissing,
+                        &vt.value,
                         format!("virtual type {name} is based on missing class {}", vt.value),
                         Some(vt.source.clone()),
                     );
@@ -251,8 +300,9 @@ impl Doctor<'_> {
                     }
                     if let Some(class) = &lp.class {
                         if !self.class_known(class) {
-                            self.error(
+                            self.error_on(
                                 DoctorLint::PluginClassMissing,
+                                &class,
                                 format!("plugin `{pname}` uses missing class {class}"),
                                 Some(lp.source.clone()),
                             );
@@ -280,8 +330,9 @@ impl Doctor<'_> {
         match value {
             ArgValue::Object(c) => {
                 if !self.class_known(c) {
-                    self.error(
+                    self.error_on(
                         DoctorLint::DiArgumentClassMissing,
+                        &c,
                         format!("di argument ${arg_name} of {target} injects missing class {c}"),
                         Some(source.clone()),
                     );
@@ -303,8 +354,9 @@ impl Doctor<'_> {
             for (event, _) in self.mage.events(area) {
                 for o in self.mage.observers(&event, area) {
                     if !o.disabled && !self.class_known(&o.instance) {
-                        self.error(
+                        self.error_on(
                             DoctorLint::ObserverClassMissing,
+                            &o.instance,
                             format!(
                                 "observer `{}` on event {event} uses missing class {}",
                                 o.name, o.instance
@@ -321,8 +373,9 @@ impl Doctor<'_> {
         // Static call — can't fail; a hypothetical error just skips the lint.
         for job in self.mage.cron_jobs(None, false).map(|c| c.jobs).unwrap_or_default() {
             if !self.class_known(&job.instance) {
-                self.error(
+                self.error_on(
                     DoctorLint::CronInstanceMissing,
+                    &job.instance,
                     format!(
                         "cron job {}/{} uses missing class {}",
                         job.group, job.name, job.instance
@@ -338,8 +391,9 @@ impl Doctor<'_> {
             self.mage.acl(None).into_iter().map(|r| r.id).collect();
         for route in self.mage.webapi(None) {
             if !self.class_known(&route.service_class) {
-                self.error(
+                self.error_on(
                     DoctorLint::WebapiServiceMissing,
+                    &route.service_class,
                     format!(
                         "webapi {} {} uses missing service class {}",
                         route.method, route.url, route.service_class
@@ -349,8 +403,9 @@ impl Doctor<'_> {
             }
             for res in &route.resources {
                 if res != "anonymous" && res != "self" && !acl_known.contains(res) {
-                    self.error(
+                    self.error_on(
                         DoctorLint::AclResourceUnknown,
+                        res,
                         format!(
                             "webapi {} {} requires ACL resource {res}, which no acl.xml declares",
                             route.method, route.url
@@ -366,8 +421,9 @@ impl Doctor<'_> {
         for cmd in self.mage.console_commands(None) {
             if !self.class_known(&cmd.class) {
                 let label = cmd.name.as_deref().unwrap_or(&cmd.item_key);
-                self.error(
+                self.error_on(
                     DoctorLint::CommandClassMissing,
+                    &cmd.class,
                     format!("console command `{label}` uses missing class {}", cmd.class),
                     Some(cmd.source.clone()),
                 );
@@ -561,8 +617,9 @@ impl Doctor<'_> {
                         .iter()
                         .any(|a| a.as_str() == "Symfony\\Component\\Console\\Command\\Command");
                     if is_command {
-                        self.warn(
+                        self.warn_on(
                             DoctorLint::CommandUnregistered,
+                            &class,
                             format!(
                                 "{class} extends Symfony Command but is not registered on CommandListInterface in di.xml"
                             ),
@@ -588,8 +645,9 @@ impl Doctor<'_> {
                     .iter()
                     .any(|a| a.as_str() == "Magento\\Framework\\Event\\ObserverInterface");
                 if is_observer {
-                    self.warn(
+                    self.warn_on(
                         DoctorLint::ObserverUnregistered,
+                        &class,
                         format!("{class} implements ObserverInterface but no events.xml registers it"),
                         Some(src(m, path, h.decl_line)),
                     );
@@ -605,8 +663,9 @@ impl Doctor<'_> {
                     continue;
                 }
                 if !self.mage.index.resolver.plugin_methods(&class).is_empty() {
-                    self.warn(
+                    self.warn_on(
                         DoctorLint::PluginUnregistered,
+                        &class,
                         format!(
                             "{class} defines before/around/after methods but no di.xml declares it as a plugin"
                         ),

@@ -52,6 +52,11 @@ impl Fixture {
             "app/code/Acme/Widget/Model/Thing.php",
             "<?php\nnamespace Acme\\Widget\\Model;\n\nclass Thing\n{\n    public function save($input)\n    {\n        return $input;\n    }\n}\n",
         );
+        // One edit-distance from the broken preference target: the did-you-mean donor.
+        write(
+            "app/code/Acme/Widget/Model/Mising.php",
+            "<?php\nnamespace Acme\\Widget\\Model;\n\nclass Mising\n{\n}\n",
+        );
         // A *registered* plugin: its aroundSave must jump to Thing::save.
         write(
             "app/code/Acme/Widget/Plugin/Registered.php",
@@ -295,6 +300,54 @@ fn diagnostics_definition_hover_and_invalidation() {
 
     let labels = complete(&mut client, "app/code/Acme/Widget/etc/events.xml", "name=\"acme");
     assert_eq!(labels, vec!["acme_thing_saved".to_string()]);
+
+    // --- quick fixes: did-you-mean on the broken preference, and the register-plugin
+    // scaffold on the unregistered-plugin warning.
+    let fix_actions = |client: &mut Client, uri: &lsp_types::Url, diag: &lsp_types::Diagnostic| {
+        client.request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+            range: diag.range,
+            context: lsp_types::CodeActionContext {
+                diagnostics: vec![diag.clone()],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+    };
+    let actions = fix_actions(&mut client, &di_uri, broken).expect("actions on preference");
+    let titles: Vec<&str> = actions
+        .iter()
+        .map(|a| match a {
+            lsp_types::CodeActionOrCommand::CodeAction(action) => action.title.as_str(),
+            _ => "",
+        })
+        .collect();
+    assert!(
+        titles.contains(&"Replace with `Acme\\Widget\\Model\\Mising`"),
+        "did-you-mean: {titles:?}"
+    );
+
+    let actions =
+        fix_actions(&mut client, &plugin_uri, &unregistered[0]).expect("actions on plugin");
+    let register = actions
+        .iter()
+        .find_map(|a| match a {
+            lsp_types::CodeActionOrCommand::CodeAction(action)
+                if action.title.starts_with("Register `Tweak`") =>
+            {
+                Some(action)
+            }
+            _ => None,
+        })
+        .expect("register action");
+    let edit = register.edit.as_ref().expect("edit");
+    let changes = edit.changes.as_ref().expect("changes");
+    let (target, edits) = changes.iter().next().expect("one file");
+    assert!(target.path().ends_with("etc/di.xml"));
+    assert!(edits[0].new_text.contains("TARGET_CLASS_TODO"));
+    assert!(edits[0].new_text.contains("Acme\\Widget\\Plugin\\Tweak"));
 
     // --- layout: definition on the template ref → the phtml; handle completion; the
     // phtml file's usage lens.

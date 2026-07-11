@@ -32,6 +32,9 @@ of the checkout — no database, no `setup:di:compile`, no working PHP needed.
   original + theme overrides), from `<update handle=…>` to the defining files, from
   `<referenceBlock name=…>` to the block's declaration; `.phtml` files carry
   override/usage lenses; completions for templates, handles, and block names.
+- **Quick fixes** — did-you-mean corrections for typo'd class names and ACL ids in
+  config XML, one-click removal of stale config.php module entries, and registration
+  boilerplate for unregistered commands, observers, and plugins.
 - **Outline & symbol search** — document symbols for every config XML, and
   workspace-wide search over classes, events, config paths, ACL ids, and tables.
 - **Plugin-method jump, both directions** — go-to-definition on a
