@@ -93,6 +93,33 @@ pub(crate) fn completions(
                     .map(|table| (table.name, K::STRUCT, None)),
             );
         }
+        CompletionKind::Template => {
+            let area = crate::layout::area_of_file(magento, path);
+            let mut refs = std::collections::BTreeSet::new();
+            for (_, op) in crate::layout::ops_where(magento, area, |op| op.template.is_some()) {
+                if let Some(template) = op.template {
+                    refs.insert(template);
+                }
+            }
+            candidates.extend(refs.into_iter().map(|t| (t, K::FILE, None)));
+        }
+        CompletionKind::LayoutHandle => {
+            let area = crate::layout::area_of_file(magento, path);
+            candidates.extend(
+                magento
+                    .layout_handles(area)
+                    .into_iter()
+                    .map(|(handle, _)| (handle, K::REFERENCE, None)),
+            );
+        }
+        CompletionKind::BlockName => {
+            let area = crate::layout::area_of_file(magento, path);
+            let mut names = std::collections::BTreeSet::new();
+            for (_, op) in crate::layout::ops_where(magento, area, crate::layout::is_declaration) {
+                names.insert(op.name);
+            }
+            candidates.extend(names.into_iter().map(|n| (n, K::FIELD, None)));
+        }
     }
 
     // Rank: whole-value prefix, then short-name prefix, then substring; all
@@ -201,6 +228,39 @@ pub(crate) fn definition(
             }
         }
         Entity::Method(method) => interceptor_locations(magento, path, &method),
+        Entity::Template(reference) => {
+            let area = crate::layout::area_of_file(magento, path);
+            crate::layout::resolve_template(magento, &reference, area)
+                .into_iter()
+                .map(|(_, file)| file_location(file, None))
+                .collect()
+        }
+        Entity::LayoutHandle(handle) => {
+            let area = crate::layout::area_of_file(magento, path);
+            magento
+                .layout(&handle, area)
+                .map(|view| {
+                    view.contributions
+                        .into_iter()
+                        .map(|c| file_location(c.file, None))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        Entity::BlockName(name) => {
+            let area = crate::layout::area_of_file(magento, path);
+            crate::layout::ops_where(magento, area, |op| {
+                crate::layout::is_declaration(op) && op.name == name
+            })
+            .into_iter()
+            .map(|(_, op)| source_location(magento, &op.source))
+            .collect()
+        }
+        Entity::Table(name) => magento
+            .table(&name)
+            .map(|table| source_location(magento, &table.source))
+            .into_iter()
+            .collect(),
     };
     match locations.len() {
         0 => None,
@@ -421,6 +481,140 @@ fn method_hover(magento: &Magento, path: &Path, method: &str) -> Option<String> 
     Some(md)
 }
 
+/// Where a template resolves (module file + theme overrides) and how many layout ops
+/// reference it.
+fn template_hover(magento: &Magento, path: &Path, reference: &str) -> Option<String> {
+    let area = crate::layout::area_of_file(magento, path);
+    let resolved = crate::layout::resolve_template(magento, reference, area);
+    let uses = crate::layout::ops_where(magento, area, |op| {
+        op.template.as_deref() == Some(reference)
+    })
+    .len();
+    let mut md = format!("**template `{reference}`**");
+    if resolved.is_empty() {
+        let _ = write!(md, "
+
+no file found (module missing, or path typo)");
+    } else {
+        for (provider, file) in &resolved {
+            let _ = write!(md, "
+- {provider}: `{}`", file.display());
+        }
+        if resolved.len() > 1 {
+            let _ = write!(
+                md,
+                "
+
+which override applies depends on the active theme"
+            );
+        }
+    }
+    if uses > 0 {
+        let _ = write!(md, "
+
+referenced by {uses} layout op(s)");
+    }
+    Some(md)
+}
+
+fn handle_hover(magento: &Magento, path: &Path, handle: &str) -> Option<String> {
+    let area = crate::layout::area_of_file(magento, path);
+    let view = magento.layout(handle, area)?;
+    let mut md = format!(
+        "**layout handle `{handle}`** — {} contributing file(s)",
+        view.contributions.len()
+    );
+    if !view.includes.is_empty() {
+        let _ = write!(md, "
+
+includes: {}", view.includes.join(", "));
+    }
+    if !view.included_by.is_empty() {
+        let _ = write!(md, "
+
+included by: {}", view.included_by.join(", "));
+    }
+    Some(md)
+}
+
+fn block_hover(magento: &Magento, path: &Path, name: &str) -> Option<String> {
+    let area = crate::layout::area_of_file(magento, path);
+    let declarations = crate::layout::ops_where(magento, area, |op| {
+        crate::layout::is_declaration(op) && op.name == name
+    });
+    let references = crate::layout::ops_where(magento, area, |op| {
+        !crate::layout::is_declaration(op)
+            && (op.name == name || op.parent.as_deref() == Some(name))
+    })
+    .len();
+    let (handle, op) = declarations.first()?;
+    let mut md = format!("**block `{name}`** — declared in handle `{handle}`");
+    if let Some(class) = &op.class {
+        let _ = write!(md, "
+
+class `{class}`");
+    }
+    if let Some(template) = &op.template {
+        let _ = write!(md, "
+
+template `{template}`");
+    }
+    let _ = write!(md, "
+
+{} ({})", op.source.module, op.source.location());
+    if references > 0 {
+        let _ = write!(md, "
+
+referenced/modified by {references} layout op(s)");
+    }
+    Some(md)
+}
+
+fn table_hover(magento: &Magento, name: &str) -> Option<String> {
+    let table = magento.table(name)?;
+    let mut md = format!(
+        "**table `{}`** — {} column(s) · {}",
+        table.name,
+        table.columns.len(),
+        table.source.module,
+    );
+    let mut foreign: Vec<&str> = table
+        .columns
+        .iter()
+        .filter(|c| c.source.module != table.source.module)
+        .map(|c| c.source.module.as_str())
+        .collect();
+    foreign.sort_unstable();
+    foreign.dedup();
+    if !foreign.is_empty() {
+        let _ = write!(md, "
+
+columns also added by: {}", foreign.join(", "));
+    }
+    Some(md)
+}
+
+/// events.xml declarations registering `class` as an observer, across all areas.
+fn observer_registrations(magento: &Magento, class: &ClassName) -> Vec<(String, Location)> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for area in Area::ALL {
+        for (event, _) in magento.events(area) {
+            for observer in magento.observers(&event, area) {
+                if observer.instance == *class
+                    && seen.insert((observer.source.file.clone(), observer.source.line))
+                {
+                    out.push((
+                        event.as_str().to_string(),
+                        source_location(magento, &observer.source),
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn observer_locations(magento: &Magento, event: &EventName) -> Vec<Location> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -470,6 +664,10 @@ pub(crate) fn hover(magento: &Magento, path: &Path, position: Position) -> Optio
         Entity::PluginMethod(method) => plugin_method_hover(magento, path, method)
             .or_else(|| method_hover(magento, path, method)),
         Entity::Method(method) => method_hover(magento, path, method),
+        Entity::Template(reference) => template_hover(magento, path, reference),
+        Entity::LayoutHandle(handle) => handle_hover(magento, path, handle),
+        Entity::BlockName(name) => block_hover(magento, path, name),
+        Entity::Table(name) => table_hover(magento, name),
     }?;
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -742,6 +940,42 @@ pub(crate) fn references(
             }
             locations
         }
+        Entity::Template(reference) => {
+            let area = crate::layout::area_of_file(magento, path);
+            crate::layout::ops_where(magento, area, |op| {
+                op.template.as_deref() == Some(reference.as_str())
+            })
+            .into_iter()
+            .map(|(_, op)| source_location(magento, &op.source))
+            .collect()
+        }
+        Entity::LayoutHandle(handle) => {
+            let area = crate::layout::area_of_file(magento, path);
+            crate::layout::ops_where(magento, area, |op| {
+                op.kind == magequery_core::LayoutOpKind::Update && op.name == handle
+            })
+            .into_iter()
+            .map(|(_, op)| source_location(magento, &op.source))
+            .collect()
+        }
+        Entity::BlockName(name) => {
+            let area = crate::layout::area_of_file(magento, path);
+            crate::layout::ops_where(magento, area, |op| {
+                op.name == name || op.parent.as_deref() == Some(name.as_str())
+            })
+            .into_iter()
+            .map(|(_, op)| source_location(magento, &op.source))
+            .collect()
+        }
+        // Every module contributing columns/constraints to the table.
+        Entity::Table(name) => magento
+            .table(&name)
+            .map(|table| {
+                let mut sites = vec![source_location(magento, &table.source)];
+                sites.extend(table.columns.iter().map(|c| source_location(magento, &c.source)));
+                sites
+            })
+            .unwrap_or_default(),
     };
     let deduped = dedup_locations(locations);
     (!deduped.is_empty()).then_some(deduped)
@@ -819,6 +1053,9 @@ fn dedup_locations(locations: Vec<Location>) -> Vec<Location> {
 /// `magequery.showReferences` command; the VS Code extension maps it onto the editor's
 /// peek view (clients without the command show inert text, which is still the fact).
 pub(crate) fn code_lens(magento: &Magento, path: &Path) -> Option<Vec<CodeLens>> {
+    if path.extension()?.to_str() == Some("phtml") {
+        return phtml_lenses(magento, path);
+    }
     if path.extension()?.to_str() != Some("php") {
         return None;
     }
@@ -883,6 +1120,17 @@ pub(crate) fn code_lens(magento: &Magento, path: &Path) -> Option<Vec<CodeLens>>
             };
             lenses.push(lens(path, method_range, title, locations));
             continue;
+        }
+        if name == "execute" {
+            let registrations = observer_registrations(magento, &class);
+            if !registrations.is_empty() {
+                let title = match registrations.as_slice() {
+                    [(event, _)] => format!("→ {event}"),
+                    many => format!("observes {} event(s)", many.len()),
+                };
+                let locations = registrations.into_iter().map(|(_, l)| l).collect();
+                lenses.push(lens(path, method_range, title, locations));
+            }
         }
         let interceptors = method_interceptors(&plugins, &name);
         if !interceptors.is_empty() {
@@ -1029,6 +1277,59 @@ fn hint(
         padding_right: Some(false),
         data: None,
     }
+}
+
+/// Lenses at the top of a `.phtml` file: the override chain and layout usage.
+fn phtml_lenses(magento: &Magento, path: &Path) -> Option<Vec<CodeLens>> {
+    let (reference, area, theme) = crate::layout::template_ref_of_file(magento, path)?;
+    let top = lsp_types::Range::new(Position::new(0, 0), Position::new(0, 0));
+    let mut lenses = Vec::new();
+
+    let resolved = crate::layout::resolve_template(magento, &reference, area);
+    match &theme {
+        Some(_) => {
+            // A theme override: link back to the module's original.
+            let originals: Vec<Location> = resolved
+                .iter()
+                .filter(|(provider, _)| provider.starts_with("module"))
+                .map(|(_, file)| file_location(file.clone(), None))
+                .collect();
+            if !originals.is_empty() {
+                lenses.push(lens(path, top, format!("overrides {reference}"), originals));
+            }
+        }
+        None => {
+            let overrides: Vec<Location> = resolved
+                .iter()
+                .filter(|(provider, _)| provider.starts_with("theme"))
+                .map(|(_, file)| file_location(file.clone(), None))
+                .collect();
+            if !overrides.is_empty() {
+                lenses.push(lens(
+                    path,
+                    top,
+                    format!("overridden in {} theme(s)", overrides.len()),
+                    overrides,
+                ));
+            }
+        }
+    }
+
+    let uses: Vec<Location> = crate::layout::ops_where(magento, area, |op| {
+        op.template.as_deref() == Some(reference.as_str())
+    })
+    .into_iter()
+    .map(|(_, op)| source_location(magento, &op.source))
+    .collect();
+    if !uses.is_empty() {
+        lenses.push(lens(
+            path,
+            top,
+            format!("used in {} layout op(s)", uses.len()),
+            dedup_locations(uses),
+        ));
+    }
+    (!lenses.is_empty()).then_some(lenses)
 }
 
 fn lens(path: &Path, range: lsp_types::Range, title: String, locations: Vec<Location>) -> CodeLens {

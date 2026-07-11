@@ -71,6 +71,17 @@ impl Fixture {
             "app/code/Acme/Widget/Observer/Recalc.php",
             "<?php\nnamespace Acme\\Widget\\Observer;\n\nclass Recalc\n{\n}\n",
         );
+        write(
+            "app/code/Acme/Widget/view/frontend/layout/acme_widget_index.xml",
+            r#"<page>
+    <update handle="default"/>
+    <referenceContainer name="content">
+        <block class="Acme\Widget\Block\Chip" name="acme.chip" template="Acme_Widget::chip.phtml"/>
+    </referenceContainer>
+</page>
+"#,
+        );
+        write("app/code/Acme/Widget/view/frontend/templates/chip.phtml", "<div></div>\n");
         // An interception-shaped class no di.xml declares: the plugin-unregistered
         // warning, which must land on the class declaration line, not line 1.
         write(
@@ -284,6 +295,48 @@ fn diagnostics_definition_hover_and_invalidation() {
 
     let labels = complete(&mut client, "app/code/Acme/Widget/etc/events.xml", "name=\"acme");
     assert_eq!(labels, vec!["acme_thing_saved".to_string()]);
+
+    // --- layout: definition on the template ref → the phtml; handle completion; the
+    // phtml file's usage lens.
+    let layout_rel = "app/code/Acme/Widget/view/frontend/layout/acme_widget_index.xml";
+    let jump = client.request::<lsp_types::request::GotoDefinition>(
+        lsp_types::GotoDefinitionParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: fixture.uri(layout_rel) },
+                position: position_after(layout_rel, "template=\"Acme_Widget::chip"),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    );
+    match jump {
+        Some(lsp_types::GotoDefinitionResponse::Scalar(location)) => assert_eq!(
+            location.uri,
+            fixture.uri("app/code/Acme/Widget/view/frontend/templates/chip.phtml")
+        ),
+        other => panic!("template definition: {other:?}"),
+    }
+    let labels = complete(&mut client, layout_rel, "handle=\"");
+    assert!(
+        labels.contains(&"acme_widget_index".to_string()),
+        "handle completion: {labels:?}"
+    );
+    let lenses = client
+        .request::<lsp_types::request::CodeLensRequest>(lsp_types::CodeLensParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: fixture.uri("app/code/Acme/Widget/view/frontend/templates/chip.phtml"),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .expect("phtml lenses");
+    assert!(
+        lenses.iter().any(|l| l
+            .command
+            .as_ref()
+            .is_some_and(|c| c.title.contains("used in 1 layout"))),
+        "phtml lens: {lenses:?}"
+    );
 
     // --- definition on the observer instance in events.xml → Recalc.php's class line.
     let events_uri = fixture.uri("app/code/Acme/Widget/etc/events.xml");

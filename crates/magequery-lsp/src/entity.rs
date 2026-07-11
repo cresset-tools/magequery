@@ -27,6 +27,15 @@ pub(crate) enum Entity {
     /// intercept it (the reverse of [`Entity::PluginMethod`]); nothing when the class
     /// has none, leaving the verb to the PHP language server.
     Method(String),
+    /// `Vendor_Module::path/file.phtml` — a template reference in layout XML (or a PHP
+    /// string). Distinguished from ACL ids by the `.`/`/` in the path half.
+    Template(String),
+    /// `<update handle="…">` in layout XML.
+    LayoutHandle(String),
+    /// A block/container name in layout XML (declaration or reference).
+    BlockName(String),
+    /// A db_schema table name (`table=`/`referenceTable=` attributes).
+    Table(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -176,6 +185,38 @@ fn classify_xml(
     // uses them (di, events, crontab, webapi, communication, widget, mview, indexer, …).
     // `name` counts only where the *named thing* is a type (di.xml `<type>`,
     // `<virtualType>`). `xsi:type` never matches — the prefix is part of the name.
+    // Layout XML first: these attributes are unambiguous wherever they appear.
+    if attr == Some("template") {
+        return Some(EntityAt {
+            entity: Entity::Template(value.to_string()),
+            span,
+        });
+    }
+    if attr == Some("handle") && element == "update" {
+        return Some(EntityAt {
+            entity: Entity::LayoutHandle(value.to_string()),
+            span,
+        });
+    }
+    if matches!(attr, Some("referenceTable"))
+        || (attr == Some("table") && element == "constraint")
+        || (attr == Some("name") && element == "table")
+    {
+        return Some(EntityAt {
+            entity: Entity::Table(value.to_string()),
+            span,
+        });
+    }
+    if (attr == Some("name")
+        && matches!(element, "block" | "container" | "referenceBlock" | "referenceContainer"))
+        || (matches!(attr, Some("element") | Some("destination")) && element == "move")
+    {
+        return Some(EntityAt {
+            entity: Entity::BlockName(value.to_string()),
+            span,
+        });
+    }
+
     let class_position = match attr {
         Some("type" | "instance" | "class" | "service" | "for" | "handler") => true,
         Some("name") => matches!(element, "type" | "virtualType"),
@@ -230,6 +271,12 @@ fn classify_shape(value: &str, span: Range<usize>) -> Option<EntityAt> {
     if value.contains('\\') {
         return Some(class_entity(value, span));
     }
+    if template_shaped(value) {
+        return Some(EntityAt {
+            entity: Entity::Template(value.to_string()),
+            span,
+        });
+    }
     if acl_shaped(value) {
         return Some(EntityAt { entity: Entity::Acl(value.to_string()), span });
     }
@@ -246,6 +293,20 @@ fn classify_shape(value: &str, span: Range<usize>) -> Option<EntityAt> {
         });
     }
     None
+}
+
+/// `Vendor_Module::path/to/file.phtml` — the path half has `/` or `.`, which an ACL
+/// resource id never does.
+fn template_shaped(value: &str) -> bool {
+    match value.split_once("::") {
+        Some((module, path)) => {
+            module_shaped(module)
+                && !path.is_empty()
+                && (path.contains('/') || path.contains('.'))
+                && !path.contains(char::is_whitespace)
+        }
+        None => false,
+    }
 }
 
 /// `Vendor_Module::resource_id`.
@@ -302,6 +363,12 @@ fn php_entity_at(text: &str, offset: usize) -> Option<EntityAt> {
         if config_path_shaped(content) {
             return Some(EntityAt {
                 entity: Entity::ConfigPath(content.to_string()),
+                span,
+            });
+        }
+        if template_shaped(content) {
+            return Some(EntityAt {
+                entity: Entity::Template(content.to_string()),
                 span,
             });
         }
@@ -461,6 +528,12 @@ pub(crate) enum CompletionKind {
     Module,
     /// db_schema table names (`referenceTable=`).
     Table,
+    /// Template references in layout XML.
+    Template,
+    /// Layout handles (`<update handle=`).
+    LayoutHandle,
+    /// Block/container names being *referenced* (referenceBlock/move — not declarations).
+    BlockName,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -523,6 +596,12 @@ fn xml_completion_context(text: &str, offset: usize) -> Option<CompletionCtx> {
             "name" if matches!(element, "type" | "virtualType") => Some(CompletionKind::Class),
             "name" if element == "event" => Some(CompletionKind::Event),
             "name" if element == "module" => Some(CompletionKind::Module),
+            "name" if matches!(element, "referenceBlock" | "referenceContainer") => {
+                Some(CompletionKind::BlockName)
+            }
+            "element" | "destination" if element == "move" => Some(CompletionKind::BlockName),
+            "template" => Some(CompletionKind::Template),
+            "handle" if element == "update" => Some(CompletionKind::LayoutHandle),
             "ref" | "resource" => Some(CompletionKind::Acl),
             "referenceTable" => Some(CompletionKind::Table),
             _ => None,
@@ -863,6 +942,44 @@ $x = 'not_a_context';
 
         // Outside any value: no context.
         assert!(ctx("di.xml", "<config>  </config>", "<config> ").is_none());
+    }
+
+    #[test]
+    fn layout_entities() {
+        let layout = r#"<page>
+    <update handle="catalog_product_view"/>
+    <referenceBlock name="product.info">
+        <block class="Acme\Widget\Block\Chip" name="acme.chip" template="Acme_Widget::chip/render.phtml"/>
+    </referenceBlock>
+    <move element="acme.chip" destination="content"/>
+</page>"#;
+        assert_eq!(
+            at("catalog_product_view.xml", layout, "Acme_Widget::chip/render.phtml"),
+            Some(Entity::Template("Acme_Widget::chip/render.phtml".to_string()))
+        );
+        assert_eq!(
+            at("catalog_product_view.xml", layout, "catalog_product_view"),
+            Some(Entity::LayoutHandle("catalog_product_view".to_string()))
+        );
+        assert_eq!(
+            at("catalog_product_view.xml", layout, "product.info"),
+            Some(Entity::BlockName("product.info".to_string()))
+        );
+        assert_eq!(
+            at("catalog_product_view.xml", layout, "element=\"acme.chip"),
+            Some(Entity::BlockName("acme.chip".to_string()))
+        );
+        // The class attribute still classifies as a class inside layout XML.
+        assert_eq!(
+            at("catalog_product_view.xml", layout, "Acme\\Widget\\Block\\Chip"),
+            Some(Entity::Class(ClassName::new("Acme\\Widget\\Block\\Chip")))
+        );
+        // Template shape wins over ACL shape only when the path half has . or /.
+        let php = "<?php $b->getTemplate('Acme_Widget::chip/render.phtml');";
+        assert_eq!(
+            at("B.php", php, "Acme_Widget::chip/render.phtml"),
+            Some(Entity::Template("Acme_Widget::chip/render.phtml".to_string()))
+        );
     }
 
     #[test]

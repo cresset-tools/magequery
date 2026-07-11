@@ -65,6 +65,7 @@ async function bootstrap(context: vscode.ExtensionContext): Promise<void> {
       { scheme: "file", language: "php" },
       { scheme: "file", language: "xml" },
       { scheme: "file", pattern: "**/*.graphqls" },
+      { scheme: "file", pattern: "**/*.phtml" },
     ],
   };
   client = new LanguageClient("magequery", "magequery", serverOptions, clientOptions);

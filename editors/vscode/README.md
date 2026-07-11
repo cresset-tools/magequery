@@ -28,6 +28,12 @@ of the checkout — no database, no `setup:di:compile`, no working PHP needed.
   peeking straight into the other side.
 - **Inlay hints** — the same plugin facts inline at the end of the signature line
   (`« 7 plugin(s) »` / `→ Save::execute()`), with the breakdown on hover.
+- **Layout navigation** — jump from `template="Vendor_Module::…"` to the file (module
+  original + theme overrides), from `<update handle=…>` to the defining files, from
+  `<referenceBlock name=…>` to the block's declaration; `.phtml` files carry
+  override/usage lenses; completions for templates, handles, and block names.
+- **Outline & symbol search** — document symbols for every config XML, and
+  workspace-wide search over classes, events, config paths, ACL ids, and tables.
 - **Plugin-method jump, both directions** — go-to-definition on a
   `before*`/`around*`/`after*` declaration in a plugin class lands on the method it
   intercepts (resolved through the di.xml plugin declaration and the preference chain);

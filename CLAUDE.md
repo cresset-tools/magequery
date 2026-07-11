@@ -1634,6 +1634,30 @@ at 200 with `is_incomplete` so clients re-query; items carry a `TextEdit` over t
 typed span (client word-boundary heuristics break on backslashes). Validated live:
 catalog 21,899 names, 2-28ms per request, full-name query → exactly 1 item.
 
+**Layout-layer navigation + symbols + observer lens** (the second magento2-lsp parity
+round). New entities: `Template` (`Vendor_Module::path.phtml` — the `.`/`/` in the path
+half distinguishes it from ACL ids; `template=` attrs anywhere + PHP strings),
+`LayoutHandle` (`<update handle=>`), `BlockName` (block/container/reference*/move
+attrs), `Table` (db_schema `table=`/`referenceTable=`/`<table name=>`). `layout.rs`
+holds the helpers: `area_of_file` (view/<area>/ path or theme-id prefix; base folds into
+frontend), `resolve_template` (module area+base file, then every theme override —
+candidates reported, never resolved to one: active theme is runtime state; uses the new
+public `Magento::themes()`), `template_ref_of_file` (phtml → its `Module::rel` ref +
+override provenance), `ops_where` (scan over `layout_handles`+`layout` — no new core
+index). Definition on a template → all resolving files; handle → contributing files;
+block name → its declaration (cross-handle: `breadcrumbs` referenced in
+catalog_product_view resolves to its `default`-handle declaration — validated live).
+References/hovers per entity; completions for template refs (the referenced-set, no
+walk), handles, block names. `.phtml` files get lenses (`overrides X`/`overridden in N
+theme(s)`/`used in N layout op(s)`); the VS Code selector gained `**/*.phtml`; watch
+globs gained it too. **Document symbols**: a generic nested XML outline (`symbols.rs`,
+quick-xml) — any element with an identifying attr (name/id/for/code/handle/instance)
+becomes a symbol; covers every config dialect without per-type parsers. **Workspace
+symbols**: query across the class catalog, events, config paths, ACL ids, modules,
+tables (same rank-and-cap as completions, min 2 chars). **Observer lens**: `execute()`
+in a registered observer gets `→ event_name` (events.xml locations). Skipped
+deliberately: short template paths (no module prefix), magic-method gd, XSD/URN.
+
 **Editors live in `editors/` (monorepo, locked); publisher identity is `cresset-tools`.**
 - `editors/vscode` — TypeScript client (`vscode-languageclient` 9, esbuild bundle).
   Activation `workspaceContains:**/app/etc/config.php` (never wakes in non-Magento

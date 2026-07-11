@@ -48,6 +48,8 @@ pub(crate) fn capabilities() -> lsp_types::ServerCapabilities {
         // The lens data as inline annotations — the plugin indicator editors without
         // code-lens rendering (Zed) can show.
         inlay_hint_provider: Some(OneOf::Left(true)),
+        document_symbol_provider: Some(OneOf::Left(true)),
+        workspace_symbol_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -476,6 +478,36 @@ impl<'a> Server<'a> {
                             .map(lsp_types::CompletionResponse::List),
                     )
                     .ok()
+                })
+            }
+            lsp_types::request::DocumentSymbolRequest::METHOD => {
+                let params: Option<lsp_types::DocumentSymbolParams> =
+                    serde_json::from_value(request.params).ok();
+                params.and_then(|p| {
+                    let path = p.text_document.uri.to_file_path().ok()?;
+                    let magento = self.handle_for(&path)?;
+                    serde_json::to_value(
+                        crate::symbols::document_symbols(&magento, &path)
+                            .map(lsp_types::DocumentSymbolResponse::Nested),
+                    )
+                    .ok()
+                })
+            }
+            lsp_types::request::WorkspaceSymbolRequest::METHOD => {
+                let params: Option<lsp_types::WorkspaceSymbolParams> =
+                    serde_json::from_value(request.params).ok();
+                params.and_then(|p| {
+                    let mut symbols = Vec::new();
+                    for index in 0..self.workspaces.len() {
+                        let Some(magento) = self.workspaces[index].handle.clone() else {
+                            continue;
+                        };
+                        let catalog = self.class_catalog(index, &magento);
+                        symbols.extend(crate::symbols::workspace_symbols(
+                            &magento, &catalog, &p.query,
+                        ));
+                    }
+                    serde_json::to_value(lsp_types::WorkspaceSymbolResponse::Flat(symbols)).ok()
                 })
             }
             lsp_types::request::InlayHintRequest::METHOD => {

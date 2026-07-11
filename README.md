@@ -187,8 +187,10 @@ editor that gives you context-aware completions (classes, events, config paths, 
 `doctor` findings as diagnostics while you type, go-to-definition and hover on
 class names in `di.xml`/`events.xml`/`webapi.xml`/`system.xml`/`schema.graphqls` (definition on
 an interface also jumps to the class its `<preference>` resolves to), find-references over the
-whole config graph (injections, virtual types, observers, cron, webapi, GraphQL, queues), and
-code lenses on PHP classes (`N plugin(s)`, `wired in N config place(s)`).
+whole config graph (injections, virtual types, observers, cron, webapi, GraphQL, queues),
+layout navigation (templates through the theme-override chain, handles, block names), config
+outlines and workspace symbol search, and code lenses on PHP classes (`N plugin(s)`,
+`wired in N config place(s)`).
 
 - **VS Code** — the extension in [`editors/vscode`](editors/vscode); it finds `magequery` on
   PATH or downloads the release binary itself.
