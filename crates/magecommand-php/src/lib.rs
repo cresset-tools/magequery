@@ -208,6 +208,17 @@ class C {
     }
 
     #[test]
+    fn bare_readonly_param_promotes_public() {
+        let c = one(
+            "<?php class C { public function __construct(readonly \\WeakReference $r, readonly int $sort) {} }",
+        );
+        let p = &c.methods[0].params;
+        assert_eq!(p[0].promoted, Some(Visibility::Public));
+        assert!(p[0].readonly);
+        assert_eq!(p[1].promoted, Some(Visibility::Public));
+    }
+
+    #[test]
     fn keyword_named_methods() {
         let c = one("<?php class C { public function list() {} public function use() {} }");
         let names: Vec<_> = c.methods.iter().map(|m| m.name.as_str()).collect();

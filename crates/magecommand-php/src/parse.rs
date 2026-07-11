@@ -781,6 +781,11 @@ impl<'a> Parser<'a> {
                             break;
                         }
                     }
+                    // A bare `readonly` param modifier still promotes — to an
+                    // implicitly public property (PHP 8.1).
+                    if readonly && promoted.is_none() {
+                        promoted = Some(Visibility::Public);
+                    }
                     self.cur.skip_insignificant();
                     let ty = if matches!(self.cur.peek(), Some(b'$' | b'&' | b'.')) {
                         None
