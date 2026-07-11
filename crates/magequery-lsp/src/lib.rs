@@ -16,6 +16,7 @@
 //!   answers the layer they can't see — the XML config graph (di.xml, events.xml, …)
 //!   and Magento-semantic overlays on PHP (DI resolution, plugins, reverse DI).
 
+mod actions;
 mod diag;
 mod entity;
 mod features;

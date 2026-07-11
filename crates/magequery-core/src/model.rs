@@ -148,6 +148,9 @@ pub struct DoctorFinding {
     pub message: String,
     /// The declaring file, when the finding has one.
     pub source: Option<Source>,
+    /// The thing the finding is *about* — the missing/unregistered class, the module,
+    /// the ACL id — structured so tooling (LSP quick fixes) never parses `message`.
+    pub subject: Option<String>,
 }
 
 /// The `doctor` result: findings sorted errors-first.
