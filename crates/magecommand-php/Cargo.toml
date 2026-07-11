@@ -1,0 +1,10 @@
+[package]
+name = "magecommand-php"
+description = "Structural PHP parser: declarations, signatures, constants — never bodies, never execution."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+memchr = "2"

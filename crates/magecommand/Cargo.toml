@@ -1,0 +1,21 @@
+[package]
+name = "magecommand"
+description = "Act on a Magento 2 codebase from the command line: fast DI compilation."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "magecommand"
+path = "src/main.rs"
+
+[dependencies]
+magecommand-engine = { path = "../magecommand-engine" }
+magequery-core = { path = "../magequery-core" }
+clap = { version = "4", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

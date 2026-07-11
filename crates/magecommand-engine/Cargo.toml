@@ -1,0 +1,16 @@
+[package]
+name = "magecommand-engine"
+description = "Compile engine for magecommand: detection, generation, archive comparison. Computes, never prints."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+magequery-core = { path = "../magequery-core" }
+magecommand-php = { path = "../magecommand-php" }
+thiserror.workspace = true
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
