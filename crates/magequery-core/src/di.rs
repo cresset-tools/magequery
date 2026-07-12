@@ -24,6 +24,10 @@ use crate::source::Source;
 pub(crate) struct Located {
     pub value: ClassName,
     pub source: Source,
+    /// First-declaration order across the whole merge (PHP assoc arrays keep
+    /// a key's original position when re-assigned; Magento's compiled
+    /// nonLazyTypes ordering depends on it).
+    pub decl_order: u32,
 }
 
 #[derive(Clone)]
@@ -58,6 +62,9 @@ pub(crate) struct LocatedBool {
 /// Fully merged DI config for one area.
 #[derive(Clone, Default)]
 pub(crate) struct AreaConfig {
+    /// Monotonic counter feeding `Located::decl_order` (clones continue
+    /// counting, so area overlays order after the global base).
+    pub next_decl: u32,
     pub preferences: HashMap<ClassName, Located>,
     /// target type -> (plugin name -> plugin)
     pub plugins: HashMap<ClassName, HashMap<String, LocatedPlugin>>,
@@ -66,6 +73,10 @@ pub(crate) struct AreaConfig {
     pub type_args: HashMap<ClassName, HashMap<String, LocatedArg>>,
     /// Explicit `shared=` declarations, last-wins (absent = Magento's default: shared).
     pub shared: HashMap<ClassName, LocatedBool>,
+    /// First-mention position per virtualType name — anchors (type-less
+    /// re-declarations) count: the XML DOM merge pins node positions at
+    /// first appearance.
+    pub vtype_positions: HashMap<ClassName, u32>,
 }
 
 impl AreaConfig {
@@ -77,6 +88,7 @@ impl AreaConfig {
             .map(|(for_type, located)| PreferenceDecl {
                 for_type: for_type.clone(),
                 prefer: located.value.clone(),
+                decl_order: located.decl_order,
                 source: located.source.clone(),
             })
             .collect();
@@ -88,6 +100,11 @@ impl AreaConfig {
             .map(|(name, located)| VirtualTypeDecl {
                 name: name.clone(),
                 base: located.value.clone(),
+                decl_order: self
+                    .vtype_positions
+                    .get(name)
+                    .copied()
+                    .unwrap_or(located.decl_order),
                 source: located.source.clone(),
             })
             .collect();
@@ -348,12 +365,43 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
     };
 
     for (for_, type_, line) in &file.preferences {
-        cfg.preferences
-            .insert(for_.clone(), Located { value: type_.clone(), source: src(*line) });
+        match cfg.preferences.get_mut(for_) {
+            Some(existing) => {
+                existing.value = type_.clone();
+                existing.source = src(*line);
+            }
+            None => {
+                let decl_order = cfg.next_decl;
+                cfg.next_decl += 1;
+                cfg.preferences.insert(
+                    for_.clone(),
+                    Located { value: type_.clone(), source: src(*line), decl_order },
+                );
+            }
+        }
+    }
+    for name in &file.virtual_type_mentions {
+        if !cfg.vtype_positions.contains_key(name) {
+            let decl_order = cfg.next_decl;
+            cfg.next_decl += 1;
+            cfg.vtype_positions.insert(name.clone(), decl_order);
+        }
     }
     for (name, type_, line) in &file.virtual_types {
-        cfg.virtual_types
-            .insert(name.clone(), Located { value: type_.clone(), source: src(*line) });
+        match cfg.virtual_types.get_mut(name) {
+            Some(existing) => {
+                existing.value = type_.clone();
+                existing.source = src(*line);
+            }
+            None => {
+                let decl_order = cfg.next_decl;
+                cfg.next_decl += 1;
+                cfg.virtual_types.insert(
+                    name.clone(),
+                    Located { value: type_.clone(), source: src(*line), decl_order },
+                );
+            }
+        }
     }
     for (name, shared, line) in &file.shared {
         cfg.shared
@@ -434,6 +482,7 @@ mod export_tests {
         Located {
             value: ClassName::new(class),
             source: src(line),
+            decl_order: line,
         }
     }
 

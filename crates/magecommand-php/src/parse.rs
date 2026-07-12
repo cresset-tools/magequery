@@ -49,11 +49,15 @@ impl<'a> Parser<'a> {
         let mut is_abstract = false;
         let mut is_final = false;
         let mut is_readonly = false;
+        let mut pending_attrs: Vec<String> = Vec::new();
         loop {
             self.cur.skip_insignificant();
             let Some(b) = self.cur.peek() else { return };
             match b {
-                b'#' if self.cur.peek_at(1) == Some(b'[') => self.cur.skip_attribute(),
+                b'#' if self.cur.peek_at(1) == Some(b'[') => {
+                    let attrs = self.parse_attribute_names();
+                    pending_attrs.extend(attrs);
+                }
                 b'}' | b';' => self.cur.bump(),
                 b'?' if self.cur.peek_at(1) == Some(b'>') => {
                     self.cur.pos += 2;
@@ -88,21 +92,75 @@ impl<'a> Parser<'a> {
                                 "trait" => ClassKind::Trait,
                                 _ => ClassKind::Enum,
                             };
-                            self.parse_declaration(kind, start, is_abstract, is_final, is_readonly);
+                            let attrs = std::mem::take(&mut pending_attrs);
+                            self.parse_declaration(
+                                kind, start, is_abstract, is_final, is_readonly, attrs,
+                            );
                             is_abstract = false;
                             is_final = false;
                             is_readonly = false;
                         }
-                        "function" => self.skip_function(),
+                        "function" => {
+                            pending_attrs.clear();
+                            self.skip_function();
+                        }
                         _ => {
                             // declare(...), const, if-guards, expressions —
                             // top-level code we don't model.
+                            pending_attrs.clear();
                             self.cur.pos = start;
                             self.cur.skip_statement();
                         }
                     }
                 }
                 _ => self.cur.skip_statement(),
+            }
+        }
+    }
+
+    /// Parse a `#[Attr, Other(args)]` group, returning resolved names.
+    fn parse_attribute_names(&mut self) -> Vec<String> {
+        self.cur.pos += 2; // "#["
+        let mut names = Vec::new();
+        loop {
+            self.cur.skip_insignificant();
+            match self.cur.peek() {
+                Some(b']') => {
+                    self.cur.bump();
+                    return names;
+                }
+                Some(b',') => {
+                    self.cur.bump();
+                }
+                None => return names,
+                _ => {
+                    let Some(name) = self.read_qualified_name() else {
+                        // Not a name where one belongs: fall back to a plain
+                        // balanced skip of the rest of the group.
+                        let mut depth = 1usize;
+                        while let Some(b) = self.cur.peek() {
+                            match b {
+                                b'[' => depth += 1,
+                                b']' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        self.cur.bump();
+                                        return names;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            self.cur.bump();
+                        }
+                        return names;
+                    };
+                    names.push(self.resolve(&name));
+                    self.cur.skip_insignificant();
+                    if self.cur.peek() == Some(b'(') {
+                        self.cur.bump();
+                        self.cur.skip_parens_body(1);
+                    }
+                }
             }
         }
     }
@@ -268,6 +326,7 @@ impl<'a> Parser<'a> {
 
     // ---- declarations ----------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     fn parse_declaration(
         &mut self,
         kind: ClassKind,
@@ -275,6 +334,7 @@ impl<'a> Parser<'a> {
         is_abstract: bool,
         is_final: bool,
         is_readonly: bool,
+        attributes: Vec<String>,
     ) {
         self.cur.skip_insignificant();
         let Some(name) = self.cur.read_ident() else {
@@ -302,6 +362,7 @@ impl<'a> Parser<'a> {
             cases: Vec::new(),
             enum_backing: None,
             methods: Vec::new(),
+            attributes,
             offset,
             uses: self.uses.iter().map(|(a, f)| (a.clone(), f.clone())).collect(),
         };

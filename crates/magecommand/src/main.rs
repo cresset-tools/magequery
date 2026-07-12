@@ -164,8 +164,57 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
             force,
         )?;
         println!("wrote {}", path.display());
+
+        // The seven area files. The class universe scans generated code;
+        // until magecommand generates it itself (M3), an archived _code from
+        // a previous compile serves (the M2 bring-up configuration).
+        let generated_code = if root.join("generated/code").is_dir() {
+            root.join("generated/code")
+        } else {
+            root.join("generated/_code")
+        };
+        let mut defs = magecommand_engine::definitions::Definitions::scan(
+            &magento,
+            &root,
+            &generated_code,
+        );
+        let pref_keys: Vec<String> = magecommand_engine::areaconfig::AREA_CODES
+            .iter()
+            .flat_map(|(area, _)| {
+                magento
+                    .di_export(*area)
+                    .preferences
+                    .into_iter()
+                    .map(|p| p.for_type.as_str().to_owned())
+            })
+            .collect();
+        let unresolved = defs.extend_hierarchy(&magento, &root, pref_keys);
+        if !unresolved.is_empty() {
+            eprintln!(
+                "note: {} class name(s) unresolvable via autoload maps (first: {})",
+                unresolved.len(),
+                unresolved.first().map(String::as_str).unwrap_or("")
+            );
+        }
+        let mut finding_count = 0usize;
+        for (area, code) in magecommand_engine::areaconfig::AREA_CODES {
+            let file = magecommand_engine::areaconfig::build_area_file(
+                &magento, &defs, area, &root,
+            );
+            finding_count += file.findings.len();
+            let path = magecommand_engine::metadata::write_metadata_file(
+                &root,
+                &format!("{code}.php"),
+                &file.render(),
+                force,
+            )?;
+            println!("wrote {}", path.display());
+        }
+        if finding_count > 0 {
+            eprintln!("note: {finding_count} static-analysis finding(s) across areas — see --json");
+        }
         eprintln!(
-            "note: metadata emission is under construction — only the files listed above were written"
+            "note: metadata emission is under construction — plugin-lists and interception.php pending"
         );
     }
     Ok(ExitCode::SUCCESS)

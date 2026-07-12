@@ -130,12 +130,14 @@ pub fn area_sections(magento: &Magento, defs: &Definitions, area: Area) -> AreaS
     }
 }
 
-/// A complete area file (chain applied), ready to serialize. `nonLazyTypes`
-/// pending.
+/// A complete area file (chain applied), ready to serialize.
 pub struct AreaFile {
     pub arguments: BTreeMap<String, PhpValue>,
     pub preferences: Vec<(String, String)>,
     pub instance_types: Vec<(String, String)>,
+    /// `class => true`, in Magento's candidate order (NOT sorted — the one
+    /// section Area::doOperation never ksorts).
+    pub non_lazy: Vec<String>,
     pub findings: Vec<String>,
 }
 
@@ -198,12 +200,165 @@ pub fn build_area_file(
     // PreferencesResolving pass 2, now through interceptor-augmented prefs.
     resolve_preferences_in_args(&mut arguments, &preferences);
 
+    // NonLazyTypes: candidates = chain-time arguments keys, then
+    // instanceTypes values, then preferences values — each in Magento's
+    // insertion order (reconstructed below), deduped first-wins, filtered to
+    // the lazy-INeligible.
+    let non_lazy = non_lazy_types(
+        defs,
+        &export,
+        &arguments,
+        &instance_types,
+        &preferences,
+        &interceptors,
+    );
+
     AreaFile {
         arguments,
         preferences: preferences.into_iter().collect(),
         instance_types: instance_types.into_iter().collect(),
+        non_lazy,
         findings: ctx.take_findings(),
     }
+}
+
+/// Chain\NonLazyTypes (PHP >= 8.4, active on the oracle): which candidate
+/// classes cannot be lazy-proxied. Order is the candidate insertion order —
+/// this section is written pre-ksort and never sorted.
+fn non_lazy_types(
+    defs: &Definitions,
+    export: &magequery_core::DiExport,
+    arguments: &BTreeMap<String, PhpValue>,
+    instance_types: &BTreeMap<String, String>,
+    preferences: &BTreeMap<String, String>,
+    interceptors: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut prefs_by_decl: Vec<&magequery_core::PreferenceDecl> = export.preferences.iter().collect();
+    prefs_by_decl.sort_by_key(|p| p.decl_order);
+    let mut vtypes_by_decl: Vec<&magequery_core::VirtualTypeDecl> =
+        export.virtual_types.iter().collect();
+    vtypes_by_decl.sort_by_key(|v| v.decl_order);
+    let pref_key_set: HashSet<&str> = export
+        .preferences
+        .iter()
+        .map(|p| p.for_type.as_str())
+        .collect();
+    let vtype_set: HashSet<&str> = export
+        .virtual_types
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect();
+    let appended_interceptors: HashSet<&str> =
+        interceptors.values().map(String::as_str).collect();
+
+    let mut candidates: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut push = |candidates: &mut Vec<String>, seen: &mut HashSet<String>, name: &str| {
+        if seen.insert(name.to_owned()) {
+            candidates.push(name.to_owned());
+        }
+    };
+
+    // [A] preference keys with argument rows, in declaration order
+    // (fillThirdPartyInterfaces put them at the FRONT of the collection).
+    // A preference key that is a VIRTUAL TYPE gets its row from the
+    // Reader's vtype loop instead — appended later, block [C].
+    for p in &prefs_by_decl {
+        let key = p.for_type.as_str();
+        if arguments.contains_key(key)
+            && !(vtype_set.contains(key) && !defs.scanned.contains(key))
+        {
+            push(&mut candidates, &mut seen, key);
+        }
+    }
+    // [B] the sorted scanned block (collection was ksort'ed). A virtual
+    // type whose name collides with a scanned class keeps the class row's
+    // position here (PHP re-assignment preserves the first position).
+    for key in arguments.keys() {
+        if pref_key_set.contains(key.as_str())
+            || appended_interceptors.contains(key.as_str())
+            || (vtype_set.contains(key.as_str()) && !defs.scanned.contains(key.as_str()))
+        {
+            continue;
+        }
+        push(&mut candidates, &mut seen, key.as_str());
+    }
+    // [C] virtual-type rows, appended by the Reader in declaration order
+    // (the seen-set already holds scanned-name collisions).
+    for v in &vtypes_by_decl {
+        if arguments.contains_key(v.name.as_str()) {
+            push(&mut candidates, &mut seen, v.name.as_str());
+        }
+    }
+    // [D] interceptor rows appended by the substitution's rename.
+    for interceptor in interceptors.values() {
+        if arguments.contains_key(interceptor.as_str()) {
+            push(&mut candidates, &mut seen, interceptor.as_str());
+        }
+    }
+    // instanceTypes VALUES in vtype declaration order.
+    for v in &vtypes_by_decl {
+        if let Some(value) = instance_types.get(v.name.as_str()) {
+            push(&mut candidates, &mut seen, value.as_str());
+        }
+    }
+    // preferences VALUES: the interceptor-map block first (its insertion
+    // order), then reader preferences in declaration order.
+    for original in interceptors.keys() {
+        if let Some(value) = preferences.get(original.as_str()) {
+            push(&mut candidates, &mut seen, value.as_str());
+        }
+    }
+    for p in &prefs_by_decl {
+        if let Some(value) = preferences.get(p.for_type.as_str()) {
+            push(&mut candidates, &mut seen, value.as_str());
+        }
+    }
+
+    candidates
+        .into_iter()
+        .filter(|name| !is_lazy_eligible(defs, name))
+        .collect()
+}
+
+/// Chain\NonLazyTypes::isLazyEligible, statically. Ineligible (=> nonLazy):
+/// `\Proxy`-suffixed, unknown to the class universe (class_exists false —
+/// virtual types land here), interface/trait/enum/abstract/final/readonly,
+/// any internal PHP ancestor, or the #[NonLazy] attribute.
+fn is_lazy_eligible(defs: &Definitions, name: &str) -> bool {
+    use magecommand_php::ClassKind;
+    if name.ends_with("\\Proxy") {
+        return false;
+    }
+    let Some(record) = defs.get(name) else {
+        return false;
+    };
+    let meta = &record.meta;
+    if meta.kind != ClassKind::Class || meta.is_abstract || meta.is_final || meta.is_readonly {
+        return false;
+    }
+    if meta
+        .attributes
+        .iter()
+        .any(|a| a == "Magento\\Framework\\ObjectManager\\Attribute\\NonLazy")
+    {
+        return false;
+    }
+    // Internal-ancestor walk: an extends chain that leaves the parsed set
+    // hit a PHP-internal class (DateTime, ArrayIterator, Exception, ...).
+    let mut current = meta;
+    let mut hops = 0;
+    while let Some(parent) = current.extends.first() {
+        hops += 1;
+        if hops > 64 {
+            return false;
+        }
+        match defs.get(parent) {
+            Some(r) => current = &r.meta,
+            None => return false,
+        }
+    }
+    true
 }
 
 /// Reader-stage preferences (fixpoint) and instanceTypes (vtype chains
@@ -298,6 +453,44 @@ fn resolve_preferences_in_args(
     }
     for value in arguments.values_mut() {
         walk(value, preferences);
+    }
+}
+
+impl AreaFile {
+    /// The complete `<area>.php` content: the four sections in Magento's
+    /// write order, var_export-exact.
+    pub fn render(&self) -> String {
+        let pairs = |entries: &[(String, String)]| {
+            PhpValue::Array(
+                entries
+                    .iter()
+                    .map(|(k, v)| (PhpKey::str(k.clone()), PhpValue::str(v.clone())))
+                    .collect(),
+            )
+        };
+        let file = PhpValue::Array(vec![
+            (
+                PhpKey::str("arguments"),
+                PhpValue::Array(
+                    self.arguments
+                        .iter()
+                        .map(|(k, v)| (PhpKey::str(k.clone()), v.clone()))
+                        .collect(),
+                ),
+            ),
+            (PhpKey::str("preferences"), pairs(&self.preferences)),
+            (PhpKey::str("instanceTypes"), pairs(&self.instance_types)),
+            (
+                PhpKey::str("nonLazyTypes"),
+                PhpValue::Array(
+                    self.non_lazy
+                        .iter()
+                        .map(|k| (PhpKey::str(k.clone()), PhpValue::Bool(true)))
+                        .collect(),
+                ),
+            ),
+        ]);
+        crate::phpexport::to_php_file(&file)
     }
 }
 

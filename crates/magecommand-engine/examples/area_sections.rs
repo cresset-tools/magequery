@@ -35,7 +35,7 @@ fn main() {
                 .map(|p| p.for_type.as_str().to_owned())
         })
         .collect();
-    let unresolved = defs.extend_hierarchy(&magento, pref_keys);
+    let unresolved = defs.extend_hierarchy(&magento, &root, pref_keys);
     eprintln!(
         "{} classes after hierarchy extension ({} unresolved: {:?}…)",
         defs.classes.len(),
@@ -74,6 +74,21 @@ fn main() {
             format!("{body}\n")
         };
 
+        let non_lazy_rendered = {
+            let section = PhpValue::Array(
+                file.non_lazy
+                    .iter()
+                    .map(|k| (PhpKey::str(k.clone()), PhpValue::Bool(true)))
+                    .collect(),
+            );
+            let wrapper = PhpValue::Array(vec![(PhpKey::str("nonLazyTypes"), section)]);
+            let full = magecommand_engine::phpexport::to_php_file(&wrapper);
+            let body = full
+                .strip_prefix("<?php return array (\n")
+                .and_then(|s| s.strip_suffix("\n);"))
+                .expect("wrapper shape");
+            format!("{body}\n")
+        };
         for (key, ours) in [
             ("arguments", args_rendered),
             ("preferences", render_section("preferences", &file.preferences)),
@@ -81,6 +96,7 @@ fn main() {
                 "instanceTypes",
                 render_section("instanceTypes", &file.instance_types),
             ),
+            ("nonLazyTypes", non_lazy_rendered),
         ] {
             match extract_section(&archive, key) {
                 None => {

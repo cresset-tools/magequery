@@ -161,6 +161,10 @@ pub(crate) struct DiFile {
     /// `(type/virtualType name, shared, line)` — explicit `shared=` attributes only
     /// (Magento defaults to shared when unstated).
     pub shared: Vec<(ClassName, bool, u32)>,
+    /// Every `<virtualType name=…>` occurrence, typed or anchor (no `type=`).
+    /// The XML DOM merge pins a node's position at its FIRST appearance in
+    /// any form, so declaration order must count anchors too.
+    pub virtual_type_mentions: Vec<ClassName>,
 }
 
 /// Parse one di.xml file. Tracks the enclosing `<type>`/`<virtualType>` so `<plugin>` and
@@ -368,6 +372,7 @@ fn di_open(
         }
         b"virtualType" => {
             if let Some(name) = attr(e, b"name") {
+                out.virtual_type_mentions.push(ClassName::new(name.clone()));
                 if let Some(t) = attr(e, b"type") {
                     out.virtual_types
                         .push((ClassName::new(name.clone()), ClassName::new(t), line));

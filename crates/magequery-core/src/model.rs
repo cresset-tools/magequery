@@ -324,6 +324,10 @@ pub struct Preference {
 pub struct PreferenceDecl {
     pub for_type: ClassName,
     pub prefer: ClassName,
+    /// First-declaration order across the merge — the position the entry
+    /// holds in Magento's (insertion-ordered) preference map, which PHP
+    /// preserves across overrides.
+    pub decl_order: u32,
     pub source: Source,
 }
 
@@ -334,6 +338,8 @@ pub struct PreferenceDecl {
 pub struct VirtualTypeDecl {
     pub name: ClassName,
     pub base: ClassName,
+    /// First-declaration order across the merge (see [`PreferenceDecl`]).
+    pub decl_order: u32,
     pub source: Source,
 }
 

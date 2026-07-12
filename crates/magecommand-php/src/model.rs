@@ -55,6 +55,8 @@ pub struct ClassMeta {
     /// The enum backing type (`enum X: string`), when declared.
     pub enum_backing: Option<String>,
     pub methods: Vec<MethodMeta>,
+    /// Class-level `#[Attribute]` names, resolved to FQCNs.
+    pub attributes: Vec<String>,
     /// Byte offset of the declaration keyword (for diagnostics).
     pub offset: usize,
     /// The file's `use` imports in effect for this declaration:

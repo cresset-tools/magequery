@@ -187,8 +187,35 @@ impl Definitions {
     pub fn extend_hierarchy(
         &mut self,
         magento: &Magento,
+        root: &Path,
         extra: impl IntoIterator<Item = String>,
     ) -> Vec<String> {
+        // Classmap-autoloaded packages (colinmollenhour/*, phpunit, …) have
+        // no PSR prefix; composer's dumped classmap is the truth for those.
+        let classmap: HashMap<String, PathBuf> = {
+            let path = root.join("vendor/composer/autoload_classmap.php");
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            let vendor = root.join("vendor");
+            let base = root.to_path_buf();
+            text.lines()
+                .filter_map(|line| {
+                    let line = line.trim();
+                    let (name, rest) = line.strip_prefix('\'')?.split_once("' => ")?;
+                    let (dir, rel) = if let Some(r) = rest.strip_prefix("$vendorDir . '") {
+                        (&vendor, r)
+                    } else if let Some(r) = rest.strip_prefix("$baseDir . '") {
+                        (&base, r)
+                    } else {
+                        return None;
+                    };
+                    let rel = rel.strip_suffix("',")?;
+                    Some((
+                        name.replace("\\\\", "\\"),
+                        dir.join(rel.trim_start_matches('/')),
+                    ))
+                })
+                .collect()
+        };
         let mut queue: Vec<String> = self
             .classes
             .values()
@@ -223,7 +250,10 @@ impl Definitions {
                 continue;
             }
             let class_name = magequery_core::ClassName::new(name.clone());
-            let Some(file) = magento.class_file(&class_name) else {
+            let resolved = magento
+                .class_file(&class_name)
+                .or_else(|| classmap.get(&name).cloned());
+            let Some(file) = resolved else {
                 // Global-namespace names are PHP built-ins (stubbed or not);
                 // only namespaced unresolvables are interesting.
                 if internal_ctor(&name).is_none() && name.contains('\\') {
