@@ -12,6 +12,7 @@ magecommand-php = { path = "../magecommand-php" }
 thiserror.workspace = true
 serde = { workspace = true }
 rayon = "1"
+quick-xml.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

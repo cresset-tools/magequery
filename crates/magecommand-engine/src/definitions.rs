@@ -39,6 +39,14 @@ pub struct Definitions {
     /// Scanned classes that came from the setup path — the interception
     /// cache's class list covers app + lib + generated only.
     pub setup_classes: HashSet<String>,
+    /// Every declaration the scan walk itself found (any kind) — the file
+    /// universe PhpScanner tokenizes; `extend_hierarchy`'s closure additions
+    /// never enter here.
+    pub from_scan: HashSet<String>,
+    /// Scan declarations that came from the generated-code path. They are
+    /// compile ARTIFACTS, not source — the codegen exists-gate (Magento's
+    /// `class_exists` on an empty generated dir) must not count them.
+    pub generated_classes: HashSet<String>,
     /// lowercase fqcn -> declared fqcn (PHP names are case-insensitive).
     canonical: HashMap<String, String>,
 }
@@ -91,6 +99,8 @@ impl Definitions {
 
         let mut classes = HashMap::with_capacity(parsed.len());
         let mut setup_classes = HashSet::new();
+        let mut from_scan = HashSet::new();
+        let mut generated_classes = HashSet::new();
         for (file, kind, meta) in parsed {
             if kind == PathKind::Setup {
                 setup_classes.insert(meta.fqcn.clone());
@@ -98,6 +108,12 @@ impl Definitions {
                 // A later non-setup path re-declaring the name un-marks it.
                 setup_classes.remove(&meta.fqcn);
             }
+            if kind == PathKind::Generated {
+                generated_classes.insert(meta.fqcn.clone());
+            } else {
+                generated_classes.remove(&meta.fqcn);
+            }
+            from_scan.insert(meta.fqcn.clone());
             classes.insert(meta.fqcn.clone(), ClassRecord { meta, file });
         }
         // Magento's FileClassScanner switches on T_CLASS and T_TRAIT only —
@@ -114,7 +130,7 @@ impl Definitions {
             .keys()
             .map(|k| (k.to_ascii_lowercase(), k.clone()))
             .collect();
-        Definitions { classes, scanned, setup_classes, canonical }
+        Definitions { classes, scanned, setup_classes, from_scan, generated_classes, canonical }
     }
 
     /// The DECLARED spelling of a case-insensitively known class name —

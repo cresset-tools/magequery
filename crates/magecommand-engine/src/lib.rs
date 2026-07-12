@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 pub mod areaconfig;
 pub mod arguments;
+pub mod codegen;
 pub mod compare;
 pub mod definitions;
 pub mod interception;
