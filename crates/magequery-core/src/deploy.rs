@@ -11,7 +11,7 @@ use crate::model::{
     CacheConfig, CacheFrontend, CacheType, DbConfig, DbConnection, LockConfig, QueueConfig,
     QueueConnection, RedisConfig, RedisInstance, SessionConfig,
 };
-use crate::vfs::Vfs;
+use crate::engine::vfs::Vfs;
 use crate::phparray::{self, PhpValue};
 
 /// Parse `app/etc/env.php` into its `PhpValue` tree.

@@ -23,21 +23,18 @@ pub mod source;
 
 mod breadth;
 mod composer;
-mod vfs;
+mod engine;
 #[cfg(feature = "db")]
 mod db;
 mod decrypt;
 mod deploy;
-mod di;
 mod doctor;
 mod eav;
 mod graphql;
-mod index;
 mod parse;
 mod php;
 mod phparray;
 mod redis;
-mod resolver;
 mod sysconfig;
 mod whatis;
 
@@ -101,7 +98,7 @@ use std::sync::OnceLock;
 pub struct Magento {
     // Filled in by the indexer (steps 1–3). Kept private so the internal representation
     // can evolve without breaking the public, struct-returning API.
-    index: index::Index,
+    index: engine::index::Index,
     // The di.xml index — the expensive parse — is built lazily so `modules`/`events`/etc.
     // don't pay for it. Carries its own diagnostics, merged into `diagnostics()` once built.
     di: OnceLock<DiBuilt>,
@@ -127,7 +124,7 @@ pub struct Magento {
 }
 
 struct DiBuilt {
-    index: di::DiIndex,
+    index: engine::di::DiIndex,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -166,7 +163,10 @@ impl Magento {
         root: impl AsRef<Path>,
         overlay: std::collections::HashMap<PathBuf, String>,
     ) -> Result<Self> {
-        let index = index::Index::build(root.as_ref(), std::sync::Arc::new(vfs::Vfs::new(overlay)))?;
+        let index = engine::index::Index::build(
+            root.as_ref(),
+            std::sync::Arc::new(engine::vfs::Vfs::new(overlay)),
+        )?;
         Ok(Self {
             index,
             di: OnceLock::new(),
@@ -227,12 +227,17 @@ impl Magento {
     }
 
     /// The merged DI config, built (and its diagnostics collected) on first DI query.
-    fn di_index(&self) -> &di::DiIndex {
+    fn di_index(&self) -> &engine::di::DiIndex {
         &self
             .di
             .get_or_init(|| {
                 let mut diagnostics = Vec::new();
-                let index = di::build(&self.index.root, &self.index.modules, &self.index.vfs, &mut diagnostics);
+                let index = engine::di::build(
+                    &self.index.root,
+                    &self.index.modules,
+                    &self.index.vfs,
+                    &mut diagnostics,
+                );
                 DiBuilt { index, diagnostics }
             })
             .index
@@ -353,7 +358,7 @@ impl Magento {
         if self.index.resolver.exists(class) {
             return true;
         }
-        let referenced = |cfg: &di::AreaConfig| {
+        let referenced = |cfg: &engine::di::AreaConfig| {
             cfg.virtual_types.contains_key(class) || cfg.plugins.contains_key(class)
         };
         referenced(self.di_index().config(area)) || referenced(self.di_index().config(Area::Global))
@@ -2584,7 +2589,7 @@ impl Magento {
         let m = &self.index.modules[me];
 
         // package root -> package, so a module finds its owner by walking its ancestors.
-        let root_of: std::collections::HashMap<&Path, &index::PackageMeta> =
+        let root_of: std::collections::HashMap<&Path, &engine::index::PackageMeta> =
             self.index.packages.iter().map(|p| (p.root.as_path(), p)).collect();
 
         // Every module's composer identity: package name + requires + the declaring
@@ -4626,7 +4631,7 @@ struct ActionScan<'a> {
     area: Area,
     module: &'a ModuleName,
     filter: Option<&'a str>,
-    resolver: &'a resolver::ClassResolver,
+    resolver: &'a engine::resolver::ClassResolver,
 }
 
 /// Recursively walk a `Controller/` tree, emitting concrete action classes mapped to URLs.
@@ -4703,7 +4708,7 @@ struct DepPkgInfo {
 }
 
 /// Read an app/code module's own `composer.json` (they're not in installed.json).
-fn read_app_composer(dir: &Path, vfs: &vfs::Vfs) -> Option<DepPkgInfo> {
+fn read_app_composer(dir: &Path, vfs: &engine::vfs::Vfs) -> Option<DepPkgInfo> {
     #[derive(serde::Deserialize)]
     struct Cj {
         name: Option<String>,
@@ -4807,7 +4812,7 @@ fn scan_arg_for_class(
 /// item-by-item; scalars/objects replace).
 fn merge_args_into(
     merged: &mut std::collections::HashMap<String, (ArgValue, Source)>,
-    args: Option<&std::collections::HashMap<String, di::LocatedArg>>,
+    args: Option<&std::collections::HashMap<String, engine::di::LocatedArg>>,
 ) {
     let Some(args) = args else { return };
     for (k, la) in args {

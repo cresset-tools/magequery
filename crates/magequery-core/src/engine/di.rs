@@ -16,7 +16,7 @@ use crate::ids::{Area, ClassName, ModuleName};
 use crate::model::Module;
 use crate::parse;
 use crate::source::Source;
-use crate::vfs::Vfs;
+use crate::engine::vfs::Vfs;
 
 /// A value plus where it was declared.
 #[derive(Clone)]

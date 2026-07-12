@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use crate::doctor;
 use crate::ids::Area;
-use crate::vfs::Vfs;
+use crate::engine::vfs::Vfs;
 use crate::model::{EavSetupKind, EavSetupProp, EavSetupRef, EavValueKind, Module};
 use crate::parse::LineMap;
 use crate::php;

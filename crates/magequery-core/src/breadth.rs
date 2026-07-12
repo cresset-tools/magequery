@@ -21,9 +21,9 @@ use crate::model::{
     MqConsumer, MqHandler, MqPublisher, MqRoute, MqTopic, MqTopicRoute, MqVia,
     MviewSubscription, Observer, Route, SystemField, WebapiRoute,
 };
+use crate::engine::vfs::Vfs;
 use crate::parse;
 use crate::source::Source;
-use crate::vfs::Vfs;
 
 const REAL_AREAS: [Area; 6] = [
     Area::Frontend,
@@ -940,8 +940,8 @@ fn layout_kind(k: parse::RawLayoutOpKind) -> LayoutOpKind {
 mod template_tests {
     use super::LayoutIndex;
     use crate::ids::{Area, ModuleName};
+    use crate::engine::vfs::Vfs;
     use crate::model::{LayoutLayer, Module, ModuleSource};
-    use crate::vfs::Vfs;
 
     #[test]
     fn joins_short_layout_reference_to_module_and_theme_files() {

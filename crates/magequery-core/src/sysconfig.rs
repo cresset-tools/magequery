@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use rayon::prelude::*;
 
-use crate::vfs::Vfs;
+use crate::engine::vfs::Vfs;
 use crate::model::{ConfigSourceKind, ConfigValue, Module};
 use crate::parse;
 use crate::phparray::PhpValue;
