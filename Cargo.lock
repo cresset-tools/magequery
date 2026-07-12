@@ -833,6 +833,8 @@ name = "magecommand-php"
 version = "0.4.0"
 dependencies = [
  "memchr",
+ "rayon",
+ "serde_json",
 ]
 
 [[package]]
