@@ -14,7 +14,8 @@ use rayon::prelude::*;
 use crate::error::Diagnostic;
 use crate::ids::{Area, ClassName, ModuleName};
 use crate::model::{
-    DiExport, Module, PluginDecl, PreferenceDecl, TypeArgDecl, TypeSharedDecl, VirtualTypeDecl,
+    DiExport, Module, PluginDecl, PreferenceDecl, TypeArgDecl, TypeNodePosition, TypeSharedDecl,
+    VirtualTypeDecl,
 };
 use crate::parse;
 use crate::source::Source;
@@ -34,7 +35,20 @@ pub(crate) struct Located {
 pub(crate) struct LocatedPlugin {
     pub class: Option<ClassName>,
     pub sort_order: i32,
-    pub disabled: bool,
+    /// `disabled=` as merged attribute-level: `None` = never written (the
+    /// compiled plugin maps only carry the key when some file declared it).
+    pub disabled: Option<bool>,
+    /// Config layer of the FIRST `disabled=` / `type=` appearance — one
+    /// scope-read's DOM merge always emits [sortOrder, disabled, instance];
+    /// only a LATER read's replace_recursive appends a field after.
+    pub disabled_layer: Option<u8>,
+    pub instance_layer: Option<u8>,
+    /// Raw spelling: `type=` written with a leading backslash (kept verbatim
+    /// in the compiled plugin lists' _data).
+    pub class_backslash: bool,
+    /// The enclosing type node's spelling at FIRST declaration — a
+    /// backslash-spelled node is a distinct DOM position.
+    pub target_backslash: bool,
     pub source: Source,
     /// Declaration order, for breaking `sort_order` ties the way Magento does: by where the
     /// plugin was first declared — `(area_rank, module load_order, line)`. Global (rank 0)
@@ -77,6 +91,10 @@ pub(crate) struct AreaConfig {
     /// re-declarations) count: the XML DOM merge pins node positions at
     /// first appearance.
     pub vtype_positions: HashMap<ClassName, u32>,
+    /// First-mention position of every type/virtualType NODE per config
+    /// layer (0 primary, 1 module global, 2 area overlay), keyed by RAW
+    /// spelling — `\X` and `X` are DISTINCT DOM nodes.
+    pub node_positions: HashMap<String, [Option<u32>; 3]>,
 }
 
 impl AreaConfig {
@@ -123,7 +141,15 @@ impl AreaConfig {
                         name: name.clone(),
                         class: plugin.class.clone(),
                         sort_order: plugin.sort_order,
-                        disabled: plugin.disabled,
+                        disabled: plugin.disabled.unwrap_or(false),
+                        disabled_attr: plugin.disabled,
+                        disabled_layer: plugin.disabled_layer,
+                        instance_layer: plugin.instance_layer,
+                        class_backslash: plugin.class_backslash,
+                        target_backslash: plugin.target_backslash,
+                        decl_layer: plugin.order_key.0,
+                        decl_load_order: plugin.order_key.1,
+                        decl_line: plugin.order_key.2,
                         source: plugin.source.clone(),
                     },
                 ));
@@ -156,6 +182,18 @@ impl AreaConfig {
             .collect();
         shared.sort_by(|a, b| a.type_name.cmp(&b.type_name));
 
+        let mut node_positions: Vec<TypeNodePosition> = self
+            .node_positions
+            .iter()
+            .map(|(name, slots)| TypeNodePosition {
+                name: name.clone(),
+                primary: slots[0],
+                modules: slots[1],
+                overlay: slots[2],
+            })
+            .collect();
+        node_positions.sort_by(|a, b| a.name.cmp(&b.name));
+
         DiExport {
             area,
             preferences,
@@ -163,6 +201,7 @@ impl AreaConfig {
             plugins,
             arguments,
             shared,
+            node_positions,
         }
     }
 }
@@ -170,6 +209,10 @@ impl AreaConfig {
 pub(crate) struct DiIndex {
     global: AreaConfig,
     areas: HashMap<Area, AreaConfig>,
+    /// Each area's OWN files only (no global base) — what one area-scope
+    /// config read contains, needed by consumers that model Magento's
+    /// scope-by-scope loading (the compiled plugin lists).
+    overlays: HashMap<Area, AreaConfig>,
 }
 
 impl DiIndex {
@@ -179,6 +222,11 @@ impl DiIndex {
             Area::Global => &self.global,
             other => self.areas.get(&other).unwrap_or(&self.global),
         }
+    }
+
+    /// The overlay-only config of `area` (empty for [`Area::Global`]).
+    pub fn overlay(&self, area: Area) -> Option<&AreaConfig> {
+        self.overlays.get(&area)
     }
 }
 
@@ -275,11 +323,13 @@ pub(crate) fn build(root: &Path, modules: &[Module], diags: &mut Vec<Diagnostic>
 
     let global = merge_area(&parsed, Area::Global, AreaConfig::default());
     let mut areas = HashMap::new();
+    let mut overlays = HashMap::new();
     for area in REAL_AREAS {
         areas.insert(area, merge_area(&parsed, area, global.clone()));
+        overlays.insert(area, merge_area(&parsed, area, AreaConfig::default()));
     }
 
-    DiIndex { global, areas }
+    DiIndex { global, areas, overlays }
 }
 
 /// The primary DI config files, exactly as Magento's bootstrap resolves them
@@ -387,6 +437,19 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
             cfg.vtype_positions.insert(name.clone(), decl_order);
         }
     }
+    for name in file
+        .virtual_type_mentions
+        .iter()
+        .map(|c| c.as_str().to_owned())
+        .chain(file.type_mentions.iter().cloned())
+    {
+        let slot = cfg.node_positions.entry(name).or_default();
+        let layer = (p.layer as usize).min(2);
+        if slot[layer].is_none() {
+            slot[layer] = Some(cfg.next_decl);
+            cfg.next_decl += 1;
+        }
+    }
     for (name, type_, line) in &file.virtual_types {
         match cfg.virtual_types.get_mut(name) {
             Some(existing) => {
@@ -438,13 +501,20 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
             // Attribute-level merge: only override fields the new declaration specifies.
             Some(existing) => {
                 if let Some(c) = &rp.class {
+                    if existing.class.is_none() {
+                        existing.instance_layer = Some(p.layer);
+                    }
                     existing.class = Some(c.clone());
+                    existing.class_backslash = rp.class_had_backslash;
                 }
                 if let Some(s) = rp.sort_order {
                     existing.sort_order = s;
                 }
                 if let Some(d) = rp.disabled {
-                    existing.disabled = d;
+                    if existing.disabled.is_none() {
+                        existing.disabled_layer = Some(p.layer);
+                    }
+                    existing.disabled = Some(d);
                 }
                 existing.source = src(rp.line);
             }
@@ -454,8 +524,12 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
                     rp.name.clone(),
                     LocatedPlugin {
                         class: rp.class.clone(),
+                        class_backslash: rp.class_had_backslash,
+                        target_backslash: rp.target_backslash,
                         sort_order: rp.sort_order.unwrap_or(0),
-                        disabled: rp.disabled.unwrap_or(false),
+                        disabled: rp.disabled,
+                        disabled_layer: rp.disabled.map(|_| p.layer),
+                        instance_layer: rp.class.as_ref().map(|_| p.layer),
                         source: src(rp.line),
                         order_key: (area_rank, p.load_order as u32, rp.line),
                     },
@@ -507,7 +581,11 @@ mod export_tests {
             LocatedPlugin {
                 class: Some(ClassName::new("P\\One")),
                 sort_order: 10,
-                disabled: false,
+                disabled: None,
+                disabled_layer: None,
+                instance_layer: Some(1),
+                class_backslash: false,
+                target_backslash: false,
                 source: src(1),
                 order_key: (0, 1, 1),
             },
@@ -517,7 +595,11 @@ mod export_tests {
             LocatedPlugin {
                 class: Some(ClassName::new("P\\Two")),
                 sort_order: 10,
-                disabled: false,
+                disabled: None,
+                disabled_layer: None,
+                instance_layer: Some(1),
+                class_backslash: false,
+                target_backslash: false,
                 source: src(2),
                 order_key: (0, 2, 2),
             },
@@ -527,7 +609,11 @@ mod export_tests {
             LocatedPlugin {
                 class: Some(ClassName::new("P\\Zero")),
                 sort_order: 0,
-                disabled: true,
+                disabled: Some(true),
+                disabled_layer: Some(1),
+                instance_layer: Some(1),
+                class_backslash: false,
+                target_backslash: false,
                 source: src(5),
                 order_key: (0, 3, 5),
             },

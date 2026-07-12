@@ -246,7 +246,7 @@ impl Doctor<'_> {
 
             for by_name in cfg.plugins.values() {
                 for (pname, lp) in by_name {
-                    if lp.disabled {
+                    if lp.disabled.unwrap_or(false) {
                         continue; // never instantiated
                     }
                     if let Some(class) = &lp.class {

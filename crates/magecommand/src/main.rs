@@ -168,10 +168,14 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
         // The seven area files. The class universe scans generated code;
         // until magecommand generates it itself (M3), an archived _code from
         // a previous compile serves (the M2 bring-up configuration).
-        let generated_code = if root.join("generated/code").is_dir() {
-            root.join("generated/code")
-        } else {
+        // Reproduction mode: an archived _code (the oracle's own generated
+        // output) beats a possibly partial live generated/code — runtime
+        // lazy generation can leave a near-empty tree that would starve the
+        // class universe. M3 removes this by generating the code ourselves.
+        let generated_code = if root.join("generated/_code").is_dir() {
             root.join("generated/_code")
+        } else {
+            root.join("generated/code")
         };
         let mut defs = magecommand_engine::definitions::Definitions::scan(
             &magento,
@@ -222,7 +226,20 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
             force,
         )?;
         println!("wrote {}", path.display());
-        eprintln!("note: metadata emission is under construction — plugin-lists pending");
+
+        let plugin_lists = magecommand_engine::pluginlist::generate(&magento, &defs);
+        for (name, content) in &plugin_lists.files {
+            let path =
+                magecommand_engine::metadata::write_metadata_file(&root, name, content, force)?;
+            println!("wrote {}", path.display());
+        }
+        if !plugin_lists.findings.is_empty() {
+            eprintln!(
+                "note: {} plugin-list finding(s), first: {}",
+                plugin_lists.findings.len(),
+                plugin_lists.findings.first().map(String::as_str).unwrap_or("")
+            );
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

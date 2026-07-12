@@ -86,7 +86,7 @@ pub use model::{
     SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses, Whatis,
 };
 pub use model::{CatalogAttribute, CatalogAttributeGroup, ClassRef};
-pub use model::{PluginDecl, PreferenceDecl, TypeArgDecl, TypeSharedDecl, VirtualTypeDecl};
+pub use model::{PluginDecl, PreferenceDecl, TypeArgDecl, TypeNodePosition, TypeSharedDecl, VirtualTypeDecl};
 pub use decrypt::Decryptor;
 pub use sysconfig::ConfigSet;
 pub use source::Source;
@@ -238,6 +238,25 @@ impl Magento {
         self.di_index().config(area).export(area)
     }
 
+    /// Like [`di_export`](Self::di_export), but ONLY the area's own files —
+    /// no global base. What one area-scope config read contains; empty for
+    /// `Area::Global`. Models Magento's scope-by-scope config loading (the
+    /// compiled plugin lists are built that way).
+    pub fn di_export_overlay(&self, area: Area) -> DiExport {
+        match self.di_index().overlay(area) {
+            Some(config) => config.export(area),
+            None => DiExport {
+                area,
+                preferences: Vec::new(),
+                virtual_types: Vec::new(),
+                plugins: Vec::new(),
+                arguments: Vec::new(),
+                shared: Vec::new(),
+                node_positions: Vec::new(),
+            },
+        }
+    }
+
     /// The concrete type Magento instantiates for `class` in `area`, with the full
     /// preference chain. If no preference applies, the class is its own concrete type
     /// (empty chain) — matching Magento, which instantiates the requested class directly.
@@ -372,7 +391,7 @@ impl Magento {
                         sort_order: lp.sort_order,
                         methods,
                         declared_on: target.clone(),
-                        disabled: lp.disabled,
+                        disabled: lp.disabled.unwrap_or(false),
                         areas: vec![lp.source.area],
                         source: lp.source.clone(),
                     },

@@ -16,6 +16,7 @@ pub mod compare;
 pub mod definitions;
 pub mod interception;
 pub mod metadata;
+pub mod pluginlist;
 pub mod phpexport;
 
 pub use compare::{compare_dirs, CompareReport};

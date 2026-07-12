@@ -141,7 +141,13 @@ impl LineMap {
 /// updates only `disabled`, keeping the `type` from an earlier declaration.
 pub(crate) struct RawPlugin {
     pub name: String,
+    /// The enclosing type node was spelled with a leading backslash — a
+    /// DISTINCT DOM node; the plugin-list generator ltrims and appends.
+    pub target_backslash: bool,
     pub class: Option<ClassName>,
+    /// Whether `type=` was written with a leading backslash — the compiled
+    /// plugin lists keep the raw spelling in their _data block.
+    pub class_had_backslash: bool,
     pub sort_order: Option<i32>,
     pub disabled: Option<bool>,
     pub line: u32,
@@ -165,6 +171,10 @@ pub(crate) struct DiFile {
     /// The XML DOM merge pins a node's position at its FIRST appearance in
     /// any form, so declaration order must count anchors too.
     pub virtual_type_mentions: Vec<ClassName>,
+    /// Every `<type name=…>` occurrence — the same position-pinning rule.
+    /// RAW spelling: a leading backslash makes a DISTINCT DOM node whose
+    /// position differs from the plain-spelled one.
+    pub type_mentions: Vec<String>,
 }
 
 /// Parse one di.xml file. Tracks the enclosing `<type>`/`<virtualType>` so `<plugin>` and
@@ -175,7 +185,7 @@ pub(crate) fn di_xml(xml: &str) -> Result<DiFile, String> {
     let mut buf = Vec::new();
     let mut arg_buf = Vec::new();
     let mut out = DiFile::default();
-    let mut current_type: Option<ClassName> = None;
+    let mut current_type: Option<(ClassName, bool)> = None;
 
     loop {
         let ev = reader.read_event_into(&mut buf);
@@ -186,7 +196,7 @@ pub(crate) fn di_xml(xml: &str) -> Result<DiFile, String> {
             Ok(Event::Start(e)) => {
                 if e.name().as_ref() == b"arguments" {
                     // Consume the whole <arguments>…</arguments> subtree.
-                    if let Some(target) = current_type.clone() {
+                    if let Some((target, _)) = current_type.clone() {
                         let args = parse_arguments(&mut reader, &lines, &mut arg_buf);
                         for item in args {
                             out.arguments.push((target.clone(), item.key, item.value, item.line));
@@ -362,7 +372,7 @@ fn di_open(
     is_start: bool,
     line: u32,
     out: &mut DiFile,
-    current_type: &mut Option<ClassName>,
+    current_type: &mut Option<(ClassName, bool)>,
 ) {
     match e.name().as_ref() {
         b"preference" => {
@@ -385,12 +395,13 @@ fn di_open(
                     ));
                 }
                 if is_start {
-                    *current_type = Some(ClassName::new(name));
+                    *current_type = Some((ClassName::new(name), false));
                 }
             }
         }
         b"type" => {
             if let Some(name) = attr(e, b"name") {
+                out.type_mentions.push(name.clone());
                 if let Some(s) = attr(e, b"shared") {
                     out.shared.push((
                         ClassName::new(name.clone()),
@@ -399,16 +410,23 @@ fn di_open(
                     ));
                 }
                 if is_start {
-                    *current_type = Some(ClassName::new(name));
+                    let backslash = name.starts_with('\\');
+                    *current_type = Some((ClassName::new(name), backslash));
                 }
             }
         }
         b"plugin" => {
-            if let (Some(target), Some(pname)) = (current_type.clone(), attr(e, b"name")) {
+            if let (Some((target, target_backslash)), Some(pname)) =
+                (current_type.clone(), attr(e, b"name"))
+            {
                 out.plugins.push((
                     target,
                     RawPlugin {
                         name: pname,
+                        target_backslash,
+                        class_had_backslash: attr(e, b"type")
+                            .map(|t| t.starts_with('\\'))
+                            .unwrap_or(false),
                         class: attr(e, b"type").map(ClassName::new),
                         sort_order: attr(e, b"sortOrder").and_then(|s| s.trim().parse().ok()),
                         disabled: attr(e, b"disabled").map(|s| matches!(s.trim(), "true" | "1")),

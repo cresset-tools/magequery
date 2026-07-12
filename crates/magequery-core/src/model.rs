@@ -360,6 +360,24 @@ pub struct PluginDecl {
     pub class: Option<ClassName>,
     pub sort_order: i32,
     pub disabled: bool,
+    /// `disabled=` as literally merged: `None` when no file ever wrote the
+    /// attribute (compiled plugin maps carry the key only when declared).
+    pub disabled_attr: Option<bool>,
+    /// Config layer (0 primary, 1 module global, 2 area) where `disabled=`
+    /// first appeared; `None` when never written.
+    pub disabled_layer: Option<u8>,
+    /// Same for `type=`.
+    pub instance_layer: Option<u8>,
+    /// `type=` was written with a leading backslash (the compiled plugin
+    /// lists keep the raw spelling in _data).
+    pub class_backslash: bool,
+    /// The enclosing type node's spelling at first declaration.
+    pub target_backslash: bool,
+    /// First-declaration position: config layer (0 global / 1 area overlay),
+    /// module load order, line — Magento's insertion order for plugin maps.
+    pub decl_layer: u8,
+    pub decl_load_order: u32,
+    pub decl_line: u32,
     pub source: Source,
 }
 
@@ -386,6 +404,21 @@ pub struct TypeArgDecl {
     pub source: Source,
 }
 
+/// First-mention position of one `<type>`/`<virtualType>` NODE per config
+/// layer. The XML DOM merge pins a node's document position at its first
+/// appearance; per-scope-read iteration (the compiled plugin lists) follows
+/// node order within each layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct TypeNodePosition {
+    /// RAW spelling — `\X` and `X` are distinct nodes.
+    pub name: String,
+    pub primary: Option<u32>,
+    pub modules: Option<u32>,
+    pub overlay: Option<u32>,
+}
+
 /// The fully merged DI configuration of one area, exported wholesale — the
 /// bulk primitive a DI compiler iterates, where the per-class queries
 /// ([`Magento::preference`], [`Magento::plugins`]) answer one name at a time.
@@ -409,6 +442,8 @@ pub struct DiExport {
     pub arguments: Vec<TypeArgDecl>,
     /// Explicit `shared=` declarations, sorted by `type_name`.
     pub shared: Vec<TypeSharedDecl>,
+    /// Node first-mention positions per layer, sorted by name.
+    pub node_positions: Vec<TypeNodePosition>,
 }
 
 /// The kind of interception a plugin method performs.

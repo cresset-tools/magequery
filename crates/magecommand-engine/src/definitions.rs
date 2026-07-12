@@ -304,7 +304,7 @@ impl Definitions {
             return out;
         };
         if record.meta.kind == ClassKind::Interface {
-            for parent in &record.meta.extends {
+            for parent in record.meta.extends.iter().rev() {
                 self.iface_table(parent, &mut out, &mut seen, 0);
                 if seen.insert(parent.clone()) {
                     out.push(parent.clone());
@@ -327,6 +327,17 @@ impl Definitions {
             for iface in &rec.meta.implements {
                 self.iface_table(iface, &mut out, &mut seen, 0);
             }
+            // PHP auto-implements Stringable on any class DECLARING
+            // __toString — the engine appends it to that class's table.
+            if rec
+                .meta
+                .methods
+                .iter()
+                .any(|m| m.name.eq_ignore_ascii_case("__toString"))
+                && seen.insert("Stringable".to_owned())
+            {
+                out.push("Stringable".to_owned());
+            }
             current = rec
                 .meta
                 .extends
@@ -337,13 +348,22 @@ impl Definitions {
     }
 
     /// The ancestor table of one interface: for each extended interface,
-    /// ITS table first, then the interface itself.
+    /// ITS table first, then the interface itself. Internal PHP interfaces
+    /// come from the stub hierarchy (Iterator extends Traversable, …).
     fn iface_table(&self, iface: &str, out: &mut Vec<String>, seen: &mut HashSet<String>, depth: usize) {
         if depth > 64 {
             return;
         }
-        let Some(record) = self.get(iface) else { return };
-        for parent in &record.meta.extends {
+        let parents: Vec<String> = match self.get(iface) {
+            Some(record) => record.meta.extends.clone(),
+            None => internal_iface_parents(iface)
+                .map(|p| p.iter().map(|s| (*s).to_owned()).collect())
+                .unwrap_or_default(),
+        };
+        // The engine linearizes an interface's extends list in REVERSE
+        // declaration order (verified empirically: StorageInterface extends
+        // UrlFinderInterface, UrlPersistInterface -> [Persist, Finder]).
+        for parent in parents.iter().rev() {
             self.iface_table(parent, out, seen, depth + 1);
             if seen.insert(parent.clone()) {
                 out.push(parent.clone());
@@ -383,6 +403,70 @@ impl Definitions {
     }
 }
 
+impl Definitions {
+    /// Flattened PUBLIC method names of a class as `get_class_methods` sees
+    /// them: own + trait-imported (aliases included, `as protected` hides)
+    /// + inherited, nearest definition wins, declared case preserved.
+    pub fn public_methods(&self, fqcn: &str) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut current = self.get(fqcn);
+        let mut hops = 0;
+        while let Some(record) = current {
+            hops += 1;
+            if hops > 64 {
+                break;
+            }
+            let meta = &record.meta;
+            for m in &meta.methods {
+                if m.visibility == magecommand_php::Visibility::Public
+                    && seen.insert(m.name.to_ascii_lowercase())
+                {
+                    out.push(m.name.clone());
+                }
+            }
+            // Trait aliases first (they may rename/hide), then trait methods.
+            for alias in &meta.trait_aliases {
+                let public = alias
+                    .visibility
+                    .map(|v| v == magecommand_php::Visibility::Public)
+                    .unwrap_or(true);
+                if let Some(new_name) = &alias.alias {
+                    if public && seen.insert(new_name.to_ascii_lowercase()) {
+                        out.push(new_name.clone());
+                    }
+                } else if !public {
+                    // visibility-only change hides the original name
+                    seen.insert(alias.method.to_ascii_lowercase());
+                }
+            }
+            let mut trait_stack: Vec<String> = meta.traits.clone();
+            let mut texpanded: HashSet<String> = HashSet::new();
+            while let Some(t) = trait_stack.pop() {
+                if !texpanded.insert(t.clone()) {
+                    continue;
+                }
+                if let Some(tr) = self.get(&t) {
+                    for m in &tr.meta.methods {
+                        if m.visibility == magecommand_php::Visibility::Public
+                            && seen.insert(m.name.to_ascii_lowercase())
+                        {
+                            out.push(m.name.clone());
+                        }
+                    }
+                    trait_stack.extend(tr.meta.traits.iter().cloned());
+                }
+            }
+            current = meta
+                .extends
+                .first()
+                .filter(|_| meta.kind != ClassKind::Interface)
+                .and_then(|p| self.get(p));
+        }
+        out
+    }
+}
+
 /// A constructor found by walking the inheritance chain.
 pub struct CtorInfo<'a> {
     /// FQCN of the class whose file declares the `__construct` (name
@@ -391,6 +475,21 @@ pub struct CtorInfo<'a> {
     pub definer_fqcn: &'a str,
     pub definer_uses: &'a [(String, String)],
     pub params: &'a [ParamMeta],
+}
+
+/// `extends` lists of internal PHP interfaces (the engine's linearization
+/// puts an interface's parents before it in class_implements tables).
+fn internal_iface_parents(name: &str) -> Option<&'static [&'static str]> {
+    Some(match name {
+        "Iterator" | "IteratorAggregate" => &["Traversable"],
+        "SeekableIterator" | "RecursiveIterator" | "OuterIterator" => &["Iterator"],
+        "Throwable" => &["Stringable"],
+        "BackedEnum" => &["UnitEnum"],
+        "Traversable" | "ArrayAccess" | "Countable" | "Serializable" | "Stringable"
+        | "JsonSerializable" | "SessionHandlerInterface" | "SessionIdInterface"
+        | "DOMParentNode" | "DOMChildNode" | "UnitEnum" | "DateTimeInterface" => &[],
+        _ => return None,
+    })
 }
 
 /// Constructor signatures of internal PHP classes, as reflection reports

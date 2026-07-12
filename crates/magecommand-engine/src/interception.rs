@@ -144,18 +144,18 @@ impl Resolver<'_> {
 /// `[parent, own interfaces]` of internal PHP classes as reflection reports
 /// them (PHP 8.5) — the relation names all receive map entries. Extended as
 /// the oracle demands; only names actually REACHED materialize.
-fn internal_relations(name: &str) -> Option<&'static [&'static str]> {
+pub(crate) fn internal_relations(name: &str) -> Option<&'static [&'static str]> {
     Some(match name {
         "DOMDocument" => &["DOMNode", "DOMParentNode"],
         "FilterIterator" => &["IteratorIterator"],
-        "IteratorIterator" => &["OuterIterator", "Iterator", "Traversable"],
+        "IteratorIterator" => &["OuterIterator", "Traversable", "Iterator"],
         "RecursiveFilterIterator" => &["FilterIterator", "RecursiveIterator"],
         "SplFileObject" => &[
             "SplFileInfo",
             "RecursiveIterator",
-            "SeekableIterator",
-            "Iterator",
             "Traversable",
+            "Iterator",
+            "SeekableIterator",
         ],
         "SplTempFileObject" => &["SplFileObject"],
         "SplFileInfo" => &["Stringable"],
@@ -175,7 +175,7 @@ fn internal_relations(name: &str) -> Option<&'static [&'static str]> {
             "Countable",
         ],
         "SessionHandler" => &["SessionHandlerInterface", "SessionIdInterface"],
-        "SimpleXMLElement" => &["Stringable", "Countable", "RecursiveIterator", "Iterator", "Traversable"],
+        "SimpleXMLElement" => &["Stringable", "Countable", "RecursiveIterator", "Traversable", "Iterator"],
         "Exception" => &["Throwable", "Stringable"],
         "RuntimeException" | "LogicException" | "ErrorException" | "JsonException" => {
             &["Exception"]
