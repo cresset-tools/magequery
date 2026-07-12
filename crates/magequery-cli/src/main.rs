@@ -69,6 +69,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
         "Frontend",
         &[
             ("layout", "Layout handle: contributing files and what they do to the page"),
+            ("templates", "PHTML templates: module file, theme overrides, layout usages"),
             ("widgets", "Widget types from widget.xml: block class, parameters"),
             ("email-templates", "Transactional email templates: file, theme overrides"),
             ("translations", "Every dictionary row for a phrase, in precedence order"),
@@ -309,6 +310,8 @@ enum Command {
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
     Layout(LayoutArgs),
+    /// PHTML templates: module file, theme overrides, and layout usages.
+    Templates(TemplatesArgs),
     /// Widget types from widget.xml: block class, parameters.
     Widgets(WidgetsArgs),
     /// Transactional email templates: file, theme overrides.
@@ -499,6 +502,18 @@ struct LayoutArgs {
     /// The layout handle (`catalog_product_view`). Omit to list every handle with its
     /// contributing-file count.
     handle: Option<String>,
+    /// Area: frontend (default) or adminhtml.
+    #[arg(long)]
+    area: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct TemplatesArgs {
+    /// An exact template reference (`Magento_Catalog::product/view.phtml`) shows its
+    /// files and layout usages; otherwise filters by a reference substring.
+    reference: Option<String>,
     /// Area: frontend (default) or adminhtml.
     #[arg(long)]
     area: Option<String>,
@@ -1159,6 +1174,7 @@ fn main() -> Result<()> {
         Command::ExtensionAttributes(args) => extension_attributes(&mage, &args, &cli.root),
         Command::CatalogAttributes(args) => catalog_attributes(&mage, &args, &cli.root),
         Command::Layout(args) => layout(&mage, &args, &cli.root),
+        Command::Templates(args) => templates(&mage, &args, &cli.root),
         Command::Widgets(args) => widgets(&mage, &args, &cli.root),
         Command::EmailTemplates(args) => email_templates(&mage, &args, &cli.root),
         Command::Translations(args) => translations(&mage, &args, &cli.root),
@@ -1967,6 +1983,100 @@ fn layout(mage: &Magento, args: &LayoutArgs, root: &Path) -> Result<()> {
         println!("{} {}", style::dim("included by:"), list.join(", "));
     }
     Ok(())
+}
+
+fn templates(mage: &Magento, args: &TemplatesArgs, root: &Path) -> Result<()> {
+    let area = match &args.area {
+        Some(a) => a.parse::<Area>().map_err(|e| anyhow!("{e}"))?,
+        None => Area::Frontend,
+    };
+    let matches = match &args.reference {
+        Some(reference) => mage
+            .template(reference, area)
+            .map(|exact| vec![exact])
+            .unwrap_or_else(|| mage.templates(area, Some(reference))),
+        None => mage.templates(area, None),
+    };
+
+    if matches.is_empty() {
+        let query = args.reference.as_deref().unwrap_or("");
+        return Err(anyhow!(
+            "no template reference matching `{query}` in {area}\n  \
+             List templates with `magequery templates --area {area}`."
+        ));
+    }
+    if args.json {
+        if args.reference.is_some() && matches.len() == 1 {
+            println!("{}", serde_json::to_string_pretty(&matches[0])?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&matches)?);
+        }
+        return Ok(());
+    }
+    if args.reference.is_some() && matches.len() == 1 {
+        render_template(&matches[0], root);
+        return Ok(());
+    }
+
+    let w = matches.iter().map(|t| t.reference.len()).max().unwrap_or(0);
+    for template in &matches {
+        let pad = " ".repeat(w - template.reference.len());
+        let missing = if template.files.is_empty() {
+            format!("  {}", style::err("[file missing]"))
+        } else {
+            String::new()
+        };
+        println!(
+            "{}{pad}  {}  {}{missing}",
+            style::name(&template.reference),
+            style::dim(&format!("{} file(s)", template.files.len())),
+            style::dim(&format!("{} use(s)", template.usages.len())),
+        );
+    }
+    eprintln!("\n{} template(s) ({area})", matches.len());
+    Ok(())
+}
+
+fn render_template(template: &magequery_core::Template, root: &Path) {
+    println!(
+        "{}  ({})",
+        style::name(&template.reference),
+        style::area(&template.area.to_string())
+    );
+    if template.files.is_empty() {
+        println!("\n  {}", style::err("[file missing — layout references it, but no module/theme file exists]"));
+    } else {
+        println!("\n{}", style::dim("files:"));
+        for file in &template.files {
+            let layer = match &file.layer {
+                magequery_core::LayoutLayer::Module(module) => style::module(module.as_str()),
+                magequery_core::LayoutLayer::Theme(theme) => {
+                    format!("{} {}", style::dim("theme"), style::area(theme))
+                }
+            };
+            let rel = file.file.strip_prefix(root).unwrap_or(&file.file);
+            println!("  {layer}  {}", style::path(&format!("# {}", rel.display())));
+        }
+    }
+    if template.usages.is_empty() {
+        println!("\n  {}", style::dim("(not referenced by layout XML)"));
+    } else {
+        println!("\n{}", style::dim("used by:"));
+        for usage in &template.usages {
+            let class = usage
+                .class
+                .as_ref()
+                .map(|c| format!("  {}", style::class(c.as_str())))
+                .unwrap_or_default();
+            println!(
+                "  {}  {}{}  {}",
+                style::name(&usage.handle),
+                style::target(&usage.block),
+                class,
+                style::path(&short_loc(&usage.source, root)),
+            );
+        }
+    }
 }
 
 /// One layout operation, compact: symbol + name + the details that matter for its kind.

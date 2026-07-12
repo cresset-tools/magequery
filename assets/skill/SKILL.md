@@ -6,7 +6,7 @@ description: >-
   or interface resolves to (preferences, plugins, virtual types, constructor
   arguments), why a plugin/observer/cron is or is not firing, where a config
   value comes from across scopes, which module added a DB column/attribute/route/
-  layout, how a URL routes, or to inspect live orders, products, and customers.
+  layout/template, how a URL routes, or to inspect live orders, products, and customers.
   Reach for it before grep or `bin/magento` for any "how is this wired" question:
   it answers in milliseconds and cites the exact file and line.
 ---
@@ -71,6 +71,13 @@ the cited file: magequery itself is read-only and never modifies anything.
 - Why is an index not updating? → `indexers [<id>] [--db]`.
 - Who extends an API data interface? → `extension-attributes '<Type>'`.
 
+**Frontend presentation**
+- Which files contribute to a layout handle? → `layout [<handle>] [--area]`.
+- Where does a PHTML template live, which themes override it, and which layout blocks
+  use it? → `templates [<Vendor_Module::path.phtml>] [--area]`.
+- Widget types, transactional emails, translations, and admin grids/forms →
+  `widgets`, `email-templates`, `translations`, and `ui-components`.
+
 **Live entities (need a database reachable from `env.php`)**
 - `order <increment#>`, `product <sku>`, `customer <email>`, `quote <id|email>`,
   `price <sku>`, `category <id|name>`, `invoice|shipment|creditmemo <increment#>`,
@@ -95,9 +102,10 @@ the cited file: magequery itself is read-only and never modifies anything.
   `# path:line`. Read it directly; open the cited line to see or edit the source.
 - Add `--json` when you need to extract a specific field programmatically. JSON is
   never colored and its types are stable.
-- Area-aware commands (`di`, `plugins`, `events`, `routes`, `webapi`, `uses`, …)
-  default to a **collapsed diff**: the global base plus per-area deltas. Use
-  `--area <name>` for one area or `--all-areas` for the full expansion. Areas are
+- Area-aware commands (`di`, `plugins`, `events`, `routes`, `webapi`, `uses`,
+  `layout`, `templates`, `ui-components`, …) default to a **collapsed diff** where
+  applicable. Use `--area <name>` for one area; commands that offer full expansion
+  also accept `--all-areas`. Areas are
   `global, frontend, adminhtml, crontab, webapi_rest, webapi_soap, graphql`.
 - `--db` opts a hybrid command into live data; the live-only commands above always
   use the database. All commands accept `--root <path>` and

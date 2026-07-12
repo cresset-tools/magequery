@@ -56,6 +56,7 @@ pub use model::{
     Indexer, IndexerLive, InstanceInfo, Integration, InterceptKind,
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
+    Template, TemplateFile, TemplateUsage,
     MviewSubscription, Observer, PluginTarget,
     BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount,
     CategoryIndexedProduct, CategoryProduct,
@@ -2977,6 +2978,18 @@ impl Magento {
     /// graph around it.
     pub fn layout(&self, handle: &str, area: Area) -> Option<LayoutView> {
         self.layout_index().view(handle, area)
+    }
+
+    /// Templates in an area, including unreferenced `.phtml` files and unresolved layout
+    /// references. Filter is a case-insensitive reference substring.
+    pub fn templates(&self, area: Area, filter: Option<&str>) -> Vec<Template> {
+        self.layout_index().templates(area, filter)
+    }
+
+    /// One exact `Vendor_Module::path.phtml` template joined to every physical candidate
+    /// and layout usage in the area.
+    pub fn template(&self, reference: &str, area: Area) -> Option<Template> {
+        self.layout_index().template(reference, area)
     }
 
     fn ui_component_index(&self) -> &breadth::UiComponentIndex {
