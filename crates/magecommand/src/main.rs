@@ -37,6 +37,9 @@ enum Command {
         /// Report what would be generated without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Overwrite existing generated files.
+        #[arg(long)]
+        force: bool,
     },
     /// Compare a generated tree against an archived ground truth
     /// (`generated/_code`, `generated/_metadata`).
@@ -68,7 +71,7 @@ fn main() -> anyhow::Result<ExitCode> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Compile { dry_run } => compile(cli.root, cli.json, dry_run),
+        Command::Compile { dry_run, force } => compile(cli.root, cli.json, dry_run, force),
         Command::Compare {
             ref archive,
             ref output,
@@ -78,7 +81,7 @@ fn main() -> anyhow::Result<ExitCode> {
     }
 }
 
-fn compile(root: Option<PathBuf>, json: bool, dry_run: bool) -> anyhow::Result<ExitCode> {
+fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> anyhow::Result<ExitCode> {
     use magequery_core::Area;
 
     let root = root.unwrap_or_else(|| PathBuf::from("."));
@@ -151,7 +154,19 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool) -> anyhow::Result<E
     }
 
     if !dry_run {
-        anyhow::bail!("generation is not implemented yet — run with --dry-run");
+        // M2 in progress: emit the metadata files implemented so far.
+        let list = magecommand_engine::metadata::app_action_list(&magento);
+        let content = magecommand_engine::phpexport::to_php_file(&list);
+        let path = magecommand_engine::metadata::write_metadata_file(
+            &root,
+            "app_action_list.php",
+            &content,
+            force,
+        )?;
+        println!("wrote {}", path.display());
+        eprintln!(
+            "note: metadata emission is under construction — only the files listed above were written"
+        );
     }
     Ok(ExitCode::SUCCESS)
 }

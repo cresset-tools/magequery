@@ -11,6 +11,8 @@
 use std::path::PathBuf;
 
 pub mod compare;
+pub mod metadata;
+pub mod phpexport;
 
 pub use compare::{compare_dirs, CompareReport};
 
@@ -21,6 +23,9 @@ pub enum Error {
     /// The archive (ground-truth) directory does not exist.
     #[error("archive directory not found: {0}")]
     ArchiveMissing(PathBuf),
+    /// Writing would clobber an existing file and `force` wasn't given.
+    #[error("refusing to overwrite {0} (pass --force)")]
+    WouldOverwrite(PathBuf),
     /// An I/O failure, tagged with the path it happened on.
     #[error("{path}: {source}")]
     Io {
