@@ -36,6 +36,9 @@ pub struct ClassRecord {
 pub struct Definitions {
     pub classes: HashMap<String, ClassRecord>,
     pub scanned: HashSet<String>,
+    /// Scanned classes that came from the setup path — the interception
+    /// cache's class list covers app + lib + generated only.
+    pub setup_classes: HashSet<String>,
     /// lowercase fqcn -> declared fqcn (PHP names are case-insensitive).
     canonical: HashMap<String, String>,
 }
@@ -64,20 +67,22 @@ impl Definitions {
             roots.push((generated_code.to_path_buf(), PathKind::Generated));
         }
 
-        let mut files: Vec<PathBuf> = Vec::new();
+        let mut files: Vec<(PathBuf, PathKind)> = Vec::new();
         for (base, kind) in &roots {
-            collect_included(base, base, *kind, &mut files);
+            let mut batch = Vec::new();
+            collect_included(base, base, *kind, &mut batch);
+            files.extend(batch.into_iter().map(|f| (f, *kind)));
         }
 
-        let parsed: Vec<(PathBuf, ClassMeta)> = files
+        let parsed: Vec<(PathBuf, PathKind, ClassMeta)> = files
             .par_iter()
-            .filter_map(|path| {
+            .filter_map(|(path, kind)| {
                 let src = fs::read(path).ok()?;
                 let meta = magecommand_php::parse_file(&src);
                 Some(
                     meta.declarations
                         .into_iter()
-                        .map(|d| (path.clone(), d))
+                        .map(|d| (path.clone(), *kind, d))
                         .collect::<Vec<_>>(),
                 )
             })
@@ -85,22 +90,31 @@ impl Definitions {
             .collect();
 
         let mut classes = HashMap::with_capacity(parsed.len());
-        for (file, meta) in parsed {
+        let mut setup_classes = HashSet::new();
+        for (file, kind, meta) in parsed {
+            if kind == PathKind::Setup {
+                setup_classes.insert(meta.fqcn.clone());
+            } else {
+                // A later non-setup path re-declaring the name un-marks it.
+                setup_classes.remove(&meta.fqcn);
+            }
             classes.insert(meta.fqcn.clone(), ClassRecord { meta, file });
         }
-        // Magento's FileClassScanner recognizes class/interface/trait tokens
-        // but NOT `enum` — enums never enter the compile universe (they stay
+        // Magento's FileClassScanner switches on T_CLASS and T_TRAIT only —
+        // interfaces and enums never enter the compile universe (they stay
         // in `classes` for constant lookups and hierarchy walks).
         let scanned = classes
             .iter()
-            .filter(|(_, r)| r.meta.kind != ClassKind::Enum)
+            .filter(|(_, r)| {
+                matches!(r.meta.kind, ClassKind::Class | ClassKind::Trait)
+            })
             .map(|(k, _)| k.clone())
             .collect();
         let canonical = classes
             .keys()
             .map(|k| (k.to_ascii_lowercase(), k.clone()))
             .collect();
-        Definitions { classes, scanned, canonical }
+        Definitions { classes, scanned, setup_classes, canonical }
     }
 
     /// The DECLARED spelling of a case-insensitively known class name —
@@ -278,41 +292,63 @@ impl Definitions {
         unresolved
     }
 
-    /// All interfaces of `fqcn`, transitive (PHP's `class_implements`):
-    /// direct implements + interface extends, then the parent chain's, in
-    /// discovery order, deduped.
+    /// All interfaces of `fqcn`, transitive, in PHP's `class_implements`
+    /// order (verified empirically): the class's DECLARED interfaces in
+    /// order, then each declared interface's ancestor table — where a
+    /// table lists an interface's parents BEFORE the interface itself —
+    /// then the parent class's interfaces.
     pub fn all_interfaces(&self, fqcn: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        let mut current = Some(fqcn.to_owned());
+        let Some(record) = self.get(fqcn) else {
+            return out;
+        };
+        if record.meta.kind == ClassKind::Interface {
+            for parent in &record.meta.extends {
+                self.iface_table(parent, &mut out, &mut seen, 0);
+                if seen.insert(parent.clone()) {
+                    out.push(parent.clone());
+                }
+            }
+            return out;
+        }
+        let mut current = Some(record);
         let mut hops = 0;
-        while let Some(name) = current {
+        while let Some(rec) = current {
             hops += 1;
             if hops > 64 {
                 break;
             }
-            let Some(record) = self.get(&name) else { break };
-            let mut stack: Vec<String> = if record.meta.kind == ClassKind::Interface {
-                record.meta.extends.clone()
-            } else {
-                record.meta.implements.clone()
-            };
-            stack.reverse();
-            while let Some(iface) = stack.pop() {
+            for iface in &rec.meta.implements {
                 if seen.insert(iface.clone()) {
                     out.push(iface.clone());
-                    if let Some(r) = self.get(&iface) {
-                        for parent in r.meta.extends.iter().rev() {
-                            stack.push(parent.clone());
-                        }
-                    }
                 }
             }
-            current = record.meta.extends.first().cloned().filter(|_| {
-                record.meta.kind != ClassKind::Interface
-            });
+            for iface in &rec.meta.implements {
+                self.iface_table(iface, &mut out, &mut seen, 0);
+            }
+            current = rec
+                .meta
+                .extends
+                .first()
+                .and_then(|parent| self.get(parent));
         }
         out
+    }
+
+    /// The ancestor table of one interface: for each extended interface,
+    /// ITS table first, then the interface itself.
+    fn iface_table(&self, iface: &str, out: &mut Vec<String>, seen: &mut HashSet<String>, depth: usize) {
+        if depth > 64 {
+            return;
+        }
+        let Some(record) = self.get(iface) else { return };
+        for parent in &record.meta.extends {
+            self.iface_table(parent, out, seen, depth + 1);
+            if seen.insert(parent.clone()) {
+                out.push(parent.clone());
+            }
+        }
     }
 
     /// Magento's `ClassReader::getParents` (the Relations source): the parent

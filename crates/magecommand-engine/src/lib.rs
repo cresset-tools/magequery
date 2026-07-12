@@ -14,6 +14,7 @@ pub mod areaconfig;
 pub mod arguments;
 pub mod compare;
 pub mod definitions;
+pub mod interception;
 pub mod metadata;
 pub mod phpexport;
 

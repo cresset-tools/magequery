@@ -213,9 +213,16 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
         if finding_count > 0 {
             eprintln!("note: {finding_count} static-analysis finding(s) across areas — see --json");
         }
-        eprintln!(
-            "note: metadata emission is under construction — plugin-lists and interception.php pending"
-        );
+
+        let interception = magecommand_engine::interception::interception_map(&magento, &defs);
+        let path = magecommand_engine::metadata::write_metadata_file(
+            &root,
+            "interception.php",
+            &magecommand_engine::interception::render(&interception),
+            force,
+        )?;
+        println!("wrote {}", path.display());
+        eprintln!("note: metadata emission is under construction — plugin-lists pending");
     }
     Ok(ExitCode::SUCCESS)
 }
