@@ -7506,7 +7506,7 @@ fn render_resolution(res: &Resolution, root: &Path) {
 fn render_arg(v: &ArgValue) -> String {
     match v {
         // Object reference — leading backslash like a FQCN, no quotes.
-        ArgValue::Object(c) => style::class(&format!("\\{}", c.as_str())),
+        ArgValue::Object(o) => style::class(&format!("\\{}", o.class.as_str())),
         ArgValue::Scalar { xsi_type, text } => render_scalar(xsi_type, text),
         ArgValue::Array(items) => {
             let inner: Vec<String> = items

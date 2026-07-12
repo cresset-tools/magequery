@@ -90,9 +90,37 @@ impl ClassResolver {
                 }
             }
         }
+        // PHP class names are case-insensitive; a source file may spell a
+        // vendor namespace differently than the package declares it
+        // (PageBuilder writes Gt\Dom, phpgt/dom declares GT\Dom). Exact
+        // matching above wins; fall back to case-insensitive prefix matching.
+        for (prefix, dirs) in &self.prefixes {
+            if name.len() >= prefix.len()
+                && name[..prefix.len()].eq_ignore_ascii_case(prefix.as_str())
+            {
+                let rel = format!("{}.php", name[prefix.len()..].replace('\\', "/"));
+                for dir in dirs {
+                    let candidate = dir.join(&rel);
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
         for (prefix, dirs) in &self.psr0 {
             if name.starts_with(prefix.as_str()) {
-                let rel = format!("{}.php", name.replace('\\', "/"));
+                // PSR-0: namespace separators AND underscores in the class
+                // part map to directories (`Zend_Cache_Core` ->
+                // `Zend/Cache/Core.php` — the zf1 fork ships this way).
+                let (ns, class_part) = match name.rfind('\\') {
+                    Some(i) => name.split_at(i + 1),
+                    None => ("", name),
+                };
+                let rel = format!(
+                    "{}{}.php",
+                    ns.replace('\\', "/"),
+                    class_part.replace('_', "/")
+                );
                 for dir in dirs {
                     let candidate = dir.join(&rel);
                     if candidate.is_file() {

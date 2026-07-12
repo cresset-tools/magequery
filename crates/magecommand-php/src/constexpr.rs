@@ -335,15 +335,26 @@ impl<'a> ExprParser<'a> {
                         b'e' => out.push('\u{1B}'),
                         b'0' => out.push('\0'),
                         b'\\' | b'"' | b'$' => out.push(esc as char),
-                        // \x, \u, octal: rare in metadata-relevant code.
-                        _ => return self.opaque(),
+                        // PHP keeps unknown escapes literally: backslash + char.
+                        other => {
+                            out.push('\\');
+                            out.push(other as char);
+                        }
                     }
                 }
                 continue;
             }
-            // Interpolation in a const expr means it wasn't const after all.
-            if quote == b'"' && (b == b'$' || b == b'{') {
-                return self.opaque();
+            // Interpolation would mean this wasn't a const expr after all —
+            // but only `$ident`, `${` and `{$` interpolate; a bare `{` or `$`
+            // is literal text ("{{var name}}" templates).
+            if quote == b'"' {
+                let next = self.cur.peek_at(1);
+                let interpolates = (b == b'$'
+                    && matches!(next, Some(n) if n == b'{' || n == b'_' || n.is_ascii_alphabetic() || n >= 0x80))
+                    || (b == b'{' && next == Some(b'$'));
+                if interpolates {
+                    return self.opaque();
+                }
             }
             let start = self.cur.pos;
             self.cur.bump();
@@ -351,6 +362,8 @@ impl<'a> ExprParser<'a> {
             {
                 self.cur.bump();
             }
+            // ($ and { fall back to the byte-wise loop above, which decides
+            // whether they interpolate or are literal.)
             out.push_str(&String::from_utf8_lossy(
                 &self.cur.src[start..self.cur.pos],
             ));
@@ -431,6 +444,15 @@ impl<'a> ExprParser<'a> {
             "null" => return ConstExpr::Null,
             "true" => return ConstExpr::Bool(true),
             "false" => return ConstExpr::Bool(false),
+            // Legacy `array(...)` syntax.
+            "array" => {
+                self.cur.skip_insignificant();
+                if self.cur.peek() == Some(b'(') {
+                    self.cur.bump();
+                    return self.parse_array(b')');
+                }
+                return self.opaque();
+            }
             _ => {}
         }
         self.cur.skip_insignificant();
@@ -501,10 +523,38 @@ impl<'a> EvalCtx<'a> {
     }
 }
 
+/// Constants of internal PHP classes (no source file to chase). Extend as
+/// the oracle demands.
+fn internal_class_const(class: &str, name: &str) -> Option<ConstValue> {
+    Some(match (class, name) {
+        ("NumberFormatter", "PATTERN_DECIMAL") => ConstValue::Int(0),
+        ("NumberFormatter", "DECIMAL") => ConstValue::Int(1),
+        ("NumberFormatter", "CURRENCY") => ConstValue::Int(2),
+        ("NumberFormatter", "PERCENT") => ConstValue::Int(3),
+        ("NumberFormatter", "SCIENTIFIC") => ConstValue::Int(4),
+        ("NumberFormatter", "SPELLOUT") => ConstValue::Int(5),
+        ("NumberFormatter", "ORDINAL") => ConstValue::Int(6),
+        ("NumberFormatter", "DURATION") => ConstValue::Int(7),
+        ("IntlDateFormatter", "NONE") => ConstValue::Int(-1),
+        ("IntlDateFormatter", "FULL") => ConstValue::Int(0),
+        ("IntlDateFormatter", "LONG") => ConstValue::Int(1),
+        ("IntlDateFormatter", "MEDIUM") => ConstValue::Int(2),
+        ("IntlDateFormatter", "SHORT") => ConstValue::Int(3),
+        _ => return None,
+    })
+}
+
 /// A small table of the PHP core constants that show up in real di config
 /// and constructor defaults. Extend as the oracle demands.
 fn global_const(name: &str) -> Option<ConstValue> {
     Some(match name {
+        // mcrypt constants: gone from PHP, polyfilled by Magento's legacy
+        // encryption code — reflection still reports their string values.
+        "MCRYPT_BLOWFISH" => ConstValue::Str("blowfish".to_owned()),
+        "MCRYPT_RIJNDAEL_128" => ConstValue::Str("rijndael-128".to_owned()),
+        "MCRYPT_RIJNDAEL_256" => ConstValue::Str("rijndael-256".to_owned()),
+        "MCRYPT_MODE_ECB" => ConstValue::Str("ecb".to_owned()),
+        "MCRYPT_MODE_CBC" => ConstValue::Str("cbc".to_owned()),
         "PHP_INT_MAX" => ConstValue::Int(i64::MAX),
         "PHP_INT_MIN" => ConstValue::Int(i64::MIN),
         "PHP_INT_SIZE" => ConstValue::Int(8),
@@ -617,6 +667,14 @@ fn eval_expr(
             Ok(ConstValue::Array(out))
         }
         ConstExpr::ClassConst { class, name } => {
+            // Internal PHP classes' constants (intl etc.) — no source exists.
+            if let ClassRef::Fqcn(i) = class {
+                if let Some(cls) = classes.get(*i) {
+                    if let Some(v) = internal_class_const(cls, name) {
+                        return Ok(v);
+                    }
+                }
+            }
             let class_name = match class {
                 ClassRef::Fqcn(i) => classes
                     .get(*i)

@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 pub mod areaconfig;
+pub mod arguments;
 pub mod compare;
 pub mod definitions;
 pub mod metadata;

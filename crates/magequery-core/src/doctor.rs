@@ -278,7 +278,8 @@ impl Doctor<'_> {
     ) {
         use crate::model::ArgValue;
         match value {
-            ArgValue::Object(c) => {
+            ArgValue::Object(o) => {
+                let c = &o.class;
                 if !self.class_known(c) {
                     self.error(
                         DoctorLint::DiArgumentClassMissing,
@@ -669,7 +670,7 @@ fn insert_stripped(set: &mut HashSet<ClassName>, class: &ClassName) {
 fn collect_arg_objects(value: &crate::model::ArgValue, out: &mut HashSet<ClassName>) {
     use crate::model::ArgValue;
     match value {
-        ArgValue::Object(c) => insert_stripped(out, c),
+        ArgValue::Object(o) => insert_stripped(out, &o.class),
         ArgValue::Array(items) => {
             for item in items {
                 collect_arg_objects(&item.value, out);

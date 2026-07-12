@@ -184,8 +184,8 @@ pub(crate) fn di_xml(xml: &str) -> Result<DiFile, String> {
                     // Consume the whole <arguments>…</arguments> subtree.
                     if let Some(target) = current_type.clone() {
                         let args = parse_arguments(&mut reader, &lines, &mut arg_buf);
-                        for (name, value, line) in args {
-                            out.arguments.push((target.clone(), name, value, line));
+                        for item in args {
+                            out.arguments.push((target.clone(), item.key, item.value, item.line));
                         }
                     }
                 } else {
@@ -208,18 +208,35 @@ pub(crate) fn di_xml(xml: &str) -> Result<DiFile, String> {
 /// A parsed argument value, carrying per-array-item line numbers but no full `Source` yet
 /// (module/file/area are added at merge time in `di.rs`, where the file context is known).
 pub(crate) enum RawArg {
-    Object(ClassName),
+    Object {
+        class: ClassName,
+        /// `shared=` attribute on the argument/item, when written.
+        shared: Option<bool>,
+        /// `sortOrder=` attribute (drives ObjectManager's SortItems merge).
+        sort_order: Option<i32>,
+    },
     Scalar { xsi_type: String, text: String },
-    /// `(key, value, line)` per item.
-    Array(Vec<(String, RawArg, u32)>),
+    Array(Vec<RawItem>),
     Null,
+}
+
+/// One `<item>` of an array argument: the `sortOrder=` XML attribute lives on
+/// the ITEM (any xsi:type — Magento's ArrayType interpreter sorts by it at
+/// conversion time).
+pub(crate) struct RawItem {
+    pub key: String,
+    pub value: RawArg,
+    pub line: u32,
+    pub sort_order: Option<i32>,
 }
 
 /// A frame on the argument-parse stack: the top-level `<arguments>` list (key `None`) or an
 /// `xsi:type="array"` (its key + the line it opened on).
 struct ArgFrame {
     key: Option<(String, u32)>,
-    items: Vec<(String, RawArg, u32)>,
+    /// `sortOrder=` on the enclosing array-typed argument/item element.
+    sort_order: Option<i32>,
+    items: Vec<RawItem>,
 }
 
 /// Parse an `<arguments>` subtree (reader positioned just after the opening tag), returning
@@ -228,10 +245,24 @@ fn parse_arguments(
     reader: &mut Reader<&[u8]>,
     lines: &LineMap,
     buf: &mut Vec<u8>,
-) -> Vec<(String, RawArg, u32)> {
-    let mut stack = vec![ArgFrame { key: None, items: Vec::new() }];
-    // The scalar leaf currently being read: (key, xsi_type, line, accumulated text).
-    let mut leaf: Option<(String, String, u32, String)> = None;
+) -> Vec<RawItem> {
+    struct Leaf {
+        key: String,
+        xsi: String,
+        line: u32,
+        text: String,
+        shared: Option<bool>,
+        sort_order: Option<i32>,
+    }
+    let mut stack = vec![ArgFrame { key: None, sort_order: None, items: Vec::new() }];
+    // The scalar leaf currently being read.
+    let mut leaf: Option<Leaf> = None;
+    let obj_attrs = |e: &BytesStart| {
+        (
+            attr(e, b"shared").map(|s| matches!(s.trim(), "true" | "1")),
+            attr(e, b"sortOrder").and_then(|s| s.trim().parse().ok()),
+        )
+    };
 
     loop {
         buf.clear();
@@ -242,33 +273,54 @@ fn parse_arguments(
             Ok(Event::Start(e)) if matches!(e.name().as_ref(), b"argument" | b"item") => {
                 let key = attr(&e, b"name").unwrap_or_default();
                 let xsi = attr(&e, b"xsi:type").unwrap_or_default();
+                let (shared, sort_order) = obj_attrs(&e);
                 if xsi == "array" {
-                    stack.push(ArgFrame { key: Some((key, line)), items: Vec::new() });
+                    stack.push(ArgFrame { key: Some((key, line)), sort_order, items: Vec::new() });
                 } else {
-                    leaf = Some((key, xsi, line, String::new()));
+                    leaf = Some(Leaf { key, xsi, line, text: String::new(), shared, sort_order });
                 }
             }
             Ok(Event::Empty(e)) if matches!(e.name().as_ref(), b"argument" | b"item") => {
                 let key = attr(&e, b"name").unwrap_or_default();
                 let xsi = attr(&e, b"xsi:type").unwrap_or_default();
-                let value = if xsi == "array" { RawArg::Array(Vec::new()) } else { scalar(&xsi, "") };
-                push_item(&mut stack, key, value, line);
+                let (shared, sort_order) = obj_attrs(&e);
+                let value = if xsi == "array" {
+                    RawArg::Array(Vec::new())
+                } else {
+                    scalar(&xsi, "", shared, sort_order)
+                };
+                push_item(&mut stack, key, value, line, sort_order);
             }
             Ok(Event::Text(e)) => {
-                if let Some((_, _, _, text)) = &mut leaf {
-                    text.push_str(&e.unescape().unwrap_or_default());
+                if let Some(l) = &mut leaf {
+                    l.text.push_str(&e.unescape().unwrap_or_default());
+                }
+            }
+            Ok(Event::CData(e)) => {
+                // <![CDATA[...]]> carries the value verbatim (the primary
+                // di.xml's regex arguments are written this way).
+                if let Some(l) = &mut leaf {
+                    l.text.push_str(&String::from_utf8_lossy(&e));
                 }
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
                 b"arguments" => break,
                 b"argument" | b"item" => {
-                    if let Some((key, xsi, line, text)) = leaf.take() {
-                        push_item(&mut stack, key, scalar(&xsi, text.trim()), line);
+                    if let Some(l) = leaf.take() {
+                        let sort_order = l.sort_order;
+                        push_item(
+                            &mut stack,
+                            l.key,
+                            scalar(&l.xsi, l.text.trim(), l.shared, l.sort_order),
+                            l.line,
+                            sort_order,
+                        );
                     } else if stack.len() > 1 {
                         // Closing an array frame.
                         let frame = stack.pop().unwrap();
                         let (key, kline) = frame.key.unwrap_or_default();
-                        push_item(&mut stack, key, RawArg::Array(frame.items), kline);
+                        let sort_order = frame.sort_order;
+                        push_item(&mut stack, key, RawArg::Array(frame.items), kline, sort_order);
                     }
                 }
                 _ => {}
@@ -279,16 +331,22 @@ fn parse_arguments(
     stack.pop().map(|f| f.items).unwrap_or_default()
 }
 
-fn push_item(stack: &mut [ArgFrame], key: String, value: RawArg, line: u32) {
+fn push_item(
+    stack: &mut [ArgFrame],
+    key: String,
+    value: RawArg,
+    line: u32,
+    sort_order: Option<i32>,
+) {
     if let Some(frame) = stack.last_mut() {
-        frame.items.push((key, value, line));
+        frame.items.push(RawItem { key, value, line, sort_order });
     }
 }
 
-/// Build a non-array value from an xsi:type and text.
-fn scalar(xsi: &str, text: &str) -> RawArg {
+/// Build a non-array value from an xsi:type, text, and object attributes.
+fn scalar(xsi: &str, text: &str, shared: Option<bool>, sort_order: Option<i32>) -> RawArg {
     match xsi {
-        "object" => RawArg::Object(ClassName::new(text)),
+        "object" => RawArg::Object { class: ClassName::new(text), shared, sort_order },
         "null" => RawArg::Null,
         _ if text.is_empty() && xsi.is_empty() => RawArg::Null,
         _ => RawArg::Scalar { xsi_type: xsi.to_string(), text: text.to_string() },

@@ -503,12 +503,24 @@ pub struct Argument {
     pub source: Source,
 }
 
+/// An `xsi:type="object"` argument: the injected class plus the attributes
+/// that shape DI compilation (`shared=` picks `_i_` vs `_ins_`; `sortOrder=`
+/// drives ObjectManager's argument-merge ordering).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct ObjectRef {
+    pub class: ClassName,
+    pub shared: Option<bool>,
+    pub sort_order: Option<i32>,
+}
+
 /// A di.xml argument value. Objects are the interesting case (what gets injected).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
 pub enum ArgValue {
     /// `xsi:type="object"` — an injected class or virtual type.
-    Object(ClassName),
+    Object(ObjectRef),
     /// Scalar value (`string`/`boolean`/`number`/`init_parameter`/`const`/…): the xsi type
     /// and its text.
     Scalar { xsi_type: String, text: String },
@@ -525,6 +537,9 @@ pub enum ArgValue {
 pub struct ArgItem {
     pub key: String,
     pub value: ArgValue,
+    /// `sortOrder=` XML attribute on the item (any xsi:type) — Magento's
+    /// ArrayType interpreter stably sorts an array's items by it.
+    pub sort_order: Option<i32>,
     pub source: Source,
 }
 

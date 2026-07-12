@@ -211,6 +211,13 @@ impl Magento {
         &self.index.check
     }
 
+    /// The source file a class name resolves to via the install's autoload
+    /// maps (PSR-4/PSR-0, vendor + app/code + root composer.json), if it
+    /// exists on disk. No PHP parsing happens — pure path math + stat.
+    pub fn class_file(&self, class: &ClassName) -> Option<std::path::PathBuf> {
+        self.index.resolver.file_for(class)
+    }
+
     /// Library component paths (magento2-library composer packages — what
     /// Magento's ComponentRegistrar reports as LIBRARY), in registration
     /// order. The DI compiler scans these alongside module paths.
@@ -818,7 +825,8 @@ impl Magento {
         let mut out: Vec<ConsoleCommand> = items
             .iter()
             .filter_map(|item| {
-                let ArgValue::Object(class) = &item.value else { return None };
+                let ArgValue::Object(obj) = &item.value else { return None };
+                let class = &obj.class;
                 let (name, description) = self.index.resolver.command_info(class);
                 let cmd = ConsoleCommand {
                     name,
@@ -3018,7 +3026,7 @@ impl Magento {
         for item in items {
             let ArgValue::Array(fields) = &item.value else { continue };
             let source = fields.iter().find(|f| f.key == "source").and_then(|f| match &f.value {
-                ArgValue::Object(c) => Some(c),
+                ArgValue::Object(o) => Some(&o.class),
                 _ => None,
             });
             let sort_order = fields
@@ -4623,7 +4631,8 @@ fn scan_arg_for_class(
         }
     };
     match value {
-        ArgValue::Object(c) => {
+        ArgValue::Object(o) => {
+            let c = &o.class;
             if c == scan.class || c == scan.proxy {
                 hit(c.clone(), false);
             }

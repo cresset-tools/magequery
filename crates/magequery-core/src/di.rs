@@ -42,6 +42,10 @@ pub(crate) struct LocatedPlugin {
 pub(crate) struct LocatedArg {
     pub value: crate::model::ArgValue,
     pub source: Source,
+    /// Config layer (0 = primary app/etc, 1 = module global, 2 = area
+    /// overlay). Within one layer array arguments merge item-by-item; across
+    /// layers Magento's Config::extend replaces same-named args wholesale.
+    pub layer: u8,
 }
 
 /// A boolean plus where it was declared.
@@ -176,6 +180,7 @@ struct Job {
     area: Area,
     module: ModuleName,
     path: PathBuf,
+    layer: u8,
 }
 
 struct Parsed {
@@ -183,6 +188,7 @@ struct Parsed {
     area: Area,
     module: ModuleName,
     path: PathBuf,
+    layer: u8,
     file: Result<parse::DiFile, String>,
 }
 
@@ -199,6 +205,7 @@ pub(crate) fn build(root: &Path, modules: &[Module], diags: &mut Vec<Diagnostic>
             area: Area::Global,
             module: ModuleName::new("(primary)"),
             path,
+            layer: 0,
         });
     }
     for m in modules {
@@ -213,12 +220,13 @@ pub(crate) fn build(root: &Path, modules: &[Module], diags: &mut Vec<Diagnostic>
                 area: Area::Global,
                 module: m.name.clone(),
                 path: global,
+                layer: 1,
             });
         }
         for area in REAL_AREAS {
             let p = m.path.join("etc").join(area.dir().unwrap()).join("di.xml");
             if p.is_file() {
-                jobs.push(Job { load_order: m.load_order + 1, area, module: m.name.clone(), path: p });
+                jobs.push(Job { load_order: m.load_order + 1, area, module: m.name.clone(), path: p, layer: 2 });
             }
         }
     }
@@ -235,6 +243,7 @@ pub(crate) fn build(root: &Path, modules: &[Module], diags: &mut Vec<Diagnostic>
                 area: j.area,
                 module: j.module.clone(),
                 path: j.path.clone(),
+                layer: j.layer,
                 file,
             }
         })
@@ -296,9 +305,13 @@ fn merge_area(parsed: &[Parsed], area: Area, mut base: AreaConfig) -> AreaConfig
 /// Convert a parse-level `RawArg` into a `model::ArgValue`, attaching a `Source` to every
 /// array item from the file being merged (`p`).
 fn to_arg_value(raw: &parse::RawArg, p: &Parsed) -> crate::model::ArgValue {
-    use crate::model::{ArgItem, ArgValue};
+    use crate::model::{ArgItem, ArgValue, ObjectRef};
     match raw {
-        parse::RawArg::Object(c) => ArgValue::Object(c.clone()),
+        parse::RawArg::Object { class, shared, sort_order } => ArgValue::Object(ObjectRef {
+            class: class.clone(),
+            shared: *shared,
+            sort_order: *sort_order,
+        }),
         parse::RawArg::Scalar { xsi_type, text } => {
             ArgValue::Scalar { xsi_type: xsi_type.clone(), text: text.clone() }
         }
@@ -306,13 +319,14 @@ fn to_arg_value(raw: &parse::RawArg, p: &Parsed) -> crate::model::ArgValue {
         parse::RawArg::Array(items) => ArgValue::Array(
             items
                 .iter()
-                .map(|(key, value, line)| ArgItem {
-                    key: key.clone(),
-                    value: to_arg_value(value, p),
+                .map(|item| ArgItem {
+                    key: item.key.clone(),
+                    value: to_arg_value(&item.value, p),
+                    sort_order: item.sort_order,
                     source: Source {
                         module: p.module.clone(),
                         file: p.path.clone(),
-                        line: *line,
+                        line: item.line,
                         area: p.area,
                     },
                 })
@@ -349,13 +363,24 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
         let value = to_arg_value(raw, p);
         let by_name = cfg.type_args.entry(target.clone()).or_default();
         match by_name.get_mut(arg_name) {
-            // Array arguments merge item-by-item across modules; others replace.
-            Some(existing) => {
+            // Within one config layer, array arguments merge item-by-item
+            // (the layer's files are one XML DOM-merge scope). ACROSS layers
+            // (primary -> module global -> area overlay) Magento's
+            // Config::extend replaces a same-named argument WHOLESALE — the
+            // oracle's OperationPool proves it ('default' from app/etc/di.xml
+            // vanishes when a module re-declares 'operations').
+            Some(existing) if existing.layer == p.layer => {
                 existing.value = existing.value.merged_with(&value);
                 existing.source = src(*line);
             }
+            Some(existing) => {
+                *existing = LocatedArg { value, source: src(*line), layer: p.layer };
+            }
             None => {
-                by_name.insert(arg_name.clone(), LocatedArg { value, source: src(*line) });
+                by_name.insert(
+                    arg_name.clone(),
+                    LocatedArg { value, source: src(*line), layer: p.layer },
+                );
             }
         }
     }

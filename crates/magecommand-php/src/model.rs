@@ -118,6 +118,22 @@ pub struct MethodMeta {
     pub offset: usize,
 }
 
+impl ParamMeta {
+    /// A synthetic parameter — for stub tables of internal PHP constructors
+    /// (reflection knows them; no source file exists to parse).
+    pub fn synthetic(name: &str, ty: Option<&str>, default: Option<&str>) -> ParamMeta {
+        ParamMeta {
+            name: name.to_owned(),
+            ty: ty.map(str::to_owned),
+            default: default.map(str::to_owned),
+            by_ref: false,
+            variadic: false,
+            promoted: None,
+            readonly: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ParamMeta {

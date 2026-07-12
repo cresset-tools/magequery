@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use magequery_core::{Area, Magento};
 
+use crate::arguments::{build_arguments, ArgsCtx};
 use crate::definitions::Definitions;
 use crate::phpexport::{PhpKey, PhpValue};
 
@@ -126,6 +127,177 @@ pub fn area_sections(magento: &Magento, defs: &Definitions, area: Area) -> AreaS
     AreaSections {
         preferences: merged.into_iter().collect(),
         instance_types: instance_types.into_iter().collect(),
+    }
+}
+
+/// A complete area file (chain applied), ready to serialize. `nonLazyTypes`
+/// pending.
+pub struct AreaFile {
+    pub arguments: BTreeMap<String, PhpValue>,
+    pub preferences: Vec<(String, String)>,
+    pub instance_types: Vec<(String, String)>,
+    pub findings: Vec<String>,
+}
+
+/// Reader + modification chain for one area: arguments, preferences,
+/// instanceTypes — in Magento's exact order of operations.
+pub fn build_area_file(
+    magento: &Magento,
+    defs: &Definitions,
+    area: Area,
+    root: &std::path::Path,
+) -> AreaFile {
+    let export = magento.di_export(area);
+    let overrides = crate::arguments::setup_overrides(magento, root);
+    let ctx = ArgsCtx::new(defs, &defs.scanned, &export, overrides);
+
+    // Reader.
+    let mut arguments = build_arguments(&ctx, magento);
+    let sections = area_sections_reader(defs, &export);
+    let mut preferences = sections.0;
+    let mut instance_types = sections.1;
+
+    // Chain: BackslashTrim is an invariant here (ClassName strips leading
+    // backslashes at construction). PreferencesResolving pass 1:
+    resolve_preferences_in_args(&mut arguments, &preferences);
+
+    // InterceptorSubstitution.
+    let interceptors: BTreeMap<String, String> = arguments
+        .keys()
+        .filter_map(|k| {
+            k.strip_suffix("\\Interceptor")
+                .map(|orig| (orig.to_owned(), k.clone()))
+        })
+        .collect();
+    for interceptor in interceptors.values() {
+        arguments.remove(interceptor);
+    }
+    for (original, interceptor) in &interceptors {
+        // PHP-ism reproduced faithfully: the rename is guarded by isset(),
+        // which is FALSE for a NULL row — a constructor-less intercepted
+        // class keeps its own key (its Interceptor row is still dropped).
+        if arguments.get(original).is_some_and(|v| *v != PhpValue::Null) {
+            let value = arguments.remove(original).unwrap();
+            arguments.insert(interceptor.clone(), value);
+        }
+    }
+    for value in preferences.values_mut() {
+        if let Some(i) = interceptors.get(value) {
+            *value = i.clone();
+        }
+    }
+    let mut merged = interceptors.clone();
+    merged.extend(std::mem::take(&mut preferences));
+    preferences = merged;
+    for value in instance_types.values_mut() {
+        if let Some(i) = interceptors.get(value) {
+            *value = i.clone();
+        }
+    }
+
+    // PreferencesResolving pass 2, now through interceptor-augmented prefs.
+    resolve_preferences_in_args(&mut arguments, &preferences);
+
+    AreaFile {
+        arguments,
+        preferences: preferences.into_iter().collect(),
+        instance_types: instance_types.into_iter().collect(),
+        findings: ctx.take_findings(),
+    }
+}
+
+/// Reader-stage preferences (fixpoint) and instanceTypes (vtype chains
+/// resolved), BEFORE interceptor substitution.
+fn area_sections_reader(
+    defs: &Definitions,
+    export: &magequery_core::DiExport,
+) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+    let pref_map: HashMap<&str, &str> = export
+        .preferences
+        .iter()
+        .map(|p| (p.for_type.as_str(), p.prefer.as_str()))
+        .collect();
+    let resolve = |name: &str| -> String {
+        let mut current = name;
+        let mut seen = HashSet::new();
+        while let Some(next) = pref_map.get(current) {
+            if !seen.insert(*next) {
+                break;
+            }
+            current = next;
+        }
+        current.to_owned()
+    };
+    let mut prefs: BTreeMap<String, String> = BTreeMap::new();
+    let names = defs
+        .scanned
+        .iter()
+        .map(String::as_str)
+        .chain(pref_map.keys().copied());
+    for name in names {
+        let resolved = resolve(name);
+        if resolved != name {
+            prefs.insert(name.to_owned(), resolved);
+        }
+    }
+    let vtype_map: HashMap<&str, &str> = export
+        .virtual_types
+        .iter()
+        .map(|v| (v.name.as_str(), v.base.as_str()))
+        .collect();
+    let resolve_vtype = |name: &str| -> String {
+        let mut current = name;
+        let mut seen = HashSet::new();
+        while let Some(next) = vtype_map.get(current) {
+            if !seen.insert(*next) {
+                break;
+            }
+            current = next;
+        }
+        current.to_owned()
+    };
+    let instance_types: BTreeMap<String, String> = export
+        .virtual_types
+        .iter()
+        .map(|v| (v.name.as_str().to_owned(), resolve_vtype(v.base.as_str())))
+        .collect();
+    (prefs, instance_types)
+}
+
+/// Chain\PreferencesResolving: every `_i_`/`_ins_` value in the arguments
+/// tree is chased through the preferences map to its end.
+fn resolve_preferences_in_args(
+    arguments: &mut BTreeMap<String, PhpValue>,
+    preferences: &BTreeMap<String, String>,
+) {
+    fn chase(value: &str, prefs: &BTreeMap<String, String>) -> String {
+        let mut current = value;
+        let mut seen = HashSet::new();
+        while let Some(next) = prefs.get(current) {
+            if !seen.insert(next.as_str()) {
+                break;
+            }
+            current = next;
+        }
+        current.to_owned()
+    }
+    fn walk(value: &mut PhpValue, prefs: &BTreeMap<String, String>) {
+        if let PhpValue::Array(entries) = value {
+            for (key, v) in entries.iter_mut() {
+                let is_instance_key =
+                    matches!(key, PhpKey::Str(s) if s == "_i_" || s == "_ins_");
+                if is_instance_key {
+                    if let PhpValue::Str(s) = v {
+                        *s = chase(s, prefs);
+                    }
+                } else {
+                    walk(v, prefs);
+                }
+            }
+        }
+    }
+    for value in arguments.values_mut() {
+        walk(value, preferences);
     }
 }
 

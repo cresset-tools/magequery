@@ -9,6 +9,9 @@
 pub enum PhpValue {
     Str(String),
     Int(i64),
+    /// var_export prints floats at shortest-roundtrip precision, with a
+    /// `.0` suffix on whole values.
+    Float(f64),
     Bool(bool),
     Null,
     /// Entries in output order — the caller owns ordering (ksort or
@@ -56,6 +59,13 @@ fn export(value: &PhpValue, indent: usize, out: &mut String) {
             out.push('\'');
         }
         PhpValue::Int(i) => out.push_str(&i.to_string()),
+        PhpValue::Float(f) => {
+            if f.fract() == 0.0 && f.is_finite() && f.abs() < 1e15 {
+                out.push_str(&format!("{f:.1}"));
+            } else {
+                out.push_str(&format!("{f}"));
+            }
+        }
         PhpValue::Bool(true) => out.push_str("true"),
         PhpValue::Bool(false) => out.push_str("false"),
         PhpValue::Null => out.push_str("NULL"),
