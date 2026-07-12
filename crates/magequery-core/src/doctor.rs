@@ -30,6 +30,7 @@ pub(crate) fn run(mage: &Magento, source_filter: Option<ModuleSource>) -> Doctor
     d.check_commands();
     d.check_mq();
     d.check_graphql();
+    d.check_templates();
 
     d.check_unregistered(source_filter);
 
@@ -365,6 +366,39 @@ impl Doctor<'_> {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// Template references no physical file satisfies: neither the module's
+    /// view/<area>|base/templates file nor any theme override exists. The template
+    /// index already normalized short paths and joined candidates, so this is a pure
+    /// projection; non-.phtml values (dynamic expressions) are skipped, never guessed.
+    fn check_templates(&mut self) {
+        for area in [Area::Frontend, Area::Adminhtml] {
+            for template in self.mage.templates(area, None) {
+                if !template.files.is_empty()
+                    || !template.reference.ends_with(".phtml")
+                    || template.usages.is_empty()
+                {
+                    continue;
+                }
+                let source = template.usages[0].source.clone();
+                let count = template.usages.len();
+                let suffix = if count > 1 {
+                    format!(" ({count} usages)")
+                } else {
+                    String::new()
+                };
+                self.warn_on(
+                    DoctorLint::TemplateFileMissing,
+                    &template.reference,
+                    format!(
+                        "layout assigns template {} but no module or theme file provides it{suffix}",
+                        template.reference
+                    ),
+                    Some(source),
+                );
             }
         }
     }

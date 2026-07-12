@@ -150,8 +150,32 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
 
     // Surface parse failures once (non-fatal — the rest still merges).
     for p in &parsed {
-        if let Err(e) = &p.file {
-            diags.push(Diagnostic::warning(format!("parsing {}: {e}", p.path.display()), None));
+        match &p.file {
+            Err(e) => {
+                diags.push(Diagnostic::warning(format!("parsing {}: {e}", p.path.display()), None));
+            }
+            Ok(file) => {
+                // A plugin name declared twice for the same type *in one file* is an
+                // authoring bug: the attributes merge silently and the later one wins.
+                // (Across files it's intentional Magento override semantics.)
+                let mut seen = std::collections::HashSet::new();
+                for (target, rp) in &file.plugins {
+                    if !seen.insert((target, &rp.name)) {
+                        diags.push(Diagnostic::warning(
+                            format!(
+                                "duplicate <plugin name=\"{}\"> for {target} in one file — attributes merge, the later declaration wins",
+                                rp.name
+                            ),
+                            Some(Source {
+                                module: p.module.clone(),
+                                file: p.path.clone(),
+                                line: rp.line,
+                                area: p.area,
+                            }),
+                        ));
+                    }
+                }
+            }
         }
     }
 

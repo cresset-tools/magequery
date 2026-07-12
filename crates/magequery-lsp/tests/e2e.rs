@@ -87,6 +87,32 @@ impl Fixture {
 "#,
         );
         write("app/code/Acme/Widget/view/frontend/templates/chip.phtml", "<div></div>\n");
+        // A short template reference (no module prefix) in a second layout file, plus
+        // its target — the owning-module normalization case.
+        write(
+            "app/code/Acme/Widget/view/frontend/layout/acme_widget_short.xml",
+            r#"<page>
+    <referenceContainer name="content">
+        <block class="Acme\Widget\Block\Chip" name="acme.chip2" template="chip2.phtml"/>
+    </referenceContainer>
+</page>
+"#,
+        );
+        write("app/code/Acme/Widget/view/frontend/templates/chip2.phtml", "<span></span>\n");
+        write(
+            "app/code/Acme/Widget/etc/db_schema.xml",
+            r#"<schema>
+    <table name="acme_thing" resource="default">
+        <column xsi:type="int" name="entity_id"/>
+        <column xsi:type="varchar" name="label"/>
+    </table>
+    <table name="acme_link" resource="default">
+        <column xsi:type="int" name="thing_id"/>
+        <constraint xsi:type="foreign" referenceId="FK" table="acme_link" column="thing_id" referenceTable="acme_thing" referenceColumn="entity_id"/>
+    </table>
+</schema>
+"#,
+        );
         // An interception-shaped class no di.xml declares: the plugin-unregistered
         // warning, which must land on the class declaration line, not line 1.
         write(
@@ -390,6 +416,35 @@ fn diagnostics_definition_hover_and_invalidation() {
             .is_some_and(|c| c.title.contains("used in 1 layout"))),
         "phtml lens: {lenses:?}"
     );
+
+    // --- short template: gd normalizes via the declaring file's module.
+    let short_rel = "app/code/Acme/Widget/view/frontend/layout/acme_widget_short.xml";
+    let jump = client.request::<lsp_types::request::GotoDefinition>(
+        lsp_types::GotoDefinitionParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: fixture.uri(short_rel) },
+                position: position_after(short_rel, "template=\"chip2"),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    );
+    match jump {
+        Some(lsp_types::GotoDefinitionResponse::Scalar(location)) => assert_eq!(
+            location.uri,
+            fixture.uri("app/code/Acme/Widget/view/frontend/templates/chip2.phtml"),
+            "short template gd"
+        ),
+        other => panic!("short template gd: {other:?}"),
+    }
+
+    // --- referenceColumn completion, scoped to the referenced table's columns.
+    let labels = complete(
+        &mut client,
+        "app/code/Acme/Widget/etc/db_schema.xml",
+        "referenceColumn=\"ent",
+    );
+    assert_eq!(labels, vec!["entity_id".to_string()], "column completion");
 
     // --- definition on the observer instance in events.xml → Recalc.php's class line.
     let events_uri = fixture.uri("app/code/Acme/Widget/etc/events.xml");

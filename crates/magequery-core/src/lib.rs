@@ -4984,6 +4984,55 @@ mod handle_tests {
         assert!(!names.iter().any(|n| n.contains("Interceptor")), "{names:?}");
     }
 
+    /// The two per-file lints fire: a layout template no file provides, and a plugin
+    /// name declared twice for one type in one file.
+    #[test]
+    fn template_and_duplicate_plugin_lints_fire() {
+        let tree = TempTree::new("nit-lints");
+        let write = |rel: &str, content: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write("app/etc/config.php", "<?php\nreturn ['modules' => ['Acme_Widget' => 1]];\n");
+        write(
+            "app/code/Acme/Widget/etc/module.xml",
+            r#"<config><module name="Acme_Widget"/></config>"#,
+        );
+        write(
+            "app/code/Acme/Widget/etc/di.xml",
+            r#"<config>
+    <type name="Acme\Widget\Model\Thing">
+        <plugin name="tweak" type="Acme\Widget\Plugin\A"/>
+        <plugin name="tweak" type="Acme\Widget\Plugin\B"/>
+    </type>
+</config>"#,
+        );
+        write(
+            "app/code/Acme/Widget/view/frontend/layout/default.xml",
+            r#"<page><body>
+    <block class="Acme\Widget\Block\Chip" name="acme.chip" template="Acme_Widget::missing.phtml"/>
+</body></page>"#,
+        );
+
+        let magento = super::Magento::open(&tree.0).unwrap();
+        let report = magento.doctor(None);
+        let template_lint = report
+            .findings
+            .iter()
+            .find(|f| f.lint == crate::model::DoctorLint::TemplateFileMissing)
+            .expect("template lint fires");
+        assert_eq!(template_lint.subject.as_deref(), Some("Acme_Widget::missing.phtml"));
+        assert!(template_lint.source.is_some());
+
+        let diags = magento.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.message.contains("duplicate <plugin name=\"tweak\"")),
+            "{:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
     /// The buffer overlay wins over disk: the same root answers differently when a
     /// di.xml is overlaid — the editor's unsaved state, analyzed without saving.
     #[test]
