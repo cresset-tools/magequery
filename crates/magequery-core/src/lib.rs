@@ -211,6 +211,13 @@ impl Magento {
         &self.index.check
     }
 
+    /// Library component paths (magento2-library composer packages — what
+    /// Magento's ComponentRegistrar reports as LIBRARY), in registration
+    /// order. The DI compiler scans these alongside module paths.
+    pub fn library_paths(&self) -> &[std::path::PathBuf] {
+        &self.index.library_paths
+    }
+
     /// The fully merged DI configuration of `area`, exported wholesale: every
     /// preference, virtual type, plugin, and constructor argument as sorted,
     /// owned declarations with provenance.

@@ -31,6 +31,8 @@ pub(crate) struct ComposerPackage {
     pub psr0: Vec<(String, Vec<PathBuf>)>,
     /// `require` package names (version constraints dropped), sorted.
     pub require: Vec<String>,
+    /// Composer package `type` (`magento2-module`, `magento2-library`, …).
+    pub package_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +54,8 @@ struct PackageEntry<'a> {
     /// Only the keys (required package names) matter; constraints are skipped unparsed.
     #[serde(default)]
     require: HashMap<String, serde::de::IgnoredAny>,
+    #[serde(rename = "type", default, borrow)]
+    package_type: Option<Cow<'a, str>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -103,7 +107,17 @@ pub(crate) fn installed_packages(vendor: &Path) -> Result<Vec<ComposerPackage>, 
         let autoload_files = p.autoload.files.iter().map(|f| f.as_ref().to_owned()).collect();
         let psr4 = prefix_map(p.autoload.psr4, &root);
         let psr0 = prefix_map(p.autoload.psr0, &root);
-        out.push(ComposerPackage { name, version, root, autoload_files, psr4, psr0, require });
+        let package_type = p.package_type.as_ref().map(|t| t.as_ref().to_owned());
+        out.push(ComposerPackage {
+            name,
+            version,
+            root,
+            autoload_files,
+            psr4,
+            psr0,
+            require,
+            package_type,
+        });
     }
     Ok(out)
 }
