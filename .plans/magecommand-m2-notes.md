@@ -11,9 +11,13 @@ in `magecommand-engine/src/phpexport.rs`).
 | file | status | generator |
 |---|---|---|
 | app_action_list.php | **byte-identical** | Module\Dir\Reader::getActionFiles + ksort (path convention, enabled modules, blind 4-char strip) |
-| global.php + 6 area files | todo | Operation\Area → Compiler\Config\Reader → ModificationChain |
-| 6 `…\|plugin-list.php` | todo | Operation\PluginListGenerator (filename = sorted scope names joined by \|; content = PluginList triple `[_data, _inherited, _processed]`) |
-| interception.php | todo | Operation\InterceptionCache → Interception\Config::initialize (true/false per class: has plugins incl. via ancestors) |
+| global.php + 6 area files | **byte-identical** | Operation\Area → Compiler\Config\Reader → ModificationChain |
+| 7 `…\|plugin-list.php` | **byte-identical** | PluginListGenerator port (see the fd9abe7..HEAD commit messages for the scope-order, backslash-node, and linearization semantics) |
+| interception.php | **byte-identical** | Interception\Config::initialize port |
+
+**M2 COMPLETE (2026-07-12): `magecommand compare` reports the full 16-file
+metadata set reproduces the archive exactly.** Next: M3 (generated/code —
+factories, proxies, interceptors, extension attributes).
 
 ## Compile paths (DiCompileCommand)
 
