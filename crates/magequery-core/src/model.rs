@@ -357,6 +357,17 @@ pub struct PluginDecl {
     pub source: Source,
 }
 
+/// One explicit `shared=` declaration on a `<type>`/`<virtualType>`. Absent
+/// types default to shared in Magento; only written attributes are exported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct TypeSharedDecl {
+    pub type_name: ClassName,
+    pub shared: bool,
+    pub source: Source,
+}
+
 /// One constructor `<argument>` on a type/virtualType in the merged config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[derive(serde::Serialize)]
@@ -390,6 +401,8 @@ pub struct DiExport {
     pub plugins: Vec<PluginDecl>,
     /// Sorted by `type_name`, then `arg`.
     pub arguments: Vec<TypeArgDecl>,
+    /// Explicit `shared=` declarations, sorted by `type_name`.
+    pub shared: Vec<TypeSharedDecl>,
 }
 
 /// The kind of interception a plugin method performs.

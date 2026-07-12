@@ -57,6 +57,10 @@ pub struct ClassMeta {
     pub methods: Vec<MethodMeta>,
     /// Byte offset of the declaration keyword (for diagnostics).
     pub offset: usize,
+    /// The file's `use` imports in effect for this declaration:
+    /// `(lowercased alias, FQCN)`. Needed to resolve names inside raw
+    /// constant expressions (defaults, const values) after parsing.
+    pub uses: Vec<(String, String)>,
 }
 
 /// `use A, B { A::m insteadof B; }` — A's `m` wins; B (and any further

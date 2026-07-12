@@ -158,6 +158,9 @@ pub(crate) struct DiFile {
     pub virtual_types: Vec<(ClassName, ClassName, u32)>,
     /// `(target type/virtualType, argument name, value, line)`
     pub arguments: Vec<(ClassName, String, RawArg, u32)>,
+    /// `(type/virtualType name, shared, line)` — explicit `shared=` attributes only
+    /// (Magento defaults to shared when unstated).
+    pub shared: Vec<(ClassName, bool, u32)>,
 }
 
 /// Parse one di.xml file. Tracks the enclosing `<type>`/`<virtualType>` so `<plugin>` and
@@ -311,6 +314,13 @@ fn di_open(
                     out.virtual_types
                         .push((ClassName::new(name.clone()), ClassName::new(t), line));
                 }
+                if let Some(s) = attr(e, b"shared") {
+                    out.shared.push((
+                        ClassName::new(name.clone()),
+                        matches!(s.trim(), "true" | "1"),
+                        line,
+                    ));
+                }
                 if is_start {
                     *current_type = Some(ClassName::new(name));
                 }
@@ -318,6 +328,13 @@ fn di_open(
         }
         b"type" => {
             if let Some(name) = attr(e, b"name") {
+                if let Some(s) = attr(e, b"shared") {
+                    out.shared.push((
+                        ClassName::new(name.clone()),
+                        matches!(s.trim(), "true" | "1"),
+                        line,
+                    ));
+                }
                 if is_start {
                     *current_type = Some(ClassName::new(name));
                 }

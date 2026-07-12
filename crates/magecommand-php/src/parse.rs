@@ -303,6 +303,7 @@ impl<'a> Parser<'a> {
             enum_backing: None,
             methods: Vec::new(),
             offset,
+            uses: self.uses.iter().map(|(a, f)| (a.clone(), f.clone())).collect(),
         };
 
         self.cur.skip_insignificant();

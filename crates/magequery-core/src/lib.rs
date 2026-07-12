@@ -86,7 +86,7 @@ pub use model::{
     SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses, Whatis,
 };
 pub use model::{CatalogAttribute, CatalogAttributeGroup, ClassRef};
-pub use model::{PluginDecl, PreferenceDecl, TypeArgDecl, VirtualTypeDecl};
+pub use model::{PluginDecl, PreferenceDecl, TypeArgDecl, TypeSharedDecl, VirtualTypeDecl};
 pub use decrypt::Decryptor;
 pub use sysconfig::ConfigSet;
 pub use source::Source;

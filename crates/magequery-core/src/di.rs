@@ -13,7 +13,9 @@ use rayon::prelude::*;
 
 use crate::error::Diagnostic;
 use crate::ids::{Area, ClassName, ModuleName};
-use crate::model::{DiExport, Module, PluginDecl, PreferenceDecl, TypeArgDecl, VirtualTypeDecl};
+use crate::model::{
+    DiExport, Module, PluginDecl, PreferenceDecl, TypeArgDecl, TypeSharedDecl, VirtualTypeDecl,
+};
 use crate::parse;
 use crate::source::Source;
 
@@ -42,6 +44,13 @@ pub(crate) struct LocatedArg {
     pub source: Source,
 }
 
+/// A boolean plus where it was declared.
+#[derive(Clone)]
+pub(crate) struct LocatedBool {
+    pub value: bool,
+    pub source: Source,
+}
+
 /// Fully merged DI config for one area.
 #[derive(Clone, Default)]
 pub(crate) struct AreaConfig {
@@ -51,6 +60,8 @@ pub(crate) struct AreaConfig {
     pub virtual_types: HashMap<ClassName, Located>,
     /// type/virtualType name -> (argument name -> value). Per-argument last-wins.
     pub type_args: HashMap<ClassName, HashMap<String, LocatedArg>>,
+    /// Explicit `shared=` declarations, last-wins (absent = Magento's default: shared).
+    pub shared: HashMap<ClassName, LocatedBool>,
 }
 
 impl AreaConfig {
@@ -113,12 +124,24 @@ impl AreaConfig {
         }
         arguments.sort_by(|a, b| (&a.type_name, &a.arg).cmp(&(&b.type_name, &b.arg)));
 
+        let mut shared: Vec<TypeSharedDecl> = self
+            .shared
+            .iter()
+            .map(|(type_name, located)| TypeSharedDecl {
+                type_name: type_name.clone(),
+                shared: located.value,
+                source: located.source.clone(),
+            })
+            .collect();
+        shared.sort_by(|a, b| a.type_name.cmp(&b.type_name));
+
         DiExport {
             area,
             preferences,
             virtual_types,
             plugins,
             arguments,
+            shared,
         }
     }
 }
@@ -317,6 +340,10 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
     for (name, type_, line) in &file.virtual_types {
         cfg.virtual_types
             .insert(name.clone(), Located { value: type_.clone(), source: src(*line) });
+    }
+    for (name, shared, line) in &file.shared {
+        cfg.shared
+            .insert(name.clone(), LocatedBool { value: *shared, source: src(*line) });
     }
     for (target, arg_name, raw, line) in &file.arguments {
         let value = to_arg_value(raw, p);
