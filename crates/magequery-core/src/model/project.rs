@@ -125,6 +125,7 @@ pub enum DoctorLint {
     CommandUnregistered,
     ObserverUnregistered,
     PluginUnregistered,
+    TemplateFileMissing,
 }
 
 /// One `doctor` finding. Errors are things that break at runtime (dangling references,

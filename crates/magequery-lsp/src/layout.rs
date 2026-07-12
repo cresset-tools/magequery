@@ -32,13 +32,66 @@ pub(crate) fn area_of_file(magento: &Magento, path: &Path) -> Area {
     Area::Frontend
 }
 
-/// Every existing file a template reference can resolve to: the module's own
-/// area/base files first, then each theme's override, labeled by provider.
+/// A template reference normalized the way core's template index keys it: short paths
+/// (`path.phtml`, no `::`) get the declaring layout file's owning module prefixed —
+/// a module layout file's own module, or the `<Vendor_Module>` path segment for a
+/// theme layout file. Mirrors core's `normalize_template_ref`.
+pub(crate) fn normalize_ref(magento: &Magento, layout_file: &Path, reference: &str) -> String {
+    let reference = reference.trim().trim_start_matches('/');
+    if reference.contains("::") {
+        return reference.to_string();
+    }
+    let module = magento
+        .modules()
+        .iter()
+        .filter(|m| layout_file.starts_with(&m.path))
+        .max_by_key(|m| m.path.as_os_str().len())
+        .map(|m| m.name.clone())
+        .or_else(|| {
+            magento.themes().into_iter().find_map(|(_, dir)| {
+                layout_file
+                    .strip_prefix(&dir)
+                    .ok()
+                    .and_then(|rel| rel.components().next())
+                    .and_then(|c| c.as_os_str().to_str())
+                    .filter(|segment| segment.contains('_'))
+                    .map(ModuleName::new)
+            })
+        });
+    match module {
+        Some(module) => format!("{module}::{reference}"),
+        None => reference.to_string(),
+    }
+}
+
+/// Every existing file a (normalized) template reference can resolve to. The template
+/// index answers when any layout references it; the physical probe is the fallback for
+/// templates no layout uses (an unreferenced theme override still deserves its lens).
 pub(crate) fn resolve_template(
     magento: &Magento,
     reference: &str,
     area: Area,
 ) -> Vec<(String, PathBuf)> {
+    if let Some(template) = magento.template(reference, area) {
+        if !template.files.is_empty() {
+            return template
+                .files
+                .into_iter()
+                .map(|f| {
+                    let label = match &f.layer {
+                        magequery_core::LayoutLayer::Module(m) => format!("module {m}"),
+                        magequery_core::LayoutLayer::Theme(id) => format!("theme {id}"),
+                    };
+                    (label, f.file)
+                })
+                .collect();
+        }
+    }
+    resolve_physical(magento, reference, area)
+}
+
+/// Filesystem-probe resolution (module area/base file + every theme override).
+fn resolve_physical(magento: &Magento, reference: &str, area: Area) -> Vec<(String, PathBuf)> {
     let Some((module_name, rel)) = parse_template_ref(reference) else {
         return Vec::new();
     };

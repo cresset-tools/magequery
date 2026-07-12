@@ -1688,6 +1688,22 @@ boilerplate** on the unregistered trio — `command-unregistered` is fully mecha
 etc file, or CreateFile + full content when absent. Vendor-module fixes are offered
 knowingly (composer wipes them; the edit preview shows the path).
 
+**Parity nits** (closing the magento2-lsp comparison; rename is the only open item):
+short template paths (`template="x.phtml"`, no module prefix) normalize LSP-side via the
+declaring layout file's owning module — mirroring core's `normalize_template_ref` — and
+the whole LSP template layer now rides the core template index from the `templates`
+command (`Magento::template()` files + usages; physical probe kept as fallback for
+unreferenced overrides). `referenceColumn=` completes the same tag's `referenceTable`
+columns (`CompletionKind::Column(table)`, tag-local scan); `table=` on constraints
+completes tables. routes.xml: `Entity::Route` on `<route id=/frontName=>` —
+gd/references → the declaration, hover → router/frontName/handling modules, area from
+the `etc/<area>/` path segment. Two new checks: `DoctorLint::TemplateFileMissing`
+(layout assigns a template no module/theme file provides — pure projection over the
+template index, `.phtml`-suffix-guarded so dynamic values never flag; zero false
+positives on lite) and a parse-channel diagnostic for a plugin name declared twice for
+one type *in one file* (attribute merge silently keeps the later; cross-file stays
+legal override semantics — detected in di::build beside the parse diagnostics).
+
 **Editors live in `editors/` (monorepo, locked); publisher identity is `cresset-tools`.**
 - `editors/vscode` — TypeScript client (`vscode-languageclient` 9, esbuild bundle).
   Activation `workspaceContains:**/app/etc/config.php` (never wakes in non-Magento

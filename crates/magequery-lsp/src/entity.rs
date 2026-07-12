@@ -36,6 +36,9 @@ pub(crate) enum Entity {
     BlockName(String),
     /// A db_schema table name (`table=`/`referenceTable=` attributes).
     Table(String),
+    /// A routes.xml route, by `id=` or `frontName=` on `<route>` (either value matches
+    /// against both fields — they're usually equal anyway).
+    Route(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -195,6 +198,12 @@ fn classify_xml(
     if attr == Some("handle") && element == "update" {
         return Some(EntityAt {
             entity: Entity::LayoutHandle(value.to_string()),
+            span,
+        });
+    }
+    if matches!(attr, Some("id") | Some("frontName")) && element == "route" {
+        return Some(EntityAt {
+            entity: Entity::Route(value.to_string()),
             span,
         });
     }
@@ -518,7 +527,7 @@ fn gql_entity_at(text: &str, offset: usize) -> Option<EntityAt> {
 
 // ---- completion --------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompletionKind {
     /// FQCNs and virtual type names.
     Class,
@@ -534,6 +543,8 @@ pub(crate) enum CompletionKind {
     LayoutHandle,
     /// Block/container names being *referenced* (referenceBlock/move — not declarations).
     BlockName,
+    /// Columns of the same tag's `referenceTable=` (db_schema foreign keys).
+    Column(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -604,6 +615,15 @@ fn xml_completion_context(text: &str, offset: usize) -> Option<CompletionCtx> {
             "handle" if element == "update" => Some(CompletionKind::LayoutHandle),
             "ref" | "resource" => Some(CompletionKind::Acl),
             "referenceTable" => Some(CompletionKind::Table),
+            "table" if element == "constraint" => Some(CompletionKind::Table),
+            "referenceColumn" => tag.as_deref().and_then(|t| {
+                // The referenced table comes from the same tag.
+                let idx = t.find("referenceTable=")? + "referenceTable=".len();
+                let quote = *t.as_bytes().get(idx)?;
+                let rest = &t[idx + 1..];
+                let end = rest.find(quote as char)?;
+                Some(CompletionKind::Column(rest[..end].to_string()))
+            }),
             _ => None,
         }?;
         return Some(CompletionCtx { kind, typed, span: value_start..offset });
@@ -940,8 +960,33 @@ $x = 'not_a_context';
         assert_eq!(got.kind, CompletionKind::Event);
         assert!(ctx("X.php", php, "'not_a").is_none());
 
+        // referenceColumn completion is scoped by the same tag's referenceTable.
+        let schema = r#"<constraint xsi:type="foreign" referenceTable="sales_order" referenceColumn="ent">"#;
+        let got = ctx("db_schema.xml", schema, "referenceColumn=\"ent").unwrap();
+        assert_eq!(got.kind, CompletionKind::Column("sales_order".to_string()));
+        assert_eq!(got.typed, "ent");
+
         // Outside any value: no context.
         assert!(ctx("di.xml", "<config>  </config>", "<config> ").is_none());
+    }
+
+    #[test]
+    fn route_entities() {
+        let routes = r#"<router id="standard">
+    <route id="checkout" frontName="checkout">
+        <module name="Magento_Checkout"/>
+    </route>
+</router>"#;
+        assert_eq!(
+            at("routes.xml", routes, "\"checkout\" front"),
+            Some(Entity::Route("checkout".to_string()))
+        );
+        assert_eq!(
+            at("routes.xml", routes, "Name=\"checkout\""),
+            Some(Entity::Route("checkout".to_string()))
+        );
+        // The router element's own id is not a route.
+        assert_eq!(at("routes.xml", routes, "r id=\"standard"), None);
     }
 
     #[test]

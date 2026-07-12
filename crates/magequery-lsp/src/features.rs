@@ -95,13 +95,12 @@ pub(crate) fn completions(
         }
         CompletionKind::Template => {
             let area = crate::layout::area_of_file(magento, path);
-            let mut refs = std::collections::BTreeSet::new();
-            for (_, op) in crate::layout::ops_where(magento, area, |op| op.template.is_some()) {
-                if let Some(template) = op.template {
-                    refs.insert(template);
-                }
-            }
-            candidates.extend(refs.into_iter().map(|t| (t, K::FILE, None)));
+            candidates.extend(
+                magento
+                    .templates(area, None)
+                    .into_iter()
+                    .map(|t| (t.reference, K::FILE, None)),
+            );
         }
         CompletionKind::LayoutHandle => {
             let area = crate::layout::area_of_file(magento, path);
@@ -111,6 +110,16 @@ pub(crate) fn completions(
                     .into_iter()
                     .map(|(handle, _)| (handle, K::REFERENCE, None)),
             );
+        }
+        CompletionKind::Column(table) => {
+            if let Some(table) = magento.table(&table) {
+                candidates.extend(
+                    table
+                        .columns
+                        .into_iter()
+                        .map(|column| (column.name, K::PROPERTY, None)),
+                );
+            }
         }
         CompletionKind::BlockName => {
             let area = crate::layout::area_of_file(magento, path);
@@ -230,6 +239,7 @@ pub(crate) fn definition(
         Entity::Method(method) => interceptor_locations(magento, path, &method),
         Entity::Template(reference) => {
             let area = crate::layout::area_of_file(magento, path);
+            let reference = crate::layout::normalize_ref(magento, path, &reference);
             crate::layout::resolve_template(magento, &reference, area)
                 .into_iter()
                 .map(|(_, file)| file_location(file, None))
@@ -261,6 +271,7 @@ pub(crate) fn definition(
             .map(|table| source_location(magento, &table.source))
             .into_iter()
             .collect(),
+        Entity::Route(needle) => route_locations(magento, path, &needle),
     };
     match locations.len() {
         0 => None,
@@ -485,11 +496,12 @@ fn method_hover(magento: &Magento, path: &Path, method: &str) -> Option<String> 
 /// reference it.
 fn template_hover(magento: &Magento, path: &Path, reference: &str) -> Option<String> {
     let area = crate::layout::area_of_file(magento, path);
+    let reference = &crate::layout::normalize_ref(magento, path, reference);
     let resolved = crate::layout::resolve_template(magento, reference, area);
-    let uses = crate::layout::ops_where(magento, area, |op| {
-        op.template.as_deref() == Some(reference)
-    })
-    .len();
+    let uses = magento
+        .template(reference, area)
+        .map(|t| t.usages.len())
+        .unwrap_or(0);
     let mut md = format!("**template `{reference}`**");
     if resolved.is_empty() {
         let _ = write!(md, "
@@ -566,6 +578,47 @@ template `{template}`");
         let _ = write!(md, "
 
 referenced/modified by {references} layout op(s)");
+    }
+    Some(md)
+}
+
+/// routes.xml lives under `etc/<area>/`; the file path decides which router set to ask.
+fn route_area(path: &Path) -> Area {
+    if path.to_string_lossy().contains("/etc/adminhtml/") {
+        Area::Adminhtml
+    } else {
+        Area::Frontend
+    }
+}
+
+fn route_locations(magento: &Magento, path: &Path, needle: &str) -> Vec<Location> {
+    magento
+        .routes(route_area(path))
+        .into_iter()
+        .filter(|route| route.id == needle || route.front_name == needle)
+        .map(|route| source_location(magento, &route.source))
+        .collect()
+}
+
+fn route_hover(magento: &Magento, path: &Path, needle: &str) -> Option<String> {
+    let route = magento
+        .routes(route_area(path))
+        .into_iter()
+        .find(|route| route.id == needle || route.front_name == needle)?;
+    let mut md = format!(
+        "**route `{}`** — router `{}`, frontName `{}`",
+        route.id, route.router, route.front_name
+    );
+    let modules = route
+        .modules
+        .iter()
+        .map(|m| m.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !modules.is_empty() {
+        let _ = write!(md, "
+
+handled by: {modules}");
     }
     Some(md)
 }
@@ -668,6 +721,7 @@ pub(crate) fn hover(magento: &Magento, path: &Path, position: Position) -> Optio
         Entity::LayoutHandle(handle) => handle_hover(magento, path, handle),
         Entity::BlockName(name) => block_hover(magento, path, name),
         Entity::Table(name) => table_hover(magento, name),
+        Entity::Route(needle) => route_hover(magento, path, needle),
     }?;
     Some(Hover {
         contents: HoverContents::Markup(MarkupContent {
@@ -942,12 +996,16 @@ pub(crate) fn references(
         }
         Entity::Template(reference) => {
             let area = crate::layout::area_of_file(magento, path);
-            crate::layout::ops_where(magento, area, |op| {
-                op.template.as_deref() == Some(reference.as_str())
-            })
-            .into_iter()
-            .map(|(_, op)| source_location(magento, &op.source))
-            .collect()
+            let reference = crate::layout::normalize_ref(magento, path, &reference);
+            magento
+                .template(&reference, area)
+                .map(|t| {
+                    t.usages
+                        .iter()
+                        .map(|u| source_location(magento, &u.source))
+                        .collect()
+                })
+                .unwrap_or_default()
         }
         Entity::LayoutHandle(handle) => {
             let area = crate::layout::area_of_file(magento, path);
@@ -967,6 +1025,7 @@ pub(crate) fn references(
             .map(|(_, op)| source_location(magento, &op.source))
             .collect()
         }
+        Entity::Route(needle) => route_locations(magento, path, &needle),
         // Every module contributing columns/constraints to the table.
         Entity::Table(name) => magento
             .table(&name)
@@ -1315,12 +1374,15 @@ fn phtml_lenses(magento: &Magento, path: &Path) -> Option<Vec<CodeLens>> {
         }
     }
 
-    let uses: Vec<Location> = crate::layout::ops_where(magento, area, |op| {
-        op.template.as_deref() == Some(reference.as_str())
-    })
-    .into_iter()
-    .map(|(_, op)| source_location(magento, &op.source))
-    .collect();
+    let uses: Vec<Location> = magento
+        .template(&reference, area)
+        .map(|t| {
+            t.usages
+                .iter()
+                .map(|u| source_location(magento, &u.source))
+                .collect()
+        })
+        .unwrap_or_default();
     if !uses.is_empty() {
         lenses.push(lens(
             path,
