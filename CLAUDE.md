@@ -191,8 +191,9 @@ CONFIG & ADMIN (where settings & permissions live)
   admin-users [<user>]   admin-roles [<role>]   integrations [<name>]   (live DB)
 
 FRONTEND      (presentation)
-  layout [<handle>] [--area]    widgets [<id>]    email-templates [<id>]
-  translations <str> [--locale] [--db]   ui-components [<name>] [--area]
+  layout [<handle>] [--area]    templates [<Vendor_Module::path.phtml>] [--area]
+  widgets [<id>]    email-templates [<id>]    translations <str> [--locale] [--db]
+  ui-components [<name>] [--area]
   cms-page|cms-block [<identifier>] [--id <n>] [--content]   (live DB)
 
 RUNTIME       (env.php config & live connections)
@@ -243,9 +244,11 @@ pipe (Rust ignores SIGPIPE by default, which `println!`/clap_complete unwrap int
 
 ### Cross-cutting flag vocabulary (a flag means the same thing everywhere)
 
-- **`--area <name>` / `--all-areas`** — only on area-aware commands (`di`, `preference`,
-  `plugins`, `events`, `routes`, `actions`, `webapi`, `uses`). Default = collapsed diff.
-  (`uses` has `--area` but no `--all-areas`: its default is already the merged union.)
+- **`--area <name>`** — only on area-aware commands (`di`, `preference`, `plugins`,
+  `events`, `routes`, `actions`, `webapi`, `uses`, `layout`, `templates`, `ui-components`).
+  **`--all-areas`** is available on the commands that render per-area DI/config views.
+  Default = collapsed diff where applicable. (`uses` has no `--all-areas`: its default is
+  already the merged union.)
 - **`--json`** and **`--color auto|always|never`** + **`--root <path>`** — global, every command.
 - **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config`,
   `schema`, `patches`, `eav`, `indexers`, `cron`). Static by default; DB overlay when asked;
@@ -1030,6 +1033,18 @@ handles on lite); `<handle>` → per-file op stream with per-op `#line`. Known l
 theme `layout/override/` replacement semantics not modeled. Validated: Luma's
 catalog_product_view `<move>`s render under the theme layer; commerce-store's `default`
 handle = 53 files, 12ms.
+
+### `templates` (PHTML files, theme overrides, and layout usages, static, done)
+
+`magequery templates [<Vendor_Module::path.phtml>] [--area]` catalogs every `.phtml`
+under enabled modules' `view/{base,frontend,adminhtml}/templates` trees and every theme's
+`<Vendor_Module>/templates` overrides, then joins them to `template=` assignments from the
+layout index. Short module-layout references (`template="path.phtml"`) normalize to the
+owning module's full reference. No arg lists references with file/use counts; an exact or
+single substring match shows module file, every theme override candidate, and each layout
+handle/block/class use with provenance. Missing files and templates unused by layout XML are
+reported honestly. Theme application depends on active-theme state, so candidates are listed,
+never falsely resolved to one.
 
 ### `widgets` (widget types from `etc/widget.xml`, static, done)
 

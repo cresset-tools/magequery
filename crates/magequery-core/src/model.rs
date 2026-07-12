@@ -1391,6 +1391,37 @@ pub struct LayoutView {
     pub included_by: Vec<String>,
 }
 
+/// One physical `.phtml` file that can satisfy a template reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct TemplateFile {
+    /// Module source or theme override layer. Theme application depends on the active
+    /// theme, so all candidates are reported rather than claiming one wins.
+    pub layer: LayoutLayer,
+    pub file: std::path::PathBuf,
+}
+
+/// One layout operation that assigns a template to a block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct TemplateUsage {
+    pub handle: String,
+    pub block: String,
+    pub class: Option<ClassName>,
+    pub source: Source,
+}
+
+/// A `Vendor_Module::path.phtml` template in one area, joined to its module file,
+/// every theme override candidate, and every layout operation that uses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+pub struct Template {
+    pub reference: String,
+    pub area: Area,
+    pub files: Vec<TemplateFile>,
+    pub usages: Vec<TemplateUsage>,
+}
+
 /// One node a ui component file declares or modifies. UI component XML is
 /// open-vocabulary — the element name IS the component type (`column`, `field`,
 /// `dataSource`, …) — and Magento merges same-name files by matching `(element, name)`,
