@@ -11,8 +11,8 @@ use crate::error::{Diagnostic, Error, Result};
 use crate::ids::ModuleName;
 use crate::model::{Module, ModuleCheck, ModuleSource, UnregisteredModule};
 use crate::parse;
-use crate::resolver;
-use crate::vfs::Vfs;
+use crate::engine::resolver;
+use crate::engine::vfs::Vfs;
 
 use std::sync::Arc;
 

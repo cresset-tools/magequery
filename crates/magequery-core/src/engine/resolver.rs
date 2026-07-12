@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use crate::composer::ComposerPackage;
 use crate::ids::ClassName;
 use crate::model::{InterceptKind, Module, ModuleSource, PluginMethod};
-use crate::vfs::Vfs;
+use crate::engine::vfs::Vfs;
 use crate::php::{self, PhpClass};
 
 /// Base types that mark a controller action (an implementation of any of these is an
