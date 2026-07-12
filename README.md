@@ -34,9 +34,9 @@ $ curl -LsSf https://bougie.tools/magequery.sh | sh
 > irm https://bougie.tools/magequery.ps1 | iex
 ```
 
-Prebuilt binaries (Linux gnu/musl, macOS arm64, Windows x64) are attached to every
-[GitHub Release](https://github.com/cresset-tools/magequery/releases) and mirrored to cresset
-infrastructure.
+Prebuilt binaries (Linux x64 gnu/musl and arm64 gnu, macOS arm64/x64, Windows x64) are
+attached to every [GitHub Release](https://github.com/cresset-tools/magequery/releases) and
+mirrored to cresset infrastructure.
 
 Or build from source. This needs a Rust toolchain, a C compiler, and CMake (the last two for
 the bundled MySQL client used by the live commands):
@@ -47,6 +47,33 @@ $ cargo install --git https://github.com/cresset-tools/magequery magequery
 
 Point it at a store with `--root <path-to-magento>`, or run it from inside the Magento root
 (the default is the current directory).
+
+### GitHub Action
+
+Use the reusable [magequery action](https://github.com/cresset-tools/magequery-action) in a
+Magento project's workflow after Bougie has installed the Magento source and its modules. It
+runs `magequery doctor` by default, which fails on broken configuration references or structural
+cycles. Static commands do not start Magento or need a database.
+
+```yaml
+- uses: actions/checkout@v4
+- uses: cresset-tools/setup-bougie@v1
+- run: bougie sync
+- uses: cresset-tools/magequery-action@v1
+  with:
+    root: .
+```
+
+Pass any other magequery command through `args`; for example, `modules --check` fails when the
+modules on disk disagree with `app/etc/config.php`. The action downloads the latest published
+magequery binary for the runner platform by default, and can pin it independently:
+
+```yaml
+- uses: cresset-tools/magequery-action@v1
+  with:
+    version: 0.7.0
+    args: modules --check
+```
 
 ## Examples
 

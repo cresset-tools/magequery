@@ -34,8 +34,9 @@ unix-archive = ".tar.gz"
 # Target triples we ship prebuilt binaries for. Linux gets both gnu and musl
 # (older distros and Alpine both work) plus arm64 (devcontainers, Graviton);
 # macOS gets both Apple Silicon and Intel; Windows is x64. The editor extensions
-# (editors/vscode, editors/zed) auto-download by exactly these triple names —
-# keep their platform maps in sync when this list changes.
+# (editors/vscode, editors/zed) and cresset-tools/magequery-action auto-download
+# by exactly these triple names — keep their platform maps in sync when this list
+# changes.
 targets = [
     "x86_64-unknown-linux-gnu",
     "x86_64-unknown-linux-musl",
