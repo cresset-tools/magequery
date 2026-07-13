@@ -253,7 +253,7 @@ fn non_lazy_types(
 
     let mut candidates: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut push = |candidates: &mut Vec<String>, seen: &mut HashSet<String>, name: &str| {
+    let push = |candidates: &mut Vec<String>, seen: &mut HashSet<String>, name: &str| {
         if seen.insert(name.to_owned()) {
             candidates.push(name.to_owned());
         }

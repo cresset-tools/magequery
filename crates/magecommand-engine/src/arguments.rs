@@ -58,7 +58,7 @@ pub struct Findings {
     pub issues: Vec<String>,
 }
 
-pub struct ArgsCtx<'a> {
+pub(crate) struct ArgsCtx<'a> {
     pub defs: &'a Definitions,
     /// Scan-set membership (the Reader's collection) — the extended
     /// hierarchy must not mint argument rows of its own.
@@ -76,7 +76,7 @@ pub struct ArgsCtx<'a> {
 }
 
 impl<'a> ArgsCtx<'a> {
-    pub fn new(
+    pub(crate) fn new(
         defs: &'a Definitions,
         scanned: &'a HashSet<String>,
         export: &'a DiExport,
@@ -605,7 +605,7 @@ impl ConstLookup for DefsLookup<'_> {
 /// Build the whole pre-chain `arguments` map for one area: every scanned
 /// Magento-concrete class, plus vtypes over their base's constructor, plus
 /// NULL rows for concrete preference keys outside the scan set.
-pub fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<String, PhpValue> {
+pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<String, PhpValue> {
     let _ = magento;
     let mut out: BTreeMap<String, PhpValue> = BTreeMap::new();
     for name in ctx.scanned {
@@ -681,7 +681,7 @@ pub fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<String, Php
 /// its own object manager before running the operations. The compiled area
 /// files bake these — including exclude regexes with absolute paths and the
 /// module list in ComponentRegistrar (autoload_files.php) order.
-pub fn setup_overrides(
+pub(crate) fn setup_overrides(
     magento: &Magento,
     root: &std::path::Path,
 ) -> Vec<(String, String, Cfg)> {

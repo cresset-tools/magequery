@@ -24,7 +24,6 @@ struct Entry {
     disabled: Option<bool>,
     instance: Option<String>,
     disabled_before_instance: bool,
-    order_key: (u8, u32, u32),
 }
 
 /// Scope-read rank of a core config layer (0 primary, 1 modules, 2 area):
@@ -57,7 +56,6 @@ impl Entry {
                 }
             }),
             disabled_before_instance,
-            order_key: (d.decl_layer, d.decl_load_order, d.decl_line),
         }
     }
 
@@ -299,7 +297,6 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
             Area::WebapiRest => "webapi_rest",
             Area::WebapiSoap => "webapi_soap",
             Area::Graphql => "graphql",
-            _ => continue,
         };
         if area != Area::Global {
             scopes.push(area_code);

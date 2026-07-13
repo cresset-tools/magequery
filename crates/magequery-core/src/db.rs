@@ -1699,11 +1699,11 @@ pub(crate) fn fetch_customer(
     // Custom EAV values — customer value tables aren't store-scoped.
     let mut values: Vec<DbProductValue> = Vec::new();
     for table in ["varchar", "int", "decimal", "datetime", "text"] {
-        let rows: Vec<(String, String, Option<String>, Option<String>, u32, Option<String>)> = c
+        let rows: Vec<(String, String, Option<String>, u32, Option<String>)> = c
             .exec(
                 format!(
                     "SELECT a.attribute_code, a.backend_type, a.frontend_input, \
-                     a.source_model, a.attribute_id, CAST(v.value AS CHAR) \
+                     a.attribute_id, CAST(v.value AS CHAR) \
                      FROM {p}customer_entity_{table} v \
                      JOIN {p}eav_attribute a ON a.attribute_id = v.attribute_id \
                      WHERE v.entity_id = :v"
@@ -1711,12 +1711,11 @@ pub(crate) fn fetch_customer(
                 params! { "v" => entity_id },
             )
             .unwrap_or_default();
-        for (attribute, backend_type, input, source_model, attribute_id, value) in rows {
+        for (attribute, backend_type, input, attribute_id, value) in rows {
             values.push(DbProductValue {
                 attribute,
                 backend_type,
                 input,
-                source_model,
                 attribute_id,
                 store_id: 0,
                 value,
@@ -2371,11 +2370,11 @@ pub(crate) fn fetch_category_card(
 'url_path','display_mode','available_sort_by','default_sort_by','landing_page'";
     let mut values: Vec<DbProductValue> = Vec::new();
     for table in ["varchar", "int", "text", "decimal", "datetime"] {
-        let rows: Vec<(String, String, Option<String>, Option<String>, u32, u32, Option<String>)> =
+        let rows: Vec<(String, String, Option<String>, u32, u32, Option<String>)> =
             c.exec(
                 format!(
                     "SELECT a.attribute_code, a.backend_type, a.frontend_input, \
-                     a.source_model, a.attribute_id, v.store_id, CAST(v.value AS CHAR) \
+                     a.attribute_id, v.store_id, CAST(v.value AS CHAR) \
                      FROM {p}catalog_category_entity_{table} v \
                      JOIN {p}eav_attribute a ON a.attribute_id = v.attribute_id \
                      JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
@@ -2385,12 +2384,11 @@ pub(crate) fn fetch_category_card(
                 params! { "v" => id },
             )
             .unwrap_or_default();
-        for (attribute, backend_type, input, source_model, attribute_id, store_id, value) in rows {
+        for (attribute, backend_type, input, attribute_id, store_id, value) in rows {
             values.push(DbProductValue {
                 attribute,
                 backend_type,
                 input,
-                source_model,
                 attribute_id,
                 store_id,
                 value,
@@ -2842,11 +2840,11 @@ pub(crate) fn fetch_product_prices(
         "'price','special_price','special_from_date','special_to_date','cost','msrp','minimal_price'";
     let mut values: Vec<DbProductValue> = Vec::new();
     for table in ["decimal", "datetime"] {
-        let rows: Vec<(String, String, Option<String>, Option<String>, u32, u32, Option<String>)> =
+        let rows: Vec<(String, String, Option<String>, u32, u32, Option<String>)> =
             c.exec(
                 format!(
                     "SELECT a.attribute_code, a.backend_type, a.frontend_input, \
-                     a.source_model, a.attribute_id, v.store_id, CAST(v.value AS CHAR) \
+                     a.attribute_id, v.store_id, CAST(v.value AS CHAR) \
                      FROM {p}catalog_product_entity_{table} v \
                      JOIN {p}eav_attribute a ON a.attribute_id = v.attribute_id \
                      WHERE v.entity_id = :v AND a.attribute_code IN ({PRICE_ATTRS})"
@@ -2854,12 +2852,11 @@ pub(crate) fn fetch_product_prices(
                 params! { "v" => entity_id },
             )
             .map_err(clean_err)?;
-        for (attribute, backend_type, input, source_model, attribute_id, store_id, value) in rows {
+        for (attribute, backend_type, input, attribute_id, store_id, value) in rows {
             values.push(DbProductValue {
                 attribute,
                 backend_type,
                 input,
-                source_model,
                 attribute_id,
                 store_id,
                 value,
@@ -3045,7 +3042,6 @@ pub(crate) struct DbProductValue {
     pub attribute: String,
     pub backend_type: String,
     pub input: Option<String>,
-    pub source_model: Option<String>,
     pub attribute_id: u32,
     pub store_id: u32,
     pub value: Option<String>,
@@ -3186,11 +3182,11 @@ pub(crate) fn fetch_product(
 
     let mut values: Vec<DbProductValue> = Vec::new();
     for table in ["varchar", "int", "decimal", "text", "datetime"] {
-        let rows: Vec<(String, String, Option<String>, Option<String>, u32, u32, Option<String>)> =
+        let rows: Vec<(String, String, Option<String>, u32, u32, Option<String>)> =
             c.exec(
                 format!(
                     "SELECT a.attribute_code, a.backend_type, a.frontend_input, \
-                     a.source_model, a.attribute_id, v.store_id, CAST(v.value AS CHAR) \
+                     a.attribute_id, v.store_id, CAST(v.value AS CHAR) \
                      FROM {p}catalog_product_entity_{table} v \
                      JOIN {p}eav_attribute a ON a.attribute_id = v.attribute_id \
                      WHERE v.entity_id = :v"
@@ -3198,12 +3194,11 @@ pub(crate) fn fetch_product(
                 params! { "v" => entity_id },
             )
             .map_err(clean_err)?;
-        for (attribute, backend_type, input, source_model, attribute_id, store_id, value) in rows {
+        for (attribute, backend_type, input, attribute_id, store_id, value) in rows {
             values.push(DbProductValue {
                 attribute,
                 backend_type,
                 input,
-                source_model,
                 attribute_id,
                 store_id,
                 value,
