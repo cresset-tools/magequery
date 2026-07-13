@@ -936,6 +936,16 @@ pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> Ge
     // op-5 artifacts, handled elsewhere.
     for (area, _) in crate::areaconfig::AREA_CODES {
         let file = crate::areaconfig::build_area_file(magento, defs, area, &root);
+        // The NonLazyTypes `class_exists` runs in THIS area's OM context, so a
+        // name that is a virtualType in this area is skipped by the generator
+        // (`shouldSkipGeneration`) — no file. The area's vtype names are exactly
+        // the keys of its instanceTypes. Without this, an area-scoped vtype
+        // whose name ends in a generatable suffix (e.g. the graphql vtype
+        // `amPromoQuoteItemFactory`) leaks a bogus Factory: it isn't in the
+        // global-only vtype skip set, and its bare source `amPromoQuoteItem`
+        // reads as a PHP built-in, so `ensure` emits it.
+        let area_vtypes: HashSet<&str> =
+            file.instance_types.iter().map(|(k, _)| k.as_str()).collect();
         let names: Vec<String> = file
             .arguments
             .keys()
@@ -943,6 +953,7 @@ pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> Ge
             .chain(file.instance_types.iter().map(|(_, v)| v.clone()))
             .chain(file.preferences.iter().map(|(_, v)| v.clone()))
             .filter(|n| !n.ends_with("\\Proxy") && !n.ends_with("\\Interceptor"))
+            .filter(|n| !area_vtypes.contains(n.as_str()))
             .collect();
         cg.ensure_all(names.iter().map(String::as_str));
     }
