@@ -82,7 +82,15 @@ pub fn plan(magento: &Magento, defs: &Definitions) -> InterceptionPlan {
                 targets.extend(entry.iter().cloned());
             }
         }
-        methods.insert(class.clone(), targets);
+        // Canonicalize the key to the class's DECLARED case. A di.xml
+        // `<type name=…>` may spell a class in a different case than its
+        // source declares (PHP class names are case-insensitive), but the
+        // generated `<Class>/Interceptor.php` path and `@see`/`extends` follow
+        // the reflection name — the declared case. `defs.get` resolves
+        // case-insensitively; its record carries the canonical fqcn. Two
+        // spellings collapsing to one class union their intercepted methods.
+        let canon = defs.get(class).map(|r| r.meta.fqcn.clone()).unwrap_or_else(|| class.clone());
+        methods.entry(canon).or_default().extend(targets);
     }
 
     InterceptionPlan { methods }
