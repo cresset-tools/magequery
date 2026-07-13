@@ -405,6 +405,48 @@ fn ucfirst(s: &str) -> String {
     }
 }
 
+/// The generated `<X>SearchResults` file, byte-exact. A repository-generator
+/// artifact: `extends \Magento\Framework\Api\SearchResults` with a single
+/// `getItems()` narrowing the docblock return type to `<source>[]`. Unlike the
+/// other generators it emits NO class docblock (its `_generateCode` override
+/// skips `setClassDocBlock`).
+pub fn search_results_bytes(fqcn: &str) -> String {
+    use crate::laminas::{Class, DocBlock, Method, Visibility};
+    let source = &fqcn[..fqcn.len() - "SearchResults".len()];
+    let source_bs = format!("\\{source}");
+    let (ns, short) = match fqcn.rfind('\\') {
+        Some(i) => (Some(fqcn[..i].to_owned()), fqcn[i + 1..].to_owned()),
+        None => (None, fqcn.to_owned()),
+    };
+    let get_items = Method {
+        name: "getItems".into(),
+        visibility: Visibility::Public,
+        is_static: false,
+        is_final: false,
+        is_abstract: false,
+        returns_ref: false,
+        params: vec![],
+        return_type: None,
+        body: Some("return parent::getItems();".into()),
+        doc: DocBlock {
+            short: Some("Returns array of items".into()),
+            tags: vec![("return".into(), format!("{source_bs}[]"))],
+            ..Default::default()
+        },
+    };
+    let class = Class {
+        namespace: ns,
+        name: short,
+        is_interface: false,
+        extends: Some("\\Magento\\Framework\\Api\\SearchResults".into()),
+        implements: vec![],
+        doc: DocBlock::default(),
+        properties: vec![],
+        methods: vec![get_items],
+    };
+    class.render()
+}
+
 /// A `<preference for= type=>` as scanned raw from one di.xml file (the
 /// repository scanner reads files, not merged config).
 struct RawPreference {

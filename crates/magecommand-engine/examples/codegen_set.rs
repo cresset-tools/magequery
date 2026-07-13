@@ -124,6 +124,25 @@ fn main() {
         println!("  proxy-mismatch: {b}");
     }
 
+    // Byte-verify SearchResults + ProxyDeferred.
+    for (name, kind) in &cg.emitted {
+        let got = match kind {
+            GenKind::SearchResults => Some(magecommand_engine::codegen::search_results_bytes(name)),
+            GenKind::ProxyDeferred => magecommand_engine::proxy::proxy_deferred_bytes(
+                &defs,
+                name.trim_end_matches("\\ProxyDeferred"),
+            ),
+            _ => continue,
+        };
+        let path = archive.join(name.replace('\\', "/")).with_extension("php");
+        let exp = std::fs::read_to_string(&path).unwrap_or_default();
+        println!(
+            "{:?} {name}: {}",
+            kind,
+            if got.as_deref() == Some(exp.as_str()) { "IDENTICAL" } else { "MISMATCH" }
+        );
+    }
+
     // What the archive holds, as fqcn -> kind bucket (by suffix).
     let mut expected: BTreeMap<String, &'static str> = BTreeMap::new();
     walk(&archive, &archive, &mut expected);
