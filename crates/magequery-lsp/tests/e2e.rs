@@ -119,6 +119,36 @@ impl Fixture {
 </schema>
 "#,
         );
+        // An ACL resource declared here and referenced from webapi.xml — the cross-file
+        // XML rename case. The webapi service points at the existing Thing class and the
+        // resource ref at the declared id, so neither adds a diagnostic.
+        write(
+            "app/code/Acme/Widget/etc/acl.xml",
+            r#"<?xml version="1.0"?>
+<config>
+    <acl>
+        <resources>
+            <resource id="Magento_Backend::admin">
+                <resource id="Acme_Widget::manage" title="Manage Widgets"/>
+            </resource>
+        </resources>
+    </acl>
+</config>
+"#,
+        );
+        write(
+            "app/code/Acme/Widget/etc/webapi.xml",
+            r#"<?xml version="1.0"?>
+<routes>
+    <route url="/V1/acme/thing" method="POST">
+        <service class="Acme\Widget\Model\Thing" method="save"/>
+        <resources>
+            <resource ref="Acme_Widget::manage"/>
+        </resources>
+    </route>
+</routes>
+"#,
+        );
         // An interception-shaped class no di.xml declares: the plugin-unregistered
         // warning, which must land on the class declaration line, not line 1.
         write(
@@ -533,6 +563,64 @@ fn diagnostics_definition_hover_and_invalidation() {
         },
     );
     assert!(declined.is_none(), "class rename should decline: {declined:?}");
+
+    // --- rename an ACL id across its acl.xml declaration AND the webapi.xml resource ref
+    // (the grep candidate path for a cross-file XML identifier).
+    let acl_rel = "app/code/Acme/Widget/etc/acl.xml";
+    let acl_edit = client
+        .request::<lsp_types::request::Rename>(lsp_types::RenameParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: fixture.uri(acl_rel) },
+                position: position_after(acl_rel, "id=\"Acme_Widget::man"), // inside ::manage
+            },
+            new_name: "Acme_Widget::admin".to_string(),
+            work_done_progress_params: Default::default(),
+        })
+        .expect("acl rename")
+        .changes
+        .expect("acl changes");
+    assert!(acl_edit.contains_key(&fixture.uri(acl_rel)), "acl.xml edited");
+    assert!(
+        acl_edit.contains_key(&fixture.uri("app/code/Acme/Widget/etc/webapi.xml")),
+        "webapi.xml ref edited: {:?}",
+        acl_edit.keys().collect::<Vec<_>>()
+    );
+    assert!(acl_edit.values().flatten().all(|e| e.new_text == "Acme_Widget::admin"));
+
+    // --- rename a container name across BOTH layout files (the layout-ops candidate path,
+    // distinct from the grep — nothing else exercises it end-to-end).
+    let short_layout = "app/code/Acme/Widget/view/frontend/layout/acme_widget_short.xml";
+    let prep = client.request::<lsp_types::request::PrepareRenameRequest>(
+        lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: fixture.uri(layout_rel) },
+            position: position_after(layout_rel, "referenceContainer name=\"conte"),
+        },
+    );
+    match prep {
+        Some(lsp_types::PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. }) => {
+            assert_eq!(placeholder, "content");
+        }
+        other => panic!("prepareRename on block: {other:?}"),
+    }
+    let block_edit = client
+        .request::<lsp_types::request::Rename>(lsp_types::RenameParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: fixture.uri(layout_rel) },
+                position: position_after(layout_rel, "referenceContainer name=\"conte"),
+            },
+            new_name: "main".to_string(),
+            work_done_progress_params: Default::default(),
+        })
+        .expect("block rename")
+        .changes
+        .expect("block changes");
+    assert!(block_edit.contains_key(&fixture.uri(layout_rel)), "index layout edited");
+    assert!(
+        block_edit.contains_key(&fixture.uri(short_layout)),
+        "short layout edited via layout ops: {:?}",
+        block_edit.keys().collect::<Vec<_>>()
+    );
+    assert!(block_edit.values().flatten().all(|e| e.new_text == "main"));
 
     // --- definition on the plugin's `aroundSave` declaration → the intercepted
     // Thing::save implementation.
