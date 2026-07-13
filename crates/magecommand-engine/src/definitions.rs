@@ -202,6 +202,12 @@ impl Definitions {
                     params: &ctor.params,
                 }));
             }
+            // A trait-provided `__construct` is flattened into the using class
+            // and OUTRANKS an inherited one, so it must be found before the
+            // parent walk. (PHP: current-class body > trait > inherited.)
+            if let Some(info) = self.trait_ctor(&record.meta.traits) {
+                return Ok(Some(info));
+            }
             match record.meta.extends.first() {
                 Some(parent) => current = parent.clone(),
                 None => return Ok(None),
@@ -483,6 +489,38 @@ impl Definitions {
     }
 }
 
+impl Definitions {
+    /// Find a `__construct` provided by any of `traits`, transitively (a trait
+    /// may `use` another). The returned [`CtorInfo`] cites the **trait** as
+    /// definer, so its parameter type hints resolve against the trait file's
+    /// namespace + `use` imports — PHP compiles a trait's signatures in the
+    /// trait's own context, not the using class's. Outer traits are checked
+    /// before the traits they use (a trait's own method beats an imported one);
+    /// a genuine multi-trait `__construct` clash is a PHP fatal error, so any
+    /// deterministic pick is fine.
+    fn trait_ctor(&self, traits: &[String]) -> Option<CtorInfo<'_>> {
+        let mut stack: Vec<String> = traits.to_vec();
+        let mut seen: HashSet<String> = HashSet::new();
+        while let Some(t) = stack.pop() {
+            if !seen.insert(t.clone()) {
+                continue;
+            }
+            let Some(rec) = self.get(&t) else { continue };
+            if let Some(ctor) =
+                rec.meta.methods.iter().find(|m| m.name.eq_ignore_ascii_case("__construct"))
+            {
+                return Some(CtorInfo {
+                    definer_fqcn: &rec.meta.fqcn,
+                    definer_uses: &rec.meta.uses,
+                    params: &ctor.params,
+                });
+            }
+            stack.extend(rec.meta.traits.iter().cloned());
+        }
+        None
+    }
+}
+
 /// A constructor found by walking the inheritance chain.
 pub struct CtorInfo<'a> {
     /// FQCN of the class whose file declares the `__construct` (name
@@ -661,5 +699,73 @@ fn excluded(base: &Path, path: &Path, kind: PathKind) -> bool {
         // `#^<setup>(/[\w]+)*/Test#` — capital-T Test at any depth.
         PathKind::Setup => comps.iter().any(|c| c.starts_with("Test")),
         PathKind::Generated => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse one PHP declaration into a [`ClassRecord`] (no source file).
+    fn record(src: &str) -> (String, ClassRecord) {
+        let meta = magecommand_php::parse_file(src.as_bytes())
+            .declarations
+            .into_iter()
+            .next()
+            .expect("one declaration");
+        (meta.fqcn.clone(), ClassRecord { meta, file: PathBuf::new() })
+    }
+
+    fn defs(records: impl IntoIterator<Item = (String, ClassRecord)>) -> Definitions {
+        Definitions {
+            classes: records.into_iter().collect(),
+            scanned: HashSet::new(),
+            setup_classes: HashSet::new(),
+            from_scan: HashSet::new(),
+            generated_classes: HashSet::new(),
+            canonical: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn trait_constructor_outranks_inherited() {
+        // C has no ctor of its own; it `use`s a trait that provides one, and
+        // extends a parent that also has one. PHP: trait beats inherited.
+        let defs = defs([
+            record("<?php trait T { public function __construct($b, $c) {} }"),
+            record("<?php class P { public function __construct($a) {} }"),
+            record("<?php class C extends P { use T; }"),
+        ]);
+        let ctor = defs.constructor_of("C").unwrap().expect("a constructor");
+        let names: Vec<&str> = ctor.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["b", "c"], "trait ctor forwarded, not the parent's");
+        assert_eq!(ctor.definer_fqcn, "T", "definer is the trait (its use-context)");
+    }
+
+    #[test]
+    fn own_constructor_beats_trait() {
+        // An explicit body __construct wins over the trait's.
+        let defs = defs([
+            record("<?php trait T { public function __construct($b) {} }"),
+            record("<?php class C { use T; public function __construct($own) {} }"),
+        ]);
+        let ctor = defs.constructor_of("C").unwrap().expect("a constructor");
+        let names: Vec<&str> = ctor.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["own"]);
+        assert_eq!(ctor.definer_fqcn, "C");
+    }
+
+    #[test]
+    fn trait_constructor_found_transitively() {
+        // A trait that `use`s another trait which provides the ctor.
+        let defs = defs([
+            record("<?php trait Inner { public function __construct($x) {} }"),
+            record("<?php trait Outer { use Inner; }"),
+            record("<?php class C { use Outer; }"),
+        ]);
+        let ctor = defs.constructor_of("C").unwrap().expect("a constructor");
+        let names: Vec<&str> = ctor.params.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["x"]);
+        assert_eq!(ctor.definer_fqcn, "Inner");
     }
 }
