@@ -135,6 +135,16 @@ multi-pattern scan over all PHP + di.xml for `…Factory`, `\Proxy`, `::class`, 
 
 ## Milestones
 
+**Status (2026-07-13): M0–M3 DONE.** Oracle is **mg-install-310** (mageos-lite
+can't `setup:di:compile` — see the oracle-baseline memory), archived as
+`generated/_code` (4106 files) + `generated/_metadata` (16 files). `magecommand
+compile --force` regenerates both trees and `magecommand compare` reports EXACT
+reproduction: 4106/4106 code + 16/16 metadata, zero changed/missing/extra, ~2.4s.
+Code emitters shipped: Factory/ExtensionInterfaceFactory (1093), Extension +
+ExtensionInterface (176 + 174), Proxy + ProxyDeferred (172 + 1), SearchResults (1),
+Interceptor (2489). M2 metadata (area files, app_action_list, interception,
+7 plugin-list triples) byte-identical. Next: **M4 (CAS)**.
+
 **M0 — Oracle + scaffold.** Capture the baseline on mageos-lite (PHP via bougie;
 `generated/` currently holds only ~151 runtime-generated files — no baseline exists
 yet), archive as `_code`/`_metadata`; build the compare harness (missing/extra/
