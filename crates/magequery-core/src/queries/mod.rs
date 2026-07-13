@@ -3,3 +3,4 @@
 mod config;
 mod live;
 mod static_queries;
+mod wiring;
