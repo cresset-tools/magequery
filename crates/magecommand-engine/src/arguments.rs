@@ -731,6 +731,30 @@ pub(crate) fn setup_overrides(
         }
     }
 
+    // app/code modules register AFTER composer autoload, via
+    // NonComposerComponentRegistration's `glob('app/code/*/*/registration.php',
+    // GLOB_NOSORT)` — filesystem (readdir) order, no sort. Mirror that so
+    // app/code modules land in the excluded-path regex too (as their own
+    // `app/code` base group, after every vendor module). Without this they were
+    // dropped entirely — invisible on the all-vendor oracle, but every store
+    // with app/code modules diverged on all seven area files.
+    let app_code = root.join("app/code");
+    if let Ok(vendor_dirs) = std::fs::read_dir(&app_code) {
+        for vendor_ent in vendor_dirs.flatten() {
+            if !vendor_ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            if let Ok(module_dirs) = std::fs::read_dir(vendor_ent.path()) {
+                for mod_ent in module_dirs.flatten() {
+                    let dir = mod_ent.path();
+                    if dir.join("registration.php").is_file() {
+                        registration_dirs.push(dir);
+                    }
+                }
+            }
+        }
+    }
+
     let module_by_path: HashMap<&std::path::Path, bool> = magento
         .modules()
         .iter()
