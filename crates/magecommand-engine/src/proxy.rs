@@ -108,6 +108,7 @@ pub fn proxy_bytes(defs: &Definitions, source: &str) -> Option<String> {
         is_interface: false,
         extends,
         implements,
+        traits: vec![],
         doc: DocBlock {
             short: Some(format!("Proxy class for @see {source_bs}")),
             ..Default::default()
@@ -217,6 +218,7 @@ pub fn proxy_deferred_bytes(defs: &Definitions, source: &str) -> Option<String> 
         is_interface: false,
         extends,
         implements,
+        traits: vec![],
         doc: DocBlock {
             short: Some(format!("ProxyDeferred class for @see {source_bs}")),
             ..Default::default()
@@ -300,6 +302,7 @@ mod tests {
             is_interface: false,
             extends: Some("\\Foo\\Bar".into()),
             implements: vec!["\\Magento\\Framework\\ObjectManager\\NoninterceptableInterface".into()],
+            traits: vec![],
             doc: crate::laminas::DocBlock {
                 short: Some("Proxy class for @see \\Foo\\Bar".into()),
                 ..Default::default()

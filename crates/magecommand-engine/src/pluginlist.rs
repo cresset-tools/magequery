@@ -170,6 +170,94 @@ pub struct GeneratedPluginLists {
     pub findings: Vec<String>,
 }
 
+/// For the Interception operation: seed the plugin inheritance from `seeds`
+/// (`getInterceptedClasses`) and return, for EVERY class the walk populates
+/// with non-null plugins, its plugin instance classes unioned across scopes.
+/// This is the keyset of `getPluginsConfig` — which, because `inheritPlugins`
+/// recurses through parents/interfaces, includes concrete ANCESTORS that
+/// themselves carry plugins even when they weren't seeds (e.g. the lone
+/// `Symfony\…\Command`, or a class implementing `NoninterceptableInterface`
+/// that a seed subclasses). Mirrors `getPluginsList` + `mergeAreaPlugins`:
+/// each area is a CLEAN `[global]`/`[global, area]` merge (NOT the plugin-list
+/// accumulation bug), areas reading the fully-merged `di_export(area)` and
+/// global `di_export(Global)`. Disabled plugins are kept — the snapshot
+/// includes them, so their target methods still count as intercepted.
+pub struct ClassPlugins {
+    /// Every plugin instance class applying (disabled included) — used for the
+    /// intercepted-method union. A class only appears here when the inherit
+    /// walk gave it a non-null config (a class inheriting only disabled
+    /// plugins from an ancestor is absent, matching the archive).
+    pub instances: Vec<String>,
+}
+
+pub fn plugin_instances_across_scopes(
+    magento: &Magento,
+    defs: &Definitions,
+    seeds: &std::collections::HashSet<String>,
+) -> std::collections::HashMap<String, ClassPlugins> {
+    let global_export = magento.di_export(Area::Global);
+    let global_vtypes: HashMap<String, String> = global_export
+        .virtual_types
+        .iter()
+        .map(|v| (v.name.as_str().to_owned(), v.base.as_str().to_owned()))
+        .collect();
+
+    let mut out: std::collections::HashMap<String, ClassPlugins> =
+        std::collections::HashMap::new();
+    for (area, _) in AREA_CODES {
+        let export_owned;
+        let export = if area == Area::Global {
+            &global_export
+        } else {
+            export_owned = magento.di_export(area);
+            &export_owned
+        };
+        let plugin_data = plugin_data_of(export);
+        let mut state = Inherit {
+            defs,
+            global_vtypes: &global_vtypes,
+            plugin_data: &plugin_data,
+            plugin_index: plugin_data
+                .iter()
+                .enumerate()
+                .map(|(i, (t, _))| (t.as_str(), i))
+                .collect(),
+            inherited: Vec::new(),
+            inherited_index: HashMap::new(),
+            processed: Vec::new(),
+            findings: Vec::new(),
+        };
+        // `_loadScopedData` inherits the scope's typed virtual types FIRST,
+        // then the class definitions (seeds). Inheriting a virtual type
+        // populates ITS ancestors too — that is how a concrete class carrying
+        // plugins (e.g. one implementing NoninterceptableInterface, never a
+        // seed) still lands in the config and gets an interceptor.
+        for v in &export.virtual_types {
+            state.inherit(v.name.as_str());
+        }
+        for class in seeds {
+            state.inherit(class);
+        }
+        // Collect EVERY populated class (getPluginsConfig's keyset), not just
+        // the seeds.
+        for (key, cfg) in &state.inherited {
+            let Some(cfg) = cfg else { continue };
+            let entry = out
+                .entry(key.clone())
+                .or_insert_with(|| ClassPlugins { instances: Vec::new() });
+            for (_, e) in cfg {
+                if let Some(inst) = &e.instance {
+                    let inst = inst.trim_start_matches('\\').to_owned();
+                    if !entry.instances.contains(&inst) {
+                        entry.instances.push(inst);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
     let global_export = magento.di_export(Area::Global);
     let global_vtypes: HashMap<String, String> = global_export
@@ -308,7 +396,9 @@ impl Inherit<'_> {
     fn inherit(&mut self, type_name: &str) -> Option<Vec<(String, Entry)>> {
         let key = type_name.trim_start_matches('\\').to_owned();
         if let Some(&i) = self.inherited_index.get(&key) {
-            return self.inherited[i].1.clone();
+            // The RETURN value (what children inherit) is the enabled-only
+            // list; the STORED value keeps disabled entries.
+            return enabled_only(self.inherited[i].1.as_deref());
         }
         // Cycle guard (Magento would recurse forever; none exist).
         self.inherited_index.insert(key.clone(), usize::MAX);
@@ -349,9 +439,16 @@ impl Inherit<'_> {
             Some(plugins)
         };
         let index = self.inherited.len();
-        self.inherited.push((key.clone(), value.clone()));
+        // Store the FULL list (disabled kept) — this is `_inherited`, what the
+        // plugin-list file renders and what the interception SET reads. But
+        // RETURN the enabled-only list — Magento's `inheritPlugins` returns
+        // `$plugins` after unsetting disabled entries, so a child never
+        // inherits a parent's disabled plugins (an all-disabled interface
+        // contributes NOTHING to its implementations).
+        let ret = enabled_only(value.as_deref());
+        self.inherited.push((key.clone(), value));
         self.inherited_index.insert(key, index);
-        value
+        ret
     }
 
     fn process(&mut self, type_name: &str, plugins: &[(String, Entry)]) {
@@ -423,6 +520,24 @@ impl Inherit<'_> {
                 }
             }
         }
+    }
+}
+
+/// The child-inheritance view of a stored plugin config: disabled entries
+/// removed (Magento's `inheritPlugins` returns `$plugins` after unsetting
+/// them). An empty result is `None`, matching PHP's falsy `if ($plugins)`
+/// check that skips the parent merge.
+fn enabled_only(stored: Option<&[(String, Entry)]>) -> Option<Vec<(String, Entry)>> {
+    let stored = stored?;
+    let filtered: Vec<(String, Entry)> = stored
+        .iter()
+        .filter(|(_, e)| e.disabled != Some(true))
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(filtered)
     }
 }
 

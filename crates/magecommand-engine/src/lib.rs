@@ -16,6 +16,7 @@ pub mod codegen;
 pub mod compare;
 pub mod definitions;
 pub mod interception;
+pub mod interceptor;
 pub mod laminas;
 pub mod metadata;
 pub mod proxy;

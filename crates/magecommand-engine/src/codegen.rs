@@ -440,6 +440,7 @@ pub fn search_results_bytes(fqcn: &str) -> String {
         is_interface: false,
         extends: Some("\\Magento\\Framework\\Api\\SearchResults".into()),
         implements: vec![],
+        traits: vec![],
         doc: DocBlock::default(),
         properties: vec![],
         methods: vec![get_items],
@@ -592,6 +593,16 @@ impl<'a> Codegen<'a> {
                     magecommand_php::ClassKind::Class | magecommand_php::ClassKind::Enum
                 );
             }
+            // A compile ARTIFACT (present only because we scan the frozen
+            // archive): at compile start it does not exist on disk, so
+            // `class_exists` is false until WE generate it. Only an already
+            // emitted one counts, and only if it's a class — never fall
+            // through to `class_file`, which would resolve the archive file
+            // and wrongly report the artifact as pre-existing.
+            return self
+                .emitted_ci
+                .get(&name.to_ascii_lowercase())
+                .is_some_and(|kind| *kind != GenKind::ExtensionInterface);
         }
         if let Some(kind) = self.emitted_ci.get(&name.to_ascii_lowercase()) {
             // Every generated artifact is a class except the extension

@@ -126,6 +126,16 @@ fn collect_from(defs: &Definitions, owner: &str, out: &mut Vec<RMethod>, seen: &
     }
 }
 
+/// Resolve a parameter list (a constructor's, say) in `declaring`'s context —
+/// the same reflection extraction the method walk applies.
+pub fn resolve_params(
+    defs: &Definitions,
+    declaring: &str,
+    params: &[magecommand_php::ParamMeta],
+) -> Vec<RParam> {
+    params.iter().map(|p| resolve_param(defs, declaring, p)).collect()
+}
+
 /// Resolve one parameter's type + default the way `EntityAbstract`'s
 /// reflection extractors do.
 fn resolve_param(defs: &Definitions, declaring: &str, p: &magecommand_php::ParamMeta) -> RParam {
@@ -149,7 +159,7 @@ fn resolve_param_type(
     default: Option<&Val>,
 ) -> Option<String> {
     let ty = ty?;
-    let resolved = resolve_self_parent(defs, declaring, ty);
+    let resolved = normalize_nullable(&resolve_self_parent(defs, declaring, ty));
     let allows_null = resolved.starts_with('?')
         || contains_null_member(&resolved)
         || matches!(default, Some(Val::Null));
@@ -166,7 +176,26 @@ fn resolve_param_type(
 
 fn resolve_return_type(defs: &Definitions, declaring: &str, rt: Option<&str>) -> Option<String> {
     let rt = rt?;
-    Some(resolve_self_parent(defs, declaring, rt))
+    Some(normalize_nullable(&resolve_self_parent(defs, declaring, rt)))
+}
+
+/// PHP reflection normalizes a union of exactly one non-null type plus `null`
+/// into a nullable named type: `T|null` (or `null|T`) reflects as `?T`
+/// (`getType()` returns a `ReflectionNamedType` with `allowsNull()`, not a
+/// `ReflectionUnionType`). Genuine multi-type unions keep `null` as a member.
+fn normalize_nullable(ty: &str) -> String {
+    if ty.starts_with('?') || !ty.contains('|') {
+        return ty.to_owned();
+    }
+    let members: Vec<&str> = ty.split('|').map(str::trim).collect();
+    let non_null: Vec<&str> =
+        members.iter().copied().filter(|m| !m.eq_ignore_ascii_case("null")).collect();
+    let has_null = members.iter().any(|m| m.eq_ignore_ascii_case("null"));
+    if has_null && non_null.len() == 1 {
+        format!("?{}", non_null[0])
+    } else {
+        ty.to_owned()
+    }
 }
 
 /// Map `self`/`parent` to concrete FQCNs (reflection reports them resolved);
@@ -245,5 +274,37 @@ fn const_to_val(value: &ConstValue) -> Val {
                 .collect(),
         ),
         _ => Val::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_nullable;
+
+    #[test]
+    fn single_class_plus_null_collapses_to_question_mark() {
+        // PHP reflection reports `T|null` (one class + null) as the nullable
+        // named type `?T` — the AttributeSet Grid Collection interceptor case.
+        assert_eq!(
+            normalize_nullable("Magento\\Framework\\Model\\ResourceModel\\Db\\AbstractDb|null"),
+            "?Magento\\Framework\\Model\\ResourceModel\\Db\\AbstractDb"
+        );
+        // `null` first works too, and casing is PHP-insensitive.
+        assert_eq!(normalize_nullable("null|Foo\\Bar"), "?Foo\\Bar");
+        assert_eq!(normalize_nullable("Foo|NULL"), "?Foo");
+    }
+
+    #[test]
+    fn multi_type_union_keeps_null_member() {
+        // Two or more non-null members stay a genuine union.
+        assert_eq!(normalize_nullable("Foo|Bar|null"), "Foo|Bar|null");
+        assert_eq!(normalize_nullable("int|string"), "int|string");
+    }
+
+    #[test]
+    fn non_union_and_already_nullable_pass_through() {
+        assert_eq!(normalize_nullable("Foo\\Bar"), "Foo\\Bar");
+        assert_eq!(normalize_nullable("?Foo\\Bar"), "?Foo\\Bar");
+        assert_eq!(normalize_nullable("int"), "int");
     }
 }

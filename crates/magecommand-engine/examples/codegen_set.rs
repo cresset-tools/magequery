@@ -147,6 +147,52 @@ fn main() {
     let mut expected: BTreeMap<String, &'static str> = BTreeMap::new();
     walk(&archive, &archive, &mut expected);
 
+    // Interceptors: SET + bytes.
+    let t = std::time::Instant::now();
+    let plan = magecommand_engine::interceptor::plan(&magento, &defs);
+    eprintln!("interceptor plan: {:?} ({} classes)", t.elapsed(), plan.methods.len());
+    let arch_intc: std::collections::HashSet<String> = expected
+        .iter()
+        .filter(|(_, c)| **c == "interceptor")
+        .map(|(n, _)| n.trim_end_matches("\\Interceptor").to_owned())
+        .collect();
+    let mine: std::collections::HashSet<String> = plan.methods.keys().cloned().collect();
+    let missing: Vec<&String> = arch_intc.difference(&mine).collect();
+    let extra: Vec<&String> = mine.difference(&arch_intc).collect();
+    println!(
+        "interceptor SET: archive {}  computed {}  missing {}  extra {}",
+        arch_intc.len(),
+        mine.len(),
+        missing.len(),
+        extra.len()
+    );
+    for m in missing.iter().take(15) {
+        println!("  SET-missing: {m}");
+    }
+    for e in extra.iter().take(15) {
+        println!("  SET-extra: {e}");
+    }
+    let mut ic_ok = 0usize;
+    let mut ic_bad: Vec<String> = Vec::new();
+    for (class, mset) in &plan.methods {
+        if !arch_intc.contains(class) {
+            continue;
+        }
+        let path = archive
+            .join(class.replace('\\', "/"))
+            .join("Interceptor.php");
+        let Ok(exp) = std::fs::read_to_string(&path) else { continue };
+        match magecommand_engine::interceptor::interceptor_bytes(&defs, class, mset) {
+            Some(got) if got == exp => ic_ok += 1,
+            _ => ic_bad.push(class.clone()),
+        }
+    }
+    println!("interceptor bytes: {ic_ok} identical, {} mismatched", ic_bad.len());
+    ic_bad.sort();
+    for b in ic_bad.iter().take(15) {
+        println!("  ic-mismatch: {b}");
+    }
+
     let bucket = |k: GenKind| -> &'static str {
         match k {
             GenKind::Factory | GenKind::ExtensionInterfaceFactory => "factory",

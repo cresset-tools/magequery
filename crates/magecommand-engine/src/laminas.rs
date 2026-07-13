@@ -464,6 +464,8 @@ pub struct Class {
     pub extends: Option<String>,
     /// Extended interfaces (for an interface) OR implemented interfaces.
     pub implements: Vec<String>,
+    /// `use \Trait;` lines, rendered first inside the body.
+    pub traits: Vec<String>,
     pub doc: DocBlock,
     pub properties: Vec<Property>,
     pub methods: Vec<Method>,
@@ -504,6 +506,15 @@ impl Class {
         out.push_str("\n{\n");
 
         let mut sections: Vec<String> = Vec::new();
+        if !self.traits.is_empty() {
+            sections.push(
+                self.traits
+                    .iter()
+                    .map(|t| format!("{INDENT}use {};", self.short_or_complete(t)))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+        }
         if !self.properties.is_empty() {
             sections.push(
                 self.properties
