@@ -84,7 +84,15 @@ fn main() -> anyhow::Result<ExitCode> {
 fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> anyhow::Result<ExitCode> {
     use magequery_core::Area;
 
+    // Magento's `BP` is always an absolute path, and it is baked verbatim into
+    // several generated arguments (the dev/test path-exclusion regexes in the
+    // area files). Absolutize a relative or defaulted root so `compile` is
+    // byte-identical regardless of the working directory it is invoked from
+    // (`.` from inside the store would otherwise emit `./setup/src` and empty
+    // module-path regexes). `absolute` (not `canonicalize`) mirrors `BP`: it
+    // does not resolve symlinks.
     let root = root.unwrap_or_else(|| PathBuf::from("."));
+    let root = std::path::absolute(&root).unwrap_or(root);
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
 
