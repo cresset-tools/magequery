@@ -868,10 +868,74 @@ impl Magento {
         out
     }
 
+    /// Every enabled module's source file (`.php`/`.xml`/`.phtml`/`.graphqls`) whose text
+    /// contains `needle` as a substring — the candidate set for a rename sweep, and the one
+    /// primitive that reaches occurrences no index holds (a PHP `dispatch()`/`isAllowed()`
+    /// string literal can sit in any file). A **coarse** pre-filter: substring, not
+    /// whole-token — the caller confirms each hit is a real reference. Reads go through the
+    /// VFS so unsaved buffers are seen; the module directory trees are walked in parallel.
+    /// Test-fixture and runtime/output dirs are skipped (the class walk's exclusions), so a
+    /// rename never rewrites generated code or fixtures. Sorted, deduped.
+    pub fn files_containing(&self, needle: &str) -> Vec<PathBuf> {
+        use rayon::prelude::*;
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let lists: Vec<Vec<PathBuf>> = self
+            .index
+            .modules
+            .par_iter()
+            .map(|m| {
+                let mut out = Vec::new();
+                walk_source(&m.path, 0, &mut |path| {
+                    if self.index.vfs.read_to_string(path).is_ok_and(|t| t.contains(needle)) {
+                        out.push(path.to_path_buf());
+                    }
+                });
+                out
+            })
+            .collect();
+        let mut all: Vec<PathBuf> = lists.into_iter().flatten().collect();
+        all.sort();
+        all.dedup();
+        all
+    }
+
     fn events_index(&self) -> &breadth::EventIndex {
         self.events.get_or_init(|| breadth::EventIndex::build(&self.index.modules, &self.index.vfs))
     }
 
+}
+
+/// Recursively walk a module tree, calling `f` on each `.php`/`.xml`/`.phtml`/`.graphqls`
+/// file. Skips test fixtures and runtime/output dirs (mirrors the class walk's exclusions)
+/// so a rename sweep never touches generated code or fixtures.
+fn walk_source(dir: &Path, depth: usize, f: &mut impl FnMut(&Path)) {
+    if depth > 12 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_dir() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if matches!(
+                name.as_ref(),
+                "Test" | "Tests" | "_files" | "node_modules" | "generated" | "var" | "pub" | "dev"
+            ) || name.starts_with('.')
+            {
+                continue;
+            }
+            walk_source(&path, depth + 1, f);
+        } else if matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("php" | "xml" | "phtml" | "graphqls")
+        ) {
+            f(&path);
+        }
+    }
 }
 
 /// Tables the runtime creates and manages outside `db_schema.xml`: mview changelogs,

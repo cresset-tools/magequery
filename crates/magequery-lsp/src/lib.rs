@@ -21,6 +21,7 @@ mod diag;
 mod entity;
 mod features;
 mod layout;
+mod rename;
 mod server;
 mod symbols;
 mod textpos;

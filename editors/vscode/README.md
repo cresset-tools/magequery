@@ -42,6 +42,11 @@ of the checkout — no database, no `setup:di:compile`, no working PHP needed.
   intercepts (resolved through the di.xml plugin declaration and the preference chain);
   go-to-definition on an intercepted method lands on the plugin methods wrapping it,
   including plugins declared on interfaces and parent classes.
+- **Rename** — rename an ACL resource id, event name, or layout block/container name and
+  every reference is rewritten across the config XML *and* PHP string literals (a
+  `dispatch()`, an `isAllowed()`), the identifiers a PHP language server treats as opaque
+  strings. Class names, config paths, and templates are left to your PHP LS / a file
+  rename on purpose.
 
 Open buffers overlay the checkout, so diagnostics and answers follow your unsaved
 edits as you type (debounced). It

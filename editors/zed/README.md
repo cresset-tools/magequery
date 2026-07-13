@@ -20,6 +20,11 @@ methods — hover the hint for the breakdown). Enable them in Zed's settings:
 "inlay_hints": { "enabled": true }
 ```
 
+**Rename** rewrites an ACL resource id, event name, or layout block name across the
+config XML *and* PHP string literals (`dispatch()`, `isAllowed()`) — the identifiers a
+PHP server treats as opaque strings. Class/config-path/template renames are left to your
+PHP server / a file rename on purpose.
+
 ## Server binary
 
 `magequery` from `PATH` when present; otherwise the extension downloads the current
