@@ -218,6 +218,20 @@ fn discover_vendor(
             Probe::Bad(diag) => diags.push(diag),
         }
     }
+
+    // Superpackage fallback. A few vendor packages register a single root
+    // `registration.php` that `require_once`s many modules bundled under an
+    // `app/code/` tree (e.g. `magestore/synthesized-superpackage`, 88 modules).
+    // None of those module roots sit at a composer candidate root, so probe the
+    // `app/code` tree recursively — exactly as we do for the project's own
+    // `app/code`. The `is_dir` gate keeps this free for normal packages (a
+    // vendor package with an `app/code/` dir is the rare superpackage marker).
+    for pkg in packages {
+        let app_code = pkg.root.join("app/code");
+        if app_code.is_dir() {
+            scan(&app_code, ModuleSource::Vendor, 0, out, diags);
+        }
+    }
 }
 
 /// Candidate module-root directories for a composer package: the dir of each

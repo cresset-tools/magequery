@@ -25,6 +25,24 @@ fn is_action_base(c: &ClassName) -> bool {
     )
 }
 
+/// Whether `path` lives under an `app/code/` directory — true for the
+/// project's own modules and for a vendor superpackage's bundled modules
+/// (`vendor/x/pkg/app/code/Vendor/Module`), the two cases Magento resolves via
+/// the registrar convention rather than composer PSR-4.
+fn under_app_code(path: &std::path::Path) -> bool {
+    let mut comps = path.components();
+    while let Some(c) = comps.next() {
+        if c.as_os_str() == "app" {
+            if let Some(next) = comps.clone().next() {
+                if next.as_os_str() == "code" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) struct ClassResolver {
     /// PSR-4: `(namespace prefix ending in '\', source dirs)`, sorted longest-prefix-first
     /// so longest-match wins. The prefix is stripped from the path.
@@ -62,9 +80,17 @@ impl ClassResolver {
         prefixes.extend(root_psr4);
         psr0.extend(root_psr0);
 
-        // app/code is not composer-managed; synthesize the Magento convention
-        // `Vendor_Module` -> namespace `Vendor\Module\` rooted at the module dir.
-        for m in modules.iter().filter(|m| m.source == ModuleSource::App) {
+        // Modules that aren't composer-PSR-4-managed: synthesize the Magento
+        // registrar convention `Vendor_Module` -> namespace `Vendor\Module\`
+        // rooted at the module dir. This covers the project's own `app/code`
+        // AND vendor "superpackages" that bundle modules under their own
+        // `app/code/` tree with only a root `registration.php` and no PSR-4
+        // (e.g. `magestore/synthesized-superpackage`) — Magento resolves those
+        // classes through the same registrar autoloader, not composer.
+        for m in modules
+            .iter()
+            .filter(|m| m.source == ModuleSource::App || under_app_code(&m.path))
+        {
             let ns = format!("{}\\", m.name.as_str().replace('_', "\\"));
             prefixes.push((ns, vec![m.path.clone()]));
         }
@@ -259,5 +285,30 @@ impl ClassResolver {
                 PluginMethod { kind, target, plugin_method: m.name }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::under_app_code;
+    use std::path::Path;
+
+    #[test]
+    fn under_app_code_matches_project_and_superpackage() {
+        // Project app/code.
+        assert!(under_app_code(Path::new(
+            "/srv/shop/app/code/Magestore/Webpos"
+        )));
+        // Vendor superpackage bundling modules under its own app/code.
+        assert!(under_app_code(Path::new(
+            "/srv/shop/vendor/magestore/synthesized-superpackage/app/code/Magestore/Webpos"
+        )));
+        // A normal composer-managed vendor module is NOT under app/code.
+        assert!(!under_app_code(Path::new(
+            "/srv/shop/vendor/magento/module-catalog"
+        )));
+        // `app` not immediately followed by `code` must not match.
+        assert!(!under_app_code(Path::new("/srv/app/lib/code/Thing")));
+        assert!(!under_app_code(Path::new("/srv/app")));
     }
 }
