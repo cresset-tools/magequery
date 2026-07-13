@@ -22,6 +22,13 @@ pub enum Val {
     Str(String),
     /// `(key, value)` — `key` absent means a sequential list entry.
     Array(Vec<(Option<ArrKey>, Val)>),
+    /// A verbatim PHP expression, rendered as-is (no quoting). Used to
+    /// preserve a parameter default the const-evaluator can't fold — e.g. a
+    /// `\Class::CONST` whose defining class isn't in the parsed universe.
+    /// Dropping such a default would make an inherited-optional parameter
+    /// required and fatal at load time, so we keep a fully-qualified,
+    /// always-valid reference instead.
+    Raw(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +47,7 @@ impl Val {
             Val::Int(n) => n.to_string(),
             Val::Float(f) => render_float(*f),
             Val::Str(s) => escape_single_quoted(s),
+            Val::Raw(s) => s.clone(),
             Val::Array(items) => {
                 let mut noindex = 0i64;
                 let parts: Vec<String> = items
