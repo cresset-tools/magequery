@@ -77,6 +77,30 @@ fn main() {
         println!("  byte-mismatch: {b}");
     }
 
+    // Byte-verify Extension / ExtensionInterface files.
+    let ext_cfg = magecommand_engine::codegen::ExtConfig::build(&magento);
+    let mut ext_ok = 0usize;
+    let mut ext_bad: Vec<&String> = Vec::new();
+    for (name, kind) in &cg.emitted {
+        if !matches!(kind, GenKind::Extension | GenKind::ExtensionInterface) {
+            continue;
+        }
+        let path = archive.join(name.replace('\\', "/")).with_extension("php");
+        let Ok(expected_bytes) = std::fs::read_to_string(&path) else {
+            ext_bad.push(name);
+            continue;
+        };
+        if magecommand_engine::codegen::extension_bytes(name, *kind, &ext_cfg) == expected_bytes {
+            ext_ok += 1;
+        } else {
+            ext_bad.push(name);
+        }
+    }
+    println!("extension bytes: {ext_ok} identical, {} mismatched", ext_bad.len());
+    for b in ext_bad.iter().take(10) {
+        println!("  ext-mismatch: {b}");
+    }
+
     // What the archive holds, as fqcn -> kind bucket (by suffix).
     let mut expected: BTreeMap<String, &'static str> = BTreeMap::new();
     walk(&archive, &archive, &mut expected);

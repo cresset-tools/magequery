@@ -165,6 +165,246 @@ pub fn factory_bytes(fqcn: &str, kind: GenKind) -> String {
     out
 }
 
+/// The merged `extension_attributes.xml` config, keyed by `for` interface
+/// (leading backslash trimmed, as the generator's `ltrim` lookup does), the
+/// value an ordered `(code, raw type)` list. Order is Magento's DOM merge:
+/// first-mention position across modules in load order, `type` last-wins.
+pub struct ExtConfig {
+    map: std::collections::HashMap<String, Vec<(String, String)>>,
+}
+
+impl ExtConfig {
+    /// Build from every enabled module's global `etc/extension_attributes.xml`
+    /// (the Config reader's default scope is `global`; there are no per-area
+    /// extension_attributes files).
+    pub fn build(magento: &Magento) -> ExtConfig {
+        let mut map: std::collections::HashMap<String, Vec<(String, String)>> =
+            std::collections::HashMap::new();
+        for module in magento.modules() {
+            if !module.enabled {
+                continue;
+            }
+            let path = module.path.join("etc/extension_attributes.xml");
+            let Ok(text) = fs::read_to_string(&path) else { continue };
+            merge_extension_attributes(&text, &mut map);
+        }
+        ExtConfig { map }
+    }
+
+    fn attributes(&self, for_type: &str) -> &[(String, String)] {
+        self.map
+            .get(for_type.trim_start_matches('\\'))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
+/// One extension_attributes.xml streamed into the merge map. `<attribute
+/// code= type=>` under `<extension_attributes for=>`; resources/join ignored
+/// (the generator reads only DATA_TYPE).
+fn merge_extension_attributes(
+    text: &str,
+    map: &mut std::collections::HashMap<String, Vec<(String, String)>>,
+) {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(text);
+    let mut buf = Vec::new();
+    let mut current_for: Option<String> = None;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                match e.local_name().as_ref() {
+                    b"extension_attributes" => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"for" {
+                                current_for = Some(
+                                    String::from_utf8_lossy(&attr.value)
+                                        .trim_start_matches('\\')
+                                        .to_owned(),
+                                );
+                            }
+                        }
+                    }
+                    b"attribute" => {
+                        if let Some(for_type) = &current_for {
+                            let mut code = None;
+                            let mut ty = None;
+                            for attr in e.attributes().flatten() {
+                                match attr.key.as_ref() {
+                                    b"code" => {
+                                        code = Some(String::from_utf8_lossy(&attr.value).into_owned())
+                                    }
+                                    b"type" => {
+                                        ty = Some(String::from_utf8_lossy(&attr.value).into_owned())
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if let (Some(code), Some(ty)) = (code, ty) {
+                                let entry = map.entry(for_type.clone()).or_default();
+                                match entry.iter_mut().find(|(c, _)| *c == code) {
+                                    Some(slot) => slot.1 = ty, // in-place, keeps position
+                                    None => entry.push((code, ty)),
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(e)) => {
+                if e.local_name().as_ref() == b"extension_attributes" {
+                    current_for = None;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// The generated Extension / ExtensionInterface file, byte-exact. `kind`
+/// selects class-vs-interface framing; the attribute method list is shared
+/// (both apply `isValidTypeDeclaration` to gate the setter type hint).
+pub fn extension_bytes(fqcn: &str, kind: GenKind, cfg: &ExtConfig) -> String {
+    let (_, source) = classify(fqcn).expect("extension name classifies");
+    let (ns, short) = match fqcn.rfind('\\') {
+        Some(i) => (Some(&fqcn[..i]), &fqcn[i + 1..]),
+        None => (None, fqcn),
+    };
+    let (label, is_iface, decl_line) = match kind {
+        GenKind::Extension => (
+            "Extension",
+            false,
+            format!(
+                "class {short} extends \\Magento\\Framework\\Api\\AbstractSimpleObject implements {short}Interface"
+            ),
+        ),
+        GenKind::ExtensionInterface => (
+            "ExtensionInterface",
+            true,
+            format!(
+                "interface {short} extends \\Magento\\Framework\\Api\\ExtensionAttributesInterface"
+            ),
+        ),
+        _ => unreachable!("extension_bytes called with {kind:?}"),
+    };
+
+    let mut methods: Vec<String> = Vec::new();
+    for (code, raw_type) in cfg.attributes(&source) {
+        let rtype = render_attr_type(raw_type);
+        let prop = snake_to_camel(code);
+        let ucprop = ucfirst(&prop);
+        // getter
+        let getter_sig = format!("get{ucprop}()");
+        let getter_body = if is_iface {
+            ";".to_owned()
+        } else {
+            format!("\n    {{\n        return $this->_get('{code}');\n    }}")
+        };
+        methods.push(format!(
+            "    /**\n     * @return {rtype}|null\n     */\n    public function {getter_sig}{getter_body}"
+        ));
+        // setter
+        let hint = if is_valid_type_declaration(&rtype) {
+            format!("{rtype} ")
+        } else {
+            String::new()
+        };
+        let setter_sig = format!("set{ucprop}({hint}${prop})");
+        let setter_body = if is_iface {
+            ";".to_owned()
+        } else {
+            format!(
+                "\n    {{\n        $this->setData('{code}', ${prop});\n        return $this;\n    }}"
+            )
+        };
+        methods.push(format!(
+            "    /**\n     * @param {rtype} ${prop}\n     * @return $this\n     */\n    public function {setter_sig}{setter_body}"
+        ));
+    }
+
+    let mut out = String::from("<?php\n");
+    if let Some(ns) = ns {
+        out.push_str("namespace ");
+        out.push_str(ns);
+        out.push_str(";\n\n");
+    }
+    out.push_str("/**\n * ");
+    out.push_str(label);
+    out.push_str(" class for @see \\");
+    out.push_str(&source);
+    out.push_str("\n */\n");
+    out.push_str(&decl_line);
+    out.push_str("\n{\n");
+    if !methods.is_empty() {
+        out.push_str(&methods.join("\n\n"));
+        out.push('\n');
+    }
+    out.push_str("}\n");
+    out
+}
+
+/// `_getFullyQualifiedClassName` applied by the generator: a type containing
+/// a backslash is forced to exactly one leading backslash; scalars/arrays of
+/// scalars pass through untouched (`int[]`, `string`).
+fn render_attr_type(raw: &str) -> String {
+    if raw.contains('\\') {
+        format!("\\{}", raw.trim_start_matches('\\'))
+    } else {
+        raw.to_owned()
+    }
+}
+
+/// `TypeProcessor::isValidTypeDeclaration` — true only for a class/interface
+/// type (not a scalar, `mixed`, or an array-of).
+fn is_valid_type_declaration(rendered: &str) -> bool {
+    if rendered.ends_with("[]") || rendered.starts_with("ArrayOf") {
+        return false;
+    }
+    let normalized = match rendered {
+        "str" => "string",
+        "integer" => "int",
+        "bool" => "boolean",
+        "mixed" => "anyType",
+        other => other,
+    };
+    !matches!(normalized, "string" | "int" | "float" | "double" | "boolean" | "anyType")
+}
+
+/// `SimpleDataObjectConverter::snakeCaseToCamelCase` = lcfirst of the
+/// upper-camel form (`str_replace('_', '', ucwords($s, '_'))`).
+fn snake_to_camel(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut upper_next = true;
+    for ch in input.chars() {
+        if ch == '_' {
+            upper_next = true;
+        } else if upper_next {
+            out.extend(ch.to_uppercase());
+            upper_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    // lcfirst
+    let mut chars = out.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().collect::<String>() + chars.as_str(),
+        None => out,
+    }
+}
+
+fn ucfirst(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// A `<preference for= type=>` as scanned raw from one di.xml file (the
 /// repository scanner reads files, not merged config).
 struct RawPreference {
@@ -885,6 +1125,79 @@ mod tests {
         assert_eq!(factory_param_candidate("Foo\\Factory"), None);
         assert_eq!(factory_param_candidate("array"), None);
         assert_eq!(factory_param_candidate("string"), None);
+    }
+
+    #[test]
+    fn snake_camel_and_type_predicates() {
+        assert_eq!(snake_to_camel("exclude_website_ids"), "excludeWebsiteIds");
+        assert_eq!(snake_to_camel("stock_item"), "stockItem");
+        assert_eq!(ucfirst("stockItem"), "StockItem");
+        // class type → hint; scalar/array/mixed → no hint.
+        assert!(is_valid_type_declaration("\\Magento\\Foo\\BarInterface"));
+        assert!(!is_valid_type_declaration("int[]"));
+        assert!(!is_valid_type_declaration("\\Magento\\Foo\\BarInterface[]"));
+        assert!(!is_valid_type_declaration("int"));
+        assert!(!is_valid_type_declaration("string"));
+        assert!(!is_valid_type_declaration("mixed"));
+        assert!(!is_valid_type_declaration("boolean"));
+        // FQCN forcing.
+        assert_eq!(render_attr_type("int[]"), "int[]");
+        assert_eq!(
+            render_attr_type("Magento\\Foo\\Bar"),
+            "\\Magento\\Foo\\Bar"
+        );
+        assert_eq!(render_attr_type("\\Magento\\Foo\\Bar"), "\\Magento\\Foo\\Bar");
+    }
+
+    #[test]
+    fn extension_bytes_shape() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "Magento\\Customer\\Api\\Data\\GroupInterface".to_owned(),
+            vec![("exclude_website_ids".to_owned(), "int[]".to_owned())],
+        );
+        let cfg = ExtConfig { map };
+        let cls = extension_bytes(
+            "Magento\\Customer\\Api\\Data\\GroupExtension",
+            GenKind::Extension,
+            &cfg,
+        );
+        assert!(cls.starts_with("<?php\nnamespace Magento\\Customer\\Api\\Data;\n\n/**\n * Extension class for @see \\Magento\\Customer\\Api\\Data\\GroupInterface\n */\nclass GroupExtension extends \\Magento\\Framework\\Api\\AbstractSimpleObject implements GroupExtensionInterface\n{\n"));
+        assert!(cls.contains("    public function getExcludeWebsiteIds()\n    {\n        return $this->_get('exclude_website_ids');\n    }\n\n"));
+        assert!(cls.contains("    public function setExcludeWebsiteIds($excludeWebsiteIds)\n    {\n        $this->setData('exclude_website_ids', $excludeWebsiteIds);\n        return $this;\n    }\n}\n"));
+        let iface = extension_bytes(
+            "Magento\\Customer\\Api\\Data\\GroupExtensionInterface",
+            GenKind::ExtensionInterface,
+            &cfg,
+        );
+        assert!(iface.contains("interface GroupExtensionInterface extends \\Magento\\Framework\\Api\\ExtensionAttributesInterface\n{\n"));
+        assert!(iface.contains("    public function getExcludeWebsiteIds();\n\n"));
+        assert!(iface.ends_with("    public function setExcludeWebsiteIds($excludeWebsiteIds);\n}\n"));
+        // Empty attribute set → bare body.
+        let empty = ExtConfig { map: std::collections::HashMap::new() };
+        let e = extension_bytes(
+            "Magento\\Bundle\\Api\\Data\\LinkExtension",
+            GenKind::Extension,
+            &empty,
+        );
+        assert!(e.ends_with("implements LinkExtensionInterface\n{\n}\n"));
+    }
+
+    #[test]
+    fn extension_setter_type_hint() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            "Foo\\ProductInterface".to_owned(),
+            vec![(
+                "stock_item".to_owned(),
+                "Magento\\CatalogInventory\\Api\\Data\\StockItemInterface".to_owned(),
+            )],
+        );
+        let cfg = ExtConfig { map };
+        let cls = extension_bytes("Foo\\ProductExtension", GenKind::Extension, &cfg);
+        // Class type ⇒ setter carries the hint; docblock uses the FQCN form.
+        assert!(cls.contains("public function setStockItem(\\Magento\\CatalogInventory\\Api\\Data\\StockItemInterface $stockItem)"));
+        assert!(cls.contains(" * @return \\Magento\\CatalogInventory\\Api\\Data\\StockItemInterface|null"));
     }
 
     #[test]
