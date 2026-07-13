@@ -913,6 +913,93 @@ impl<'a> Codegen<'a> {
     }
 }
 
+/// The full `generated/code` tree: every generated PHP file as
+/// `(relative path, content)`, the relative path being the FQCN with `\` →
+/// `/` and a `.php` suffix (an interceptor lives at `<Class>/Interceptor.php`).
+pub struct GeneratedCode {
+    pub files: Vec<(String, String)>,
+    pub findings: Vec<String>,
+}
+
+/// Generate every `generated/code` file for the compile. Runs the same
+/// scanner sweep the SET model does (`collect` + the NonLazyTypes incidental
+/// `class_exists` pass over the seven area files), then materializes the bytes
+/// per generated entity; interceptors come from the separate interception
+/// plan (op 5). The result is the union that `magecommand compare` checks
+/// against the frozen `generated/_code`.
+pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> GeneratedCode {
+    let mut cg = Codegen::new(magento, defs, root.clone());
+    cg.collect();
+    // Incidental: the Area operation's NonLazyTypes modifier `class_exists`es
+    // every argument key (virtual-type names included), instanceType value and
+    // preference value; `\Proxy`/`\Interceptor` names short-circuit or are
+    // op-5 artifacts, handled elsewhere.
+    for (area, _) in crate::areaconfig::AREA_CODES {
+        let file = crate::areaconfig::build_area_file(magento, defs, area, &root);
+        let names: Vec<String> = file
+            .arguments
+            .keys()
+            .cloned()
+            .chain(file.instance_types.iter().map(|(_, v)| v.clone()))
+            .chain(file.preferences.iter().map(|(_, v)| v.clone()))
+            .filter(|n| !n.ends_with("\\Proxy") && !n.ends_with("\\Interceptor"))
+            .collect();
+        cg.ensure_all(names.iter().map(String::as_str));
+    }
+
+    let ext_cfg = ExtConfig::build(magento);
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut findings: Vec<String> = Vec::new();
+    for (name, kind) in &cg.emitted {
+        let content = match kind {
+            GenKind::Factory | GenKind::ExtensionInterfaceFactory => factory_bytes(name, *kind),
+            GenKind::Extension | GenKind::ExtensionInterface => {
+                extension_bytes(name, *kind, &ext_cfg)
+            }
+            GenKind::SearchResults => search_results_bytes(name),
+            GenKind::Proxy => match crate::proxy::proxy_bytes(defs, name.trim_end_matches("\\Proxy")) {
+                Some(bytes) => bytes,
+                None => {
+                    findings.push(format!("proxy source unresolved: {name}"));
+                    continue;
+                }
+            },
+            GenKind::ProxyDeferred => {
+                match crate::proxy::proxy_deferred_bytes(defs, name.trim_end_matches("\\ProxyDeferred")) {
+                    Some(bytes) => bytes,
+                    None => {
+                        findings.push(format!("proxyDeferred source unresolved: {name}"));
+                        continue;
+                    }
+                }
+            }
+            // Repository/Logger/Mapper/Persistor/Convertor/Remote: the
+            // RepositoryScanner family and the never-exercised registry
+            // entries. None occur on the oracle (archive `other` = 0); a
+            // future store that hits one gets a finding, not a silent gap.
+            other => {
+                findings.push(format!("unmodeled generator {other:?}: {name}"));
+                continue;
+            }
+        };
+        files.push((format!("{}.php", name.replace('\\', "/")), content));
+    }
+
+    // op 5: interceptors (not part of `emitted` — a separate plan).
+    let plan = crate::interceptor::plan(magento, defs);
+    for (class, methods) in &plan.methods {
+        match crate::interceptor::interceptor_bytes(defs, class, methods) {
+            Some(bytes) => {
+                files.push((format!("{}/Interceptor.php", class.replace('\\', "/")), bytes))
+            }
+            None => findings.push(format!("interceptor subject unresolved: {class}")),
+        }
+    }
+
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    GeneratedCode { files, findings }
+}
+
 /// The parameter-type capture of PhpScanner's reflection regex
 /// `/\[\s\<\w+?>\s\??([\w\\]+)/`: strip a leading `?`, take the leading
 /// word/backslash run (a union stops at `|`), and keep it when it ends in

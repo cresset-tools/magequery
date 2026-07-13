@@ -77,6 +77,47 @@ pub fn write_metadata_file(
     Ok(target)
 }
 
+/// Write one `generated/code` file (`rel_path` is `Foo/Bar/Proxy.php`),
+/// creating the intermediate directories. Same atomic temp+rename +
+/// clobber-guard as [`write_metadata_file`].
+pub fn write_code_file(
+    root: &Path,
+    rel_path: &str,
+    content: &str,
+    force: bool,
+) -> Result<PathBuf> {
+    let target = root.join("generated/code").join(rel_path);
+    let dir = target
+        .parent()
+        .ok_or_else(|| Error::io(&target, std::io::Error::other("no parent dir")))?;
+    fs::create_dir_all(dir).map_err(|e| Error::io(dir, e))?;
+    if target.exists() && !force {
+        return Err(Error::WouldOverwrite(target));
+    }
+    let file_name = target.file_name().expect("target has a file name").to_string_lossy();
+    let tmp = dir.join(format!(".{file_name}.tmp"));
+    fs::write(&tmp, content).map_err(|e| Error::io(&tmp, e))?;
+    fs::rename(&tmp, &target).map_err(|e| Error::io(&target, e))?;
+    Ok(target)
+}
+
+/// Remove a compile output directory (`generated/code` or
+/// `generated/metadata`) so a fresh compile starts clean, exactly as
+/// `setup:di:compile` wipes `generated/code` before running. A missing dir is
+/// not an error. NEVER pass an archive dir (`_code`/`_metadata`).
+pub fn clear_generated_dir(root: &Path, subdir: &str) -> Result<()> {
+    debug_assert!(
+        !subdir.starts_with('_'),
+        "refusing to clear an archive dir: {subdir}"
+    );
+    let dir = root.join("generated").join(subdir);
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::io(&dir, e)),
+    }
+}
+
 fn collect_leaf_files(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -89,5 +130,36 @@ fn collect_leaf_files(root: &Path, out: &mut Vec<PathBuf>) {
         } else {
             out.push(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_code_file_creates_nested_dirs_and_guards_clobber() {
+        let root = tempfile::tempdir().unwrap();
+        let rel = "Magento/Catalog/Model/ProductFactory.php";
+        let path = write_code_file(root.path(), rel, "<?php\n", false).unwrap();
+        assert_eq!(path, root.path().join("generated/code").join(rel));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "<?php\n");
+        // No temp file left behind.
+        assert!(!path.with_file_name(".ProductFactory.php.tmp").exists());
+        // Second write without force is refused; with force it overwrites.
+        assert!(write_code_file(root.path(), rel, "<?php // v2\n", false).is_err());
+        write_code_file(root.path(), rel, "<?php // v2\n", true).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "<?php // v2\n");
+    }
+
+    #[test]
+    fn clear_generated_dir_removes_tree_and_tolerates_absence() {
+        let root = tempfile::tempdir().unwrap();
+        write_code_file(root.path(), "A/B/CFactory.php", "x", false).unwrap();
+        assert!(root.path().join("generated/code").exists());
+        clear_generated_dir(root.path(), "code").unwrap();
+        assert!(!root.path().join("generated/code").exists());
+        // A missing dir is fine (idempotent).
+        clear_generated_dir(root.path(), "code").unwrap();
     }
 }

@@ -154,24 +154,37 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
     }
 
     if !dry_run {
-        // M2 in progress: emit the metadata files implemented so far.
+        // A clean compile, like `setup:di:compile`: refuse to clobber an
+        // existing output tree unless --force, then wipe generated/code +
+        // generated/metadata and regenerate both from scratch. (The archive
+        // dirs `_code`/`_metadata` are never touched.)
+        let code_dir = root.join("generated/code");
+        let meta_dir = root.join("generated/metadata");
+        if !force && (dir_has_files(&code_dir) || dir_has_files(&meta_dir)) {
+            anyhow::bail!(
+                "generated/code or generated/metadata is non-empty; pass --force to overwrite"
+            );
+        }
+        magecommand_engine::metadata::clear_generated_dir(&root, "code")?;
+        magecommand_engine::metadata::clear_generated_dir(&root, "metadata")?;
+
+        // Metadata files (M2). The output dir is now clean, so force-write.
         let list = magecommand_engine::metadata::app_action_list(&magento);
         let content = magecommand_engine::phpexport::to_php_file(&list);
         let path = magecommand_engine::metadata::write_metadata_file(
             &root,
             "app_action_list.php",
             &content,
-            force,
+            true,
         )?;
         println!("wrote {}", path.display());
 
-        // The seven area files. The class universe scans generated code;
-        // until magecommand generates it itself (M3), an archived _code from
-        // a previous compile serves (the M2 bring-up configuration).
-        // Reproduction mode: an archived _code (the oracle's own generated
-        // output) beats a possibly partial live generated/code — runtime
-        // lazy generation can leave a near-empty tree that would starve the
-        // class universe. M3 removes this by generating the code ourselves.
+        // The class universe scans a generated-code tree so reflection over
+        // generated artifacts (a proxy's source, an interceptor's subject)
+        // resolves. Reproduction mode prefers the frozen archive `_code` (the
+        // oracle's own output) over the live `generated/code` we just cleared:
+        // a self-consistent bring-up. A true from-empty compile would scan our
+        // freshly generated tree instead; that swap is a later refinement.
         let generated_code = if root.join("generated/_code").is_dir() {
             root.join("generated/_code")
         } else {
@@ -210,7 +223,7 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
                 &root,
                 &format!("{code}.php"),
                 &file.render(),
-                force,
+                true,
             )?;
             println!("wrote {}", path.display());
         }
@@ -223,14 +236,14 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
             &root,
             "interception.php",
             &magecommand_engine::interception::render(&interception),
-            force,
+            true,
         )?;
         println!("wrote {}", path.display());
 
         let plugin_lists = magecommand_engine::pluginlist::generate(&magento, &defs);
         for (name, content) in &plugin_lists.files {
             let path =
-                magecommand_engine::metadata::write_metadata_file(&root, name, content, force)?;
+                magecommand_engine::metadata::write_metadata_file(&root, name, content, true)?;
             println!("wrote {}", path.display());
         }
         if !plugin_lists.findings.is_empty() {
@@ -240,8 +253,29 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
                 plugin_lists.findings.first().map(String::as_str).unwrap_or("")
             );
         }
+
+        // generated/code (M3): factories, extensions, proxies, searchResults,
+        // proxyDeferred, interceptors — the full tree the compare checks
+        // against `generated/_code`.
+        let code = magecommand_engine::codegen::generate_code(&magento, &defs, root.clone());
+        for (rel, content) in &code.files {
+            magecommand_engine::metadata::write_code_file(&root, rel, content, true)?;
+        }
+        println!("wrote {} generated/code file(s)", code.files.len());
+        if !code.findings.is_empty() {
+            eprintln!(
+                "note: {} generated-code finding(s), first: {}",
+                code.findings.len(),
+                code.findings.first().map(String::as_str).unwrap_or("")
+            );
+        }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Whether a directory exists and contains at least one entry.
+fn dir_has_files(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some())
 }
 
 fn compare(
