@@ -51,6 +51,12 @@ pub(crate) fn capabilities() -> lsp_types::ServerCapabilities {
         document_symbol_provider: Some(OneOf::Left(true)),
         code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         workspace_symbol_provider: Some(OneOf::Left(true)),
+        // Rename the pure-Magento string identifiers (ACL ids, event names, block names) —
+        // `prepareRename` gates it per-cursor, so classes/config paths decline cleanly.
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
         ..Default::default()
     }
 }
@@ -526,6 +532,27 @@ impl<'a> Server<'a> {
                         ));
                     }
                     serde_json::to_value(lsp_types::WorkspaceSymbolResponse::Flat(symbols)).ok()
+                })
+            }
+            lsp_types::request::PrepareRenameRequest::METHOD => {
+                self.with_doc_position(request, |magento, path, position| {
+                    serde_json::to_value(crate::rename::prepare_rename(magento, path, position)).ok()
+                })
+            }
+            lsp_types::request::Rename::METHOD => {
+                let params: Option<lsp_types::RenameParams> =
+                    serde_json::from_value(request.params).ok();
+                params.and_then(|p| {
+                    let doc = p.text_document_position;
+                    let path = doc.text_document.uri.to_file_path().ok()?;
+                    let magento = self.handle_for(&path)?;
+                    serde_json::to_value(crate::rename::rename(
+                        &magento,
+                        &path,
+                        doc.position,
+                        &p.new_name,
+                    ))
+                    .ok()
                 })
             }
             lsp_types::request::InlayHintRequest::METHOD => {

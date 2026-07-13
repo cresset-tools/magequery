@@ -1688,7 +1688,7 @@ boilerplate** on the unregistered trio — `command-unregistered` is fully mecha
 etc file, or CreateFile + full content when absent. Vendor-module fixes are offered
 knowingly (composer wipes them; the edit preview shows the path).
 
-**Parity nits** (closing the magento2-lsp comparison; rename is the only open item):
+**Parity nits** (closing the magento2-lsp comparison):
 short template paths (`template="x.phtml"`, no module prefix) normalize LSP-side via the
 declaring layout file's owning module — mirroring core's `normalize_template_ref` — and
 the whole LSP template layer now rides the core template index from the `templates`
@@ -1703,6 +1703,35 @@ template index, `.phtml`-suffix-guarded so dynamic values never flag; zero false
 positives on lite) and a parse-channel diagnostic for a plugin name declared twice for
 one type *in one file* (attribute merge silently keeps the later; cross-file stays
 legal override semantics — detected in di::build beside the parse diagnostics).
+
+**Rename (`textDocument/rename` + `prepareRename`)** — `rename.rs`, the last magento2-lsp
+parity item. Scope is deliberately narrow: the pure-Magento **string** identifiers a PHP
+language server can't see and that are a literal string wherever they occur — **ACL
+resource ids, event names, layout block/container names**. `prepareRename` gates it
+per-cursor (returns the identifier's range + placeholder), so a class, config path, or
+anything unclassified declines cleanly with a null response. Deliberately **not**
+renameable, each for a principled reason: **classes** (the file + `class` decl + every
+`use`/type ref belong to Intelephense — the "not a PHP language server" line; ours would
+leave PHP half-renamed), **config paths** (nested XML *elements* in config.xml/system.xml,
+not a renameable string), **templates/handles** (bound to a `.phtml`/handle *file* — a
+filesystem move, not a text edit). Mechanism: candidate files come from
+`Magento::files_containing(id)` — a new core primitive that greps every enabled module's
+`.php`/`.xml`/`.phtml`/`.graphqls` under its dir in parallel via the VFS (so PHP
+`dispatch()`/`isAllowed()` string literals no index holds are reached; ~30ms warm on lite,
+the class-walk exclusions skip generated/fixtures) — for ACL/event ids, and from the
+already-parsed layout ops for block names. **Precision is re-classification, not
+grep**: every candidate occurrence is run back through `entity_at`, and only a span that
+classifies to the *same* entity is rewritten — so a longer id that has ours as a prefix
+(`Foo::sales` inside `Foo::sales_view`) or a snake_case string that isn't an event (no
+`dispatch` on the line) is left alone; the whole-line `Source` provenance never needed
+column precision this way. `.phtml` is classified as PHP so a template's dispatch/isAllowed
+participates. The core grep is public and reusable; `occurrences()` (the pure edit finder)
+unit-tests without a handle, and the e2e renames `acme_thing_saved` across events.xml + a
+PHP dispatch while a class cursor declines. No editor-side change: rename is a standard LSP
+capability the generic clients pick up from `rename_provider`. (Client applies the
+`WorkspaceEdit`; we never write files.) Known scope limits, by design: config.xml default
+values (structural), theme layout files outside module dirs, and block names in PHP
+`getBlock()` (too common a substring — layout-XML only).
 
 **Editors live in `editors/` (monorepo, locked); publisher identity is `cresset-tools`.**
 - `editors/vscode` — TypeScript client (`vscode-languageclient` 9, esbuild bundle).

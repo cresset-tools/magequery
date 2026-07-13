@@ -76,6 +76,12 @@ impl Fixture {
             "app/code/Acme/Widget/Observer/Recalc.php",
             "<?php\nnamespace Acme\\Widget\\Observer;\n\nclass Recalc\n{\n}\n",
         );
+        // Dispatches the event by name — the PHP string-literal occurrence a rename must
+        // reach beyond the events.xml declaration.
+        write(
+            "app/code/Acme/Widget/Model/Dispatcher.php",
+            "<?php\nnamespace Acme\\Widget\\Model;\n\nclass Dispatcher\n{\n    public function run($em)\n    {\n        $em->dispatch('acme_thing_saved', []);\n    }\n}\n",
+        );
         write(
             "app/code/Acme/Widget/view/frontend/layout/acme_widget_index.xml",
             r#"<page>
@@ -480,6 +486,53 @@ fn diagnostics_definition_hover_and_invalidation() {
     };
     assert!(markup.value.contains("acme_thing_saved"));
     assert!(markup.value.contains("Acme\\Widget\\Observer\\Recalc"));
+
+    // --- rename: an event name across its events.xml declaration AND a PHP dispatch, with
+    // a class declining (prepareRename returns null — that's Intelephense's job).
+    let events_rel = "app/code/Acme/Widget/etc/events.xml";
+    let prep = client.request::<lsp_types::request::PrepareRenameRequest>(
+        lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: fixture.uri(events_rel) },
+            position: position_after(events_rel, "name=\"acme_thing"), // inside the event name
+        },
+    );
+    match prep {
+        Some(lsp_types::PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. }) => {
+            assert_eq!(placeholder, "acme_thing_saved");
+        }
+        other => panic!("prepareRename on event: {other:?}"),
+    }
+    let edit = client
+        .request::<lsp_types::request::Rename>(lsp_types::RenameParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: fixture.uri(events_rel) },
+                position: position_after(events_rel, "name=\"acme_thing"),
+            },
+            new_name: "acme_thing_updated".to_string(),
+            work_done_progress_params: Default::default(),
+        })
+        .expect("rename edit");
+    let changes = edit.changes.expect("changes");
+    let events_edits = changes.get(&fixture.uri(events_rel)).expect("events.xml edited");
+    assert_eq!(events_edits.len(), 1);
+    assert_eq!(events_edits[0].new_text, "acme_thing_updated");
+    let dispatcher_edits = changes
+        .get(&fixture.uri("app/code/Acme/Widget/Model/Dispatcher.php"))
+        .expect("Dispatcher.php edited");
+    assert_eq!(dispatcher_edits.len(), 1);
+    assert_eq!(dispatcher_edits[0].new_text, "acme_thing_updated");
+
+    // A class reference declines rename (null response) — the PHP LS owns that.
+    let declined = client.request::<lsp_types::request::PrepareRenameRequest>(
+        lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: di_uri.clone() },
+            position: position_after(
+                "app/code/Acme/Widget/etc/di.xml",
+                "type=\"Acme\\Widget\\Model\\Mis",
+            ),
+        },
+    );
+    assert!(declined.is_none(), "class rename should decline: {declined:?}");
 
     // --- definition on the plugin's `aroundSave` declaration → the intercepted
     // Thing::save implementation.

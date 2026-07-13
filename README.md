@@ -216,8 +216,10 @@ class names in `di.xml`/`events.xml`/`webapi.xml`/`system.xml`/`schema.graphqls`
 an interface also jumps to the class its `<preference>` resolves to), find-references over the
 whole config graph (injections, virtual types, observers, cron, webapi, GraphQL, queues),
 layout navigation (templates through the theme-override chain, handles, block names), config
-outlines and workspace symbol search, and code lenses on PHP classes (`N plugin(s)`,
-`wired in N config place(s)`).
+outlines and workspace symbol search, code lenses on PHP classes (`N plugin(s)`,
+`wired in N config place(s)`), and rename for ACL ids, event names, and block names across
+the config XML and PHP string literals (the identifiers a PHP server can't see; classes and
+config paths stay with your PHP server).
 
 - **VS Code** — the extension in [`editors/vscode`](editors/vscode); it finds `magequery` on
   PATH or downloads the release binary itself.
