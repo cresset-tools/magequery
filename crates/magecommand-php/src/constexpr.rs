@@ -523,10 +523,29 @@ impl<'a> EvalCtx<'a> {
     }
 }
 
-/// Constants of internal PHP classes (no source file to chase). Extend as
-/// the oracle demands.
+/// Constants of internal PHP classes (no source file to chase) plus a few
+/// ubiquitous library constants whose source may be unreachable on some stores
+/// (the ZF1 `Zend_Cache` cleaning modes: reflection reports their frozen string
+/// values, and every Magento cache Proxy inherits `clean($mode = \Zend_Cache::
+/// CLEANING_MODE_ALL)` from `TagScope`). Extend as the oracle demands.
 fn internal_class_const(class: &str, name: &str) -> Option<ConstValue> {
     Some(match (class, name) {
+        // Zend_Cache cleaning modes — stable ZF1 string constants. Resolving
+        // them here (not via the parsed corpus) keeps the cache Proxies exact
+        // even where the zf1 package isn't reached by the class-resolution
+        // closure (const-referenced classes aren't queued); the value matches
+        // the oracle's file-resolved `'all'`, so it stays byte-exact there too.
+        ("Zend_Cache", "CLEANING_MODE_ALL") => ConstValue::Str("all".to_owned()),
+        ("Zend_Cache", "CLEANING_MODE_OLD") => ConstValue::Str("old".to_owned()),
+        ("Zend_Cache", "CLEANING_MODE_MATCHING_TAG") => {
+            ConstValue::Str("matchingTag".to_owned())
+        }
+        ("Zend_Cache", "CLEANING_MODE_NOT_MATCHING_TAG") => {
+            ConstValue::Str("notMatchingTag".to_owned())
+        }
+        ("Zend_Cache", "CLEANING_MODE_MATCHING_ANY_TAG") => {
+            ConstValue::Str("matchingAnyTag".to_owned())
+        }
         ("NumberFormatter", "PATTERN_DECIMAL") => ConstValue::Int(0),
         ("NumberFormatter", "DECIMAL") => ConstValue::Int(1),
         ("NumberFormatter", "CURRENCY") => ConstValue::Int(2),
@@ -818,6 +837,22 @@ mod tests {
         assert_eq!(ev("1_000"), ConstValue::Int(1000));
         assert_eq!(ev("'it\\'s'"), ConstValue::Str("it's".into()));
         assert_eq!(ev("\"a\\nb\""), ConstValue::Str("a\nb".into()));
+    }
+
+    #[test]
+    fn zend_cache_cleaning_modes_resolve_without_a_parsed_class() {
+        // `NoLookup` means no parsed corpus (the proforto case where the zf1
+        // package isn't reached). The internal table still folds the ZF1
+        // cleaning modes to their frozen string values — so the cache Proxies
+        // render `clean($mode = 'all', …)` rather than an unresolvable default.
+        assert_eq!(
+            ev("\\Zend_Cache::CLEANING_MODE_ALL"),
+            ConstValue::Str("all".into())
+        );
+        assert_eq!(
+            ev("\\Zend_Cache::CLEANING_MODE_MATCHING_TAG"),
+            ConstValue::Str("matchingTag".into())
+        );
     }
 
     #[test]
