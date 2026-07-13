@@ -235,6 +235,23 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
             )?;
             println!("wrote {}", path.display());
         }
+        // Custom-registered areas (AreaList::getCodes() beyond the fixed seven,
+        // e.g. postcode-nl's postcode_eu): the global base overlaid by each
+        // module's etc/<code>/di.xml. Empty on stores that register none.
+        for code in magecommand_engine::areaconfig::custom_area_codes(&magento) {
+            let export = magento.di_export_custom_area(&code);
+            let file = magecommand_engine::areaconfig::build_area_file_from_export(
+                &magento, &defs, export, &root,
+            );
+            finding_count += file.findings.len();
+            let path = magecommand_engine::metadata::write_metadata_file(
+                &root,
+                &format!("{code}.php"),
+                &file.render(),
+                true,
+            )?;
+            println!("wrote {}", path.display());
+        }
         if finding_count > 0 {
             eprintln!("note: {finding_count} static-analysis finding(s) across areas — see --json");
         }

@@ -369,6 +369,57 @@ fn merge_area(parsed: &[Parsed], area: Area, mut base: AreaConfig) -> AreaConfig
     base
 }
 
+/// Merge a **custom-registered** area's overlay (`etc/<code>/di.xml` of every
+/// enabled module) onto `base`, in module load order. `code` is an area name
+/// discovered by the caller from `AreaList`'s `areas` argument (Magento's
+/// `AreaList::getCodes()`) — the fixed [`Area`] enum can't name it, so overlay
+/// files are read directly and tagged with a `Global` placeholder [`Source`]
+/// area; the overlay RANK comes from the config layer (2), decoupled from the
+/// enum in [`merge_file`]. Pass `base = global.clone()` for the full area
+/// config (`<code>.php`) or `base = AreaConfig::default()` for the overlay-only
+/// config the compiled plugin lists read.
+pub(crate) fn merge_custom_area(modules: &[Module], code: &str, base: AreaConfig) -> AreaConfig {
+    let jobs: Vec<Job> = modules
+        .iter()
+        .filter(|m| m.enabled)
+        .filter_map(|m| {
+            let path = m.path.join("etc").join(code).join("di.xml");
+            path.is_file().then(|| Job {
+                load_order: m.load_order + 1,
+                area: Area::Global,
+                module: m.name.clone(),
+                path,
+                layer: 2,
+            })
+        })
+        .collect();
+
+    let parsed: Vec<Parsed> = jobs
+        .par_iter()
+        .map(|j| {
+            let file = std::fs::read_to_string(&j.path)
+                .map_err(|e| format!("reading {}: {e}", j.path.display()))
+                .and_then(|text| parse::di_xml(&text));
+            Parsed {
+                load_order: j.load_order,
+                area: j.area,
+                module: j.module.clone(),
+                path: j.path.clone(),
+                layer: j.layer,
+                file,
+            }
+        })
+        .collect();
+
+    let mut base = base;
+    let mut order: Vec<&Parsed> = parsed.iter().filter(|p| p.file.is_ok()).collect();
+    order.sort_by_key(|p| p.load_order);
+    for p in order {
+        merge_file(&mut base, p);
+    }
+    base
+}
+
 /// Convert a parse-level `RawArg` into a `model::ArgValue`, attaching a `Source` to every
 /// array item from the file being merged (`p`).
 fn to_arg_value(raw: &parse::RawArg, p: &Parsed) -> crate::model::ArgValue {
@@ -519,7 +570,13 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
                 existing.source = src(rp.line);
             }
             None => {
-                let area_rank = if p.area == Area::Global { 0 } else { 1 };
+                // Global base (rank 0) before area overlay (rank 1). Keyed on
+                // the config LAYER, not the `Area` enum: layer 2 is assigned
+                // only to `etc/<area>/di.xml` overlays (primary=0, module
+                // global=1), so this is identical to `p.area != Global` for the
+                // fixed areas — but it also lets a custom-registered area
+                // (merged with a Global placeholder tag) rank as an overlay.
+                let area_rank = if p.layer >= 2 { 1 } else { 0 };
                 by_name.insert(
                     rp.name.clone(),
                     LocatedPlugin {

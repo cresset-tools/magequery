@@ -257,6 +257,27 @@ impl Magento {
         }
     }
 
+    /// The merged DI config of a **custom-registered** area — the global base
+    /// overlaid by every enabled module's `etc/<code>/di.xml`. `code` is an area
+    /// name the caller discovered from `AreaList`'s `areas` argument (Magento's
+    /// `AreaList::getCodes()`); the fixed [`Area`] enum can't name it, so the
+    /// returned [`DiExport`] carries `area = Area::Global` as a placeholder tag —
+    /// the merged *values* and overlay plugin ranking are what a compiler
+    /// consumes. A write-side bulk primitive parallel to [`di_export`](Self::di_export)
+    /// (the read-side query API stays on the fixed seven areas).
+    pub fn di_export_custom_area(&self, code: &str) -> DiExport {
+        let base = self.di_index().config(Area::Global).clone();
+        di::merge_custom_area(&self.index.modules, code, base).export(Area::Global)
+    }
+
+    /// Like [`di_export_custom_area`](Self::di_export_custom_area) but the area's
+    /// OWN overlay files only (no global base) — the per-scope config the
+    /// compiled plugin lists read for a custom area.
+    pub fn di_export_custom_area_overlay(&self, code: &str) -> DiExport {
+        di::merge_custom_area(&self.index.modules, code, di::AreaConfig::default())
+            .export(Area::Global)
+    }
+
     /// The concrete type Magento instantiates for `class` in `area`, with the full
     /// preference chain. If no preference applies, the class is its own concrete type
     /// (empty chain) — matching Magento, which instantiates the requested class directly.
