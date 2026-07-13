@@ -10,7 +10,9 @@
 //! its extended-interface tables. Validated against the frozen archive.
 
 use magecommand_php::{ClassKind, Visibility as PhpVis};
-use magecommand_php::constexpr::{eval, parse_const_expr, ArrayKey, ConstValue, EvalCtx};
+use magecommand_php::constexpr::{
+    eval, parse_const_expr, ArrayKey, BinOp, ClassRef, ConstExpr, ConstValue, EvalCtx,
+};
 use std::collections::HashSet;
 
 use crate::arguments::DefsLookup;
@@ -249,8 +251,66 @@ fn eval_default(defs: &Definitions, declaring: &str, expr: &str) -> Option<Val> 
     let ctx = EvalCtx::new(&lookup, Some(declaring));
     match eval(&parsed, &ctx) {
         Ok(value) => Some(const_to_val(&value)),
-        Err(_) => None,
+        // The evaluator can't fold it — typically a `\Class::CONST` whose
+        // defining class isn't in the parsed universe (e.g. Adobe's
+        // `\Zend_Cache::CLEANING_MODE_ALL`). Dropping the default would turn an
+        // inherited-optional parameter into a required one — an illegal
+        // override that fatals at class load. Preserve a fully-qualified,
+        // always-valid reference instead. Byte-exactness is retained wherever
+        // eval succeeds (the oracle never reaches this arm — it stays
+        // 4106/4106); this only turns the unresolvable case from broken code
+        // into valid code.
+        Err(_) => verbatim_expr(&parsed.expr, &parsed.classes).map(Val::Raw),
     }
+}
+
+/// Render a const expression back to valid PHP source, fully qualifying every
+/// class reference so it is valid regardless of the generated file's `use`
+/// context. `None` for shapes not worth reproducing (they don't hit the fatal
+/// case, so the prior drop behaviour is retained for them).
+fn verbatim_expr(expr: &ConstExpr, classes: &[String]) -> Option<String> {
+    Some(match expr {
+        ConstExpr::Null => "null".to_owned(),
+        ConstExpr::Bool(b) => Val::Bool(*b).render(),
+        ConstExpr::Int(n) => Val::Int(*n).render(),
+        ConstExpr::Float(f) => Val::Float(*f).render(),
+        ConstExpr::Str(s) => Val::Str(s.clone()).render(),
+        ConstExpr::ClassNameOf(fqcn) => format!("\\{fqcn}::class"),
+        ConstExpr::GlobalConst(name) => name.clone(),
+        ConstExpr::ClassConst { class, name } => {
+            let cls = match class {
+                ClassRef::Fqcn(i) => format!("\\{}", classes.get(*i)?),
+                ClassRef::SelfRef => "self".to_owned(),
+                ClassRef::ParentRef => "parent".to_owned(),
+                ClassRef::StaticRef => "static".to_owned(),
+                _ => return None,
+            };
+            format!("{cls}::{name}")
+        }
+        ConstExpr::Neg(inner) => format!("-{}", verbatim_expr(inner, classes)?),
+        ConstExpr::BinOp { op, left, right } => {
+            let sym = match op {
+                BinOp::Concat => ".",
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::Shl => "<<",
+                BinOp::Shr => ">>",
+                BinOp::BitOr => "|",
+                BinOp::BitAnd => "&",
+                BinOp::BitXor => "^",
+                _ => return None,
+            };
+            format!(
+                "{} {sym} {}",
+                verbatim_expr(left, classes)?,
+                verbatim_expr(right, classes)?
+            )
+        }
+        _ => return None,
+    })
 }
 
 fn const_to_val(value: &ConstValue) -> Val {
@@ -306,5 +366,43 @@ mod tests {
         assert_eq!(normalize_nullable("Foo\\Bar"), "Foo\\Bar");
         assert_eq!(normalize_nullable("?Foo\\Bar"), "?Foo\\Bar");
         assert_eq!(normalize_nullable("int"), "int");
+    }
+
+    #[test]
+    fn verbatim_default_fully_qualifies_class_const() {
+        use super::verbatim_expr;
+        use magecommand_php::constexpr::{ClassRef, ConstExpr};
+        // The Zend_Cache case: an unresolvable `\Zend_Cache::CLEANING_MODE_ALL`
+        // renders to a valid, fully-qualified reference — never dropped.
+        let expr = ConstExpr::ClassConst {
+            class: ClassRef::Fqcn(0),
+            name: "CLEANING_MODE_ALL".to_owned(),
+        };
+        assert_eq!(
+            verbatim_expr(&expr, &["Zend_Cache".to_owned()]).as_deref(),
+            Some("\\Zend_Cache::CLEANING_MODE_ALL")
+        );
+        // self::/parent:: stay valid in the generated subclass (inherited const).
+        assert_eq!(
+            verbatim_expr(
+                &ConstExpr::ClassConst { class: ClassRef::SelfRef, name: "X".to_owned() },
+                &[]
+            )
+            .as_deref(),
+            Some("self::X")
+        );
+        // A concat of a const and a string keeps both, recursively.
+        let concat = ConstExpr::BinOp {
+            op: magecommand_php::constexpr::BinOp::Concat,
+            left: Box::new(ConstExpr::ClassConst {
+                class: ClassRef::Fqcn(0),
+                name: "PREFIX".to_owned(),
+            }),
+            right: Box::new(ConstExpr::Str("x".to_owned())),
+        };
+        assert_eq!(
+            verbatim_expr(&concat, &["Acme\\C".to_owned()]).as_deref(),
+            Some("\\Acme\\C::PREFIX . 'x'")
+        );
     }
 }
