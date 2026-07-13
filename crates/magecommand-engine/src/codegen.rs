@@ -957,6 +957,30 @@ pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> Ge
             .collect();
         cg.ensure_all(names.iter().map(String::as_str));
     }
+    // Custom-registered areas contribute their overlay's referenced classes to
+    // the same incidental `class_exists` sweep (usually already covered by the
+    // fixed areas, but kept faithful for a custom area that wires in a proxy no
+    // standard area references).
+    for code in crate::areaconfig::custom_area_codes(magento) {
+        let file = crate::areaconfig::build_area_file_from_export(
+            magento,
+            defs,
+            magento.di_export_custom_area(&code),
+            &root,
+        );
+        let area_vtypes: std::collections::HashSet<&str> =
+            file.instance_types.iter().map(|(k, _)| k.as_str()).collect();
+        let names: Vec<String> = file
+            .arguments
+            .keys()
+            .cloned()
+            .chain(file.instance_types.iter().map(|(_, v)| v.clone()))
+            .chain(file.preferences.iter().map(|(_, v)| v.clone()))
+            .filter(|n| !n.ends_with("\\Proxy") && !n.ends_with("\\Interceptor"))
+            .filter(|n| !area_vtypes.contains(n.as_str()))
+            .collect();
+        cg.ensure_all(names.iter().map(String::as_str));
+    }
 
     let ext_cfg = ExtConfig::build(magento);
     let mut files: Vec<(String, String)> = Vec::new();

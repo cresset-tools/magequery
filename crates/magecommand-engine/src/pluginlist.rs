@@ -368,6 +368,58 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
         files.push((filename, render_triple(&plugin_data, &state)));
         findings.extend(state.findings);
     }
+
+    // Custom-registered areas (postcode-nl's postcode_eu, …). They come AFTER
+    // graphql in getAllScopes, so — like every scope past frontend — each reads
+    // from an EMPTY base and contributes only its own overlay. Seeds are the
+    // overlay's virtual types at slot 2 (the overlay export holds nothing else,
+    // so there is no source.area filter to apply).
+    for code in crate::areaconfig::custom_area_codes(magento) {
+        let export = magento.di_export_custom_area_overlay(&code);
+        let scopes: Vec<&str> = vec!["primary", "global", code.as_str()];
+        let mut sorted = scopes.clone();
+        sorted.sort_unstable();
+        let filename = format!("{}|plugin-list.php", sorted.join("|"));
+
+        let node_pos: HashMap<&str, &magequery_core::TypeNodePosition> =
+            export.node_positions.iter().map(|n| (n.name.as_str(), n)).collect();
+        let mut vtype_seeds: Vec<(u8, u32, &str)> = export
+            .virtual_types
+            .iter()
+            .map(|v| {
+                let slot =
+                    node_pos.get(v.name.as_str()).and_then(|n| n.overlay).unwrap_or(v.decl_order);
+                (2u8, slot, v.name.as_str())
+            })
+            .collect();
+        vtype_seeds.sort();
+
+        let plugin_data = plugin_data_of(&export);
+        let mut state = Inherit {
+            defs,
+            global_vtypes: &global_vtypes,
+            plugin_data: &plugin_data,
+            plugin_index: plugin_data
+                .iter()
+                .enumerate()
+                .map(|(i, (t, _))| (t.as_str(), i))
+                .collect(),
+            inherited: Vec::new(),
+            inherited_index: HashMap::new(),
+            processed: Vec::new(),
+            findings: Vec::new(),
+        };
+        for (_, _, seed) in &vtype_seeds {
+            state.inherit(seed);
+        }
+        let type_names: Vec<&str> = plugin_data.iter().map(|(t, _)| t.as_str()).collect();
+        for name in type_names {
+            state.inherit(name);
+        }
+        files.push((filename, render_triple(&plugin_data, &state)));
+        findings.extend(state.findings);
+    }
+
     GeneratedPluginLists { files, findings }
 }
 

@@ -25,6 +25,39 @@ pub const AREA_CODES: [(Area, &str); 7] = [
     (Area::Graphql, "graphql"),
 ];
 
+/// Custom-registered area codes: the keys of `Magento\Framework\App\AreaList`'s
+/// `areas` argument (Magento's `AreaList::getCodes()`) minus the seven fixed
+/// areas magecommand already emits. Each yields an extra `<code>.php` and a
+/// `…|<code>|…|plugin-list.php`, exactly as the compile's Area operation loops
+/// `array_merge([GLOBAL], $areaList->getCodes())`. Sorted for determinism.
+pub fn custom_area_codes(magento: &Magento) -> Vec<String> {
+    use magequery_core::ArgValue;
+    const FIXED: [&str; 7] = [
+        "global",
+        "frontend",
+        "adminhtml",
+        "crontab",
+        "webapi_rest",
+        "webapi_soap",
+        "graphql",
+    ];
+    let export = magento.di_export(Area::Global);
+    let mut codes: Vec<String> = Vec::new();
+    for decl in &export.arguments {
+        if decl.type_name.as_str() == "Magento\\Framework\\App\\AreaList" && decl.arg == "areas" {
+            if let ArgValue::Array(items) = &decl.value {
+                for item in items {
+                    if !FIXED.contains(&item.key.as_str()) && !codes.contains(&item.key) {
+                        codes.push(item.key.clone());
+                    }
+                }
+            }
+        }
+    }
+    codes.sort();
+    codes
+}
+
 pub struct AreaSections {
     /// `instance => preference`, interceptor-substituted, sorted.
     pub preferences: Vec<(String, String)>,
@@ -149,7 +182,20 @@ pub fn build_area_file(
     area: Area,
     root: &std::path::Path,
 ) -> AreaFile {
-    let export = magento.di_export(area);
+    build_area_file_from_export(magento, defs, magento.di_export(area), root)
+}
+
+/// Like [`build_area_file`] but driven by a caller-supplied [`DiExport`] — used
+/// for custom-registered areas, whose merged config comes from
+/// [`Magento::di_export_custom_area`] rather than the fixed `Area` enum. The
+/// area itself plays no further role here (it only selected the export), so the
+/// reader/chain is identical.
+pub fn build_area_file_from_export(
+    magento: &Magento,
+    defs: &Definitions,
+    export: magequery_core::DiExport,
+    root: &std::path::Path,
+) -> AreaFile {
     let overrides = crate::arguments::setup_overrides(magento, root);
     let ctx = ArgsCtx::new(defs, &defs.scanned, &export, overrides);
 
