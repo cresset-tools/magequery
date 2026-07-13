@@ -16,7 +16,10 @@ pub mod codegen;
 pub mod compare;
 pub mod definitions;
 pub mod interception;
+pub mod laminas;
 pub mod metadata;
+pub mod proxy;
+pub mod reflect;
 pub mod pluginlist;
 pub mod phpexport;
 

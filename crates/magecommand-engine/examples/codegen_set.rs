@@ -101,6 +101,29 @@ fn main() {
         println!("  ext-mismatch: {b}");
     }
 
+    // Byte-verify Proxy files.
+    let mut px_ok = 0usize;
+    let mut px_bad: Vec<&String> = Vec::new();
+    for (name, kind) in &cg.emitted {
+        if *kind != GenKind::Proxy {
+            continue;
+        }
+        let source = name.trim_end_matches("\\Proxy");
+        let path = archive.join(name.replace('\\', "/")).with_extension("php");
+        let Ok(expected_bytes) = std::fs::read_to_string(&path) else {
+            px_bad.push(name);
+            continue;
+        };
+        match magecommand_engine::proxy::proxy_bytes(&defs, source) {
+            Some(got) if got == expected_bytes => px_ok += 1,
+            _ => px_bad.push(name),
+        }
+    }
+    println!("proxy bytes: {px_ok} identical, {} mismatched", px_bad.len());
+    for b in px_bad.iter().take(6) {
+        println!("  proxy-mismatch: {b}");
+    }
+
     // What the archive holds, as fqcn -> kind bucket (by suffix).
     let mut expected: BTreeMap<String, &'static str> = BTreeMap::new();
     walk(&archive, &archive, &mut expected);
