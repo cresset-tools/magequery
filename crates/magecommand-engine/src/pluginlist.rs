@@ -182,9 +182,9 @@ pub struct GeneratedPluginLists {
 /// includes them, so their target methods still count as intercepted.
 pub struct ClassPlugins {
     /// Every plugin instance class applying (disabled included) — used for the
-    /// intercepted-method union. A class only appears here when the inherit
-    /// walk gave it a non-null config (a class inheriting only disabled
-    /// plugins from an ancestor is absent, matching the archive).
+    /// intercepted-method union. A class appears here when the inherit walk
+    /// gave it a non-null config: its own plugins, OR an ancestor's disabled
+    /// plugins inherited via a cache hit (order-dependent — see `inherit`).
     pub instances: Vec<String>,
 }
 
@@ -233,7 +233,16 @@ pub fn plugin_instances_across_scopes(
         for v in &export.virtual_types {
             state.inherit(v.name.as_str());
         }
-        for class in seeds {
+        // Seeds are a HashSet — iterate in a STABLE order. This matters only
+        // for the disabled-plugin-inheritance quirk (a subclass inherits an
+        // ancestor's disabled plugin iff the ancestor is computed first); a
+        // deterministic order keeps the output reproducible. We approximate
+        // Magento's scan order (`$definedClasses`) with the class name, which
+        // puts core `Magento\…` ancestors before third-party subclasses — the
+        // relative order that decides the common cross-module case.
+        let mut sorted_seeds: Vec<&String> = seeds.iter().collect();
+        sorted_seeds.sort_unstable();
+        for class in sorted_seeds {
             state.inherit(class);
         }
         // Collect EVERY populated class (getPluginsConfig's keyset), not just
@@ -445,9 +454,16 @@ impl Inherit<'_> {
     fn inherit(&mut self, type_name: &str) -> Option<Vec<(String, Entry)>> {
         let key = type_name.trim_start_matches('\\').to_owned();
         if let Some(&i) = self.inherited_index.get(&key) {
-            // The RETURN value (what children inherit) is the enabled-only
-            // list; the STORED value keeps disabled entries.
-            return enabled_only(self.inherited[i].1.as_deref());
+            // CACHE HIT. Magento's `inheritPlugins` returns `$inherited[$type]`
+            // verbatim here — the STORED list, which KEEPS disabled entries.
+            // Only the FIRST-computation return path (below) strips disabled.
+            // So a class whose ancestor was already computed inherits that
+            // ancestor's disabled plugins into its own config; their target
+            // methods still generate (passthrough) interceptor wrappers. This
+            // is order-dependent, faithful to Magento: whether a subclass gets
+            // an ancestor's disabled plugin turns on which was processed first
+            // (seed order below is sorted to make it deterministic).
+            return self.inherited[i].1.clone();
         }
         // Cycle guard (Magento would recurse forever; none exist).
         self.inherited_index.insert(key.clone(), usize::MAX);
@@ -489,11 +505,12 @@ impl Inherit<'_> {
         };
         let index = self.inherited.len();
         // Store the FULL list (disabled kept) — this is `_inherited`, what the
-        // plugin-list file renders and what the interception SET reads. But
-        // RETURN the enabled-only list — Magento's `inheritPlugins` returns
-        // `$plugins` after unsetting disabled entries, so a child never
-        // inherits a parent's disabled plugins (an all-disabled interface
-        // contributes NOTHING to its implementations).
+        // plugin-list file renders and what the interception SET reads. But on
+        // THIS first-computation path RETURN the enabled-only list: Magento's
+        // `inheritPlugins` returns `$plugins` after unsetting disabled entries.
+        // So a child computed DURING its parent's first computation misses the
+        // parent's disabled plugins; a child computed after the parent already
+        // cached gets them (the cache-hit path above). Order decides.
         let ret = enabled_only(value.as_deref());
         self.inherited.push((key.clone(), value));
         self.inherited_index.insert(key, index);
@@ -707,4 +724,103 @@ fn render_triple(plugin_data: &PluginData, state: &Inherit) -> String {
         (PhpKey::Int(1), inherited_value),
         (PhpKey::Int(2), processed_value),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::definitions::ClassRecord;
+    use std::path::PathBuf;
+
+    fn record(src: &str) -> (String, ClassRecord) {
+        let meta = magecommand_php::parse_file(src.as_bytes())
+            .declarations
+            .into_iter()
+            .next()
+            .expect("one declaration");
+        (meta.fqcn.clone(), ClassRecord { meta, file: PathBuf::new() })
+    }
+
+    fn defs(records: impl IntoIterator<Item = (String, ClassRecord)>) -> Definitions {
+        Definitions::from_records(records)
+    }
+
+    fn entry(instance: &str, disabled: bool) -> Entry {
+        Entry {
+            sort_order: 0,
+            disabled: disabled.then_some(true),
+            instance: Some(instance.to_owned()),
+            disabled_before_instance: true,
+        }
+    }
+
+    fn state<'a>(
+        defs: &'a Definitions,
+        vtypes: &'a HashMap<String, String>,
+        plugin_data: &'a PluginData,
+    ) -> Inherit<'a> {
+        Inherit {
+            defs,
+            global_vtypes: vtypes,
+            plugin_data,
+            plugin_index: plugin_data
+                .iter()
+                .enumerate()
+                .map(|(i, (t, _))| (t.as_str(), i))
+                .collect(),
+            inherited: Vec::new(),
+            inherited_index: HashMap::new(),
+            processed: Vec::new(),
+            findings: Vec::new(),
+        }
+    }
+
+    fn derived_plugin_names<'a>(s: &'a Inherit) -> Vec<&'a str> {
+        s.inherited
+            .iter()
+            .find(|(k, _)| k.as_str() == "Derived")
+            .and_then(|(_, v)| v.as_ref())
+            .expect("Derived has a config")
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect()
+    }
+
+    /// The order-dependent disabled-plugin inheritance quirk, ported faithfully
+    /// (validated byte-exact on the oracle synthetic Acme_PluginDisable): Base
+    /// carries a DISABLED plugin, Derived a subclass with an enabled one.
+    /// Magento's `inheritPlugins` returns the with-disabled `$inherited[$type]`
+    /// on a CACHE HIT but the enabled-only `$plugins` on first computation. So
+    /// when Base is computed FIRST, Derived cache-hits Base and inherits its
+    /// disabled plugin (whose target method still gets a passthrough
+    /// interceptor). Computed the other way round, Derived misses it.
+    #[test]
+    fn subclass_inherits_ancestors_disabled_plugin_only_when_ancestor_computed_first() {
+        let defs = defs([
+            record("<?php class Base { public function gamma() {} public function delta() {} }"),
+            record("<?php class Derived extends Base {}"),
+        ]);
+        let vtypes = HashMap::new();
+        let plugin_data: PluginData = vec![
+            ("Base".to_owned(), vec![("base_gamma".to_owned(), entry("BasePlugin", true))]),
+            ("Derived".to_owned(), vec![("derived_delta".to_owned(), entry("DerivedPlugin", false))]),
+        ];
+
+        // Ancestor FIRST: Derived cache-hits Base -> inherits the disabled plugin.
+        let mut s = state(&defs, &vtypes, &plugin_data);
+        s.inherit("Base");
+        s.inherit("Derived");
+        let names = derived_plugin_names(&s);
+        assert!(names.contains(&"base_gamma"), "cache hit inherits disabled plugin: {names:?}");
+        assert!(names.contains(&"derived_delta"));
+
+        // Descendant FIRST: Derived's own recursion first-computes Base, whose
+        // return strips disabled -> Derived does NOT inherit it.
+        let mut s = state(&defs, &vtypes, &plugin_data);
+        s.inherit("Derived");
+        s.inherit("Base");
+        let names = derived_plugin_names(&s);
+        assert!(!names.contains(&"base_gamma"), "first-computation strips disabled: {names:?}");
+        assert!(names.contains(&"derived_delta"));
+    }
 }
