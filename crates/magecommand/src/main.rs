@@ -56,6 +56,10 @@ enum Command {
         /// How many paths to list per difference bucket (text output).
         #[arg(long, default_value_t = 10, value_name = "N")]
         sample: usize,
+        /// Don't recognize or explain known/expected differences; list every
+        /// divergence as a raw bucket (the pre-classification behavior).
+        #[arg(long)]
+        no_explain: bool,
     },
 }
 
@@ -77,7 +81,8 @@ fn main() -> anyhow::Result<ExitCode> {
             ref output,
             fail_on_diff,
             sample,
-        } => compare(archive, output, cli.json, fail_on_diff, sample),
+            no_explain,
+        } => compare(cli.root, archive, output, cli.json, fail_on_diff, sample, no_explain),
     }
 }
 
@@ -304,38 +309,128 @@ fn dir_has_files(dir: &std::path::Path) -> bool {
 }
 
 fn compare(
+    root: Option<PathBuf>,
     archive: &PathBuf,
     output: &PathBuf,
     json: bool,
     fail_on_diff: bool,
     sample: usize,
+    no_explain: bool,
 ) -> anyhow::Result<ExitCode> {
     let report = magecommand_engine::compare_dirs(archive, output)?;
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+    // The disabled-module explanation needs config.php. Best-effort: if the
+    // root isn't a Magento checkout (comparing two loose trees), skip it —
+    // those interceptors simply stay unexplained rather than misclassified.
+    let disabled_modules: std::collections::HashSet<String> = if no_explain {
+        std::collections::HashSet::new()
     } else {
-        let total = report.archive_total();
+        let root = std::path::absolute(root.unwrap_or_else(|| PathBuf::from("."))).unwrap_or_default();
+        magequery_core::Magento::open(&root)
+            .map(|m| {
+                m.modules()
+                    .iter()
+                    .filter(|md| !md.enabled)
+                    .map(|md| md.name.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let total = report.archive_total();
+    let summary = format!(
+        "archive: {} file(s) · identical {} · changed {} · missing {} · extra {}",
+        total,
+        report.identical,
+        report.changed.len(),
+        report.missing.len(),
+        report.extra.len()
+    );
+
+    // Raw mode (or --json, which stays the machine-readable byte-level report):
+    // no classification.
+    if no_explain {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("{summary}");
+            print_bucket("changed", &report.changed, sample);
+            print_bucket("missing", &report.missing, sample);
+            print_bucket("extra", &report.extra, sample);
+            if report.is_clean() {
+                println!("output reproduces the archive exactly");
+            }
+        }
+        return Ok(fail_exit(fail_on_diff, !report.is_clean()));
+    }
+
+    let ctx = magecommand_engine::ClassifyCtx {
+        archive,
+        output,
+        disabled_modules: &disabled_modules,
+    };
+    let classified = magecommand_engine::classify(&report, &ctx);
+
+    if json {
+        let out = serde_json::json!({ "report": report, "classified": classified });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        // Under --json, "clean" ignores explained differences too, so scripts
+        // can gate on genuine regressions only.
+        return Ok(fail_exit(fail_on_diff, classified.unexplained_count() > 0));
+    }
+
+    println!("{summary}");
+
+    // The genuine, unexplained differences first — the signal.
+    print_bucket("changed", &classified.changed, sample);
+    print_bucket("missing", &classified.missing, sample);
+    print_bucket("extra", &classified.extra, sample);
+
+    // Then the known/expected differences, each with its explanation.
+    if !classified.known.is_empty() {
         println!(
-            "archive: {} file(s) · identical {} · changed {} · missing {} · extra {}",
-            total,
-            report.identical,
-            report.changed.len(),
-            report.missing.len(),
-            report.extra.len()
+            "\nknown & expected differences ({} file(s)) — magecommand targets Mage-OS 3.1.0 / Magento 2.4.9:",
+            classified.known_count()
         );
-        print_bucket("changed", &report.changed, sample);
-        print_bucket("missing", &report.missing, sample);
-        print_bucket("extra", &report.extra, sample);
-        if report.is_clean() {
-            println!("output reproduces the archive exactly");
+        for group in &classified.known {
+            println!("\n  ▸ {} ({} file(s))", group.title, group.items.len());
+            for line in wrap_indent(&group.explanation, "    ", 92) {
+                println!("{line}");
+            }
+            for item in group.items.iter().take(sample) {
+                println!("      · {item}");
+            }
+            if group.items.len() > sample {
+                println!("      · … {} more", group.items.len() - sample);
+            }
         }
     }
 
-    if fail_on_diff && !report.is_clean() {
-        return Ok(ExitCode::FAILURE);
+    // Verdict.
+    if report.is_clean() {
+        println!("\noutput reproduces the archive exactly");
+    } else if classified.unexplained_count() == 0 {
+        println!(
+            "\noutput matches the archive except for {} known/expected difference(s) explained above",
+            classified.known_count()
+        );
+    } else {
+        println!(
+            "\n{} unexplained difference(s) to investigate; {} known/expected",
+            classified.unexplained_count(),
+            classified.known_count()
+        );
     }
-    Ok(ExitCode::SUCCESS)
+
+    Ok(fail_exit(fail_on_diff, classified.unexplained_count() > 0))
+}
+
+fn fail_exit(fail_on_diff: bool, has_diff: bool) -> ExitCode {
+    if fail_on_diff && has_diff {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn print_bucket(label: &str, paths: &[String], sample: usize) {
@@ -348,4 +443,24 @@ fn print_bucket(label: &str, paths: &[String], sample: usize) {
     if paths.len() > sample {
         println!("  {label}: … {} more", paths.len() - sample);
     }
+}
+
+/// Word-wrap `text` to `width` columns, each line prefixed with `indent`.
+fn wrap_indent(text: &str, indent: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.len() + 1 + word.len() > width {
+            lines.push(format!("{indent}{line}"));
+            line.clear();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(format!("{indent}{line}"));
+    }
+    lines
 }

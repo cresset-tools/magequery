@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 pub mod areaconfig;
 pub mod arguments;
+pub mod classify;
 pub mod codegen;
 pub mod compare;
 pub mod definitions;
@@ -24,6 +25,7 @@ pub mod reflect;
 pub mod pluginlist;
 pub mod phpexport;
 
+pub use classify::{classify, Classified, ClassifyCtx, KnownGroup, KnownKind};
 pub use compare::{compare_dirs, CompareReport};
 
 /// Errors the engine can return.
