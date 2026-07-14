@@ -208,17 +208,25 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
             &root,
             &generated_code,
         );
-        let pref_keys: Vec<String> = magecommand_engine::areaconfig::AREA_CODES
-            .iter()
-            .flat_map(|(area, _)| {
-                magento
-                    .di_export(*area)
-                    .preferences
-                    .into_iter()
-                    .map(|p| p.for_type.as_str().to_owned())
-            })
-            .collect();
-        let unresolved = defs.extend_hierarchy(&magento, &root, pref_keys);
+        // Names the class universe must be able to reflect even when the scan
+        // walk didn't collect them: preference TARGETS (the concrete each
+        // interface resolves to) and PLUGIN CLASSES. Magento reflects a plugin
+        // class via autoload during interception, independent of the compile's
+        // scanned collection — so a plugin whose file sits in a scan-EXCLUDED
+        // path (e.g. `<module>/TestFramework/…`, referenced from production
+        // di.xml) is still reflected, and its target methods still wrap. The
+        // resolver here is PSR-4/classmap-based (no exclusion), so passing the
+        // plugin class as an `extra` name pulls it into `classes`.
+        let mut resolve_keys: Vec<String> = Vec::new();
+        for (area, _) in magecommand_engine::areaconfig::AREA_CODES {
+            let export = magento.di_export(area);
+            resolve_keys
+                .extend(export.preferences.iter().map(|p| p.for_type.as_str().to_owned()));
+            resolve_keys.extend(
+                export.plugins.iter().filter_map(|p| p.class.as_ref()).map(|c| c.as_str().to_owned()),
+            );
+        }
+        let unresolved = defs.extend_hierarchy(&magento, &root, resolve_keys);
         if !unresolved.is_empty() {
             eprintln!(
                 "note: {} class name(s) unresolvable via autoload maps (first: {})",
