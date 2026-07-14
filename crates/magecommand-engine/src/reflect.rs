@@ -70,17 +70,15 @@ pub fn public_methods(defs: &Definitions, fqcn: &str) -> Vec<RMethod> {
         }
         let Some(rec) = defs.get(&name) else { break };
         collect_from(defs, &name, &mut out, &mut seen);
-        // Trait methods (flattened).
-        let mut stack: Vec<String> = rec.meta.traits.clone();
+        // Trait methods, flattened depth-first in declaration order: each trait
+        // contributes its own public methods, then recurses into its nested
+        // `use`d traits (pre-order), siblings left-to-right — mirroring the
+        // engine's trait-flattening into the function table. (A stack/`pop`
+        // walk here would reverse sibling traits, misordering the interceptor's
+        // methods for any class that `use`s more than one.)
         let mut expanded: HashSet<String> = HashSet::new();
-        while let Some(t) = stack.pop() {
-            if !expanded.insert(t.clone()) {
-                continue;
-            }
-            collect_from(defs, &t, &mut out, &mut seen);
-            if let Some(tr) = defs.get(&t) {
-                stack.extend(tr.meta.traits.iter().cloned());
-            }
+        for t in &rec.meta.traits {
+            collect_trait(defs, t, &mut out, &mut seen, &mut expanded);
         }
         current = rec
             .meta
@@ -90,6 +88,28 @@ pub fn public_methods(defs: &Definitions, fqcn: &str) -> Vec<RMethod> {
             .cloned();
     }
     out
+}
+
+/// Append a trait's public methods, then recurse into its nested `use`d traits
+/// in declaration order (pre-order DFS) — PHP's trait-flattening order. The
+/// `expanded` guard applies each trait once per class hop (a diamond of traits
+/// contributes its methods at first encounter; later paths are `seen`-deduped).
+fn collect_trait(
+    defs: &Definitions,
+    trait_name: &str,
+    out: &mut Vec<RMethod>,
+    seen: &mut HashSet<String>,
+    expanded: &mut HashSet<String>,
+) {
+    if !expanded.insert(trait_name.to_owned()) {
+        return;
+    }
+    collect_from(defs, trait_name, out, seen);
+    if let Some(tr) = defs.get(trait_name) {
+        for nested in &tr.meta.traits {
+            collect_trait(defs, nested, out, seen, expanded);
+        }
+    }
 }
 
 /// Append `owner`'s directly-declared public methods (not yet seen).

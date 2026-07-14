@@ -756,6 +756,34 @@ mod tests {
     }
 
     #[test]
+    fn public_methods_reflection_order_own_traits_nested_parent() {
+        // Mirrors the Acme_TraitOrder oracle fixture, verified byte-exact
+        // against a real `setup:di:compile` interceptor. Reflection lists a
+        // class's own public methods (source order), then each `use`d trait in
+        // DECLARATION order — its own methods, then its nested traits, pre-order
+        // — then the parent chain. A trait/own method shadowing a parent's keeps
+        // the earlier (nearer) position. The earlier stack/`pop` walk reversed
+        // sibling traits, so this would have emitted `secondA` before `firstA`.
+        let defs = defs([
+            record("<?php trait NestedT { public function nestedX() {} }"),
+            record(
+                "<?php trait FirstT { use NestedT; public function firstA() {} public function firstB() {} }",
+            ),
+            record("<?php trait SecondT { public function secondA() {} }"),
+            record("<?php class P { public function baseAlpha() {} public function baseShared() {} }"),
+            record(
+                "<?php class C extends P { use FirstT, SecondT; public function ownOne() {} public function baseShared() {} }",
+            ),
+        ]);
+        let names: Vec<String> =
+            crate::reflect::public_methods(&defs, "C").into_iter().map(|m| m.name).collect();
+        assert_eq!(
+            names,
+            ["ownOne", "baseShared", "firstA", "firstB", "nestedX", "secondA", "baseAlpha"]
+        );
+    }
+
+    #[test]
     fn trait_constructor_found_transitively() {
         // A trait that `use`s another trait which provides the ctor.
         let defs = defs([
