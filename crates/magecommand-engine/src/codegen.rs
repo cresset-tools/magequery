@@ -804,14 +804,23 @@ impl<'a> Codegen<'a> {
             .collect();
         names.sort();
         for name in names {
-            // Factories from constructor parameters (reflection walks to the
-            // nearest inherited constructor, as constructor_of does).
+            // Factories AND proxies from constructor parameters (reflection
+            // walks to the nearest inherited constructor, as constructor_of
+            // does). A `…Factory` param is caught by PhpScanner's
+            // `_fetchFactories`; a `…\Proxy` param has no scanner, but the
+            // definition compiler resolves every constructor argument's class,
+            // and the code-generator autoloader materializes the proxy the
+            // first time `<Subject>\Proxy` is reflected — so a proxy injected
+            // only via a constructor type-hint (e.g. `use …\Foo\Proxy as Foo;
+            // __construct(Foo $foo)`), with no di.xml `<argument>` at all, is
+            // still generated. Verified on the oracle: a synthetic class with
+            // such a parameter and no di.xml reference produces the proxy.
             if let Ok(Some(ctor)) = defs.constructor_of(name) {
-                let candidates: Vec<String> = ctor
-                    .params
+                let types: Vec<&str> = ctor.params.iter().filter_map(|p| p.ty.as_deref()).collect();
+                let candidates: Vec<String> = types
                     .iter()
-                    .filter_map(|p| p.ty.as_deref())
-                    .filter_map(factory_param_candidate)
+                    .filter_map(|ty| factory_param_candidate(ty))
+                    .chain(types.iter().filter_map(|ty| proxy_param_candidate(ty)))
                     .map(str::to_owned)
                     .collect();
                 for cand in candidates {
@@ -1059,6 +1068,21 @@ fn factory_param_candidate(ty: &str) -> Option<&str> {
     }
 }
 
+/// A constructor parameter type that names a `<Subject>\Proxy` — captured the
+/// same way as `factory_param_candidate` (cut at the first non-name char so a
+/// union keeps only its first member, drop a leading `?`), but keyed on the
+/// `\Proxy` *segment* (`ends_with("\\Proxy")`), mirroring the di.xml scanner's
+/// `_filterEntities` gate. `ensure` then generates it only if the stripped
+/// subject is a real class.
+fn proxy_param_candidate(ty: &str) -> Option<&str> {
+    let s = ty.strip_prefix('?').unwrap_or(ty);
+    let end = s
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '\\'))
+        .unwrap_or(s.len());
+    let cap = &s[..end];
+    cap.ends_with("\\Proxy").then_some(cap)
+}
+
 fn is_di_xml(path: &std::path::Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
@@ -1300,6 +1324,20 @@ mod tests {
         assert_eq!(factory_param_candidate("Foo\\Factory"), None);
         assert_eq!(factory_param_candidate("array"), None);
         assert_eq!(factory_param_candidate("string"), None);
+    }
+
+    #[test]
+    fn proxy_param_candidates() {
+        // A `\Proxy`-segment constructor param (already alias-resolved to its
+        // FQCN by the parser) is a proxy target; `?` and unions handled like
+        // the factory scan.
+        assert_eq!(proxy_param_candidate("Foo\\Bar\\Proxy"), Some("Foo\\Bar\\Proxy"));
+        assert_eq!(proxy_param_candidate("?Foo\\Bar\\Proxy"), Some("Foo\\Bar\\Proxy"));
+        assert_eq!(proxy_param_candidate("Foo\\A\\Proxy|null"), Some("Foo\\A\\Proxy"));
+        // "Proxy" only as a name suffix, not its own segment, is not a proxy.
+        assert_eq!(proxy_param_candidate("Foo\\MyProxy"), None);
+        assert_eq!(proxy_param_candidate("Foo\\Bar"), None);
+        assert_eq!(proxy_param_candidate("string"), None);
     }
 
     #[test]
