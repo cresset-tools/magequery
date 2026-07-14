@@ -252,6 +252,26 @@ fn map_self_parent(defs: &Definitions, declaring: &str, name: &str) -> String {
             .get(declaring)
             .and_then(|r| r.meta.extends.first().cloned())
             .unwrap_or_else(|| name.to_owned()),
+        _ => canonicalize_class_case(defs, name),
+    }
+}
+
+/// PHP class names are case-insensitive, but reflection reports a class type in
+/// its DECLARED case, not the case written at the type-hint site. So a param
+/// hinted `\…\Resourcemodel\Quote` whose class declares `ResourceModel`
+/// reflects (and the real interceptor renders) as `ResourceModel`. Canonicalize
+/// any name resolving to a known class to its `meta.fqcn`; scalars, built-ins,
+/// and names outside the class universe pass through unchanged.
+fn canonicalize_class_case(defs: &Definitions, name: &str) -> String {
+    let bare = name.trim_start_matches('\\');
+    match defs.get(bare) {
+        Some(rec) if rec.meta.fqcn != bare => {
+            if name.starts_with('\\') {
+                format!("\\{}", rec.meta.fqcn)
+            } else {
+                rec.meta.fqcn.clone()
+            }
+        }
         _ => name.to_owned(),
     }
 }
@@ -424,5 +444,38 @@ mod tests {
             verbatim_expr(&concat, &["Acme\\C".to_owned()]).as_deref(),
             Some("\\Acme\\C::PREFIX . 'x'")
         );
+    }
+
+    #[test]
+    fn class_type_canonicalizes_to_declared_case() {
+        use super::canonicalize_class_case;
+        use crate::definitions::{ClassRecord, Definitions};
+        use std::path::PathBuf;
+
+        let meta = magecommand_php::parse_file(
+            b"<?php namespace Acme\\Foo\\ResourceModel; class Thing {}",
+        )
+        .declarations
+        .into_iter()
+        .next()
+        .unwrap();
+        let fqcn = meta.fqcn.clone();
+        let defs =
+            Definitions::from_records([(fqcn, ClassRecord { meta, file: PathBuf::new() })]);
+
+        // A hint written in the wrong case (`Resourcemodel`) resolves to the
+        // DECLARED case (`ResourceModel`) — what PHP reflection reports.
+        assert_eq!(
+            canonicalize_class_case(&defs, "\\Acme\\Foo\\Resourcemodel\\Thing"),
+            "\\Acme\\Foo\\ResourceModel\\Thing"
+        );
+        // The leading-backslash spelling is preserved as written.
+        assert_eq!(
+            canonicalize_class_case(&defs, "Acme\\Foo\\Resourcemodel\\Thing"),
+            "Acme\\Foo\\ResourceModel\\Thing"
+        );
+        // Scalars and classes outside the universe pass through untouched.
+        assert_eq!(canonicalize_class_case(&defs, "int"), "int");
+        assert_eq!(canonicalize_class_case(&defs, "\\Other\\Cls"), "\\Other\\Cls");
     }
 }
