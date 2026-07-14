@@ -52,6 +52,25 @@ pub struct Definitions {
 }
 
 impl Definitions {
+    /// Test-only: build a `Definitions` from `(fqcn, record)` pairs, populating
+    /// the case-insensitive `canonical` map. The other index sets stay empty.
+    #[cfg(test)]
+    pub(crate) fn from_records(
+        records: impl IntoIterator<Item = (String, ClassRecord)>,
+    ) -> Definitions {
+        let classes: HashMap<String, ClassRecord> = records.into_iter().collect();
+        let canonical =
+            classes.keys().map(|k| (k.to_ascii_lowercase(), k.clone())).collect();
+        Definitions {
+            classes,
+            scanned: HashSet::new(),
+            setup_classes: HashSet::new(),
+            from_scan: HashSet::new(),
+            generated_classes: HashSet::new(),
+            canonical,
+        }
+    }
+
     /// Scan the compile paths of `magento`, with `generated_code` supplied by
     /// the caller (the live `generated/code`, or an archived `_code` when
     /// reproducing an existing compile).

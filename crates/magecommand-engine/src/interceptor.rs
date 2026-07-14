@@ -50,9 +50,9 @@ pub fn plan(magento: &Magento, defs: &Definitions) -> InterceptionPlan {
 
     // filterNullInheritance keeps a key only when the KEY class is concrete;
     // the interceptable/seed validation does NOT re-apply to ancestor keys.
-    // (Whether a class survives at all is already decided by the inherit walk:
-    // a class inheriting only disabled plugins from an ancestor gets a null
-    // config and never appears here.)
+    // (Whether a class survives at all is decided by the inherit walk: a class
+    // whose only config is an ancestor's disabled plugins survives iff that
+    // ancestor was computed first — the order-dependent cache-hit path.)
     let set: HashSet<String> = instances
         .keys()
         .filter(|k| defs.is_concrete(k))
