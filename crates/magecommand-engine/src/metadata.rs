@@ -151,6 +151,99 @@ pub fn write_code_files(root: &Path, files: &[(String, String)], force: bool) ->
     Ok(files.len())
 }
 
+/// What an incremental write actually did, for the CLI to report.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct IncrementalStats {
+    pub written: usize,
+    pub skipped: usize,
+    pub deleted: usize,
+}
+
+/// Reconcile `generated/code` against the previous compile's manifest: write
+/// only the files whose content changed (or are new), delete the ones that
+/// disappeared, and leave byte-identical files untouched. Returns the stats and
+/// the fresh manifest (hashes of the CURRENT output) for the caller to persist.
+///
+/// This replaces `clear + write_code_files` on the `--incremental` path — the
+/// tree is NOT cleared first, so unchanged files (the vast majority of a
+/// re-compile) are never touched, and on APFS the ~1.8s write phase collapses to
+/// the changed subset. `prev = None` writes everything (a cold incremental
+/// build, e.g. first run or an invalidated manifest).
+///
+/// Byte-exactness: the in-memory `files` are the single source of truth; we only
+/// skip writing bytes whose blake3 already matches the manifest, so the result
+/// is identical to a full compile. The manifest is trusted as the on-disk record
+/// (the caller guards that `generated/code` actually exists before trusting it).
+pub fn write_code_files_incremental(
+    root: &Path,
+    files: &[(String, String)],
+    prev: Option<&crate::manifest::Manifest>,
+    bp: &str,
+) -> Result<(IncrementalStats, crate::manifest::Manifest)> {
+    use rayon::prelude::*;
+    use std::collections::{BTreeMap, HashSet};
+    use crate::manifest::Manifest;
+
+    let base = root.join("generated/code");
+
+    // Hash the whole new output (parallel) → the fresh manifest map.
+    let new_files: BTreeMap<String, String> = files
+        .par_iter()
+        .map(|(rel, content)| (rel.clone(), Manifest::hash(content.as_bytes())))
+        .collect();
+
+    // Writes = new path, or a hash that differs from the manifest.
+    let to_write: Vec<&(String, String)> = files
+        .iter()
+        .filter(|(rel, _)| match prev.and_then(|m| m.files.get(rel)) {
+            Some(prev_hash) => prev_hash != &new_files[rel],
+            None => true,
+        })
+        .collect();
+
+    // Deletes = in the old manifest but not in the new output.
+    let new_paths: HashSet<&str> = files.iter().map(|(r, _)| r.as_str()).collect();
+    let to_delete: Vec<&String> = prev
+        .map(|m| m.files.keys().filter(|p| !new_paths.contains(p.as_str())).collect())
+        .unwrap_or_default();
+
+    // Pre-create the parent dirs of the files we WILL write (dedup), then write
+    // them directly in parallel — same as the full path, minus the untouched
+    // majority.
+    fs::create_dir_all(&base).map_err(|e| Error::io(&base, e))?;
+    let dirs: Vec<PathBuf> = to_write
+        .iter()
+        .filter_map(|(rel, _)| Path::new(rel).parent())
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|p| base.join(p))
+        .collect();
+    dirs.par_iter()
+        .try_for_each(|dir| fs::create_dir_all(dir).map_err(|e| Error::io(dir, e)))?;
+    to_write.par_iter().try_for_each(|(rel, content)| -> Result<()> {
+        let target = base.join(rel);
+        fs::write(&target, content).map_err(|e| Error::io(&target, e))
+    })?;
+
+    // Remove files that no longer belong (a missing one is fine — already gone).
+    for rel in &to_delete {
+        let target = base.join(rel);
+        match fs::remove_file(&target) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(Error::io(&target, e)),
+        }
+    }
+
+    let stats = IncrementalStats {
+        written: to_write.len(),
+        skipped: files.len() - to_write.len(),
+        deleted: to_delete.len(),
+    };
+    Ok((stats, Manifest::from_hashes(bp, new_files)))
+}
+
 /// Remove a compile output directory (`generated/code` or
 /// `generated/metadata`) so a fresh compile starts clean, exactly as
 /// `setup:di:compile` wipes `generated/code` before running. A missing dir is
@@ -256,5 +349,42 @@ mod tests {
         assert!(!root.path().join("generated/code").exists());
         // A missing dir is fine (idempotent).
         clear_generated_dir(root.path(), "code").unwrap();
+    }
+
+    #[test]
+    fn incremental_write_skips_unchanged_writes_changed_and_deletes_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let bp = "/srv/shop";
+        let base = root.path().join("generated/code");
+        let read = |rel: &str| fs::read_to_string(base.join(rel)).unwrap();
+
+        // Cold build (no manifest): everything is written, nothing skipped.
+        let v1 = vec![
+            ("A/Keep.php".to_owned(), "<?php // keep".to_owned()),
+            ("A/Change.php".to_owned(), "<?php // v1".to_owned()),
+            ("B/Gone.php".to_owned(), "<?php // gone".to_owned()),
+        ];
+        let (s, m1) = write_code_files_incremental(root.path(), &v1, None, bp).unwrap();
+        assert_eq!((s.written, s.skipped, s.deleted), (3, 0, 0));
+        assert_eq!(read("A/Change.php"), "<?php // v1");
+
+        // Second run: Keep unchanged, Change edited, Gone removed, New added.
+        let v2 = vec![
+            ("A/Keep.php".to_owned(), "<?php // keep".to_owned()),
+            ("A/Change.php".to_owned(), "<?php // v2".to_owned()),
+            ("C/New.php".to_owned(), "<?php // new".to_owned()),
+        ];
+        let (s, m2) = write_code_files_incremental(root.path(), &v2, Some(&m1), bp).unwrap();
+        assert_eq!((s.written, s.skipped, s.deleted), (2, 1, 1));
+        assert_eq!(read("A/Change.php"), "<?php // v2");
+        assert_eq!(read("C/New.php"), "<?php // new");
+        assert!(!base.join("B/Gone.php").exists(), "removed file deleted");
+        // The fresh manifest reflects the new set exactly.
+        let keys: Vec<_> = m2.files.keys().cloned().collect();
+        assert_eq!(keys, ["A/Change.php", "A/Keep.php", "C/New.php"]);
+
+        // Re-running with the up-to-date manifest is a pure no-op.
+        let (s, _) = write_code_files_incremental(root.path(), &v2, Some(&m2), bp).unwrap();
+        assert_eq!((s.written, s.skipped, s.deleted), (0, 3, 0));
     }
 }

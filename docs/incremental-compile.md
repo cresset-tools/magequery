@@ -1,8 +1,21 @@
 # magecommand incremental compile (CAS) — design scope
 
-Status: **scoping** (no code yet). Target: cut the re-compile cost, especially on
-APFS where the compile is filesystem-bound (see the perf notes below), and enable
-CI to treat `setup:di:compile` as a **cache restore**.
+Status: **Win 1 shipped** (`compile --incremental`); Wins 2–3 + CI recipe scoped
+below. Target: cut the re-compile cost, especially on APFS where the compile is
+filesystem-bound (see the perf notes below), and enable CI to treat
+`setup:di:compile` as a **cache restore**.
+
+**Win 1 (output manifest) — done.** `compile` writes
+`generated/.mqcache/manifest.json` (blake3 of every output file, guarded by
+format version + tool version + `BP`). `compile --incremental` reconciles
+`generated/code` in place: it re-runs the compute, hashes the fresh in-memory
+output, and writes only the files whose hash changed, deletes the ones that
+disappeared, and skips the rest — no clear, no full rewrite. Falls back to a full
+compile when no valid manifest exists (or under `--force`). Verified on the
+oracle: a no-op re-compile writes 0/4106 files and stays byte-exact; changed and
+deleted paths reconcile byte-exact; a missing manifest falls back to full. The
+write+clear phases (the ~3.4s APFS cost) collapse to the changed subset. Still
+paid every run: scan + compute (that's what Win 2's short-circuit removes).
 
 ## The core observation
 

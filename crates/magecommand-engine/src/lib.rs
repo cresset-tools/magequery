@@ -19,6 +19,7 @@ pub mod definitions;
 pub mod interception;
 pub mod interceptor;
 pub mod laminas;
+pub mod manifest;
 pub mod metadata;
 pub mod proxy;
 pub mod reflect;

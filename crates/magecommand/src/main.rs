@@ -40,6 +40,11 @@ enum Command {
         /// Overwrite existing generated files.
         #[arg(long)]
         force: bool,
+        /// Reuse the previous compile's output manifest: reconcile
+        /// generated/code in place, writing only the files whose content
+        /// changed. Falls back to a full compile if no valid manifest exists.
+        #[arg(long)]
+        incremental: bool,
     },
     /// Compare a generated tree against an archived ground truth
     /// (`generated/_code`, `generated/_metadata`).
@@ -80,7 +85,9 @@ fn main() -> anyhow::Result<ExitCode> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Compile { dry_run, force } => compile(cli.root, cli.json, dry_run, force),
+        Command::Compile { dry_run, force, incremental } => {
+            compile(cli.root, cli.json, dry_run, force, incremental)
+        }
         Command::Compare {
             ref archive,
             ref output,
@@ -104,7 +111,13 @@ fn main() -> anyhow::Result<ExitCode> {
 // The final `lap!` resets `t` without a subsequent read — expected for a
 // timing macro whose last call closes the sequence.
 #[allow(unused_assignments)]
-fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> anyhow::Result<ExitCode> {
+fn compile(
+    root: Option<PathBuf>,
+    json: bool,
+    dry_run: bool,
+    force: bool,
+    incremental: bool,
+) -> anyhow::Result<ExitCode> {
     use magequery_core::Area;
 
     // Magento's `BP` is always an absolute path, and it is baked verbatim into
@@ -208,15 +221,32 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
         // A clean compile, like `setup:di:compile`: refuse to clobber an
         // existing output tree unless --force, then wipe generated/code +
         // generated/metadata and regenerate both from scratch. (The archive
-        // dirs `_code`/`_metadata` are never touched.)
+        // dirs `_code`/`_metadata` are never touched.) `--incremental` is an
+        // intentional overwrite, so it skips the guard.
+        let bp = root.to_string_lossy().to_string();
         let code_dir = root.join("generated/code");
         let meta_dir = root.join("generated/metadata");
-        if !force && (dir_has_files(&code_dir) || dir_has_files(&meta_dir)) {
+        if !force && !incremental && (dir_has_files(&code_dir) || dir_has_files(&meta_dir)) {
             anyhow::bail!(
                 "generated/code or generated/metadata is non-empty; pass --force to overwrite"
             );
         }
-        magecommand_engine::metadata::clear_generated_dir(&root, "code")?;
+        // Incremental only when asked (and NOT --force, which forces a full
+        // rebuild) AND a trustworthy manifest exists AND the code tree it
+        // describes is actually present (guards the "manifest kept, tree
+        // deleted" case) — else fall back to a full compile.
+        let prev_manifest = if incremental && !force && dir_has_files(&code_dir) {
+            magecommand_engine::manifest::Manifest::load(&root, &bp)
+        } else {
+            None
+        };
+        let do_incremental = prev_manifest.is_some();
+
+        // Metadata is always rewritten (small, cheap). generated/code is cleared
+        // only for a full compile — the incremental path reconciles it in place.
+        if !do_incremental {
+            magecommand_engine::metadata::clear_generated_dir(&root, "code")?;
+        }
         magecommand_engine::metadata::clear_generated_dir(&root, "metadata")?;
         lap!("clear generated dirs");
 
@@ -335,9 +365,30 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
             &interception,
         );
         lap!("generate_code (in memory)");
-        magecommand_engine::metadata::write_code_files(&root, &code.files, true)?;
+        // Reconcile generated/code against the manifest (writing only changed
+        // files) and record the fresh manifest so the NEXT run can go
+        // incremental. A full compile takes the same path with `prev = None`:
+        // it writes everything and still emits the baseline manifest.
+        let (stats, manifest) = magecommand_engine::metadata::write_code_files_incremental(
+            &root,
+            &code.files,
+            prev_manifest.as_ref(),
+            &bp,
+        )?;
         lap!("write code files (disk)");
-        println!("wrote {} generated/code file(s)", code.files.len());
+        manifest.save(&root)?;
+        lap!("write manifest");
+        if do_incremental {
+            println!(
+                "incremental: wrote {} · skipped {} unchanged · deleted {} (of {} files)",
+                stats.written,
+                stats.skipped,
+                stats.deleted,
+                code.files.len()
+            );
+        } else {
+            println!("wrote {} generated/code file(s)", code.files.len());
+        }
         if !code.findings.is_empty() {
             eprintln!(
                 "note: {} generated-code finding(s), first: {}",
