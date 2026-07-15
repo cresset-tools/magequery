@@ -216,9 +216,19 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
                 "generated/code or generated/metadata is non-empty; pass --force to overwrite"
             );
         }
-        magecommand_engine::metadata::clear_generated_dir(&root, "code")?;
-        magecommand_engine::metadata::clear_generated_dir(&root, "metadata")?;
-        lap!("clear generated dirs");
+        // Rename the old trees aside (instant) and unlink them on background
+        // threads; joined at the end of this block. Deleting a populated
+        // generated/code is ~1.6s on APFS and would otherwise block the compile
+        // start. The freshly-emptied dirs are recreated by the writers below.
+        let mut clear_handles = Vec::new();
+        for sub in ["code", "metadata"] {
+            if let Some(handle) =
+                magecommand_engine::metadata::clear_generated_dir_deferred(&root, sub)?
+            {
+                clear_handles.push(handle);
+            }
+        }
+        lap!("clear generated dirs (rename aside)");
 
         // Metadata files (M2). The output dir is now clean, so force-write.
         let list = magecommand_engine::metadata::app_action_list(&magento);
@@ -345,6 +355,12 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
                 code.findings.first().map(String::as_str).unwrap_or("")
             );
         }
+        // Ensure the backgrounded deletes of the old trees finished before we
+        // return (normally already done — they overlapped the whole compile).
+        for handle in clear_handles {
+            let _ = handle.join();
+        }
+        lap!("join background clears");
     }
     Ok(ExitCode::SUCCESS)
 }
