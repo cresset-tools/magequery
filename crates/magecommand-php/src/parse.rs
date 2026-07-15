@@ -19,6 +19,11 @@ pub fn parse_file(src: &[u8]) -> FileMeta {
     // Everything before the first open tag is HTML.
     p.cur.skip_html_until_open_tag();
     p.top_level();
+    // A `class_exists(…)` guard declares the same name in both branches; PHP
+    // defines whichever branch runs. We keep the FIRST (the `if` branch, the
+    // real implementation the shim's dependency-present path takes).
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    p.out.declarations.retain(|d| seen.insert(d.fqcn.clone(), ()).is_none());
     p.out
 }
 
@@ -46,6 +51,12 @@ impl<'a> Parser<'a> {
     // ---- top level -----------------------------------------------------
 
     fn top_level(&mut self) {
+        self.scan_declarations(false);
+    }
+
+    /// Scan declarations at file scope (`nested = false`) or inside a `{ … }`
+    /// block (`nested = true`, returns after consuming the matching `}`).
+    fn scan_declarations(&mut self, nested: bool) {
         let mut is_abstract = false;
         let mut is_final = false;
         let mut is_readonly = false;
@@ -58,7 +69,13 @@ impl<'a> Parser<'a> {
                     let attrs = self.parse_attribute_names();
                     pending_attrs.extend(attrs);
                 }
-                b'}' | b';' => self.cur.bump(),
+                b'}' => {
+                    self.cur.bump();
+                    if nested {
+                        return; // the block this scan was opened for just closed
+                    }
+                }
+                b';' => self.cur.bump(),
                 b'?' if self.cur.peek_at(1) == Some(b'>') => {
                     self.cur.pos += 2;
                     self.cur.skip_html_until_open_tag();
@@ -104,9 +121,26 @@ impl<'a> Parser<'a> {
                             pending_attrs.clear();
                             self.skip_function();
                         }
+                        // A class can be declared inside an `if`/`else` guard —
+                        // the `class_exists(…)` compat-shim pattern (Hyva
+                        // modules, PHP polyfills). Descend into the block so the
+                        // conditional class enters the universe; `parse_file`
+                        // keeps the FIRST declaration of each name, mirroring the
+                        // `if`-branch a store with the guarded dependency takes.
+                        "if" | "elseif" => {
+                            pending_attrs.clear();
+                            self.skip_paren_condition();
+                            self.descend_if_braced();
+                        }
+                        "else" => {
+                            // `else { … }` descends; `else if …` leaves the `if`
+                            // for the next iteration's handler.
+                            pending_attrs.clear();
+                            self.descend_if_braced();
+                        }
                         _ => {
-                            // declare(...), const, if-guards, expressions —
-                            // top-level code we don't model.
+                            // declare(...), const, expressions — top-level code
+                            // we don't model.
                             pending_attrs.clear();
                             self.cur.pos = start;
                             self.cur.skip_statement();
@@ -115,6 +149,26 @@ impl<'a> Parser<'a> {
                 }
                 _ => self.cur.skip_statement(),
             }
+        }
+    }
+
+    /// Skip a `( … )` control-structure condition if one is next.
+    fn skip_paren_condition(&mut self) {
+        self.cur.skip_insignificant();
+        if self.cur.peek() == Some(b'(') {
+            self.cur.bump();
+            self.cur.skip_parens_body(1);
+        }
+    }
+
+    /// If a `{` follows, descend into the block scanning for declarations
+    /// (consuming through its matching `}`). A braceless body is left for the
+    /// main loop — a braceless `if (x) class C {}` still registers `C`.
+    fn descend_if_braced(&mut self) {
+        self.cur.skip_insignificant();
+        if self.cur.peek() == Some(b'{') {
+            self.cur.bump();
+            self.scan_declarations(true);
         }
     }
 
