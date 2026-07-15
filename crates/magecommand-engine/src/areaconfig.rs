@@ -268,34 +268,46 @@ pub fn build_area_file_from_export(
     }
 }
 
-/// Every compiled area file — the seven fixed areas in generation order, then
-/// custom-registered areas (sorted) — each paired with its metadata-file stem.
+/// One compiled area: its metadata-file stem (`global`, `frontend`, …), the
+/// full [`AreaFile`], and its already-rendered `<code>.php` body.
+pub struct CompiledArea {
+    pub code: String,
+    pub file: AreaFile,
+    pub rendered: String,
+}
+
+/// Every compiled area — the seven fixed areas in generation order, then
+/// custom-registered areas (sorted).
 ///
 /// This is the compile's single most expensive computation (each area runs the
 /// full Reader + modification chain), and it was previously done *twice*: once
 /// to write the `<code>.php` metadata and again for codegen's incidental
 /// `class_exists` sweep. Build it once here and share both consumers. The areas
-/// are independent, so they build in parallel; `collect` into an indexed `Vec`
-/// preserves the fixed-then-custom order the sweep and metadata write rely on.
+/// are independent, so they build — and render — in parallel; `collect` into an
+/// indexed `Vec` preserves the fixed-then-custom order the sweep and metadata
+/// write rely on.
 pub fn build_all_area_files(
     magento: &Magento,
     defs: &Definitions,
     root: &std::path::Path,
-) -> Vec<(String, AreaFile)> {
+) -> Vec<CompiledArea> {
     use rayon::prelude::*;
     let custom = custom_area_codes(magento);
-    let mut files: Vec<(String, AreaFile)> = AREA_CODES
+    let mut files: Vec<CompiledArea> = AREA_CODES
         .par_iter()
-        .map(|(area, code)| ((*code).to_owned(), build_area_file(magento, defs, *area, root)))
+        .map(|(area, code)| {
+            let file = build_area_file(magento, defs, *area, root);
+            let rendered = file.render();
+            CompiledArea { code: (*code).to_owned(), file, rendered }
+        })
         .collect();
-    let custom_files: Vec<(String, AreaFile)> = custom
+    let custom_files: Vec<CompiledArea> = custom
         .par_iter()
         .map(|code| {
             let export = magento.di_export_custom_area(code);
-            (
-                code.clone(),
-                build_area_file_from_export(magento, defs, export, root),
-            )
+            let file = build_area_file_from_export(magento, defs, export, root);
+            let rendered = file.render();
+            CompiledArea { code: code.clone(), file, rendered }
         })
         .collect();
     files.extend(custom_files);

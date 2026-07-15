@@ -282,14 +282,14 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
         // same set, so it must never be recomputed.
         let area_files =
             magecommand_engine::areaconfig::build_all_area_files(&magento, &defs, &root);
-        lap!("build area files (x7+)");
+        lap!("build + render area files (x7+)");
         let mut finding_count = 0usize;
-        for (code, file) in &area_files {
-            finding_count += file.findings.len();
+        for ca in &area_files {
+            finding_count += ca.file.findings.len();
             let path = magecommand_engine::metadata::write_metadata_file(
                 &root,
-                &format!("{code}.php"),
-                &file.render(),
+                &format!("{}.php", ca.code),
+                &ca.rendered,
                 true,
             )?;
             println!("wrote {}", path.display());
