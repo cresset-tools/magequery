@@ -151,54 +151,6 @@ pub fn write_code_files(root: &Path, files: &[(String, String)], force: bool) ->
     Ok(files.len())
 }
 
-/// Clear a compile output dir OFF the critical path: rename the existing tree
-/// aside (an instant metadata op) and unlink it on a background thread, instead
-/// of blocking the compile on the delete.
-///
-/// Deleting a populated `generated/code` (10k+ files) reliably costs ~1.6s on
-/// APFS, and it sits at the very start of the compile — before ~5s of
-/// scan/build/write. Renaming it aside is O(1); the actual unlink then overlaps
-/// the rest of the compile on ONE background thread (deliberately single-
-/// threaded, so it never steals rayon workers from the real work) and is joined
-/// at the end (by which point it is normally already done).
-///
-/// Returns a [`JoinHandle`](std::thread::JoinHandle) the caller MUST join before
-/// exit so the unlink completes; `None` when there was nothing to delete. Falls
-/// back to a synchronous in-place [`clear_generated_dir`] if the rename fails
-/// (odd filesystem, leftover trash) so correctness never depends on it. A
-/// missing dir is a no-op. NEVER pass an archive dir (`_code`/`_metadata`).
-pub fn clear_generated_dir_deferred(
-    root: &Path,
-    subdir: &str,
-) -> Result<Option<std::thread::JoinHandle<()>>> {
-    debug_assert!(
-        !subdir.starts_with('_'),
-        "refusing to clear an archive dir: {subdir}"
-    );
-    let gen = root.join("generated");
-    let dir = gen.join(subdir);
-    if !dir.exists() {
-        return Ok(None);
-    }
-    // Per-pid trash name: unique to this run, so concurrent compiles in one root
-    // never collide and a normal run's trash is gone by the join below. A
-    // same-pid leftover (crash + pid reuse) is astronomically unlikely but
-    // cleared first so the rename can't fail on it.
-    let trash = gen.join(format!(".{subdir}.__mqtrash.{}", std::process::id()));
-    if trash.exists() {
-        let _ = fs::remove_dir_all(&trash);
-    }
-    match fs::rename(&dir, &trash) {
-        Ok(()) => Ok(Some(std::thread::spawn(move || {
-            let _ = fs::remove_dir_all(&trash);
-        }))),
-        Err(_) => {
-            clear_generated_dir(root, subdir)?;
-            Ok(None)
-        }
-    }
-}
-
 /// Remove a compile output directory (`generated/code` or
 /// `generated/metadata`) so a fresh compile starts clean, exactly as
 /// `setup:di:compile` wipes `generated/code` before running. A missing dir is
@@ -208,8 +160,14 @@ pub fn clear_generated_dir_deferred(
 /// `remove_dir_all` unlinks them serially (~140ms). Instead, remove each
 /// `Vendor/Module` subtree in parallel (hundreds of independent subtrees =
 /// good fan-out), then drop the emptied top dir. Falls back to a plain
-/// `remove_dir_all` for a shallow tree. This is the fallback for
-/// [`clear_generated_dir_deferred`]; prefer that on the compile path.
+/// `remove_dir_all` for a shallow tree.
+///
+/// (A background/deferred variant — rename aside + unlink on a worker thread —
+/// was tried and reverted: on APFS the compile already saturates the single FS
+/// metadata lock, so a background delete only contends with the foreground
+/// scan/write instead of overlapping it. Deferral helps only where the FS lets
+/// independent subtrees delete concurrently; there it saved ~40ms, not worth the
+/// machinery. The real macOS lever is FEWER files, i.e. incremental/CAS.)
 pub fn clear_generated_dir(root: &Path, subdir: &str) -> Result<()> {
     use rayon::prelude::*;
     debug_assert!(
