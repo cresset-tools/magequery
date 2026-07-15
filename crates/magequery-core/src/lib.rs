@@ -18,6 +18,7 @@
 
 pub mod error;
 pub mod ids;
+pub mod laminas_alias;
 pub mod model;
 pub mod source;
 
