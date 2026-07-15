@@ -118,12 +118,50 @@ pub fn write_code_files(root: &Path, files: &[(String, String)], force: bool) ->
 /// `generated/metadata`) so a fresh compile starts clean, exactly as
 /// `setup:di:compile` wipes `generated/code` before running. A missing dir is
 /// not an error. NEVER pass an archive dir (`_code`/`_metadata`).
+///
+/// `generated/code` holds ~4100 files under `Vendor/Module/…`; a single
+/// `remove_dir_all` unlinks them serially (~140ms). Instead, remove each
+/// `Vendor/Module` subtree in parallel (hundreds of independent subtrees =
+/// good fan-out), then drop the emptied top dir. Falls back to a plain
+/// `remove_dir_all` for a shallow tree.
 pub fn clear_generated_dir(root: &Path, subdir: &str) -> Result<()> {
+    use rayon::prelude::*;
     debug_assert!(
         !subdir.starts_with('_'),
         "refusing to clear an archive dir: {subdir}"
     );
     let dir = root.join("generated").join(subdir);
+
+    // Gather depth-2 targets: each `Vendor/Module` dir, plus any stray file or
+    // non-dir entry directly under `Vendor/`. Missing dir ⇒ nothing to do.
+    let vendors = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Error::io(&dir, e)),
+    };
+    let mut targets: Vec<PathBuf> = Vec::new();
+    for vendor in vendors.flatten() {
+        let vpath = vendor.path();
+        if vendor.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            match fs::read_dir(&vpath) {
+                Ok(modules) => targets.extend(modules.flatten().map(|m| m.path())),
+                Err(_) => targets.push(vpath),
+            }
+        } else {
+            targets.push(vpath);
+        }
+    }
+
+    targets.par_iter().try_for_each(|p| -> Result<()> {
+        let r = if p.is_dir() { fs::remove_dir_all(p) } else { fs::remove_file(p) };
+        match r {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::io(p, e)),
+        }
+    })?;
+
+    // Drop the now-emptied Vendor dirs + the top dir in one final sweep.
     match fs::remove_dir_all(&dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
