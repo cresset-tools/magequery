@@ -159,26 +159,30 @@ pub struct IncrementalStats {
     pub deleted: usize,
 }
 
-/// Reconcile `generated/code` against the previous compile's manifest: write
-/// only the files whose content changed (or are new), delete the ones that
-/// disappeared, and leave byte-identical files untouched. Returns the stats and
-/// the fresh manifest (hashes of the CURRENT output) for the caller to persist.
+/// Reconcile `generated/code` against the previous compile's output (moved aside
+/// to `prev_dir`) and manifest: write only the files whose content changed (or
+/// are new), rename the byte-identical majority back from `prev_dir`, and drop
+/// the rest. Returns the stats and the fresh manifest (hashes of the CURRENT
+/// output) for the caller to persist.
 ///
-/// This replaces `clear + write_code_files` on the `--incremental` path — the
-/// tree is NOT cleared first, so unchanged files (the vast majority of a
-/// re-compile) are never touched, and on APFS the ~1.8s write phase collapses to
-/// the changed subset. `prev = None` writes everything (a cold incremental
-/// build, e.g. first run or an invalidated manifest).
+/// The caller moves the old `generated/code` to `prev_dir` before the compute so
+/// the compute sees an empty tree (byte-identical to a full compile — see the
+/// `--incremental` handling in main), then hands it here. For each output file:
+/// if its blake3 matches the manifest AND the old copy is in `prev_dir`, it is
+/// **renamed** back into place (a metadata op — no data rewrite, the APFS win);
+/// otherwise the fresh bytes are written. Leftover files in `prev_dir` are the
+/// removed outputs; the whole `prev_dir` is dropped at the end.
 ///
-/// Byte-exactness: the in-memory `files` are the single source of truth; we only
-/// skip writing bytes whose blake3 already matches the manifest, so the result
-/// is identical to a full compile. The manifest is trusted as the on-disk record
-/// (the caller guards that `generated/code` actually exists before trusting it).
+/// `prev = None` / `prev_dir = None` is the cold path: everything is written
+/// (first run or an invalidated manifest). Byte-exactness: the in-memory `files`
+/// are the single source of truth — a renamed-back file is only ever one whose
+/// hash already matches, so the result is identical to a full compile.
 pub fn write_code_files_incremental(
     root: &Path,
     files: &[(String, String)],
     prev: Option<&crate::manifest::Manifest>,
     bp: &str,
+    prev_dir: Option<&Path>,
 ) -> Result<(IncrementalStats, crate::manifest::Manifest)> {
     use rayon::prelude::*;
     use std::collections::{BTreeMap, HashSet};
@@ -192,26 +196,32 @@ pub fn write_code_files_incremental(
         .map(|(rel, content)| (rel.clone(), Manifest::hash(content.as_bytes())))
         .collect();
 
-    // Writes = new path, or a hash that differs from the manifest.
-    let to_write: Vec<&(String, String)> = files
+    // A file can be RESTORED (renamed back from prev_dir) only when its content
+    // is unchanged (hash matches the manifest) and the old copy is actually
+    // there; everything else is WRITTEN fresh.
+    enum Action<'a> {
+        Restore(&'a str),
+        Write(&'a str, &'a str),
+    }
+    let actions: Vec<Action> = files
         .iter()
-        .filter(|(rel, _)| match prev.and_then(|m| m.files.get(rel)) {
-            Some(prev_hash) => prev_hash != &new_files[rel],
-            None => true,
+        .map(|(rel, content)| {
+            let unchanged = prev
+                .and_then(|m| m.files.get(rel))
+                .is_some_and(|h| h == &new_files[rel]);
+            let restorable = unchanged
+                && prev_dir.is_some_and(|d| d.join(rel).exists());
+            if restorable {
+                Action::Restore(rel)
+            } else {
+                Action::Write(rel, content)
+            }
         })
         .collect();
 
-    // Deletes = in the old manifest but not in the new output.
-    let new_paths: HashSet<&str> = files.iter().map(|(r, _)| r.as_str()).collect();
-    let to_delete: Vec<&String> = prev
-        .map(|m| m.files.keys().filter(|p| !new_paths.contains(p.as_str())).collect())
-        .unwrap_or_default();
-
-    // Pre-create the parent dirs of the files we WILL write (dedup), then write
-    // them directly in parallel — same as the full path, minus the untouched
-    // majority.
+    // Pre-create every parent dir once (the moved-aside base is now empty).
     fs::create_dir_all(&base).map_err(|e| Error::io(&base, e))?;
-    let dirs: Vec<PathBuf> = to_write
+    let dirs: Vec<PathBuf> = files
         .iter()
         .filter_map(|(rel, _)| Path::new(rel).parent())
         .filter(|p| !p.as_os_str().is_empty())
@@ -221,26 +231,41 @@ pub fn write_code_files_incremental(
         .collect();
     dirs.par_iter()
         .try_for_each(|dir| fs::create_dir_all(dir).map_err(|e| Error::io(dir, e)))?;
-    to_write.par_iter().try_for_each(|(rel, content)| -> Result<()> {
-        let target = base.join(rel);
-        fs::write(&target, content).map_err(|e| Error::io(&target, e))
+
+    // Apply in parallel: rename unchanged back, write changed fresh.
+    actions.par_iter().try_for_each(|action| -> Result<()> {
+        match action {
+            Action::Restore(rel) => {
+                let src = prev_dir.expect("restore implies prev_dir").join(rel);
+                let dst = base.join(rel);
+                fs::rename(&src, &dst).map_err(|e| Error::io(&dst, e))
+            }
+            Action::Write(rel, content) => {
+                let dst = base.join(rel);
+                fs::write(&dst, content).map_err(|e| Error::io(&dst, e))
+            }
+        }
     })?;
 
-    // Remove files that no longer belong (a missing one is fine — already gone).
-    for rel in &to_delete {
-        let target = base.join(rel);
-        match fs::remove_file(&target) {
+    let written = actions.iter().filter(|a| matches!(a, Action::Write(..))).count();
+    let restored = actions.len() - written;
+
+    // Everything still in prev_dir is a removed output; dropping the whole tree
+    // deletes them (and the old copies of the files we rewrote). Count them for
+    // the report before removing.
+    let new_paths: HashSet<&str> = files.iter().map(|(r, _)| r.as_str()).collect();
+    let deleted = prev
+        .map(|m| m.files.keys().filter(|p| !new_paths.contains(p.as_str())).count())
+        .unwrap_or(0);
+    if let Some(dir) = prev_dir {
+        match fs::remove_dir_all(dir) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(Error::io(&target, e)),
+            Err(e) => return Err(Error::io(dir, e)),
         }
     }
 
-    let stats = IncrementalStats {
-        written: to_write.len(),
-        skipped: files.len() - to_write.len(),
-        deleted: to_delete.len(),
-    };
+    let stats = IncrementalStats { written, skipped: restored, deleted };
     Ok((stats, Manifest::from_hashes(bp, new_files)))
 }
 
@@ -352,39 +377,44 @@ mod tests {
     }
 
     #[test]
-    fn incremental_write_skips_unchanged_writes_changed_and_deletes_removed() {
+    fn incremental_write_restores_unchanged_writes_changed_and_drops_removed() {
         let root = tempfile::tempdir().unwrap();
         let bp = "/srv/shop";
         let base = root.path().join("generated/code");
+        let prev = root.path().join("generated/.mqcache/prev");
         let read = |rel: &str| fs::read_to_string(base.join(rel)).unwrap();
 
-        // Cold build (no manifest): everything is written, nothing skipped.
+        // Cold build (no manifest, no prev tree): everything is written.
         let v1 = vec![
             ("A/Keep.php".to_owned(), "<?php // keep".to_owned()),
             ("A/Change.php".to_owned(), "<?php // v1".to_owned()),
             ("B/Gone.php".to_owned(), "<?php // gone".to_owned()),
         ];
-        let (s, m1) = write_code_files_incremental(root.path(), &v1, None, bp).unwrap();
+        let (s, m1) = write_code_files_incremental(root.path(), &v1, None, bp, None).unwrap();
         assert_eq!((s.written, s.skipped, s.deleted), (3, 0, 0));
         assert_eq!(read("A/Change.php"), "<?php // v1");
 
-        // Second run: Keep unchanged, Change edited, Gone removed, New added.
+        // Simulate the caller moving the current output aside before recompute.
+        fs::create_dir_all(prev.parent().unwrap()).unwrap();
+        fs::rename(&base, &prev).unwrap();
+        assert!(!base.exists());
+
+        // Second run: Keep unchanged (restored from prev), Change edited
+        // (written), Gone removed, New added (written).
         let v2 = vec![
             ("A/Keep.php".to_owned(), "<?php // keep".to_owned()),
             ("A/Change.php".to_owned(), "<?php // v2".to_owned()),
             ("C/New.php".to_owned(), "<?php // new".to_owned()),
         ];
-        let (s, m2) = write_code_files_incremental(root.path(), &v2, Some(&m1), bp).unwrap();
+        let (s, m2) =
+            write_code_files_incremental(root.path(), &v2, Some(&m1), bp, Some(&prev)).unwrap();
         assert_eq!((s.written, s.skipped, s.deleted), (2, 1, 1));
-        assert_eq!(read("A/Change.php"), "<?php // v2");
-        assert_eq!(read("C/New.php"), "<?php // new");
-        assert!(!base.join("B/Gone.php").exists(), "removed file deleted");
-        // The fresh manifest reflects the new set exactly.
+        assert_eq!(read("A/Keep.php"), "<?php // keep", "restored from prev");
+        assert_eq!(read("A/Change.php"), "<?php // v2", "rewritten");
+        assert_eq!(read("C/New.php"), "<?php // new", "new file written");
+        assert!(!base.join("B/Gone.php").exists(), "removed file dropped");
+        assert!(!prev.exists(), "prev tree cleaned up");
         let keys: Vec<_> = m2.files.keys().cloned().collect();
         assert_eq!(keys, ["A/Change.php", "A/Keep.php", "C/New.php"]);
-
-        // Re-running with the up-to-date manifest is a pure no-op.
-        let (s, _) = write_code_files_incremental(root.path(), &v2, Some(&m2), bp).unwrap();
-        assert_eq!((s.written, s.skipped, s.deleted), (0, 3, 0));
     }
 }
