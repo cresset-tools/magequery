@@ -939,14 +939,23 @@ pub struct GeneratedCode {
 pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> GeneratedCode {
     let mut cg = Codegen::new(magento, defs, root.clone());
     cg.collect();
-    // Incidental: the Area operation's NonLazyTypes modifier `class_exists`es
-    // every argument key (virtual-type names included), instanceType value and
-    // preference value; `\Proxy`/`\Interceptor` names short-circuit or are
-    // op-5 artifacts, handled elsewhere.
+    // Incidental generation while the config Reader aggregates each area
+    // (`Compiler\Config\Reader::generateCachePerScope`): it `isConcrete()`s —
+    // hence `class_exists()`, which autoloads and so materializes a generatable
+    // name — every instanceType key it resolves arguments for and every
+    // virtualType's original type. It does NOT touch preference *targets*: the
+    // Reader only records `$config['preferences'][$for] = $type` as a string
+    // (line ~92) and resolves constructors solely for concrete types already in
+    // the definitions collection plus virtualType originals. So a name reachable
+    // ONLY as a `<preference type=…Factory>` (e.g. RemoteStorage's
+    // `MetadataProviderFactory`) is never generated at compile time — it's a
+    // runtime-generated factory. Mirror that: sweep arguments + instanceType
+    // values, never preference targets. `\Proxy`/`\Interceptor` names
+    // short-circuit or are op-5 artifacts, handled elsewhere.
     for (area, _) in crate::areaconfig::AREA_CODES {
         let file = crate::areaconfig::build_area_file(magento, defs, area, &root);
-        // The NonLazyTypes `class_exists` runs in THIS area's OM context, so a
-        // name that is a virtualType in this area is skipped by the generator
+        // The `isConcrete` runs in THIS area's OM context, so a name that is a
+        // virtualType in this area is skipped by the generator
         // (`shouldSkipGeneration`) — no file. The area's vtype names are exactly
         // the keys of its instanceTypes. Without this, an area-scoped vtype
         // whose name ends in a generatable suffix (e.g. the graphql vtype
@@ -960,7 +969,6 @@ pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> Ge
             .keys()
             .cloned()
             .chain(file.instance_types.iter().map(|(_, v)| v.clone()))
-            .chain(file.preferences.iter().map(|(_, v)| v.clone()))
             .filter(|n| !n.ends_with("\\Proxy") && !n.ends_with("\\Interceptor"))
             .filter(|n| !area_vtypes.contains(n.as_str()))
             .collect();
@@ -984,7 +992,6 @@ pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> Ge
             .keys()
             .cloned()
             .chain(file.instance_types.iter().map(|(_, v)| v.clone()))
-            .chain(file.preferences.iter().map(|(_, v)| v.clone()))
             .filter(|n| !n.ends_with("\\Proxy") && !n.ends_with("\\Interceptor"))
             .filter(|n| !area_vtypes.contains(n.as_str()))
             .collect();
