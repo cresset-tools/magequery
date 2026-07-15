@@ -101,16 +101,53 @@ pub fn write_code_file(
     Ok(target)
 }
 
-/// Write every `generated/code` file in parallel. The files are independent
-/// and [`write_code_file`]'s per-file atomic temp+rename plus the idempotent
-/// `create_dir_all` (concurrent calls for a shared parent dir are safe) make
-/// concurrent writes correct. Returns the number written, or the first I/O
-/// error encountered.
+/// Write every `generated/code` file in parallel — the compile's bulk output
+/// (~10k files on a large store). Returns the number written, or the first I/O
+/// error.
+///
+/// Two deliberate departures from the atomic per-file [`write_code_file`]:
+///
+/// 1. **Direct write, no temp+rename.** `compile` clears `generated/code`
+///    first (mirroring `setup:di:compile`), so the tree is already torn down
+///    for the whole write phase — the per-file rename guards nothing at the
+///    directory level, and nothing reads the tree mid-compile. A direct
+///    `fs::write` is one syscall instead of open-tmp+write+rename, and matches
+///    Magento's own `file_put_contents`. (A crash mid-compile leaves a partial
+///    tree either way; you re-run compile.)
+/// 2. **Each unique parent dir is created ONCE**, up front, instead of a
+///    `create_dir_all` per file re-walking shared parent chains 10k+ times.
+///
+/// On macOS/APFS — where the old path measured ~165µs/file — this is the
+/// dominant write-phase cost. `force=false` keeps a best-effort clobber guard;
+/// the compile always passes `force=true`.
 pub fn write_code_files(root: &Path, files: &[(String, String)], force: bool) -> Result<usize> {
     use rayon::prelude::*;
-    files
-        .par_iter()
-        .try_for_each(|(rel, content)| write_code_file(root, rel, content, force).map(|_| ()))?;
+    use std::collections::HashSet;
+
+    let base = root.join("generated/code");
+    fs::create_dir_all(&base).map_err(|e| Error::io(&base, e))?;
+
+    // Pre-create every distinct parent dir once (dedup). `create_dir_all` is
+    // recursive, so creating each leaf dir covers its ancestors; concurrent
+    // calls racing on a shared ancestor are safe (AlreadyExists is ignored).
+    let dirs: Vec<PathBuf> = files
+        .iter()
+        .filter_map(|(rel, _)| Path::new(rel).parent())
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|p| base.join(p))
+        .collect();
+    dirs.par_iter()
+        .try_for_each(|dir| fs::create_dir_all(dir).map_err(|e| Error::io(dir, e)))?;
+
+    files.par_iter().try_for_each(|(rel, content)| -> Result<()> {
+        let target = base.join(rel);
+        if !force && target.exists() {
+            return Err(Error::WouldOverwrite(target));
+        }
+        fs::write(&target, content).map_err(|e| Error::io(&target, e))
+    })?;
     Ok(files.len())
 }
 
