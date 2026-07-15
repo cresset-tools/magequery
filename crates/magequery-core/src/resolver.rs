@@ -103,8 +103,22 @@ impl ClassResolver {
     /// The on-disk file a class maps to, if any PSR-4/PSR-0 prefix resolves it to an
     /// existing `.php`. Scans matching prefixes longest-first and returns the first file
     /// that exists.
+    ///
+    /// Falls back to the legacy-alias rewrite: a `Zend\…`-family name that no prefix
+    /// resolves is retried as the `Laminas\…` class the `laminas-zendframework-bridge`
+    /// aliases it to, so a lookup of a legacy name lands on the real Laminas source. The
+    /// fallback is self-gating — it returns a path only when the Laminas file exists.
     pub fn file_for(&self, class: &ClassName) -> Option<PathBuf> {
         let name = class.as_str();
+        if let Some(found) = self.file_for_name(name) {
+            return Some(found);
+        }
+        crate::laminas_alias::canonical(name).and_then(|canonical| self.file_for_name(&canonical))
+    }
+
+    /// `file_for` for a raw class name, without the legacy-alias fallback (the fallback
+    /// resolves the canonical name through here, so keeping it separate avoids recursion).
+    fn file_for_name(&self, name: &str) -> Option<PathBuf> {
         for (prefix, dirs) in &self.prefixes {
             if let Some(rest) = name.strip_prefix(prefix.as_str()) {
                 let rel = format!("{}.php", rest.replace('\\', "/"));
@@ -290,8 +304,39 @@ impl ClassResolver {
 
 #[cfg(test)]
 mod tests {
-    use super::under_app_code;
-    use std::path::Path;
+    use super::{under_app_code, ClassResolver};
+    use crate::ids::ClassName;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// A resolver with a single PSR-4 prefix and no PSR-0, for unit tests.
+    fn resolver(prefix: &str, dir: &Path) -> ClassResolver {
+        ClassResolver {
+            prefixes: vec![(prefix.to_owned(), vec![dir.to_path_buf()])],
+            psr0: Vec::new(),
+            headers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[test]
+    fn legacy_zend_name_resolves_to_the_laminas_source() {
+        let dir = tempfile::tempdir().unwrap();
+        // Only the Laminas source exists on disk.
+        let uri = dir.path().join("Uri/Uri.php");
+        std::fs::create_dir_all(uri.parent().unwrap()).unwrap();
+        std::fs::write(&uri, "<?php\n").unwrap();
+        let r = resolver("Laminas\\", dir.path());
+
+        // A legacy Zend hint lands on the real Laminas file via the alias fallback.
+        assert_eq!(r.file_for(&ClassName::new("Zend\\Uri\\Uri")), Some(uri.clone()));
+        // The Laminas name resolves directly (no fallback needed).
+        assert_eq!(r.file_for(&ClassName::new("Laminas\\Uri\\Uri")), Some(uri));
+        // A legacy name whose Laminas target does not exist stays unresolved.
+        assert_eq!(r.file_for(&ClassName::new("Zend\\Nope\\Missing")), None::<PathBuf>);
+        // A non-legacy name with no prefix is unaffected.
+        assert_eq!(r.file_for(&ClassName::new("Magento\\Framework\\App")), None::<PathBuf>);
+    }
 
     #[test]
     fn under_app_code_matches_project_and_superpackage() {
