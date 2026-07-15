@@ -22,6 +22,9 @@ const REPO = "cresset-tools/magequery";
 
 let client: LanguageClient | undefined;
 
+/** The binary the running client was started with, set by bootstrap (undefined = not running). */
+let serverBinary: string | undefined;
+
 export function activate(context: vscode.ExtensionContext): void {
   // Code lenses arrive with this command; convert the plain-JSON arguments into the
   // types VS Code's built-in peek view expects.
@@ -42,12 +45,27 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
   );
 
+  // A manual "is there a newer server?" trigger; unlike the startup check it ignores the
+  // per-version dismissal and reports even when already current.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("magequery.checkForServerUpdate", () =>
+      checkForUpdate(context, { force: true }),
+    ),
+  );
+
   // Never block activation on the bootstrap: findServer may ask the user a question
   // (the download prompt), and an unanswered notification would otherwise pin the
-  // extension in "Activating…" forever.
-  void bootstrap(context).catch((error) => {
-    void vscode.window.showErrorMessage(`magequery failed to start: ${String(error)}`);
-  });
+  // extension in "Activating…" forever. Once the server is up, quietly check for a newer
+  // release (only the binary we downloaded ourselves is ours to update).
+  void bootstrap(context)
+    .then(() => {
+      if (serverBinary) {
+        void checkForUpdate(context, { force: false });
+      }
+    })
+    .catch((error) => {
+      void vscode.window.showErrorMessage(`magequery failed to start: ${String(error)}`);
+    });
 }
 
 async function bootstrap(context: vscode.ExtensionContext): Promise<void> {
@@ -55,6 +73,7 @@ async function bootstrap(context: vscode.ExtensionContext): Promise<void> {
   if (!binary) {
     return; // findServer already surfaced the reason
   }
+  serverBinary = binary;
 
   const serverOptions: ServerOptions = {
     command: binary,
@@ -117,11 +136,102 @@ async function findServer(context: vscode.ExtensionContext): Promise<string | un
     return undefined;
   }
   try {
-    return await download(context);
+    return await download(context, await latestReleaseTag());
   } catch (error) {
     void vscode.window.showErrorMessage(`magequery download failed: ${String(error)}`);
     return undefined;
   }
+}
+
+// ---- update check --------------------------------------------------------------------
+// Only the binary this extension downloaded is ours to update: a PATH or `serverPath`
+// binary is the user's (or their package manager's) to bump, so the startup check stays
+// silent about it and the manual command just explains that.
+
+async function checkForUpdate(
+  context: vscode.ExtensionContext,
+  { force }: { force: boolean },
+): Promise<void> {
+  const enabled = vscode.workspace
+    .getConfiguration("magequery")
+    .get<boolean>("checkForUpdates", true);
+  if (!force && !enabled) {
+    return;
+  }
+
+  const managed = downloadTarget(context);
+  if (!serverBinary || !managed || serverBinary !== managed) {
+    if (force) {
+      void vscode.window.showInformationMessage(
+        "magequery is supplied from PATH or magequery.serverPath — the extension only updates a binary it downloaded itself.",
+      );
+    }
+    return;
+  }
+
+  const current = await versionOf(serverBinary);
+  if (!current) {
+    return;
+  }
+
+  let tag: string;
+  try {
+    tag = await latestReleaseTag();
+  } catch (error) {
+    if (force) {
+      void vscode.window.showErrorMessage(`magequery update check failed: ${String(error)}`);
+    }
+    return;
+  }
+  const latest = tag.replace(/^magequery-v/, "");
+
+  if (!olderThan(current, latest)) {
+    if (force) {
+      void vscode.window.showInformationMessage(`magequery ${current} is up to date.`);
+    }
+    return;
+  }
+
+  // "Later" suppresses re-prompting for this version until a newer one appears; the manual
+  // command bypasses the suppression.
+  if (!force && context.globalState.get<string>("magequery.dismissedVersion") === latest) {
+    return;
+  }
+
+  const pick = await vscode.window.showInformationMessage(
+    `magequery ${latest} is available (you have ${current}).`,
+    "Update",
+    "Later",
+  );
+  if (pick === "Update") {
+    try {
+      await updateServer(context, tag);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`magequery update failed: ${String(error)}`);
+    }
+  } else if (pick === "Later") {
+    await context.globalState.update("magequery.dismissedVersion", latest);
+  }
+}
+
+async function updateServer(context: vscode.ExtensionContext, tag: string): Promise<void> {
+  // Stop the running server first so its binary file is free to overwrite (Windows locks a
+  // running exe; Linux refuses to write a busy one), then swap in place and restart.
+  await client?.stop();
+  client = undefined;
+  serverBinary = undefined;
+  await download(context, tag);
+  await bootstrap(context);
+}
+
+async function latestReleaseTag(): Promise<string> {
+  const release = (await (
+    await fetch(`https://api.github.com/repos/${REPO}/releases/latest`)
+  ).json()) as { tag_name?: string };
+  if (!release.tag_name) {
+    throw new Error("latest release has no tag_name");
+  }
+  return release.tag_name;
 }
 
 async function versionOf(binary: string): Promise<string | undefined> {
@@ -165,17 +275,14 @@ function downloadTarget(context: vscode.ExtensionContext): string | undefined {
   return path.join(context.globalStorageUri.fsPath, "server", name);
 }
 
-async function download(context: vscode.ExtensionContext): Promise<string> {
+async function download(context: vscode.ExtensionContext, tag: string): Promise<string> {
   const triple = distTriple();
   const target = downloadTarget(context);
   if (!triple || !target) {
     throw new Error(`no prebuilt binary for ${process.platform}-${process.arch}`);
   }
   const archiveExt = process.platform === "win32" ? "zip" : "tar.gz";
-  const release = (await (
-    await fetch(`https://api.github.com/repos/${REPO}/releases/latest`)
-  ).json()) as { tag_name: string };
-  const url = `https://github.com/${REPO}/releases/download/${release.tag_name}/magequery-${triple}.${archiveExt}`;
+  const url = `https://github.com/${REPO}/releases/download/${tag}/magequery-${triple}.${archiveExt}`;
 
   const dir = path.dirname(target);
   await fs.promises.mkdir(dir, { recursive: true });
@@ -200,7 +307,7 @@ async function download(context: vscode.ExtensionContext): Promise<string> {
     await fs.promises.chmod(target, 0o755);
   }
   void vscode.window.showInformationMessage(
-    `magequery ${release.tag_name.replace(/^magequery-v/, "")} downloaded.`,
+    `magequery ${tag.replace(/^magequery-v/, "")} downloaded.`,
   );
   return target;
 }

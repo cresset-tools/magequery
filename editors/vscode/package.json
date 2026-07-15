@@ -36,9 +36,21 @@
           "type": "string",
           "default": "",
           "description": "Path to the magequery binary. Leave empty to use `magequery` from PATH, falling back to a download from GitHub releases."
+        },
+        "magequery.checkForUpdates": {
+          "type": "boolean",
+          "default": true,
+          "description": "On startup, check GitHub for a newer magequery server release and prompt to update. Only applies to a binary the extension downloaded itself — a binary from PATH or `magequery.serverPath` is left for you to update."
         }
       }
-    }
+    },
+    "commands": [
+      {
+        "command": "magequery.checkForServerUpdate",
+        "title": "Check for Server Update",
+        "category": "magequery"
+      }
+    ]
   },
   "scripts": {
     "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18",
