@@ -200,64 +200,94 @@ pub fn plugin_instances_across_scopes(
         .map(|v| (v.name.as_str().to_owned(), v.base.as_str().to_owned()))
         .collect();
 
+    // Each area's inheritance is an INDEPENDENT walk over the same read-only
+    // `defs`/`global_vtypes` — its own `Inherit` state, its own export. The
+    // order-dependent disabled-plugin quirk lives WITHIN one area's inherit
+    // sequence (vtypes, then sorted seeds), never across areas, so the seven
+    // areas run in parallel. Determinism is preserved by merging their
+    // contributions in the FIXED area order below: the instances Vec then
+    // accumulates exactly as the old sequential loop produced it.
+    use rayon::prelude::*;
+    let per_area: Vec<Vec<(String, Vec<String>)>> = AREA_CODES
+        .par_iter()
+        .map(|(area, _)| {
+            let export_owned;
+            let export = if *area == Area::Global {
+                &global_export
+            } else {
+                export_owned = magento.di_export(*area);
+                &export_owned
+            };
+            let plugin_data = plugin_data_of(export);
+            let mut state = Inherit {
+                defs,
+                global_vtypes: &global_vtypes,
+                plugin_data: &plugin_data,
+                plugin_index: plugin_data
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (t, _))| (t.as_str(), i))
+                    .collect(),
+                inherited: Vec::new(),
+                inherited_index: HashMap::new(),
+                processed: Vec::new(),
+                findings: Vec::new(),
+            };
+            // `_loadScopedData` inherits the scope's typed virtual types FIRST,
+            // then the class definitions (seeds). Inheriting a virtual type
+            // populates ITS ancestors too — that is how a concrete class
+            // carrying plugins (e.g. one implementing NoninterceptableInterface,
+            // never a seed) still lands in the config and gets an interceptor.
+            for v in &export.virtual_types {
+                state.inherit(v.name.as_str());
+            }
+            // Seeds are a HashSet — iterate in a STABLE order. This matters only
+            // for the disabled-plugin-inheritance quirk (a subclass inherits an
+            // ancestor's disabled plugin iff the ancestor is computed first); a
+            // deterministic order keeps the output reproducible. We approximate
+            // Magento's scan order (`$definedClasses`) with the class name,
+            // which puts core `Magento\…` ancestors before third-party
+            // subclasses — the relative order that decides the common
+            // cross-module case.
+            let mut sorted_seeds: Vec<&String> = seeds.iter().collect();
+            sorted_seeds.sort_unstable();
+            for class in sorted_seeds {
+                state.inherit(class);
+            }
+            // This area's contribution: EVERY populated class (getPluginsConfig's
+            // keyset), in `inherited` insertion order, each with its deduped
+            // instance list. A populated-but-instance-less key is kept (empty
+            // Vec) so the merged keyset matches the sequential version exactly.
+            state
+                .inherited
+                .iter()
+                .filter_map(|(key, cfg)| {
+                    let cfg = cfg.as_ref()?;
+                    let mut instances: Vec<String> = Vec::new();
+                    for (_, e) in cfg {
+                        if let Some(inst) = &e.instance {
+                            let inst = inst.trim_start_matches('\\').to_owned();
+                            if !instances.contains(&inst) {
+                                instances.push(inst);
+                            }
+                        }
+                    }
+                    Some((key.clone(), instances))
+                })
+                .collect()
+        })
+        .collect();
+
     let mut out: std::collections::HashMap<String, ClassPlugins> =
         std::collections::HashMap::new();
-    for (area, _) in AREA_CODES {
-        let export_owned;
-        let export = if area == Area::Global {
-            &global_export
-        } else {
-            export_owned = magento.di_export(area);
-            &export_owned
-        };
-        let plugin_data = plugin_data_of(export);
-        let mut state = Inherit {
-            defs,
-            global_vtypes: &global_vtypes,
-            plugin_data: &plugin_data,
-            plugin_index: plugin_data
-                .iter()
-                .enumerate()
-                .map(|(i, (t, _))| (t.as_str(), i))
-                .collect(),
-            inherited: Vec::new(),
-            inherited_index: HashMap::new(),
-            processed: Vec::new(),
-            findings: Vec::new(),
-        };
-        // `_loadScopedData` inherits the scope's typed virtual types FIRST,
-        // then the class definitions (seeds). Inheriting a virtual type
-        // populates ITS ancestors too — that is how a concrete class carrying
-        // plugins (e.g. one implementing NoninterceptableInterface, never a
-        // seed) still lands in the config and gets an interceptor.
-        for v in &export.virtual_types {
-            state.inherit(v.name.as_str());
-        }
-        // Seeds are a HashSet — iterate in a STABLE order. This matters only
-        // for the disabled-plugin-inheritance quirk (a subclass inherits an
-        // ancestor's disabled plugin iff the ancestor is computed first); a
-        // deterministic order keeps the output reproducible. We approximate
-        // Magento's scan order (`$definedClasses`) with the class name, which
-        // puts core `Magento\…` ancestors before third-party subclasses — the
-        // relative order that decides the common cross-module case.
-        let mut sorted_seeds: Vec<&String> = seeds.iter().collect();
-        sorted_seeds.sort_unstable();
-        for class in sorted_seeds {
-            state.inherit(class);
-        }
-        // Collect EVERY populated class (getPluginsConfig's keyset), not just
-        // the seeds.
-        for (key, cfg) in &state.inherited {
-            let Some(cfg) = cfg else { continue };
+    for contrib in per_area {
+        for (key, instances) in contrib {
             let entry = out
-                .entry(key.clone())
+                .entry(key)
                 .or_insert_with(|| ClassPlugins { instances: Vec::new() });
-            for (_, e) in cfg {
-                if let Some(inst) = &e.instance {
-                    let inst = inst.trim_start_matches('\\').to_owned();
-                    if !entry.instances.contains(&inst) {
-                        entry.instances.push(inst);
-                    }
+            for inst in instances {
+                if !entry.instances.contains(&inst) {
+                    entry.instances.push(inst);
                 }
             }
         }
