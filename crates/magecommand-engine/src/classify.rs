@@ -30,6 +30,11 @@ pub enum KnownKind {
     DisabledModuleInterceptor,
     /// Two paths differing only by letter case (case-insensitive filesystem).
     FilenameCasing,
+    /// Interceptor/proxy content that differs only in the code generator's
+    /// formatting between the archive's Magento and magecommand's 2.4.9 target
+    /// (return-type spacing, explicit nullable defaults, proxy `__clone`/
+    /// `_resetState` null-guards, added `__debugInfo`). Behavior-preserving.
+    GeneratorVersionFormatting,
 }
 
 impl KnownKind {
@@ -40,6 +45,9 @@ impl KnownKind {
                 "Interceptors for disabled modules (Magento 2.4.9 behavior)"
             }
             KnownKind::FilenameCasing => "Filename letter-casing (case-insensitive filesystem)",
+            KnownKind::GeneratorVersionFormatting => {
+                "Code-generator formatting (Magento version, behavior-preserving)"
+            }
         }
     }
 }
@@ -99,7 +107,7 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
     // classifier.
     let mut missing: Vec<String> = report.missing.clone();
     let mut extra: Vec<String> = report.extra.clone();
-    let changed: Vec<String> = report.changed.clone();
+    let mut changed: Vec<String> = report.changed.clone();
     let mut known: Vec<KnownGroup> = Vec::new();
 
     // 1. Plugin-list scope ordering: pair a missing `a|b|…|plugin-list.php`
@@ -119,6 +127,14 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
     //    owning module is disabled in config.php (no extra counterpart —
     //    magecommand simply doesn't generate it).
     if let Some(group) = disabled_module_interceptors(&mut missing, ctx) {
+        known.push(group);
+    }
+
+    // 4. Code-generator version formatting: a changed file whose only difference
+    //    is the generator formatting Magento changed between the archive's
+    //    version and magecommand's 2.4.9 target (verified by normalizing both
+    //    sides to byte-equality).
+    if let Some(group) = generator_version_formatting(&mut changed, ctx) {
         known.push(group);
     }
 
@@ -282,6 +298,85 @@ Skipping disabled modules is the improvement: it never generates code that can't
     })
 }
 
+/// Reduce the code generator's version-specific formatting to a canonical form.
+///
+/// Magento's code generator changed several byte-level (but behavior-preserving)
+/// details between releases; magecommand emits the 2.4.9 / Mage-OS 3.1.0 form, so
+/// an archive from an older Magento differs in exactly these ways. Applying the
+/// same reductions to BOTH sides collapses those differences while leaving any
+/// genuine change (a different type, an extra dependency, a real body edit)
+/// intact — so a file is only claimed when the sole differences were these.
+fn strip_generator_version_formatting(s: &str) -> String {
+    let mut t = s.to_string();
+    // Return-type spacing: `foo() : T` (older) -> `foo(): T` (2.4.9, PSR-12).
+    // Also normalizes the identical ternary spacing on both sides — harmless.
+    t = t.replace(") : ", "): ");
+    // Explicit nullable default: `?T $x = null` (2.4.9, PHP 8.4 compat) -> `?T $x`.
+    t = t.replace(" = null,", ",");
+    t = t.replace(" = null)", ")");
+    // Proxy `__clone` null-guard (2.4.9) -> unguarded (older): keep the proxy
+    // lazy when cloned instead of forcing instantiation.
+    t = t.replace(
+        "        if ($this->_subject) {\n            $this->_subject = clone $this->_getSubject();\n        }",
+        "        $this->_subject = clone $this->_getSubject();",
+    );
+    // Proxy `__debugInfo` method (2.4.9-only) -> removed.
+    t = t.replace(
+        "\n\n    /**\n     * Debug proxied instance\n     */\n    public function __debugInfo()\n    {\n        return ['i' => $this->_subject];\n    }",
+        "",
+    );
+    // Proxy `_resetState` null-guard (2.4.9) -> unguarded (older).
+    t = t.replace("     * Reset state of proxied instance", "     * {@inheritdoc}");
+    t = t.replace(
+        "        if ($this->_subject) {\n            $this->_subject->_resetState(); \n        }",
+        "        $this->_getSubject()->_resetState();",
+    );
+    t
+}
+
+fn generator_version_formatting(
+    changed: &mut Vec<String>,
+    ctx: &ClassifyCtx,
+) -> Option<KnownGroup> {
+    let mut items: Vec<String> = Vec::new();
+    let mut claimed: HashSet<String> = HashSet::new();
+
+    for c in changed.iter() {
+        let (Ok(a), Ok(b)) =
+            (fs::read_to_string(ctx.archive.join(c)), fs::read_to_string(ctx.output.join(c)))
+        else {
+            continue;
+        };
+        // Claim only when normalization makes them exactly equal: the sole
+        // differences were the known generator-formatting reductions.
+        if strip_generator_version_formatting(&a) == strip_generator_version_formatting(&b) {
+            items.push(c.clone());
+            claimed.insert(c.clone());
+        }
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+    changed.retain(|c| !claimed.contains(c));
+
+    Some(KnownGroup {
+        kind: KnownKind::GeneratorVersionFormatting,
+        title: KnownKind::GeneratorVersionFormatting.title().to_owned(),
+        explanation:
+            "These files are byte-identical after normalizing the code generator's \
+version-specific formatting, so they differ only in ways Magento changed between the archive's \
+version and magecommand's 2.4.9 / Mage-OS 3.1.0 target — all behavior-preserving: return-type \
+spacing (`foo() : T` -> `foo(): T`), explicit nullable defaults (`?T $x` -> `?T $x = null`, the \
+PHP 8.4 compat form), and the proxy template's laziness hardening (null-guards in `__clone` and \
+`_resetState` so cloning/resetting an unused proxy no longer forces instantiation, plus an added \
+`__debugInfo`). Run magecommand against a 2.4.9 store and these vanish."
+                .to_owned(),
+        items,
+        verified: true,
+    })
+}
+
 fn same_bytes(a: &Path, b: &Path) -> bool {
     match (fs::read(a), fs::read(b)) {
         (Ok(x), Ok(y)) => x == y,
@@ -370,5 +465,60 @@ mod tests {
         let c = classify(&r, &ctx(&disabled, dir));
         assert!(c.known.is_empty());
         assert_eq!(c.unexplained_count(), 3);
+    }
+
+    #[test]
+    fn strips_the_known_generator_formatting_deltas() {
+        // return-type spacing
+        let a = "    public function getCID() : string\n    {\n    }\n";
+        let b = "    public function getCID(): string\n    {\n    }\n";
+        assert_eq!(
+            strip_generator_version_formatting(a),
+            strip_generator_version_formatting(b)
+        );
+        // nullable default + proxy __clone guard + __debugInfo
+        let arch = "    public function __clone()\n    {\n        $this->_subject = clone $this->_getSubject();\n    }\n\n    public function f(?\\X $r)\n    {\n    }\n";
+        let mc = "    public function __clone()\n    {\n        if ($this->_subject) {\n            $this->_subject = clone $this->_getSubject();\n        }\n    }\n\n    /**\n     * Debug proxied instance\n     */\n    public function __debugInfo()\n    {\n        return ['i' => $this->_subject];\n    }\n\n    public function f(?\\X $r = null)\n    {\n    }\n";
+        assert_eq!(
+            strip_generator_version_formatting(arch),
+            strip_generator_version_formatting(mc)
+        );
+        // a genuine type difference is NOT collapsed
+        let x = "    public function f(\\Laminas\\Uri\\Uri $u)\n";
+        let y = "    public function f(\\Zend\\Uri\\Uri $u)\n";
+        assert_ne!(
+            strip_generator_version_formatting(x),
+            strip_generator_version_formatting(y)
+        );
+    }
+
+    #[test]
+    fn classifies_formatting_absorbs_only_matching_files() {
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        // formatting-only difference -> should be absorbed
+        write(archive.path(), "A/Interceptor.php", "public function g() : void\n{\n}\n");
+        write(output.path(), "A/Interceptor.php", "public function g(): void\n{\n}\n");
+        // genuine difference -> stays changed
+        write(archive.path(), "B/Interceptor.php", "public function g(\\Laminas\\Uri\\Uri $u)\n");
+        write(output.path(), "B/Interceptor.php", "public function g(\\Zend\\Uri\\Uri $u)\n");
+
+        let disabled = HashSet::new();
+        let ctx = ClassifyCtx {
+            archive: archive.path(),
+            output: output.path(),
+            disabled_modules: &disabled,
+        };
+        let r = report(&[], &[], &["A/Interceptor.php", "B/Interceptor.php"]);
+        let c = classify(&r, &ctx);
+        assert_eq!(c.known.len(), 1);
+        assert_eq!(c.known[0].kind, KnownKind::GeneratorVersionFormatting);
+        assert_eq!(c.known[0].items, vec!["A/Interceptor.php"]);
+        assert_eq!(c.changed, vec!["B/Interceptor.php"]);
     }
 }
