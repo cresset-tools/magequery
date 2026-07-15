@@ -704,6 +704,84 @@ fn collect_included(base: &Path, dir: &Path, kind: PathKind, out: &mut Vec<PathB
     }
 }
 
+/// Every file the compile reads as an INPUT — for content-addressed change
+/// detection (the incremental short-circuit + the CI cache key). The `.php` the
+/// scan parses (constructor/hierarchy/plugin headers) PLUS the `.xml` that
+/// drives DI (di.xml, module.xml, extension_attributes.xml, …), under the SAME
+/// roots and the SAME exclusion rules as [`Definitions::scan`] so the set
+/// matches exactly what the compile consumes — plus the deployment/composer
+/// files (config.php, env.php, installed.json, composer.json/lock) and the
+/// primary `app/etc` di. Deliberately NOT `generated/code` (that is output).
+///
+/// Soundness over speed: over-covering (e.g. a module's `events.xml`, which DI
+/// compile ignores) only causes an unnecessary recompile; UNDER-covering would
+/// serve a stale result. Returned sorted + deduped for a stable digest.
+pub fn compile_input_files(magento: &Magento, root: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<(PathBuf, PathKind)> = Vec::new();
+    for module in magento.modules() {
+        if module.enabled {
+            roots.push((module.path.clone(), PathKind::Module));
+        }
+    }
+    for lib in magento.library_paths() {
+        roots.push((lib.clone(), PathKind::Library));
+    }
+    let setup = root.join("setup/src");
+    if setup.is_dir() {
+        roots.push((setup, PathKind::Setup));
+    }
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for (base, kind) in &roots {
+        collect_input_files(base, base, *kind, &mut files);
+    }
+    // Deployment + composer inputs; app/etc holds the primary di glob
+    // (`{*di.xml,*/*di.xml}`) + config.php, which have no module base to
+    // exclude against — collect them directly.
+    let app_etc = root.join("app/etc");
+    collect_input_files(&app_etc, &app_etc, PathKind::Module, &mut files);
+    for rel in [
+        "app/etc/config.php",
+        "app/etc/env.php",
+        "vendor/composer/installed.json",
+        "composer.json",
+        "composer.lock",
+    ] {
+        let p = root.join(rel);
+        if p.is_file() {
+            files.push(p);
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// Like [`collect_included`] but keeps `.php` AND `.xml` — the DI config is XML.
+fn collect_input_files(base: &Path, dir: &Path, kind: PathKind, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else { continue };
+        if excluded(base, &path, kind) {
+            continue;
+        }
+        if ft.is_dir() {
+            collect_input_files(base, &path, kind, out);
+        } else if path
+            .extension()
+            .is_some_and(|e| e == "php" || e == "xml")
+            && !path
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+        {
+            out.push(path);
+        }
+    }
+}
+
 /// Mirror DiCompileCommand's exclude regexes. They are PREFIX matches with
 /// no trailing slash: `#^<module>/Test#` also kills `TestFramework/…` and a
 /// stray `Testify.php` — reproduced faithfully, for files and dirs alike.
