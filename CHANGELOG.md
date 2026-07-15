@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.8.0...magequery-v0.9.0) (2026-07-15)
+
+
+### Features
+
+* **vscode:** prompt to update the managed server binary ([#41](https://github.com/cresset-tools/magequery/issues/41)) ([e0eea6f](https://github.com/cresset-tools/magequery/commit/e0eea6f21a3b6b7ce3b0fb7fcbc6db5912b61cbf))
+
 ## [0.8.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.7.0...magequery-v0.8.0) (2026-07-13)
 
 
