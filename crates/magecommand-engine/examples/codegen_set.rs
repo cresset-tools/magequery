@@ -149,7 +149,8 @@ fn main() {
 
     // Interceptors: SET + bytes.
     let t = std::time::Instant::now();
-    let plan = magecommand_engine::interceptor::plan(&magento, &defs);
+    let has_plugins = magecommand_engine::interception::interception_map(&magento, &defs);
+    let plan = magecommand_engine::interceptor::plan(&magento, &defs, &has_plugins);
     eprintln!("interceptor plan: {:?} ({} classes)", t.elapsed(), plan.methods.len());
     let arch_intc: std::collections::HashSet<String> = expected
         .iter()
