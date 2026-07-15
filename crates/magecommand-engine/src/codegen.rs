@@ -940,7 +940,7 @@ pub fn generate_code(
     magento: &Magento,
     defs: &Definitions,
     root: PathBuf,
-    area_files: &[(String, crate::areaconfig::AreaFile)],
+    area_files: &[crate::areaconfig::CompiledArea],
     has_plugins: &std::collections::BTreeMap<String, bool>,
 ) -> GeneratedCode {
     let _prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
@@ -980,7 +980,8 @@ pub fn generate_code(
     // `amPromoQuoteItemFactory`) leaks a bogus Factory: it isn't in the
     // global-only vtype skip set, and its bare source `amPromoQuoteItem` reads
     // as a PHP built-in, so `ensure` emits it.
-    for (_code, file) in area_files {
+    for ca in area_files {
+        let file = &ca.file;
         let area_vtypes: HashSet<&str> =
             file.instance_types.iter().map(|(k, _)| k.as_str()).collect();
         let names: Vec<String> = file
@@ -1040,12 +1041,26 @@ pub fn generate_code(
     // reused here — the plan needs the same map, never a fresh one.
     let plan = crate::interceptor::plan(magento, defs, has_plugins);
     ilap!(_it, "interceptor plan");
-    for (class, methods) in &plan.methods {
-        match crate::interceptor::interceptor_bytes(defs, class, methods) {
-            Some(bytes) => {
-                files.push((format!("{}/Interceptor.php", class.replace('\\', "/")), bytes))
-            }
-            None => findings.push(format!("interceptor subject unresolved: {class}")),
+    // Each interceptor's bytes are an independent pure function of the (already
+    // fully-populated) definitions, and the final `files.sort_by` makes push
+    // order irrelevant — so generate them in parallel (2489 on the oracle).
+    use rayon::prelude::*;
+    let interceptors: Vec<Result<(String, String), String>> = plan
+        .methods
+        .par_iter()
+        .map(
+            |(class, methods)| match crate::interceptor::interceptor_bytes(defs, class, methods) {
+                Some(bytes) => {
+                    Ok((format!("{}/Interceptor.php", class.replace('\\', "/")), bytes))
+                }
+                None => Err(format!("interceptor subject unresolved: {class}")),
+            },
+        )
+        .collect();
+    for result in interceptors {
+        match result {
+            Ok(file) => files.push(file),
+            Err(finding) => findings.push(finding),
         }
     }
 
