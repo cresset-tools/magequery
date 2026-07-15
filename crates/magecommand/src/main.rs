@@ -60,6 +60,11 @@ enum Command {
         /// divergence as a raw bucket (the pre-classification behavior).
         #[arg(long)]
         no_explain: bool,
+        /// Require exact bytes: count interceptors that differ only in method
+        /// order as `changed`. By default such files (behaviorally identical;
+        /// PHP 8.4 vs 8.5 reflection order) are reported as `reordered`.
+        #[arg(long)]
+        strict_ordering: bool,
     },
 }
 
@@ -82,7 +87,17 @@ fn main() -> anyhow::Result<ExitCode> {
             fail_on_diff,
             sample,
             no_explain,
-        } => compare(cli.root, archive, output, cli.json, fail_on_diff, sample, no_explain),
+            strict_ordering,
+        } => compare(
+            cli.root,
+            archive,
+            output,
+            cli.json,
+            fail_on_diff,
+            sample,
+            no_explain,
+            strict_ordering,
+        ),
     }
 }
 
@@ -316,6 +331,7 @@ fn dir_has_files(dir: &std::path::Path) -> bool {
     std::fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compare(
     root: Option<PathBuf>,
     archive: &PathBuf,
@@ -324,8 +340,9 @@ fn compare(
     fail_on_diff: bool,
     sample: usize,
     no_explain: bool,
+    strict_ordering: bool,
 ) -> anyhow::Result<ExitCode> {
-    let report = magecommand_engine::compare_dirs(archive, output)?;
+    let report = magecommand_engine::compare_dirs(archive, output, strict_ordering)?;
 
     // The disabled-module explanation needs config.php. Best-effort: if the
     // root isn't a Magento checkout (comparing two loose trees), skip it —
@@ -346,7 +363,7 @@ fn compare(
     };
 
     let total = report.archive_total();
-    let summary = format!(
+    let mut summary = format!(
         "archive: {} file(s) · identical {} · changed {} · missing {} · extra {}",
         total,
         report.identical,
@@ -354,6 +371,9 @@ fn compare(
         report.missing.len(),
         report.extra.len()
     );
+    if !report.reordered.is_empty() {
+        summary.push_str(&format!(" · reordered {}", report.reordered.len()));
+    }
 
     // Raw mode (or --json, which stays the machine-readable byte-level report):
     // no classification.
@@ -365,8 +385,14 @@ fn compare(
             print_bucket("changed", &report.changed, sample);
             print_bucket("missing", &report.missing, sample);
             print_bucket("extra", &report.extra, sample);
-            if report.is_clean() {
+            print_bucket("reordered", &report.reordered, sample);
+            if report.is_clean() && report.reordered.is_empty() {
                 println!("output reproduces the archive exactly");
+            } else if report.is_clean() {
+                println!(
+                    "output matches the archive; {} file(s) differ only in method order",
+                    report.reordered.len()
+                );
             }
         }
         return Ok(fail_exit(fail_on_diff, !report.is_clean()));
@@ -394,6 +420,29 @@ fn compare(
     print_bucket("missing", &classified.missing, sample);
     print_bucket("extra", &classified.extra, sample);
 
+    // Method-order-only differences: behaviorally identical, so grouped with the
+    // known/expected divergences rather than the signal above.
+    if !report.reordered.is_empty() {
+        println!(
+            "\n  ▸ Interceptor method order (PHP-version reflection order) ({} file(s))",
+            report.reordered.len()
+        );
+        let explanation = "Same method set, byte-identical bodies, different order. PHP's \
+            getMethods() order — which the interceptor generator follows — differs across PHP \
+            versions (8.4 vs 8.5) for trait-using classes. Method order in a PHP class is \
+            behaviorally irrelevant, so these are equivalent. Use --strict-ordering to treat \
+            them as `changed`.";
+        for line in wrap_indent(explanation, "    ", 92) {
+            println!("{line}");
+        }
+        for item in report.reordered.iter().take(sample) {
+            println!("      · {item}");
+        }
+        if report.reordered.len() > sample {
+            println!("      · … {} more", report.reordered.len() - sample);
+        }
+    }
+
     // Then the known/expected differences, each with its explanation.
     if !classified.known.is_empty() {
         println!(
@@ -414,17 +463,24 @@ fn compare(
         }
     }
 
-    // Verdict.
-    if report.is_clean() {
+    // Verdict. Method-order-only differences (`reordered`) are behaviorally
+    // benign, so they never count as unexplained but are surfaced for honesty.
+    let reordered = report.reordered.len();
+    let reordered_note = if reordered > 0 {
+        format!(", {reordered} method-order")
+    } else {
+        String::new()
+    };
+    if report.is_clean() && reordered == 0 {
         println!("\noutput reproduces the archive exactly");
     } else if classified.unexplained_count() == 0 {
         println!(
-            "\noutput matches the archive except for {} known/expected difference(s) explained above",
+            "\noutput matches the archive except for {} known/expected{reordered_note} difference(s) explained above",
             classified.known_count()
         );
     } else {
         println!(
-            "\n{} unexplained difference(s) to investigate; {} known/expected",
+            "\n{} unexplained difference(s) to investigate; {} known/expected{reordered_note}",
             classified.unexplained_count(),
             classified.known_count()
         );
