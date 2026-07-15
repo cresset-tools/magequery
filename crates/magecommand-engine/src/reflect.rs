@@ -262,17 +262,38 @@ fn map_self_parent(defs: &Definitions, declaring: &str, name: &str) -> String {
 /// reflects (and the real interceptor renders) as `ResourceModel`. Canonicalize
 /// any name resolving to a known class to its `meta.fqcn`; scalars, built-ins,
 /// and names outside the class universe pass through unchanged.
+///
+/// A legacy `Zend\…` name is a further wrinkle: the `laminas-zendframework-bridge`
+/// aliases it to a real `Laminas\…` class, so reflection reports the canonical
+/// Laminas name (a hint `\Zend\Uri\Uri` renders `\Laminas\Uri\Uri`). We reproduce
+/// that only when the legacy name is not itself a known class and the Laminas
+/// target *is* — matching the bridge, which aliases solely when the target loads.
 fn canonicalize_class_case(defs: &Definitions, name: &str) -> String {
     let bare = name.trim_start_matches('\\');
-    match defs.get(bare) {
-        Some(rec) if rec.meta.fqcn != bare => {
-            if name.starts_with('\\') {
-                format!("\\{}", rec.meta.fqcn)
-            } else {
-                rec.meta.fqcn.clone()
-            }
+    if let Some(rec) = defs.get(bare) {
+        return declared_case(rec, name, bare);
+    }
+    // Not a known class: try the legacy-alias rewrite (Zend\… -> Laminas\…),
+    // gated on the canonical target actually existing in the class universe.
+    if let Some(canonical) = magequery_core::laminas_alias::canonical(name) {
+        let canonical_bare = canonical.trim_start_matches('\\');
+        if let Some(rec) = defs.get(canonical_bare) {
+            return declared_case(rec, &canonical, canonical_bare);
         }
-        _ => name.to_owned(),
+    }
+    name.to_owned()
+}
+
+/// The declared-case FQCN of `rec`, preserving the leading-backslash convention
+/// of `name`. `bare` is `name` without its leading backslash.
+fn declared_case(rec: &crate::definitions::ClassRecord, name: &str, bare: &str) -> String {
+    if rec.meta.fqcn == bare {
+        return name.to_owned();
+    }
+    if name.starts_with('\\') {
+        format!("\\{}", rec.meta.fqcn)
+    } else {
+        rec.meta.fqcn.clone()
     }
 }
 
