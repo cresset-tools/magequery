@@ -111,7 +111,7 @@ impl<'a> Parser<'a> {
                             };
                             let attrs = std::mem::take(&mut pending_attrs);
                             self.parse_declaration(
-                                kind, start, is_abstract, is_final, is_readonly, attrs,
+                                kind, start, is_abstract, is_final, is_readonly, attrs, nested,
                             );
                             is_abstract = false;
                             is_final = false;
@@ -389,6 +389,7 @@ impl<'a> Parser<'a> {
         is_final: bool,
         is_readonly: bool,
         attributes: Vec<String>,
+        conditional: bool,
     ) {
         self.cur.skip_insignificant();
         let Some(name) = self.cur.read_ident() else {
@@ -419,6 +420,7 @@ impl<'a> Parser<'a> {
             attributes,
             offset,
             uses: self.uses.iter().map(|(a, f)| (a.clone(), f.clone())).collect(),
+            conditional,
         };
 
         self.cur.skip_insignificant();

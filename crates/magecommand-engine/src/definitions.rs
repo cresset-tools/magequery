@@ -132,7 +132,14 @@ impl Definitions {
             } else {
                 generated_classes.remove(&meta.fqcn);
             }
-            from_scan.insert(meta.fqcn.clone());
+            // A conditionally-declared class (`if (class_exists(…)) { class … }`)
+            // is reflectable via autoload but is never a T_CLASS token at file
+            // scope, so Magento's ClassesScanner never puts it in `$definedClasses`.
+            // Keep it in `classes` (for plugin reflection) but out of the
+            // interceptor/factory/proxy candidate set.
+            if !meta.conditional {
+                from_scan.insert(meta.fqcn.clone());
+            }
             classes.insert(meta.fqcn.clone(), ClassRecord { meta, file });
         }
         // Magento's FileClassScanner switches on T_CLASS and T_TRAIT only —
@@ -142,6 +149,7 @@ impl Definitions {
             .iter()
             .filter(|(_, r)| {
                 matches!(r.meta.kind, ClassKind::Class | ClassKind::Trait)
+                    && !r.meta.conditional
             })
             .map(|(k, _)| k.clone())
             .collect();

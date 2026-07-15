@@ -63,6 +63,12 @@ pub struct ClassMeta {
     /// `(lowercased alias, FQCN)`. Needed to resolve names inside raw
     /// constant expressions (defaults, const values) after parsing.
     pub uses: Vec<(String, String)>,
+    /// True when this class was declared inside a conditional block
+    /// (`if (class_exists(…)) { class … }`) rather than at top-level file
+    /// scope. Magento's token ClassesScanner is top-level-only, so such a
+    /// class is reflectable (autoload) but NOT an interceptor/factory/proxy
+    /// candidate — it must stay out of `Definitions.scanned`/`from_scan`.
+    pub conditional: bool,
 }
 
 /// `use A, B { A::m insteadof B; }` — A's `m` wins; B (and any further
