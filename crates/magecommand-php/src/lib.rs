@@ -58,6 +58,32 @@ mod tests {
     }
 
     #[test]
+    fn conditional_class_declaration_keeps_if_branch() {
+        // A class declared inside an `if (class_exists(…)) { … } else { … }`
+        // guard — the Hyva compat-shim / PHP-polyfill pattern. The real
+        // implementation lives in the `if` branch; the empty fallback in
+        // `else`. We descend into both and keep the FIRST (the real one), with
+        // its methods, so it enters the class universe for interception.
+        let c = one(
+            r#"<?php
+namespace Acme\Shim;
+use Vendor\Real\Base;
+if (class_exists(\Vendor\Real\Base::class)) {
+    class Shim extends Base {
+        public function afterIsVirtual($subject, $result) { return $result; }
+    }
+} else {
+    class Shim {
+    }
+}"#,
+        );
+        assert_eq!(c.fqcn, "Acme\\Shim\\Shim");
+        assert_eq!(c.extends, ["Vendor\\Real\\Base"], "the if-branch class, not the stub");
+        assert_eq!(c.methods.len(), 1);
+        assert_eq!(c.methods[0].name, "afterIsVirtual");
+    }
+
+    #[test]
     fn constructor_with_promotion_defaults_and_types() {
         let c = one(
             r#"<?php
