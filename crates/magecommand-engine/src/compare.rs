@@ -127,32 +127,42 @@ fn same_content(a: &Path, b: &Path) -> Result<bool> {
     Ok(bytes_a == bytes_b)
 }
 
-/// True when two files are byte-identical after canonicalizing the order of a
-/// generated interceptor's method blocks — i.e. they differ only in method
-/// sequence and are behaviorally the same PHP class.
+/// True when two files are byte-identical after canonicalizing the block order of
+/// a generated interceptor or proxy — i.e. they differ only in method sequence and
+/// are behaviorally the same PHP class.
 fn same_modulo_ordering(a: &Path, b: &Path) -> Result<bool> {
     let bytes_a = fs::read(a).map_err(|e| Error::io(a, e))?;
     let bytes_b = fs::read(b).map_err(|e| Error::io(b, e))?;
     Ok(match (canonical_method_order(&bytes_a), canonical_method_order(&bytes_b)) {
         (Some(ca), Some(cb)) => ca == cb,
-        // A file that is not a recognizable interceptor never matches modulo
-        // ordering — genuine content changes are never masked.
+        // A file that is not a recognizable interceptor or proxy never matches
+        // modulo ordering — genuine content changes are never masked.
         _ => false,
     })
 }
 
-/// Canonicalize a generated `Interceptor.php` by sorting its method blocks into
-/// a stable order. Returns `None` for anything that is not an interceptor-shaped
-/// class (so the caller falls back to strict byte comparison).
+/// Canonicalize a generated interceptor or proxy by sorting its blank-line
+/// separated blocks into a stable order. Returns `None` for anything that is not
+/// an interceptor- or proxy-shaped class (so the caller falls back to strict byte
+/// comparison).
 ///
-/// A Magento interceptor has a rigid layout: a header ending in the trait `use`,
-/// then blank-line-separated method blocks (`__construct` first), then a lone
-/// closing `}`. Reordering those blocks is a semantic no-op, so two files with
-/// the same header, footer and *multiset* of blocks are equivalent.
-fn canonical_method_order(bytes: &[u8]) -> Option<Vec<u8>> {
+/// Both templates share a rigid layout: a header, then blank-line-separated
+/// blocks (method bodies for interceptors; property declarations followed by
+/// method bodies for proxies), then a lone closing `}`. Generated bodies contain
+/// no blank lines, so the split is exact. Sorting the blocks yields a scrambled
+/// but deterministic canonical form — two files produce the same bytes only when
+/// they share the same header and the same *multiset* of blocks, i.e. they differ
+/// solely in the order of methods (a reflection-order artifact) and are
+/// behaviorally identical. Any genuine change to the class declaration, a
+/// property, or a method body alters a block and defeats the match.
+pub(crate) fn canonical_method_order(bytes: &[u8]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(bytes).ok()?;
-    // Only interceptors: the marker is unambiguous and present in every one.
-    if !text.contains("implements \\Magento\\Framework\\Interception\\InterceptorInterface") {
+    // Markers are unambiguous and present in every generated file of each kind.
+    let is_interceptor =
+        text.contains("implements \\Magento\\Framework\\Interception\\InterceptorInterface");
+    let is_proxy =
+        text.contains("implements \\Magento\\Framework\\ObjectManager\\NoninterceptableInterface");
+    if !is_interceptor && !is_proxy {
         return None;
     }
     let trailing_nl = text.ends_with('\n');
@@ -306,6 +316,54 @@ mod tests {
 
         let report = compare_dirs(archive.path(), output.path(), false).unwrap();
         assert_eq!(report.changed, vec!["I/Interceptor.php"]);
+        assert!(report.reordered.is_empty());
+    }
+
+    /// A minimal proxy with fixed properties and `methods` in the given order.
+    fn proxy(methods: &[&str]) -> String {
+        let mut s = String::from(
+            "<?php\nnamespace Foo;\n\n/**\n * Proxy class for @see \\Foo\\Bar\n */\n\
+             class Proxy extends \\Foo\\Bar implements \
+             \\Magento\\Framework\\ObjectManager\\NoninterceptableInterface\n{\n\
+             \x20   /**\n     * @var string\n     */\n    protected $_instanceName = null;\n\n\
+             \x20   /**\n     * @var \\Foo\\Bar\n     */\n    protected $_subject = null;",
+        );
+        for m in methods {
+            s.push_str(&format!(
+                "\n\n    /**\n     * {{@inheritdoc}}\n     */\n    public function {m}()\n    {{\n\
+                 \x20       return $this->_getSubject()->{m}();\n    }}"
+            ));
+        }
+        s.push_str("\n}\n");
+        s
+    }
+
+    #[test]
+    fn proxy_method_reorder_is_reordered_not_changed_when_lenient() {
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        write(archive.path(), "P/Proxy.php", &proxy(&["alpha", "beta"]));
+        write(output.path(), "P/Proxy.php", &proxy(&["beta", "alpha"]));
+
+        let lenient = compare_dirs(archive.path(), output.path(), false).unwrap();
+        assert_eq!(lenient.reordered, vec!["P/Proxy.php"]);
+        assert!(lenient.changed.is_empty());
+        assert!(lenient.is_clean());
+
+        let strict = compare_dirs(archive.path(), output.path(), true).unwrap();
+        assert_eq!(strict.changed, vec!["P/Proxy.php"]);
+        assert!(strict.reordered.is_empty());
+    }
+
+    #[test]
+    fn proxy_with_changed_body_is_changed_even_when_lenient() {
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        write(archive.path(), "P/Proxy.php", &proxy(&["alpha", "beta"]));
+        write(output.path(), "P/Proxy.php", &proxy(&["alpha", "gamma"]));
+
+        let report = compare_dirs(archive.path(), output.path(), false).unwrap();
+        assert_eq!(report.changed, vec!["P/Proxy.php"]);
         assert!(report.reordered.is_empty());
     }
 

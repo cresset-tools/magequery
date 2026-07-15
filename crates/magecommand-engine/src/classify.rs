@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use crate::compare::CompareReport;
+use crate::compare::{canonical_method_order, CompareReport};
 
 /// A category of known/expected difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -347,9 +347,19 @@ fn generator_version_formatting(
         else {
             continue;
         };
-        // Claim only when normalization makes them exactly equal: the sole
-        // differences were the known generator-formatting reductions.
-        if strip_generator_version_formatting(&a) == strip_generator_version_formatting(&b) {
+        // Claim only when normalization makes them equal: the sole differences
+        // were the known generator-formatting reductions. A generated interceptor
+        // or proxy may additionally differ in method order (a reflection-order
+        // artifact), so fall back to comparing the normalized text modulo block
+        // order — this absorbs files that combine formatting deltas with a reorder.
+        let na = strip_generator_version_formatting(&a);
+        let nb = strip_generator_version_formatting(&b);
+        let matches = na == nb
+            || matches!(
+                (canonical_method_order(na.as_bytes()), canonical_method_order(nb.as_bytes())),
+                (Some(ca), Some(cb)) if ca == cb
+            );
+        if matches {
             items.push(c.clone());
             claimed.insert(c.clone());
         }
@@ -520,5 +530,46 @@ mod tests {
         assert_eq!(c.known[0].kind, KnownKind::GeneratorVersionFormatting);
         assert_eq!(c.known[0].items, vec!["A/Interceptor.php"]);
         assert_eq!(c.changed, vec!["B/Interceptor.php"]);
+    }
+
+    #[test]
+    fn formatting_classifier_absorbs_a_proxy_that_also_reordered() {
+        // A proxy whose only differences are a formatting delta (return-type
+        // spacing) AND a method reorder — the real-world Yireo case. Neither the
+        // reordered bucket (bytes still differ after sorting) nor a plain
+        // formatting compare (order still differs) catches it alone; composing the
+        // two does.
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        // Shared header + two method blocks. Archive: `alpha`,`beta` with the old
+        // `() : T` spacing; output: `beta`,`alpha` with the new `(): T` spacing.
+        let head = "<?php\nnamespace Foo;\n\nclass Proxy extends \\Foo\\Bar implements \
+\\Magento\\Framework\\ObjectManager\\NoninterceptableInterface\n{\n    protected $_subject = null;";
+        let m = |name: &str, spaced: bool| {
+            let colon = if spaced { ") : " } else { "): " };
+            format!("\n\n    public function {name}({colon}string\n    {{\n        return '{name}';\n    }}")
+        };
+        let arch = format!("{head}{}{}\n}}\n", m("alpha", true), m("beta", true));
+        let mc = format!("{head}{}{}\n}}\n", m("beta", false), m("alpha", false));
+        write(archive.path(), "P/Proxy.php", &arch);
+        write(output.path(), "P/Proxy.php", &mc);
+
+        let disabled = HashSet::new();
+        let ctx = ClassifyCtx {
+            archive: archive.path(),
+            output: output.path(),
+            disabled_modules: &disabled,
+        };
+        let r = report(&[], &[], &["P/Proxy.php"]);
+        let c = classify(&r, &ctx);
+        assert_eq!(c.known.len(), 1);
+        assert_eq!(c.known[0].kind, KnownKind::GeneratorVersionFormatting);
+        assert_eq!(c.known[0].items, vec!["P/Proxy.php"]);
+        assert!(c.changed.is_empty());
     }
 }
