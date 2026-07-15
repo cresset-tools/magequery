@@ -242,9 +242,25 @@ fn compile(
         };
         let do_incremental = prev_manifest.is_some();
 
-        // Metadata is always rewritten (small, cheap). generated/code is cleared
-        // only for a full compile — the incremental path reconciles it in place.
-        if !do_incremental {
+        // Incremental must produce a byte-identical result to a full compile,
+        // and a full compile computes with generated/code ABSENT (cleared
+        // first): the generated artifacts otherwise leak into the scan universe
+        // AND the class resolver, perturbing which factories/interceptors get
+        // emitted. So the incremental path MOVES the old tree aside (an instant
+        // rename) rather than clearing it — the compute then sees an empty
+        // generated/code exactly as a full compile does, while the old files
+        // stay available in `prev_dir` to rename back for the untouched
+        // majority during the reconcile write. A full compile clears as before.
+        let prev_dir = root.join("generated/.mqcache/prev");
+        if do_incremental {
+            // Discard any leftover prev tree from a crashed run, then move the
+            // current output aside.
+            let _ = std::fs::remove_dir_all(&prev_dir);
+            if let Some(parent) = prev_dir.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&code_dir, &prev_dir)?;
+        } else {
             magecommand_engine::metadata::clear_generated_dir(&root, "code")?;
         }
         magecommand_engine::metadata::clear_generated_dir(&root, "metadata")?;
@@ -374,6 +390,7 @@ fn compile(
             &code.files,
             prev_manifest.as_ref(),
             &bp,
+            do_incremental.then_some(prev_dir.as_path()),
         )?;
         lap!("write code files (disk)");
         manifest.save(&root)?;

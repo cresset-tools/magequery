@@ -5,17 +5,34 @@ below. Target: cut the re-compile cost, especially on APFS where the compile is
 filesystem-bound (see the perf notes below), and enable CI to treat
 `setup:di:compile` as a **cache restore**.
 
-**Win 1 (output manifest) — done.** `compile` writes
-`generated/.mqcache/manifest.json` (blake3 of every output file, guarded by
-format version + tool version + `BP`). `compile --incremental` reconciles
-`generated/code` in place: it re-runs the compute, hashes the fresh in-memory
-output, and writes only the files whose hash changed, deletes the ones that
-disappeared, and skips the rest — no clear, no full rewrite. Falls back to a full
-compile when no valid manifest exists (or under `--force`). Verified on the
-oracle: a no-op re-compile writes 0/4106 files and stays byte-exact; changed and
-deleted paths reconcile byte-exact; a missing manifest falls back to full. The
-write+clear phases (the ~3.4s APFS cost) collapse to the changed subset. Still
-paid every run: scan + compute (that's what Win 2's short-circuit removes).
+**Win 1 (output manifest) — done, with a compute-isolation subtlety.** `compile`
+writes `generated/.mqcache/manifest.json` (blake3 of every output file, guarded
+by format version + tool version + `BP`). `compile --incremental` reconciles
+`generated/code`: re-run the compute, hash the fresh in-memory output, write only
+the files whose hash changed, and reuse the rest. Falls back to a full compile
+with no valid manifest (or under `--force`).
+
+The subtlety (found the hard way, and why this must not be "leave the tree in
+place"): a full compile computes with `generated/code` **absent** (it clears
+first), and the generated artifacts otherwise leak into BOTH the scan universe
+and the class resolver — a stale factory makes the compiler think it already
+exists (skip) or re-emit an extra one. The oracle masked this because it always
+scans the frozen `generated/_code` archive; hiding the archive exposed a real
+divergence (4104 or 2489 files vs a full compile's 4103). Fix: `--incremental`
+**moves the old tree aside** (`generated/.mqcache/prev`, an instant rename) so
+the compute sees an empty tree exactly like a full compile, then reconciles —
+**renaming** the byte-identical majority back (a metadata op, no data rewrite)
+and writing only the changed files. Verified: with the archive hidden (true live
+mode), incremental output is now **byte-identical** to a full compile, for both a
+no-op and a changed input; reproduction mode stays byte-exact (4106); unit +
+manifest-perturbation tests cover the write/restore/delete diff.
+
+Perf note: on Linux the rename-back (+ recreating the dir tree) costs ~186ms vs
+~20ms for a plain full write — a regression in absolute terms but trivial, and
+Linux was never the target. On APFS, where writes are ~90× slower, the renames
+should win. Either way the no-op case is really Win 2's job (short-circuit before
+any of this runs); Win 1's reconcile is the "changed a little" path. Still paid
+every run: scan + compute — that's what Win 2 removes.
 
 ## The core observation
 
