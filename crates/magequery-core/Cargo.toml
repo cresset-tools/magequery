@@ -22,3 +22,6 @@ aes = "0.8"
 simple-rijndael = "0.3"
 base64 = "0.22"
 mysql = { version = "25", optional = true, default-features = false, features = ["minimal"] }
+
+[dev-dependencies]
+tempfile = "3"
