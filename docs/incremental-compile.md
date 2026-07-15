@@ -1,9 +1,24 @@
 # magecommand incremental compile (CAS) — design scope
 
-Status: **Win 1 shipped** (`compile --incremental`); Wins 2–3 + CI recipe scoped
-below. Target: cut the re-compile cost, especially on APFS where the compile is
-filesystem-bound (see the perf notes below), and enable CI to treat
-`setup:di:compile` as a **cache restore**.
+Status: **Wins 1 + 2 shipped** (`compile --incremental`, `digest`); Win 3 + the
+CI-recipe rollout scoped below. Target: cut the re-compile cost, especially on
+APFS where the compile is filesystem-bound (see the perf notes below), and enable
+CI to treat `setup:di:compile` as a **cache restore**.
+
+**Win 2 (input-digest short-circuit + `digest`) — done.** `compile` records a
+stat-fingerprint of the whole compile INPUT set in the manifest;
+`compile --incremental` recomputes it up front and, on a match, **skips the
+entire compile** (scan + compute + write) — on the oracle a no-op recompile is
+~90ms (the input walk) vs ~890ms full. The input set is
+`definitions::compile_input_files` (the `.php` the scan reads + the DI `.xml` +
+config/composer files, under the scan's own exclusion rules — sound by
+construction: over-covering only recompiles unnecessarily, under-covering would
+serve stale). `magecommand digest` prints the same digest as a **CI cache key**
+(content-hashed by default = checkout-independent; `--stat` = the fast local
+variant). Verified: no-op short-circuits + stays byte-exact; touching an input
+bypasses it (and, if only mtime changed, Win 1 then writes 0). Caveat: the
+short-circuit walks the module + framework trees to stat them (~90ms oracle,
+more on APFS); still far below a full compile.
 
 **Win 1 (output manifest) — done, with a compute-isolation subtlety.** `compile`
 writes `generated/.mqcache/manifest.json` (blake3 of every output file, guarded

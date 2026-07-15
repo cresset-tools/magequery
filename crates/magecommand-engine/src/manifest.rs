@@ -18,7 +18,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
+use magequery_core::Magento;
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
@@ -43,9 +45,90 @@ pub struct Manifest {
     /// Absolute Magento root (`BP`) it was built for — baked into some generated
     /// output, so a manifest from another root must not be trusted.
     pub bp: String,
+    /// The stat-fingerprint digest of the compile INPUTS at the time this was
+    /// written ([`FingerprintMode::Stat`]). `--incremental` recomputes it and,
+    /// on a match, skips the whole compile — the output is already current.
+    /// `None` on manifests written before Win 2 (treated as "unknown" → no
+    /// short-circuit, a safe recompile).
+    #[serde(default)]
+    pub inputs_digest: Option<String>,
     /// `rel_path` (as written under `generated/code`, forward-slashed) → content
     /// hash. `BTreeMap` for a stable, diffable on-disk order.
     pub files: BTreeMap<String, String>,
+}
+
+/// How [`input_digest`] fingerprints each input file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FingerprintMode {
+    /// `mtime` + `size` — no file reads, so it's fast (the interactive
+    /// `--incremental` short-circuit). mtime is unreliable after a fresh
+    /// `git checkout`, so this is for the local edit loop, not a CI key.
+    Stat,
+    /// blake3 of each file's bytes — checkout-independent, so it's the CI cache
+    /// key, at the cost of reading every input.
+    Content,
+}
+
+/// A digest over the whole compile INPUT set (see
+/// [`crate::definitions::compile_input_files`]), plus `BP`, the tool version,
+/// and the enabled-module set/order. Two inputs producing the same digest yield
+/// the same `generated/` — so an unchanged digest means the last output is still
+/// valid (skip the compile), and it is a sound CI cache key. Files are
+/// fingerprinted in parallel; the sorted input list keeps the fold order stable.
+pub fn input_digest(magento: &Magento, root: &Path, mode: FingerprintMode) -> String {
+    use rayon::prelude::*;
+    let files = crate::definitions::compile_input_files(magento, root);
+    let per_file: Vec<[u8; 32]> = files
+        .par_iter()
+        .map(|path| {
+            let mut h = blake3::Hasher::new();
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            h.update(rel.to_string_lossy().as_bytes());
+            h.update(b"\0");
+            match mode {
+                FingerprintMode::Stat => match std::fs::metadata(path) {
+                    Ok(meta) => {
+                        h.update(&meta.len().to_le_bytes());
+                        let nanos = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0);
+                        h.update(&nanos.to_le_bytes());
+                    }
+                    Err(_) => {
+                        h.update(b"\x01missing");
+                    }
+                },
+                FingerprintMode::Content => match std::fs::read(path) {
+                    Ok(bytes) => {
+                        h.update(&bytes);
+                    }
+                    Err(_) => {
+                        h.update(b"\x01missing");
+                    }
+                },
+            }
+            *h.finalize().as_bytes()
+        })
+        .collect();
+
+    let mut top = blake3::Hasher::new();
+    top.update(TOOL_VERSION.as_bytes());
+    top.update(b"\0");
+    top.update(root.to_string_lossy().as_bytes());
+    top.update(b"\0");
+    for module in magento.modules() {
+        if module.enabled {
+            top.update(module.name.as_str().as_bytes());
+            top.update(b"\0");
+        }
+    }
+    for fp in &per_file {
+        top.update(fp);
+    }
+    top.finalize().to_hex().to_string()
 }
 
 impl Manifest {
@@ -80,11 +163,14 @@ impl Manifest {
     }
 
     /// Build a fresh manifest from the just-written file set (`rel_path` → hash).
+    /// `inputs_digest` starts empty; the caller sets it (it needs the `Magento`
+    /// handle to fingerprint the inputs) before [`save`](Self::save).
     pub fn from_hashes(bp: &str, files: BTreeMap<String, String>) -> Manifest {
         Manifest {
             version: MANIFEST_VERSION,
             tool_version: TOOL_VERSION.to_owned(),
             bp: bp.to_owned(),
+            inputs_digest: None,
             files,
         }
     }

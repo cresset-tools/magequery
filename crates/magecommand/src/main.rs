@@ -71,6 +71,17 @@ enum Command {
         #[arg(long)]
         strict_ordering: bool,
     },
+    /// Print a digest of the compile inputs — a content-addressed key for the
+    /// generated output. Since the compile is a pure function of the source
+    /// tree, an unchanged digest means the last compile is still valid: use it
+    /// as a CI cache key for `generated/` (see docs/incremental-compile.md).
+    Digest {
+        /// Fingerprint by mtime+size instead of file contents — fast, but mtime
+        /// is unreliable after a fresh `git checkout`, so this matches the local
+        /// `--incremental` short-circuit and is NOT a portable CI key.
+        #[arg(long)]
+        stat: bool,
+    },
 }
 
 fn main() -> anyhow::Result<ExitCode> {
@@ -88,6 +99,7 @@ fn main() -> anyhow::Result<ExitCode> {
         Command::Compile { dry_run, force, incremental } => {
             compile(cli.root, cli.json, dry_run, force, incremental)
         }
+        Command::Digest { stat } => digest(cli.root, stat),
         Command::Compare {
             ref archive,
             ref output,
@@ -150,6 +162,38 @@ fn compile(
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
     lap!("open + discovery");
+
+    // Incremental setup + fast short-circuit (Win 2). Load the previous
+    // manifest, and if `--incremental` and no compile INPUT changed since it was
+    // written (stat-fingerprint match), the current output is already correct —
+    // skip the entire compile (scan + compute + write) before doing any of it.
+    // `--force` bypasses; a dry-run always reports.
+    let bp = root.to_string_lossy().to_string();
+    let code_dir = root.join("generated/code");
+    let prev_manifest = if incremental && !force && dir_has_files(&code_dir) {
+        magecommand_engine::manifest::Manifest::load(&root, &bp)
+    } else {
+        None
+    };
+    let do_incremental = prev_manifest.is_some();
+    if !dry_run && do_incremental {
+        if let Some(prev_digest) = prev_manifest.as_ref().and_then(|m| m.inputs_digest.as_ref()) {
+            let current = magecommand_engine::manifest::input_digest(
+                &magento,
+                &root,
+                magecommand_engine::manifest::FingerprintMode::Stat,
+            );
+            lap!("input digest (short-circuit check)");
+            if &current == prev_digest {
+                if json {
+                    println!("{{\"status\":\"up-to-date\",\"reason\":\"no input changed\"}}");
+                } else {
+                    println!("up to date — no compile input changed (use --force to rebuild)");
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+        }
+    }
 
     let modules = magento.modules();
     let enabled = modules.iter().filter(|m| m.enabled).count();
@@ -222,25 +266,15 @@ fn compile(
         // existing output tree unless --force, then wipe generated/code +
         // generated/metadata and regenerate both from scratch. (The archive
         // dirs `_code`/`_metadata` are never touched.) `--incremental` is an
-        // intentional overwrite, so it skips the guard.
-        let bp = root.to_string_lossy().to_string();
-        let code_dir = root.join("generated/code");
+        // intentional overwrite, so it skips the guard. `bp`, `code_dir`,
+        // `prev_manifest` and `do_incremental` were computed above (the
+        // short-circuit uses them too).
         let meta_dir = root.join("generated/metadata");
         if !force && !incremental && (dir_has_files(&code_dir) || dir_has_files(&meta_dir)) {
             anyhow::bail!(
                 "generated/code or generated/metadata is non-empty; pass --force to overwrite"
             );
         }
-        // Incremental only when asked (and NOT --force, which forces a full
-        // rebuild) AND a trustworthy manifest exists AND the code tree it
-        // describes is actually present (guards the "manifest kept, tree
-        // deleted" case) — else fall back to a full compile.
-        let prev_manifest = if incremental && !force && dir_has_files(&code_dir) {
-            magecommand_engine::manifest::Manifest::load(&root, &bp)
-        } else {
-            None
-        };
-        let do_incremental = prev_manifest.is_some();
 
         // Incremental must produce a byte-identical result to a full compile,
         // and a full compile computes with generated/code ABSENT (cleared
@@ -385,7 +419,7 @@ fn compile(
         // files) and record the fresh manifest so the NEXT run can go
         // incremental. A full compile takes the same path with `prev = None`:
         // it writes everything and still emits the baseline manifest.
-        let (stats, manifest) = magecommand_engine::metadata::write_code_files_incremental(
+        let (stats, mut manifest) = magecommand_engine::metadata::write_code_files_incremental(
             &root,
             &code.files,
             prev_manifest.as_ref(),
@@ -393,8 +427,16 @@ fn compile(
             do_incremental.then_some(prev_dir.as_path()),
         )?;
         lap!("write code files (disk)");
+        // Record the input fingerprint so the next --incremental run can
+        // short-circuit when nothing changed (Win 2). Stat-based to match the
+        // short-circuit check above.
+        manifest.inputs_digest = Some(magecommand_engine::manifest::input_digest(
+            &magento,
+            &root,
+            magecommand_engine::manifest::FingerprintMode::Stat,
+        ));
         manifest.save(&root)?;
-        lap!("write manifest");
+        lap!("write manifest + input digest");
         if do_incremental {
             println!(
                 "incremental: wrote {} · skipped {} unchanged · deleted {} (of {} files)",
@@ -414,6 +456,21 @@ fn compile(
             );
         }
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `magecommand digest [--stat]` — print the compile-input digest and exit.
+fn digest(root: Option<PathBuf>, stat: bool) -> anyhow::Result<ExitCode> {
+    let root = root.unwrap_or_else(|| PathBuf::from("."));
+    let root = std::path::absolute(&root).unwrap_or(root);
+    let magento = magequery_core::Magento::open(&root)
+        .with_context(|| format!("not a Magento root: {}", root.display()))?;
+    let mode = if stat {
+        magecommand_engine::manifest::FingerprintMode::Stat
+    } else {
+        magecommand_engine::manifest::FingerprintMode::Content
+    };
+    println!("{}", magecommand_engine::manifest::input_digest(&magento, &root, mode));
     Ok(ExitCode::SUCCESS)
 }
 
