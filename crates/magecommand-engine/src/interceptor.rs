@@ -29,9 +29,11 @@ pub struct InterceptionPlan {
 
 /// Build the plan: `getInterceptedClasses` (concrete + has-plugins +
 /// interceptable, over the app+lib+generated scan) then `getInterceptedMethods`.
-pub fn plan(magento: &Magento, defs: &Definitions) -> InterceptionPlan {
-    let has_plugins = crate::interception::interception_map(magento, defs);
-
+pub fn plan(
+    magento: &Magento,
+    defs: &Definitions,
+    has_plugins: &std::collections::BTreeMap<String, bool>,
+) -> InterceptionPlan {
     // Seeds = getInterceptedClasses: scanned (app+lib+generated) classes that
     // pass has-plugins + concrete + interceptable.
     let mut seeds: HashSet<String> = HashSet::new();
@@ -39,7 +41,7 @@ pub fn plan(magento: &Magento, defs: &Definitions) -> InterceptionPlan {
         if defs.setup_classes.contains(class) {
             continue;
         }
-        if is_intercepted_class(defs, &has_plugins, class) {
+        if is_intercepted_class(defs, has_plugins, class) {
             seeds.insert(class.clone());
         }
     }

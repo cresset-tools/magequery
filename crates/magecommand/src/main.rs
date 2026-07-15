@@ -101,6 +101,9 @@ fn main() -> anyhow::Result<ExitCode> {
     }
 }
 
+// The final `lap!` resets `t` without a subsequent read — expected for a
+// timing macro whose last call closes the sequence.
+#[allow(unused_assignments)]
 fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> anyhow::Result<ExitCode> {
     use magequery_core::Area;
 
@@ -113,8 +116,27 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
     // does not resolve symlinks.
     let root = root.unwrap_or_else(|| PathBuf::from("."));
     let root = std::path::absolute(&root).unwrap_or(root);
+
+    // Phase timing (stderr) when MAGECOMMAND_PROFILE is set — `lap!("label")`
+    // prints the time since the previous lap and resets the clock.
+    let prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
+    let mut t = std::time::Instant::now();
+    macro_rules! lap {
+        ($label:expr) => {
+            if prof {
+                eprintln!(
+                    "  [profile] {:<26} {:>8.1} ms",
+                    $label,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
+                t = std::time::Instant::now();
+            }
+        };
+    }
+
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
+    lap!("open + discovery");
 
     let modules = magento.modules();
     let enabled = modules.iter().filter(|m| m.enabled).count();
@@ -132,6 +154,7 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
     ];
     let exports: Vec<_> = AREAS.iter().map(|&a| magento.di_export(a)).collect();
     let extended_types = magento.extension_attributes(None).len();
+    lap!("di_export x7 (work plan)");
 
     if json {
         let plan = serde_json::json!({
@@ -195,6 +218,7 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
         }
         magecommand_engine::metadata::clear_generated_dir(&root, "code")?;
         magecommand_engine::metadata::clear_generated_dir(&root, "metadata")?;
+        lap!("clear generated dirs");
 
         // Metadata files (M2). The output dir is now clean, so force-write.
         let list = magecommand_engine::metadata::app_action_list(&magento);
@@ -223,6 +247,7 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
             &root,
             &generated_code,
         );
+        lap!("scan php universe");
         // Names the class universe must be able to reflect even when the scan
         // walk didn't collect them: preference TARGETS (the concrete each
         // interface resolves to) and PLUGIN CLASSES. Magento reflects a plugin
@@ -249,28 +274,17 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
                 unresolved.first().map(String::as_str).unwrap_or("")
             );
         }
+        lap!("extend_hierarchy (reflect)");
+        // Build every area file (the fixed seven + any custom-registered areas
+        // like postcode-nl's postcode_eu) ONCE, in parallel. This is the
+        // compile's most expensive computation; both the `<code>.php` metadata
+        // write below and codegen's incidental class_exists sweep consume the
+        // same set, so it must never be recomputed.
+        let area_files =
+            magecommand_engine::areaconfig::build_all_area_files(&magento, &defs, &root);
+        lap!("build area files (x7+)");
         let mut finding_count = 0usize;
-        for (area, code) in magecommand_engine::areaconfig::AREA_CODES {
-            let file = magecommand_engine::areaconfig::build_area_file(
-                &magento, &defs, area, &root,
-            );
-            finding_count += file.findings.len();
-            let path = magecommand_engine::metadata::write_metadata_file(
-                &root,
-                &format!("{code}.php"),
-                &file.render(),
-                true,
-            )?;
-            println!("wrote {}", path.display());
-        }
-        // Custom-registered areas (AreaList::getCodes() beyond the fixed seven,
-        // e.g. postcode-nl's postcode_eu): the global base overlaid by each
-        // module's etc/<code>/di.xml. Empty on stores that register none.
-        for code in magecommand_engine::areaconfig::custom_area_codes(&magento) {
-            let export = magento.di_export_custom_area(&code);
-            let file = magecommand_engine::areaconfig::build_area_file_from_export(
-                &magento, &defs, export, &root,
-            );
+        for (code, file) in &area_files {
             finding_count += file.findings.len();
             let path = magecommand_engine::metadata::write_metadata_file(
                 &root,
@@ -283,6 +297,7 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
         if finding_count > 0 {
             eprintln!("note: {finding_count} static-analysis finding(s) across areas — see --json");
         }
+        lap!("write area metadata");
 
         let interception = magecommand_engine::interception::interception_map(&magento, &defs);
         let path = magecommand_engine::metadata::write_metadata_file(
@@ -292,6 +307,7 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
             true,
         )?;
         println!("wrote {}", path.display());
+        lap!("interception.php");
 
         let plugin_lists = magecommand_engine::pluginlist::generate(&magento, &defs);
         for (name, content) in &plugin_lists.files {
@@ -306,14 +322,21 @@ fn compile(root: Option<PathBuf>, json: bool, dry_run: bool, force: bool) -> any
                 plugin_lists.findings.first().map(String::as_str).unwrap_or("")
             );
         }
+        lap!("plugin-lists (metadata)");
 
         // generated/code (M3): factories, extensions, proxies, searchResults,
         // proxyDeferred, interceptors — the full tree the compare checks
         // against `generated/_code`.
-        let code = magecommand_engine::codegen::generate_code(&magento, &defs, root.clone());
-        for (rel, content) in &code.files {
-            magecommand_engine::metadata::write_code_file(&root, rel, content, true)?;
-        }
+        let code = magecommand_engine::codegen::generate_code(
+            &magento,
+            &defs,
+            root.clone(),
+            &area_files,
+            &interception,
+        );
+        lap!("generate_code (in memory)");
+        magecommand_engine::metadata::write_code_files(&root, &code.files, true)?;
+        lap!("write code files (disk)");
         println!("wrote {} generated/code file(s)", code.files.len());
         if !code.findings.is_empty() {
             eprintln!(

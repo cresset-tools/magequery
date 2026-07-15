@@ -268,6 +268,40 @@ pub fn build_area_file_from_export(
     }
 }
 
+/// Every compiled area file — the seven fixed areas in generation order, then
+/// custom-registered areas (sorted) — each paired with its metadata-file stem.
+///
+/// This is the compile's single most expensive computation (each area runs the
+/// full Reader + modification chain), and it was previously done *twice*: once
+/// to write the `<code>.php` metadata and again for codegen's incidental
+/// `class_exists` sweep. Build it once here and share both consumers. The areas
+/// are independent, so they build in parallel; `collect` into an indexed `Vec`
+/// preserves the fixed-then-custom order the sweep and metadata write rely on.
+pub fn build_all_area_files(
+    magento: &Magento,
+    defs: &Definitions,
+    root: &std::path::Path,
+) -> Vec<(String, AreaFile)> {
+    use rayon::prelude::*;
+    let custom = custom_area_codes(magento);
+    let mut files: Vec<(String, AreaFile)> = AREA_CODES
+        .par_iter()
+        .map(|(area, code)| ((*code).to_owned(), build_area_file(magento, defs, *area, root)))
+        .collect();
+    let custom_files: Vec<(String, AreaFile)> = custom
+        .par_iter()
+        .map(|code| {
+            let export = magento.di_export_custom_area(code);
+            (
+                code.clone(),
+                build_area_file_from_export(magento, defs, export, root),
+            )
+        })
+        .collect();
+    files.extend(custom_files);
+    files
+}
+
 /// Chain\NonLazyTypes (PHP >= 8.4, active on the oracle): which candidate
 /// classes cannot be lazy-proxied. Order is the candidate insertion order —
 /// this section is written pre-ksort and never sorted.

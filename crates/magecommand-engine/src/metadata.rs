@@ -101,6 +101,19 @@ pub fn write_code_file(
     Ok(target)
 }
 
+/// Write every `generated/code` file in parallel. The files are independent
+/// and [`write_code_file`]'s per-file atomic temp+rename plus the idempotent
+/// `create_dir_all` (concurrent calls for a shared parent dir are safe) make
+/// concurrent writes correct. Returns the number written, or the first I/O
+/// error encountered.
+pub fn write_code_files(root: &Path, files: &[(String, String)], force: bool) -> Result<usize> {
+    use rayon::prelude::*;
+    files
+        .par_iter()
+        .try_for_each(|(rel, content)| write_code_file(root, rel, content, force).map(|_| ()))?;
+    Ok(files.len())
+}
+
 /// Remove a compile output directory (`generated/code` or
 /// `generated/metadata`) so a fresh compile starts clean, exactly as
 /// `setup:di:compile` wipes `generated/code` before running. A missing dir is

@@ -936,9 +936,26 @@ pub struct GeneratedCode {
 /// per generated entity; interceptors come from the separate interception
 /// plan (op 5). The result is the union that `magecommand compare` checks
 /// against the frozen `generated/_code`.
-pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> GeneratedCode {
+pub fn generate_code(
+    magento: &Magento,
+    defs: &Definitions,
+    root: PathBuf,
+    area_files: &[(String, crate::areaconfig::AreaFile)],
+    has_plugins: &std::collections::BTreeMap<String, bool>,
+) -> GeneratedCode {
+    let _prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
+    macro_rules! ilap {
+        ($t:expr, $label:expr) => {
+            if _prof {
+                eprintln!("  [profile]     · {:<24} {:>8.1} ms", $label, $t.elapsed().as_secs_f64() * 1000.0);
+                $t = std::time::Instant::now();
+            }
+        };
+    }
+    let mut _it = std::time::Instant::now();
     let mut cg = Codegen::new(magento, defs, root.clone());
     cg.collect();
+    ilap!(_it, "collect");
     // Incidental generation while the config Reader aggregates each area
     // (`Compiler\Config\Reader::generateCachePerScope`): it `isConcrete()`s —
     // hence `class_exists()`, which autoloads and so materializes a generatable
@@ -952,16 +969,18 @@ pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> Ge
     // runtime-generated factory. Mirror that: sweep arguments + instanceType
     // values, never preference targets. `\Proxy`/`\Interceptor` names
     // short-circuit or are op-5 artifacts, handled elsewhere.
-    for (area, _) in crate::areaconfig::AREA_CODES {
-        let file = crate::areaconfig::build_area_file(magento, defs, area, &root);
-        // The `isConcrete` runs in THIS area's OM context, so a name that is a
-        // virtualType in this area is skipped by the generator
-        // (`shouldSkipGeneration`) — no file. The area's vtype names are exactly
-        // the keys of its instanceTypes. Without this, an area-scoped vtype
-        // whose name ends in a generatable suffix (e.g. the graphql vtype
-        // `amPromoQuoteItemFactory`) leaks a bogus Factory: it isn't in the
-        // global-only vtype skip set, and its bare source `amPromoQuoteItem`
-        // reads as a PHP built-in, so `ensure` emits it.
+    //
+    // The area files (fixed + custom) are prebuilt and passed in — the same set
+    // main.rs writes as `<code>.php` metadata — so this sweep never rebuilds
+    // them. The `isConcrete` runs in each area's OM context, so a name that is a
+    // virtualType in this area is skipped by the generator
+    // (`shouldSkipGeneration`) — no file. The area's vtype names are exactly the
+    // keys of its instanceTypes. Without this, an area-scoped vtype whose name
+    // ends in a generatable suffix (e.g. the graphql vtype
+    // `amPromoQuoteItemFactory`) leaks a bogus Factory: it isn't in the
+    // global-only vtype skip set, and its bare source `amPromoQuoteItem` reads
+    // as a PHP built-in, so `ensure` emits it.
+    for (_code, file) in area_files {
         let area_vtypes: HashSet<&str> =
             file.instance_types.iter().map(|(k, _)| k.as_str()).collect();
         let names: Vec<String> = file
@@ -974,31 +993,10 @@ pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> Ge
             .collect();
         cg.ensure_all(names.iter().map(String::as_str));
     }
-    // Custom-registered areas contribute their overlay's referenced classes to
-    // the same incidental `class_exists` sweep (usually already covered by the
-    // fixed areas, but kept faithful for a custom area that wires in a proxy no
-    // standard area references).
-    for code in crate::areaconfig::custom_area_codes(magento) {
-        let file = crate::areaconfig::build_area_file_from_export(
-            magento,
-            defs,
-            magento.di_export_custom_area(&code),
-            &root,
-        );
-        let area_vtypes: std::collections::HashSet<&str> =
-            file.instance_types.iter().map(|(k, _)| k.as_str()).collect();
-        let names: Vec<String> = file
-            .arguments
-            .keys()
-            .cloned()
-            .chain(file.instance_types.iter().map(|(_, v)| v.clone()))
-            .filter(|n| !n.ends_with("\\Proxy") && !n.ends_with("\\Interceptor"))
-            .filter(|n| !area_vtypes.contains(n.as_str()))
-            .collect();
-        cg.ensure_all(names.iter().map(String::as_str));
-    }
+    ilap!(_it, "area+custom sweep");
 
     let ext_cfg = ExtConfig::build(magento);
+    ilap!(_it, "ExtConfig::build");
     let mut files: Vec<(String, String)> = Vec::new();
     let mut findings: Vec<String> = Vec::new();
     for (name, kind) in &cg.emitted {
@@ -1035,9 +1033,13 @@ pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> Ge
         };
         files.push((format!("{}.php", name.replace('\\', "/")), content));
     }
+    ilap!(_it, "emit generated bytes");
 
-    // op 5: interceptors (not part of `emitted` — a separate plan).
-    let plan = crate::interceptor::plan(magento, defs);
+    // op 5: interceptors (not part of `emitted` — a separate plan). The
+    // has-plugins map is computed once by the caller (for interception.php) and
+    // reused here — the plan needs the same map, never a fresh one.
+    let plan = crate::interceptor::plan(magento, defs, has_plugins);
+    ilap!(_it, "interceptor plan");
     for (class, methods) in &plan.methods {
         match crate::interceptor::interceptor_bytes(defs, class, methods) {
             Some(bytes) => {
@@ -1047,7 +1049,9 @@ pub fn generate_code(magento: &Magento, defs: &Definitions, root: PathBuf) -> Ge
         }
     }
 
+    ilap!(_it, "interceptor bytes");
     files.sort_by(|a, b| a.0.cmp(&b.0));
+    ilap!(_it, "sort");
     GeneratedCode { files, findings }
 }
 
