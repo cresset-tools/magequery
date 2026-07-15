@@ -303,6 +303,7 @@ mod tests {
             missing: missing.iter().map(|s| s.to_string()).collect(),
             extra: extra.iter().map(|s| s.to_string()).collect(),
             changed: changed.iter().map(|s| s.to_string()).collect(),
+            reordered: Vec::new(),
             identical: 0,
         }
     }
