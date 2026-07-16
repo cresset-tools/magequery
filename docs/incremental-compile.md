@@ -1,10 +1,56 @@
 # magecommand incremental compile (CAS) — design scope
 
-Status: **Win 2 shipped** (`compile --incremental` = no-op short-circuit,
+Status: **`watch` server shipped (v1)** — the real fast-loop answer, see the next
+section; **Win 2 shipped** (`compile --incremental` = no-op short-circuit,
 `digest`); **Win 1 retired** (partial reconcile — a net loss on APFS, see below);
-Win 3 + the CI-recipe rollout scoped below. Target: cut the re-compile cost,
-especially on APFS where the compile is filesystem-bound (see the perf notes
-below), and enable CI to treat `setup:di:compile` as a **cache restore**.
+**CI cache demoted** (mostly moot — see the footnote). Target: cut the re-compile
+cost, especially on APFS where the compile is filesystem-bound.
+
+## `watch` — the long-running compile server (the fast-loop answer)
+
+The insight that reframes everything below: the APFS FS-metadata lock only hurts
+when you *touch many files*. Every cold-process approach still touches all ~10k on
+some axis — the scan re-reads them, the write re-writes them, even
+`--incremental` re-stats them to detect the change. A **warm server** touches only
+what changed:
+
+- the parsed PHP universe ([`Definitions`]) stays in memory, so an edit that
+  doesn't touch PHP (a di.xml tweak — the common case) **skips the scan**;
+- the OS file-watcher (`notify`) reports the exact delta, so there's **no re-stat
+  walk**;
+- the previous output tree stays in memory, so we **diff and write only the
+  handful of files that changed** (this is Win 1's goal, finally correct — a warm
+  process holds both trees, so the diff is a free map compare and the write is
+  just the delta; no rename-aside, no 10k-file hash).
+
+`magecommand watch`: initial full build (identical to `compile --force`), then on
+each file change re-parse only what's needed, recompute, and write the delta.
+**Correctness by construction:** each recompile runs the *same*
+`build::compute_outputs` a cold compile runs, over a `Definitions` that is either
+freshly re-scanned (a PHP file changed) or unchanged (nothing PHP changed → a
+re-scan would be identical). So the on-disk result after an edit is byte-for-byte
+a cold `compile --force` of that edited state.
+
+Verified on the oracle: disabling one plugin recompiled writing **2 files, 4120
+unchanged** (vs a cold compile re-writing all 4122), and the tree was
+**byte-identical** to a cold compile of the same edited state; a di-only edit
+skips the PHP scan (`reopen` only). The write-delta is the whole APFS payoff —
+proforto measurement pending. Two fixes the prototype forced: filter watcher
+events to real writes (Create/Remove/Modify-data — Access events from the
+recompile's own file reads would otherwise feed back into an endless loop), and
+exclude `**/_files/**` fixtures the scan already ignores.
+
+v1 scope / next steps: on a PHP change it re-scans the whole universe (v2:
+incremental per-file `Definitions` update); it recomputes all 7 areas from the
+in-memory parses (v3: per-area invalidation); it doesn't yet update the input
+digest manifest (a later cold `--incremental` recomputes, which is safe). The
+compute itself (~2s CPU on proforto) is the remaining floor a warm server keeps
+paying until v2/v3.
+
+---
+
+The material below predates `watch` and is kept for the CAS/`--incremental`
+design and the (now demoted) CI-cache investigation.
 
 **Win 2 (input-digest short-circuit + `digest`) — done, and it is the whole
 `--incremental` mechanism.** `compile` records a stat-fingerprint of the whole
@@ -167,7 +213,22 @@ and a rename hits it just as hard as a write. The manifest now stores only the
   recompute. Medium value, more moving parts → **defer** until Win 1/2 are in and
   the scan is measured to still dominate.
 
-## CI cache integration (the investigated question: **yes, and it fits unusually well**)
+## CI cache integration — DEMOTED (mostly moot; kept for the record)
+
+Revised verdict after review: for the common Linux-CI case this is **not worth
+it**, for three compounding reasons. (1) The input digest is whole-file, coarser
+than the true DI dependency (headers + di.xml), so a method-*body* edit busts the
+cache even though the output is identical — and active branches touch scanned PHP
+on nearly every push, so exact hits are rare. (2) With Win 1 retired a miss is a
+full compile, no partial reuse. (3) The clincher: on a Linux runner the compile is
+already ~0.9s, and restoring + extracting a ~10k-file cache is probably *slower*
+than recomputing — the whole cache premise was "the compile is slow" (APFS), and
+CI is fast-FS. magecommand's speed makes caching its own output moot. What
+survives: **matrix fan-out on one commit** (compile once, restore across
+PHP/DB legs — the output is PHP-version-independent since magecommand never runs
+PHP), macOS runners, and same-commit re-runs. The `digest` command stays useful as
+a cache-*key* primitive even when you don't cache `generated/`. The recipes below
+are retained for those niches.
 
 Because the output is a pure function of the source, CI can cache it keyed on the
 source — the same pattern CI already uses for `vendor/` keyed on `composer.lock`.
