@@ -37,6 +37,35 @@ mod tests {
     }
 
     #[test]
+    fn alt_syntax_class_exists_guard_keeps_if_branch() {
+        // `if (class_exists(X)): class C {…} else: class C {…} endif;` — the
+        // alternative-syntax compat shim (TIG PostNL's SourceItemsDataBySkuProxy,
+        // G2). The class must be registered (not dropped), at brace depth 0 so it
+        // is scanned, keeping the FIRST (`if`-branch) body with its constructor.
+        let src = r#"<?php
+namespace App;
+use Magento\Framework\ObjectManagerInterface;
+if (class_exists(\App\Dep\Factory::class)):
+    class Proxy {
+        public function __construct(ObjectManagerInterface $om, Dep $dep) {}
+    }
+else:
+    class Proxy {
+        public function __construct(ObjectManagerInterface $om) {}
+    }
+endif;
+"#;
+        // Only one declaration survives dedup — the if-branch — and it is NOT
+        // conditional (no braces around it), so the scan will include it.
+        let c = one(src);
+        assert_eq!(c.fqcn, "App\\Proxy");
+        assert!(!c.conditional, "alt-syntax class sits at brace depth 0");
+        let ctor = c.methods.iter().find(|m| m.name == "__construct").unwrap();
+        assert_eq!(ctor.params.len(), 2, "the if-branch constructor is kept");
+        assert_eq!(ctor.params[1].name, "dep");
+    }
+
+    #[test]
     fn minimal_class() {
         let c = one("<?php namespace A\\B; class C {}");
         assert_eq!(c.fqcn, "A\\B\\C");
