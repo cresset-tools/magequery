@@ -166,16 +166,26 @@ impl<'a> ArgsCtx<'a> {
         if let Some(cached) = self.merged_cache.borrow().get(name) {
             return cached.clone();
         }
+        // Array-argument items are NOT re-sorted at merge time. Magento's
+        // ObjectManager\Helper\SortItems runs at RUNTIME (Data\Argument\
+        // Interpreter\ArrayType::evaluate), NOT during di:compile — the compiled
+        // metadata stores merged arrays in declaration/merge order. The only
+        // ordering baked in is the `sortOrder=` ATTRIBUTE, which the Mapper
+        // consumes + strips per declaration (replicated in `to_cfg`); a child
+        // `<item name="sortOrder">` is plain data and must keep its position.
+        // Proven on the oracle (Mq_ModSort synthetic): a parent form with
+        // sortOrder-keyed modifiers + a child adding un-keyed ones compiles
+        // parent-block-then-child (merge order), never key-sorted. Re-sorting
+        // here was the proforto `frontend.php` divergence (Amasty modifiers
+        // hoisted before Hyva's).
         let mut arguments: Vec<(CfgKey, Cfg)> = Vec::new();
         if let Some(base) = self.vtypes.get(name) {
             arguments = self.merged_config(base);
-            sort_items(&mut arguments);
         } else if self.defs.contains(name) {
             for relation in self.defs.relations_of(name) {
                 let relation_args = self.merged_config(&relation);
                 if !relation_args.is_empty() {
                     array_replace(&mut arguments, relation_args);
-                    sort_items(&mut arguments);
                 }
             }
         }
@@ -184,7 +194,6 @@ impl<'a> ArgsCtx<'a> {
                 arguments = own;
             } else {
                 array_replace_recursive(&mut arguments, own);
-                sort_items(&mut arguments);
             }
         }
         self.merged_cache
@@ -568,33 +577,6 @@ fn array_replace_recursive(base: &mut Vec<(CfgKey, Cfg)>, over: Vec<(CfgKey, Cfg
     }
 }
 
-/// ObjectManager\Helper\SortItems: when any argument's ITEMS carry a
-/// `sortOrder` key, each argument's items are stably re-ordered by it.
-/// (The single-level mode reorders the argument MAP itself, which never
-/// reaches the compiled output — lookups are by name.)
-fn sort_items(arguments: &mut [(CfgKey, Cfg)]) {
-    let multi = arguments.iter().any(|(_, v)| match v {
-        Cfg::Map(items) => items
-            .iter()
-            .any(|(_, item)| matches!(item, Cfg::Map(m) if map_get(m, "sortOrder").is_some())),
-        _ => false,
-    });
-    if !multi {
-        return;
-    }
-    for (_, value) in arguments.iter_mut() {
-        if let Cfg::Map(items) = value {
-            items.sort_by_key(|(_, item)| match item {
-                Cfg::Map(m) => match map_get(m, "sortOrder") {
-                    Some(Cfg::Int(i)) => *i,
-                    Some(Cfg::Str(s)) => s.trim().parse().unwrap_or(0),
-                    _ => 0,
-                },
-                _ => 0,
-            });
-        }
-    }
-}
 
 // ---- const lookup over the scanned corpus ------------------------------------
 
@@ -885,4 +867,71 @@ fn preg_quote(s: &str) -> String {
         out.push(ch);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn modifier(class: &str, sort_order: Option<i64>) -> Cfg {
+        let mut m = vec![(CfgKey::s("class"), Cfg::Str(class.to_owned()))];
+        if let Some(so) = sort_order {
+            // `sortOrder` as a nested data KEY (Hyva/Amasty convention), NOT the
+            // `sortOrder=` item attribute — the Mapper leaves it as plain data.
+            m.push((CfgKey::s("sortOrder"), Cfg::Int(so)));
+        }
+        Cfg::Map(m)
+    }
+
+    fn item_keys(cfg: &Cfg) -> Vec<String> {
+        match cfg {
+            Cfg::Map(items) => items
+                .iter()
+                .map(|(k, _)| match k {
+                    CfgKey::Str(s) => s.clone(),
+                    CfgKey::Int(i) => i.to_string(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The proforto `frontend.php` bug shape: a child form (`AttrForm`) whose
+    /// parent (`BaseForm`) declares `entityFormModifiers` with sortOrder-keyed
+    /// items, and the child adds un-keyed modifiers. Real 2.4.9 di:compile keeps
+    /// the type-hierarchy merge in MERGE order — parent block, then the child's
+    /// additions — and does NOT re-sort by the nested `sortOrder` key (that sort
+    /// is runtime-only, `ArrayType::evaluate`). Verified byte-for-byte against a
+    /// real compile via the `Mq_ModSort` oracle synthetic. This locks the merge
+    /// helper so no one reintroduces the compile-time `sort_items` reorder.
+    #[test]
+    fn hierarchy_merge_preserves_order_and_never_key_sorts() {
+        let parent = vec![(
+            CfgKey::s("entityFormModifiers"),
+            Cfg::Map(vec![
+                (CfgKey::s("bAlpha"), modifier("Hyva\\Form\\BAlpha", Some(900))),
+                (CfgKey::s("bBeta"), modifier("Hyva\\Form\\BBeta", Some(940))),
+            ]),
+        )];
+        let child = vec![(
+            CfgKey::s("entityFormModifiers"),
+            Cfg::Map(vec![
+                (CfgKey::s("aGamma"), modifier("Amasty\\Form\\AGamma", None)),
+                (CfgKey::s("aDelta"), modifier("Amasty\\Form\\ADelta", None)),
+            ]),
+        )];
+
+        // merged_config merges the parent-type args, then array_replace_recursive
+        // overlays the child's own — with NO sort afterward.
+        let mut merged = parent;
+        array_replace_recursive(&mut merged, child);
+
+        assert_eq!(merged.len(), 1, "one merged argument");
+        assert_eq!(
+            item_keys(&merged[0].1),
+            ["bAlpha", "bBeta", "aGamma", "aDelta"],
+            "merged modifiers must stay parent-then-child, never key-sorted \
+             (a key-sort would hoist aGamma/aDelta to the front)"
+        );
+    }
 }
