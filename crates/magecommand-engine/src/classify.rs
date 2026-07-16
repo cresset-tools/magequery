@@ -36,6 +36,12 @@ pub enum KnownKind {
     /// `NonLazyTypes` compiler-chain step, a 2.4.9 / PHP 8.4 feature the older
     /// archive predates), never removing or changing what the archive has.
     ExtraMetadata,
+    /// A metadata DI-config file whose only substantive difference (once
+    /// disabled-module entries and pure additions are accounted for) is the
+    /// generated ClassesScanner directory-exclusion regex — a literal alternation
+    /// of every enabled module's directory, so a stale archive with a different
+    /// module set lists different members.
+    ClassScannerExcludeRegex,
     /// Two paths differing only by letter case (case-insensitive filesystem).
     FilenameCasing,
     /// Interceptor/proxy content that differs only in the code generator's
@@ -57,6 +63,9 @@ impl KnownKind {
             }
             KnownKind::ExtraMetadata => {
                 "Extra DI-config metadata (output superset — nonLazyTypes, Magento 2.4.9)"
+            }
+            KnownKind::ClassScannerExcludeRegex => {
+                "ClassesScanner directory-exclusion regex (enabled-module set differs)"
             }
             KnownKind::FilenameCasing => "Filename letter-casing (case-insensitive filesystem)",
             KnownKind::GeneratorVersionFormatting => {
@@ -166,6 +175,15 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
     //    ahead of the older archive. Disabled-module entries are stripped first so
     //    a file mixing disabled removals with output additions still qualifies.
     if let Some(group) = extra_metadata(&mut changed, ctx) {
+        known.push(group);
+    }
+
+    // 7. ClassesScanner exclude-regex: a changed metadata file whose only
+    //    remaining difference (after disabled removals + additions) is the
+    //    generated directory-exclusion regex, whose alternation enumerates the
+    //    enabled-module dirs — a stale archive lists a different set. Runs last so
+    //    rules 5/6 claim the files where the regex was not the blocker.
+    if let Some(group) = class_scanner_exclude_regex(&mut changed, ctx) {
         known.push(group);
     }
 
@@ -347,14 +365,18 @@ fn metadata_entry_module_disabled(key: &str, disabled: &HashSet<String>) -> bool
 
 /// The class key of a *top-level* DI-config entry, if `line` is one.
 ///
-/// `var_export` indents each nesting level by two spaces, so a top-level entry
-/// (a direct child of the `arguments`/`preferences`/`instanceTypes`/`nonLazyTypes`
-/// section arrays) starts at exactly four: `    'Some\\Class' => `. Section
-/// headers (two spaces) and nested argument lines (six or more) are rejected.
+/// `var_export` indents each nesting level by two spaces. Two file shapes carry
+/// class-keyed entries: the sectioned area files (`global.php`, `<area>.php`),
+/// where a class is a child of an `arguments`/`preferences`/`instanceTypes`/
+/// `nonLazyTypes` section and so sits at **four** spaces; and the flat
+/// `interception.php` map, whose class keys sit at **two**. Both are accepted.
+/// A two-space *section header* (`  'arguments' =>`) also matches here, but it has
+/// no `\\`, so [`metadata_entry_module_disabled`] never treats it as a module
+/// class — only real `Vendor\\Module\\…` keys are ever stripped. Deeper argument
+/// lines (six-plus spaces) have a space, not a quote, at the tested position and
+/// are rejected.
 fn top_level_entry_key(line: &str) -> Option<&str> {
-    // Exactly four spaces then the opening quote — a five-plus-space (nested)
-    // line has a space, not a quote, in that position and is rejected.
-    let rest = line.strip_prefix("    '")?;
+    let rest = line.strip_prefix("    '").or_else(|| line.strip_prefix("  '"))?;
     let end = rest.find("' =>")?;
     Some(&rest[..end])
 }
@@ -375,10 +397,14 @@ fn strip_disabled_module_entries(text: &str, disabled: &HashSet<String>) -> (Str
             if metadata_entry_module_disabled(key, disabled) {
                 stripped = true;
                 // A block value (`'K' =>` with the value on the following lines)
-                // runs to its indent-four close; an inline value is just `line`.
+                // runs to a `)` at the key's own indentation; an inline value is
+                // just `line`. (Flat-map interception entries are always inline
+                // scalars, so the block branch only ever fires for area files.)
                 if line.ends_with("=>") || line.ends_with("=> ") {
+                    let indent = line.len() - line.trim_start().len();
+                    let close = format!("{}),", " ".repeat(indent));
                     for inner in lines.by_ref() {
-                        if inner == "    )," {
+                        if inner == close {
                             break;
                         }
                     }
@@ -514,6 +540,107 @@ optimization from the `Chain\\NonLazyTypes` compiler pass that magecommand's 2.4
 3.1.0 (PHP 8.4) target runs but the older archive predates. Extra compiled DI entries are inert \
 — nothing references them at runtime — so this is additive and safe. A genuine regression would \
 *remove* or *change* an archive entry, which keeps the file flagged; only pure additions land here."
+                .to_owned(),
+        items,
+        verified: true,
+    })
+}
+
+/// Replace the generated ClassesScanner directory-exclusion regex value with a
+/// fixed placeholder on any line that carries it, leaving every other line intact.
+///
+/// The regex is a literal alternation of every enabled module's directory —
+/// `#^(?:…/vendor/<pkg>…|…/app/code/<Vendor>/<Module>…)/Test#` and its `/tests#`
+/// sibling — emitted by the DI compiler from the module set on disk. It is a pure
+/// function of *which* modules are enabled, so a stale archive compiled from a
+/// different set lists different members (and order). Canonicalizing both sides
+/// lets the surrounding entries be compared without that membership drift masking
+/// them. The line is recognized by its exact signature (a `#^(?:` value ending in
+/// `/Test#` or `/tests#`), never an arbitrary regex, so an unrelated changed value
+/// is left alone to keep its file flagged.
+fn canonicalize_class_scanner_regex(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        match canonical_scanner_regex_line(line) {
+            Some(canon) => out.push_str(&canon),
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The canonicalized form of `line` if it is a ClassesScanner exclusion-regex
+/// value line (`<indent><key> => '#^(?:…)/Test#',`), else `None`.
+fn canonical_scanner_regex_line(line: &str) -> Option<String> {
+    let arrow = line.find("=> '#^(?:")?;
+    if !line.ends_with("/Test#',") && !line.ends_with("/tests#',") {
+        return None;
+    }
+    // Keep everything through `=> ` (indent + array-index key), swap the value.
+    let head = &line[..arrow + "=> ".len()];
+    Some(format!("{head}'<class-scanner-exclude-regex>',"))
+}
+
+/// A changed metadata file whose only substantive difference — after removing
+/// disabled-module entries and allowing pure additions — is the generated
+/// ClassesScanner directory-exclusion regex. Canonicalizing that one line on both
+/// sides and re-checking equality/superset confirms it; any *other* changed value
+/// leaves the sides unequal and non-subsequence, so the file stays flagged.
+///
+/// Runs after rules 5/6 so pure disabled-module and pure-additions files are
+/// already claimed — a file only reaches here because the regex line was the
+/// blocker.
+fn class_scanner_exclude_regex(
+    changed: &mut Vec<String>,
+    ctx: &ClassifyCtx,
+) -> Option<KnownGroup> {
+    let mut items: Vec<String> = Vec::new();
+    let mut claimed: HashSet<String> = HashSet::new();
+
+    for c in changed.iter() {
+        let (Ok(a), Ok(b)) =
+            (fs::read_to_string(ctx.archive.join(c)), fs::read_to_string(ctx.output.join(c)))
+        else {
+            continue;
+        };
+        if !a.starts_with("<?php return array (") {
+            continue;
+        }
+        let (sa, _) = strip_disabled_module_entries(&a, ctx.disabled_modules);
+        let (sb, _) = strip_disabled_module_entries(&b, ctx.disabled_modules);
+        let ca = canonicalize_class_scanner_regex(&sa);
+        let cb = canonicalize_class_scanner_regex(&sb);
+        // Only relevant when a scanner regex was actually present and differed;
+        // if canonicalizing changed nothing, rules 5/6 already own this file.
+        if ca == sa && cb == sb {
+            continue;
+        }
+        let matches = ca == cb || (ca.len() <= cb.len() && is_line_subsequence(&ca, &cb));
+        if matches {
+            items.push(c.clone());
+            claimed.insert(c.clone());
+        }
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+    changed.retain(|c| !claimed.contains(c));
+
+    Some(KnownGroup {
+        kind: KnownKind::ClassScannerExcludeRegex,
+        title: KnownKind::ClassScannerExcludeRegex.title().to_owned(),
+        explanation:
+            "These files match once the generated ClassesScanner directory-exclusion regex is \
+normalized (and disabled-module entries removed). That regex — `#^(?:…/vendor/<pkg>…|…/app/code/\
+<Vendor>/<Module>…)/Test#` and its `/tests#` sibling — is a literal alternation of every enabled \
+module's directory, so an archive compiled from a different module set lists different members (and \
+order). magecommand builds it from the same module discovery it uses everywhere, and it is \
+byte-identical to a matched-version compile (the oracle), so a membership/order difference here is a \
+stale-archive artifact, never a bug. After canonicalizing it, the only remaining differences are \
+disabled-module removals and additive entries — a genuine changed value would survive canonicalization \
+and keep the file flagged."
                 .to_owned(),
         items,
         verified: true,
@@ -899,5 +1026,116 @@ mod tests {
         assert_eq!(c.known[0].kind, KnownKind::GeneratorVersionFormatting);
         assert_eq!(c.known[0].items, vec!["P/Proxy.php"]);
         assert!(c.changed.is_empty());
+    }
+
+    #[test]
+    fn classifies_flat_interception_disabled_entries() {
+        // `interception.php` is a FLAT two-space map (class -> bool), not the
+        // sectioned four-space shape of the area files. The archive lists classes
+        // from a disabled module the current (smaller) enabled set omits; removing
+        // them makes the two identical.
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        write(
+            archive.path(),
+            "interception.php",
+            "<?php return array (\n  'Good\\\\Mod\\\\A' => true,\n  'Bad\\\\Mod\\\\B' => false,\n  'Bad\\\\Mod\\\\C' => true,\n);",
+        );
+        write(
+            output.path(),
+            "interception.php",
+            "<?php return array (\n  'Good\\\\Mod\\\\A' => true,\n);",
+        );
+        let mut disabled = HashSet::new();
+        disabled.insert("Bad_Mod".to_string());
+        let ctx = ClassifyCtx {
+            archive: archive.path(),
+            output: output.path(),
+            disabled_modules: &disabled,
+        };
+        let r = report(&[], &[], &["interception.php"]);
+        let c = classify(&r, &ctx);
+        assert_eq!(c.known.len(), 1);
+        assert_eq!(c.known[0].kind, KnownKind::DisabledModuleMetadata);
+        assert_eq!(c.known[0].items, vec!["interception.php"]);
+        assert!(c.changed.is_empty());
+        // A two-space *section header* is never mistaken for a module class.
+        assert!(!metadata_entry_module_disabled("arguments", &disabled));
+    }
+
+    #[test]
+    fn canonicalizes_only_the_scanner_exclude_regex() {
+        let scanner = "        0 => '#^(?:/v/foo/module-a|/v/bar/module-b)/Test#',";
+        assert_eq!(
+            canonical_scanner_regex_line(scanner).as_deref(),
+            Some("        0 => '<class-scanner-exclude-regex>',")
+        );
+        // A different `#^(?:` regex that is not the test-dir exclusion is left alone.
+        assert!(canonical_scanner_regex_line("      'pattern' => '#^(?:foo|bar)$#',").is_none());
+        // An ordinary value line is left alone.
+        assert!(canonical_scanner_regex_line("        '_v_' => 'x',").is_none());
+    }
+
+    #[test]
+    fn classifies_class_scanner_exclude_regex_membership() {
+        // The proforto shape in miniature: a `global.php` where, relative to the
+        // stale archive, the output (a) drops a disabled module's entry, (b) adds a
+        // new enabled class, and (c) lists a different member set in the generated
+        // ClassesScanner exclusion regex. Only after normalizing that one regex line
+        // do the sides reconcile — so the file must land in the regex group, not stay
+        // flagged.
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        let file = |members: &str, entries: &[&str]| {
+            let mut s = String::from(
+                "<?php return array (\n  'arguments' => \n  array (\n    'Magento\\\\Setup\\\\Module\\\\Di\\\\Code\\\\Reader\\\\ClassesScanner' => \n    array (\n      'excludePatterns' => \n      array (\n",
+            );
+            s.push_str(&format!("        0 => '#^(?:{members})/Test#',\n"));
+            s.push_str(&format!("        1 => '#^(?:{members})/tests#',\n"));
+            s.push_str("      ),\n    ),\n");
+            for e in entries {
+                s.push_str(&format!("    '{e}' => NULL,\n"));
+            }
+            s.push_str("  ),\n);");
+            s
+        };
+        write(archive.path(), "global.php", &file("/v/foo/module-a", &["Bad\\\\Mod\\\\X"]));
+        write(
+            output.path(),
+            "global.php",
+            &file("/v/foo/module-a|/v/foo/module-b", &["New\\\\Enabled\\\\Class"]),
+        );
+        // Control: a genuine changed value (no scanner regex) must stay flagged.
+        write(archive.path(), "other.php", "<?php return array (\n  'arguments' => \n  array (\n    'X' => \n    array (\n      '_v_' => 1,\n    ),\n  ),\n);");
+        write(output.path(), "other.php", "<?php return array (\n  'arguments' => \n  array (\n    'X' => \n    array (\n      '_v_' => 2,\n    ),\n  ),\n);");
+
+        let mut disabled = HashSet::new();
+        disabled.insert("Bad_Mod".to_string());
+        let ctx = ClassifyCtx {
+            archive: archive.path(),
+            output: output.path(),
+            disabled_modules: &disabled,
+        };
+        let r = report(&[], &[], &["global.php", "other.php"]);
+        let c = classify(&r, &ctx);
+        let regex_groups: Vec<_> = c
+            .known
+            .iter()
+            .filter(|g| g.kind == KnownKind::ClassScannerExcludeRegex)
+            .collect();
+        assert_eq!(regex_groups.len(), 1);
+        assert_eq!(regex_groups[0].items, vec!["global.php"]);
+        // The genuine value change is NOT absorbed.
+        assert_eq!(c.changed, vec!["other.php"]);
     }
 }
