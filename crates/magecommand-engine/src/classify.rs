@@ -28,6 +28,14 @@ pub enum KnownKind {
     PluginListScopeOrder,
     /// Interceptor for a class in a module that is disabled in config.php.
     DisabledModuleInterceptor,
+    /// A metadata DI-config file (`global.php`, `<area>.php`) that is identical
+    /// once the top-level entries for classes in disabled modules are removed.
+    DisabledModuleMetadata,
+    /// A metadata DI-config file where the output is a strict superset of the
+    /// archive: it only *adds* entries (e.g. the `nonLazyTypes` section and the
+    /// `NonLazyTypes` compiler-chain step, a 2.4.9 / PHP 8.4 feature the older
+    /// archive predates), never removing or changing what the archive has.
+    ExtraMetadata,
     /// Two paths differing only by letter case (case-insensitive filesystem).
     FilenameCasing,
     /// Interceptor/proxy content that differs only in the code generator's
@@ -43,6 +51,12 @@ impl KnownKind {
             KnownKind::PluginListScopeOrder => "Plugin-list cache filename scope ordering",
             KnownKind::DisabledModuleInterceptor => {
                 "Interceptors for disabled modules (Magento 2.4.9 behavior)"
+            }
+            KnownKind::DisabledModuleMetadata => {
+                "DI-config entries for disabled modules (Magento 2.4.9 behavior)"
+            }
+            KnownKind::ExtraMetadata => {
+                "Extra DI-config metadata (output superset — nonLazyTypes, Magento 2.4.9)"
             }
             KnownKind::FilenameCasing => "Filename letter-casing (case-insensitive filesystem)",
             KnownKind::GeneratorVersionFormatting => {
@@ -135,6 +149,23 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
     //    version and magecommand's 2.4.9 target (verified by normalizing both
     //    sides to byte-equality).
     if let Some(group) = generator_version_formatting(&mut changed, ctx) {
+        known.push(group);
+    }
+
+    // 5. Disabled-module DI-config entries: a changed metadata file (`global.php`,
+    //    `<area>.php`) that becomes byte-identical once the top-level entries for
+    //    classes in disabled modules are removed from both sides — the metadata
+    //    analog of rule 3.
+    if let Some(group) = disabled_module_metadata(&mut changed, ctx) {
+        known.push(group);
+    }
+
+    // 6. Extra metadata: a changed metadata file where the output only *adds*
+    //    lines the archive lacks (chiefly the `nonLazyTypes` section) and never
+    //    removes or changes archive content — magecommand's 2.4.9 target being
+    //    ahead of the older archive. Disabled-module entries are stripped first so
+    //    a file mixing disabled removals with output additions still qualifies.
+    if let Some(group) = extra_metadata(&mut changed, ctx) {
         known.push(group);
     }
 
@@ -298,6 +329,197 @@ Skipping disabled modules is the improvement: it never generates code that can't
     })
 }
 
+/// The `Vendor_Module` owning a DI-config entry key, if that module is disabled.
+///
+/// Keys in a `var_export`ed metadata file are double-backslash escaped, e.g.
+/// `BigBridge\\TaxExceptions\\Helper\\ConfigHelper` -> `BigBridge_TaxExceptions`.
+/// Virtual types and other non-FQCN keys (no `\\`) never match a module name.
+fn metadata_entry_module_disabled(key: &str, disabled: &HashSet<String>) -> bool {
+    let mut segs = key.split("\\\\");
+    let (Some(vendor), Some(module)) = (segs.next(), segs.next()) else {
+        return false;
+    };
+    if vendor.is_empty() || module.is_empty() {
+        return false;
+    }
+    disabled.contains(&format!("{vendor}_{module}"))
+}
+
+/// The class key of a *top-level* DI-config entry, if `line` is one.
+///
+/// `var_export` indents each nesting level by two spaces, so a top-level entry
+/// (a direct child of the `arguments`/`preferences`/`instanceTypes`/`nonLazyTypes`
+/// section arrays) starts at exactly four: `    'Some\\Class' => `. Section
+/// headers (two spaces) and nested argument lines (six or more) are rejected.
+fn top_level_entry_key(line: &str) -> Option<&str> {
+    // Exactly four spaces then the opening quote — a five-plus-space (nested)
+    // line has a space, not a quote, in that position and is rejected.
+    let rest = line.strip_prefix("    '")?;
+    let end = rest.find("' =>")?;
+    Some(&rest[..end])
+}
+
+/// Remove every top-level DI-config entry whose class key belongs to a disabled
+/// module, so two metadata files can be compared modulo disabled-module noise.
+///
+/// The block a key introduces is either a single inline line (`'K' => NULL,`) or
+/// a `var_export` array spanning to its own indent-four `    ),` close; both are
+/// dropped in full. Lines are re-joined with `\n`; the same transform on both
+/// sides keeps any surviving difference intact for an exact comparison.
+fn strip_disabled_module_entries(text: &str, disabled: &HashSet<String>) -> (String, bool) {
+    let mut out = String::with_capacity(text.len());
+    let mut stripped = false;
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if let Some(key) = top_level_entry_key(line) {
+            if metadata_entry_module_disabled(key, disabled) {
+                stripped = true;
+                // A block value (`'K' =>` with the value on the following lines)
+                // runs to its indent-four close; an inline value is just `line`.
+                if line.ends_with("=>") || line.ends_with("=> ") {
+                    for inner in lines.by_ref() {
+                        if inner == "    )," {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    (out, stripped)
+}
+
+fn disabled_module_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
+    if ctx.disabled_modules.is_empty() {
+        return None;
+    }
+    let mut items: Vec<String> = Vec::new();
+    let mut claimed: HashSet<String> = HashSet::new();
+
+    for c in changed.iter() {
+        let (Ok(a), Ok(b)) =
+            (fs::read_to_string(ctx.archive.join(c)), fs::read_to_string(ctx.output.join(c)))
+        else {
+            continue;
+        };
+        // Only the `var_export`ed DI-config metadata files — never a generated
+        // interceptor/proxy, whose top-level-looking lines aren't config entries.
+        if !a.starts_with("<?php return array (") {
+            continue;
+        }
+        let (sa, stripped_a) = strip_disabled_module_entries(&a, ctx.disabled_modules);
+        let (sb, stripped_b) = strip_disabled_module_entries(&b, ctx.disabled_modules);
+        // Claim only when removing disabled-module entries (from at least one
+        // side) makes the files identical — so any *other* difference keeps the
+        // file flagged.
+        if (stripped_a || stripped_b) && sa == sb {
+            items.push(c.clone());
+            claimed.insert(c.clone());
+        }
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+    changed.retain(|c| !claimed.contains(c));
+
+    let mut module_list: Vec<String> = ctx.disabled_modules.iter().cloned().collect();
+    module_list.sort();
+    Some(KnownGroup {
+        kind: KnownKind::DisabledModuleMetadata,
+        title: KnownKind::DisabledModuleMetadata.title().to_owned(),
+        explanation:
+            "These metadata DI-config files are byte-identical once the top-level entries for \
+classes in modules disabled in app/etc/config.php are removed from both sides. Since Magento \
+2.4.9, setup:di:compile compiles only enabled modules, so magecommand — which targets 2.4.9 / \
+Mage-OS 3.1.0 — correctly omits those entries. The archive was produced before the modules were \
+disabled (or by an older Magento that compiled every module on disk regardless of enable-state). \
+Omitting disabled modules is the improvement: the config never references code that can't run."
+                .to_owned(),
+        items,
+        verified: true,
+    })
+}
+
+/// True when every line of `a` appears in `b` in order — i.e. `b` is `a` with
+/// some lines inserted, and nothing deleted or changed. Greedy single-pass, O(|b|):
+/// each `b` line is consumed at most once and the cursor never rewinds, which is
+/// the standard (and optimal) test for "is `a` a subsequence of `b`". A changed
+/// or removed line in `a` has no match remaining in `b`, so the check fails —
+/// only pure insertions into `b` pass.
+fn is_line_subsequence(a: &str, b: &str) -> bool {
+    let mut b_lines = b.lines();
+    for a_line in a.lines() {
+        loop {
+            match b_lines.next() {
+                Some(b_line) if b_line == a_line => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
+/// A changed metadata file whose output is a strict superset of the archive: the
+/// output only *adds* config (most visibly the whole `nonLazyTypes` section and
+/// the `NonLazyTypes` step in `ModificationChain`, a 2.4.9 / PHP 8.4 feature the
+/// older archive predates), never removing or altering what the archive has.
+///
+/// Disabled-module entries are stripped from both sides first (rule 5's transform),
+/// so a file combining disabled-module *removals* with genuine output *additions*
+/// still qualifies — every remaining difference is then an insertion into the
+/// output. Any real regression (a changed value, a dropped entry) leaves an
+/// archive line unmatched and keeps the file flagged.
+fn extra_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
+    let mut items: Vec<String> = Vec::new();
+    let mut claimed: HashSet<String> = HashSet::new();
+
+    for c in changed.iter() {
+        let (Ok(a), Ok(b)) =
+            (fs::read_to_string(ctx.archive.join(c)), fs::read_to_string(ctx.output.join(c)))
+        else {
+            continue;
+        };
+        if !a.starts_with("<?php return array (") {
+            continue;
+        }
+        let (sa, _) = strip_disabled_module_entries(&a, ctx.disabled_modules);
+        let (sb, _) = strip_disabled_module_entries(&b, ctx.disabled_modules);
+        // Claim only when the output strictly grew and contains every archive line
+        // in order — additions only. `sa.len() < sb.len()` also rules out the
+        // equal case (which rule 5 already handles).
+        if sa.len() < sb.len() && is_line_subsequence(&sa, &sb) {
+            items.push(c.clone());
+            claimed.insert(c.clone());
+        }
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+    changed.retain(|c| !claimed.contains(c));
+
+    Some(KnownGroup {
+        kind: KnownKind::ExtraMetadata,
+        title: KnownKind::ExtraMetadata.title().to_owned(),
+        explanation:
+            "In these files the output is a strict superset of the archive: every archive entry \
+is present unchanged and the output only *adds* metadata. The largest addition is the \
+`nonLazyTypes` section (plus its `NonLazyTypes` step in `ModificationChain`) — the lazy-proxy \
+optimization from the `Chain\\NonLazyTypes` compiler pass that magecommand's 2.4.9 / Mage-OS \
+3.1.0 (PHP 8.4) target runs but the older archive predates. Extra compiled DI entries are inert \
+— nothing references them at runtime — so this is additive and safe. A genuine regression would \
+*remove* or *change* an archive entry, which keeps the file flagged; only pure additions land here."
+                .to_owned(),
+        items,
+        verified: true,
+    })
+}
+
 /// Reduce the code generator's version-specific formatting to a canonical form.
 ///
 /// Magento's code generator changed several byte-level (but behavior-preserving)
@@ -450,6 +672,112 @@ mod tests {
         assert_eq!(c.known[0].items.len(), 1);
         // The enabled-module interceptor is NOT absorbed — it stays unexplained.
         assert_eq!(c.missing, vec!["Magento/Catalog/Model/Product/Interceptor.php"]);
+    }
+
+    #[test]
+    fn classifies_disabled_module_metadata() {
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        // `global.php`: the archive additionally carries a block entry and an
+        // inline entry for the disabled `Bad\Mod`; the enabled `Good\Mod` entry
+        // is shared. Removing the disabled entries makes the two identical.
+        let shared = "  'arguments' => \n  array (\n    'Good\\\\Mod\\\\A' => \n    array (\n      'x' => \n      array (\n        '_v_' => 1,\n      ),\n    ),\n";
+        let archive_global = format!(
+            "<?php return array (\n{shared}    'Bad\\\\Mod\\\\B' => \n    array (\n      'y' => \n      array (\n        '_v_' => 2,\n      ),\n    ),\n    'Bad\\\\Mod\\\\C' => NULL,\n  ),\n);\n"
+        );
+        let output_global = format!("<?php return array (\n{shared}  ),\n);\n");
+        write(archive.path(), "global.php", &archive_global);
+        write(output.path(), "global.php", &output_global);
+        // `crontab.php`: an *enabled*-module difference remains after stripping,
+        // so it must stay flagged.
+        write(archive.path(), "crontab.php", "<?php return array (\n  'arguments' => \n  array (\n    'Good\\\\Mod\\\\A' => NULL,\n  ),\n);\n");
+        write(output.path(), "crontab.php", "<?php return array (\n  'arguments' => \n  array (\n    'Good\\\\Mod\\\\A' => false,\n  ),\n);\n");
+
+        let mut disabled = HashSet::new();
+        disabled.insert("Bad_Mod".to_string());
+        let ctx = ClassifyCtx {
+            archive: archive.path(),
+            output: output.path(),
+            disabled_modules: &disabled,
+        };
+        let r = report(&[], &[], &["global.php", "crontab.php"]);
+        let c = classify(&r, &ctx);
+        assert_eq!(c.known.len(), 1);
+        assert_eq!(c.known[0].kind, KnownKind::DisabledModuleMetadata);
+        assert_eq!(c.known[0].items, vec!["global.php"]);
+        // The enabled-module change is NOT absorbed.
+        assert_eq!(c.changed, vec!["crontab.php"]);
+    }
+
+    #[test]
+    fn classifies_extra_metadata_additions() {
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        // The shared `arguments` body, without the section/root close so entries
+        // can be appended cleanly.
+        let args_open = "<?php return array (\n  'arguments' => \n  array (\n    'Good\\\\Mod\\\\A' => \n    array (\n      'x' => \n      array (\n        '_v_' => 1,\n      ),\n    ),\n";
+        let close = "  ),\n);\n"; // close arguments, then root
+        // additions.php: output keeps every archive line and appends a whole new
+        // section — pure additions — plus a disabled-module removal (stripped first).
+        write(
+            archive.path(),
+            "additions.php",
+            &format!("{args_open}    'Bad\\\\Mod\\\\B' => NULL,\n{close}"),
+        );
+        write(
+            output.path(),
+            "additions.php",
+            &format!("{args_open}  ),\n  'nonLazyTypes' => \n  array (\n    'Good\\\\Mod\\\\A' => true,\n  ),\n);\n"),
+        );
+        // changed.php: the output *changes* an archive value — must stay flagged.
+        write(archive.path(), "changed.php", &format!("{args_open}{close}"));
+        write(
+            output.path(),
+            "changed.php",
+            &format!("{args_open}{close}").replace("'_v_' => 1,", "'_v_' => 2,"),
+        );
+        // removed.php: the output *drops* an archive entry — must stay flagged.
+        write(
+            archive.path(),
+            "removed.php",
+            &format!("{args_open}    'Good\\\\Mod\\\\Z' => NULL,\n{close}"),
+        );
+        write(output.path(), "removed.php", &format!("{args_open}{close}"));
+
+        let mut disabled = HashSet::new();
+        disabled.insert("Bad_Mod".to_string());
+        let ctx = ClassifyCtx {
+            archive: archive.path(),
+            output: output.path(),
+            disabled_modules: &disabled,
+        };
+        let r = report(&[], &[], &["additions.php", "changed.php", "removed.php"]);
+        let c = classify(&r, &ctx);
+        let extra: Vec<_> =
+            c.known.iter().filter(|g| g.kind == KnownKind::ExtraMetadata).collect();
+        assert_eq!(extra.len(), 1);
+        assert_eq!(extra[0].items, vec!["additions.php"]);
+        // A changed value and a dropped entry are NOT absorbed.
+        assert!(c.changed.contains(&"changed.php".to_string()));
+        assert!(c.changed.contains(&"removed.php".to_string()));
+    }
+
+    #[test]
+    fn line_subsequence_detects_insertions_only() {
+        assert!(is_line_subsequence("a\nb\nc\n", "a\nX\nb\nc\nY\n")); // insertions
+        assert!(!is_line_subsequence("a\nb\nc\n", "a\nc\n")); // deletion
+        assert!(!is_line_subsequence("a\nb\nc\n", "a\nB\nc\n")); // change
+        assert!(is_line_subsequence("", "a\n")); // empty is a subsequence of anything
     }
 
     #[test]
