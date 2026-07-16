@@ -244,12 +244,22 @@ pub(crate) struct RawItem {
     pub sort_order: Option<i32>,
 }
 
-/// A frame on the argument-parse stack: the top-level `<arguments>` list (key `None`) or an
-/// `xsi:type="array"` (its key + the line it opened on).
+/// A frame on the argument-parse stack: the top-level `<arguments>` list (key `None`), an
+/// `xsi:type="array"`, or an **untyped** element (no `xsi:type`) whose kind is resolved by
+/// shape on close — `<item>` children ⇒ array, else its text ⇒ scalar (Magento's
+/// `Mapper\Dom` infers array from item children when the type attribute is omitted, as e.g.
+/// EffectConnect's `sales_order_grid` `columns` argument is written).
 struct ArgFrame {
     key: Option<(String, u32)>,
     /// `sortOrder=` on the enclosing array-typed argument/item element.
     sort_order: Option<i32>,
+    /// The element's `xsi:type`: `"array"` (explicit) or `""` (untyped — resolved by shape).
+    xsi: String,
+    /// `shared=` on the untyped element (used only if it resolves to a scalar/object).
+    shared: Option<bool>,
+    /// Text captured while the frame is open — used only when it closes with no `<item>`
+    /// children (an untyped element that turned out to be a plain scalar).
+    text: String,
     items: Vec<RawItem>,
 }
 
@@ -268,7 +278,14 @@ fn parse_arguments(
         shared: Option<bool>,
         sort_order: Option<i32>,
     }
-    let mut stack = vec![ArgFrame { key: None, sort_order: None, items: Vec::new() }];
+    let mut stack = vec![ArgFrame {
+        key: None,
+        sort_order: None,
+        xsi: String::new(),
+        shared: None,
+        text: String::new(),
+        items: Vec::new(),
+    }];
     // The scalar leaf currently being read.
     let mut leaf: Option<Leaf> = None;
     let obj_attrs = |e: &BytesStart| {
@@ -288,8 +305,19 @@ fn parse_arguments(
                 let key = attr(&e, b"name").unwrap_or_default();
                 let xsi = attr(&e, b"xsi:type").unwrap_or_default();
                 let (shared, sort_order) = obj_attrs(&e);
-                if xsi == "array" {
-                    stack.push(ArgFrame { key: Some((key, line)), sort_order, items: Vec::new() });
+                // An explicit array OR an untyped element opens a frame: an untyped
+                // element with `<item>` children is an array (Magento infers this from
+                // shape), otherwise it closes as its text/scalar. A typed scalar/object
+                // element (`string`/`object`/…) reads as a leaf.
+                if xsi == "array" || xsi.is_empty() {
+                    stack.push(ArgFrame {
+                        key: Some((key, line)),
+                        sort_order,
+                        xsi,
+                        shared,
+                        text: String::new(),
+                        items: Vec::new(),
+                    });
                 } else {
                     leaf = Some(Leaf { key, xsi, line, text: String::new(), shared, sort_order });
                 }
@@ -306,15 +334,23 @@ fn parse_arguments(
                 push_item(&mut stack, key, value, line, sort_order);
             }
             Ok(Event::Text(e)) => {
+                let t = e.unescape().unwrap_or_default();
+                // Into the active scalar leaf, else the open frame's text buffer
+                // (used only if that frame closes without item children).
                 if let Some(l) = &mut leaf {
-                    l.text.push_str(&e.unescape().unwrap_or_default());
+                    l.text.push_str(&t);
+                } else if let Some(frame) = stack.last_mut() {
+                    frame.text.push_str(&t);
                 }
             }
             Ok(Event::CData(e)) => {
                 // <![CDATA[...]]> carries the value verbatim (the primary
                 // di.xml's regex arguments are written this way).
+                let t = String::from_utf8_lossy(&e);
                 if let Some(l) = &mut leaf {
-                    l.text.push_str(&String::from_utf8_lossy(&e));
+                    l.text.push_str(&t);
+                } else if let Some(frame) = stack.last_mut() {
+                    frame.text.push_str(&t);
                 }
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
@@ -330,11 +366,20 @@ fn parse_arguments(
                             sort_order,
                         );
                     } else if stack.len() > 1 {
-                        // Closing an array frame.
-                        let frame = stack.pop().unwrap();
-                        let (key, kline) = frame.key.unwrap_or_default();
+                        // Closing a frame — resolve its kind by shape.
+                        let mut frame = stack.pop().unwrap();
+                        let (key, kline) = frame.key.take().unwrap_or_default();
                         let sort_order = frame.sort_order;
-                        push_item(&mut stack, key, RawArg::Array(frame.items), kline, sort_order);
+                        let items = std::mem::take(&mut frame.items);
+                        let value = if !items.is_empty() || frame.xsi == "array" {
+                            // Explicit array, or an untyped element with item children.
+                            RawArg::Array(items)
+                        } else {
+                            // Untyped element with no items: it's a plain scalar (its
+                            // text) or null — same shape as a `leaf` would have produced.
+                            scalar(&frame.xsi, frame.text.trim(), frame.shared, sort_order)
+                        };
+                        push_item(&mut stack, key, value, kline, sort_order);
                     }
                 }
                 _ => {}
@@ -1384,6 +1429,65 @@ pub(crate) fn mview_xml(xml: &str) -> Vec<RawMview> {
         buf.clear();
     }
     out
+}
+
+#[cfg(test)]
+mod di_argument_tests {
+    use super::{di_xml, RawArg};
+
+    /// An `<argument>` with no `xsi:type` but `<item>` children is an ARRAY —
+    /// Magento infers the type from shape. Before the fix the items leaked as
+    /// bogus top-level arguments and the array itself vanished, losing a module's
+    /// merged columns (EffectConnect's `sales_order_grid` additions, G3).
+    #[test]
+    fn untyped_argument_with_item_children_is_an_array() {
+        let xml = r#"<?xml version="1.0"?>
+<config>
+  <virtualType name="Magento\Sales\Model\ResourceModel\Order\Grid" type="Magento\Sales\Model\ResourceModel\Grid">
+    <arguments>
+      <argument name="columns">
+        <item name="ec_id" xsi:type="string">sales_order.ec_id</item>
+        <item name="ec_name" xsi:type="string">sales_order.ec_name</item>
+      </argument>
+    </arguments>
+  </virtualType>
+</config>"#;
+        let di = di_xml(xml).unwrap();
+        // Exactly ONE top-level argument, `columns` — not ec_id/ec_name leaking out.
+        assert_eq!(di.arguments.len(), 1, "columns must be the only top-level arg");
+        let (target, name, value, _) = &di.arguments[0];
+        assert_eq!(target.as_str(), "Magento\\Sales\\Model\\ResourceModel\\Order\\Grid");
+        assert_eq!(name, "columns");
+        let RawArg::Array(items) = value else {
+            panic!("columns must parse as an Array");
+        };
+        let keys: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
+        assert_eq!(keys, ["ec_id", "ec_name"]);
+        let RawArg::Scalar { xsi_type, text } = &items[0].value else {
+            panic!("item must be a scalar string");
+        };
+        assert_eq!((xsi_type.as_str(), text.as_str()), ("string", "sales_order.ec_id"));
+    }
+
+    /// An untyped `<argument>` with only text (no items) stays a plain scalar —
+    /// the fix must not turn every untyped argument into an array.
+    #[test]
+    fn untyped_argument_with_only_text_is_a_scalar() {
+        let xml = r#"<?xml version="1.0"?>
+<config>
+  <type name="Foo\Bar">
+    <arguments>
+      <argument name="label">hello</argument>
+    </arguments>
+  </type>
+</config>"#;
+        let di = di_xml(xml).unwrap();
+        assert_eq!(di.arguments.len(), 1);
+        let RawArg::Scalar { text, .. } = &di.arguments[0].2 else {
+            panic!("untyped text argument must be a scalar");
+        };
+        assert_eq!(text, "hello");
+    }
 }
 
 #[cfg(test)]
