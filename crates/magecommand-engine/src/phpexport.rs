@@ -88,9 +88,11 @@ fn export(value: &PhpValue, indent: usize, out: &mut String) {
                     PhpKey::Str(s) => export(&PhpValue::Str(s.clone()), inner, out),
                 }
                 out.push_str(" => ");
-                if matches!(val, PhpValue::Array(_)) {
-                    // var_export puts nested arrays on their own line at the
-                    // key's indent — after a trailing space on the key line.
+                if matches!(val, PhpValue::Array(_) | PhpValue::Raw(_)) {
+                    // var_export puts nested arrays — and objects, which includes
+                    // enum cases (a `Raw` bareword like `\Enum::CASE`) — on their
+                    // own line at the key's indent, after a trailing space on the
+                    // key line.
                     out.push('\n');
                     for _ in 0..inner {
                         out.push(' ');
@@ -143,14 +145,15 @@ mod tests {
     #[test]
     fn raw_renders_unquoted_bareword() {
         // An enum-case default is emitted as a verbatim `\Enum::CASE` reference,
-        // NOT a quoted string (G4).
+        // NOT a quoted string (G4) — and, like any object, var_export places it on
+        // its own line at the key's indent (trailing space after `=>`).
         let v = PhpValue::Array(vec![(
             PhpKey::str("_v_"),
             PhpValue::Raw("\\Vendor\\Enum::CASE".to_owned()),
         )]);
         assert_eq!(
             to_php_file(&v),
-            "<?php return array (\n  '_v_' => \\Vendor\\Enum::CASE,\n);"
+            "<?php return array (\n  '_v_' => \n  \\Vendor\\Enum::CASE,\n);"
         );
     }
 
