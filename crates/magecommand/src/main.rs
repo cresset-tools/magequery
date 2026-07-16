@@ -80,6 +80,13 @@ enum Command {
         /// PHP 8.4 vs 8.5 reflection order) are reported as `reordered`.
         #[arg(long)]
         strict_ordering: bool,
+        /// Diagnostic: for one changed metadata file (relative path, e.g.
+        /// `frontend.php`), apply the classifier normalizations (strip
+        /// disabled-module entries, canonicalize the ClassesScanner regex) to both
+        /// sides and print the first genuine divergence with context. Pinpoints why
+        /// a lone file stays unexplained.
+        #[arg(long, value_name = "FILE")]
+        show_residual: Option<PathBuf>,
     },
     /// Print a digest of the compile inputs — a content-addressed key for the
     /// generated output. Since the compile is a pure function of the source
@@ -118,6 +125,7 @@ fn main() -> anyhow::Result<ExitCode> {
             sample,
             no_explain,
             strict_ordering,
+            ref show_residual,
         } => compare(
             cli.root,
             archive,
@@ -127,6 +135,7 @@ fn main() -> anyhow::Result<ExitCode> {
             sample,
             no_explain,
             strict_ordering,
+            show_residual.as_deref(),
         ),
     }
 }
@@ -394,6 +403,7 @@ fn compare(
     sample: usize,
     no_explain: bool,
     strict_ordering: bool,
+    show_residual: Option<&std::path::Path>,
 ) -> anyhow::Result<ExitCode> {
     let report = magecommand_engine::compare_dirs(archive, output, strict_ordering)?;
 
@@ -414,6 +424,16 @@ fn compare(
             })
             .unwrap_or_default()
     };
+
+    // Diagnostic mode: pinpoint one file's residual difference and stop.
+    if let Some(rel) = show_residual {
+        let a = std::fs::read_to_string(archive.join(rel))
+            .with_context(|| format!("reading archive {}", archive.join(rel).display()))?;
+        let b = std::fs::read_to_string(output.join(rel))
+            .with_context(|| format!("reading output {}", output.join(rel).display()))?;
+        print!("{}", magecommand_engine::residual_report(&a, &b, &disabled_modules));
+        return Ok(ExitCode::SUCCESS);
+    }
 
     let total = report.archive_total();
     let mut summary = format!(
