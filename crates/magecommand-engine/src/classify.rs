@@ -736,6 +736,58 @@ PHP 8.4 compat form), and the proxy template's laziness hardening (null-guards i
     })
 }
 
+/// Diagnostic for a changed metadata file that did *not* classify: apply the same
+/// normalizations the classifiers use (strip disabled-module entries, canonicalize
+/// the ClassesScanner exclusion regex), then report the first place the archive
+/// stops being an in-order subsequence of the output — the first genuine change,
+/// reorder, or drop — with context from both sides. This is what the `compare
+/// --show-residual` flag prints so a lone unexplained file can be pinpointed
+/// without hand-rolling the block-aware disabled-strip in a shell.
+pub fn residual_report(archive_text: &str, output_text: &str, disabled: &HashSet<String>) -> String {
+    let (sa, _) = strip_disabled_module_entries(archive_text, disabled);
+    let (sb, _) = strip_disabled_module_entries(output_text, disabled);
+    let na = canonicalize_class_scanner_regex(&sa);
+    let nb = canonicalize_class_scanner_regex(&sb);
+    let a: Vec<&str> = na.lines().collect();
+    let b: Vec<&str> = nb.lines().collect();
+
+    // Greedy forward subsequence match of the normalized archive against the
+    // normalized output — the exact test the classifiers use.
+    let mut j = 0usize;
+    for (i, a_line) in a.iter().enumerate() {
+        let start = j;
+        while j < b.len() && b[j] != *a_line {
+            j += 1;
+        }
+        if j == b.len() {
+            // `a_line` has no match forward from `start`: the divergence point.
+            let mut out = format!(
+                "normalized archive is NOT a subsequence of output.\n\
+                 first unmatched archive line (normalized index {i}):\n  {a_line}\n\n\
+                 --- archive, from the divergence (next 22 lines) ---\n"
+            );
+            for l in a.iter().skip(i).take(22) {
+                out.push_str("  ");
+                out.push_str(l);
+                out.push('\n');
+            }
+            out.push_str("\n--- output, from where the archive last matched (next 22 lines) ---\n");
+            for l in b.iter().skip(start.saturating_sub(2)).take(22) {
+                out.push_str("  ");
+                out.push_str(l);
+                out.push('\n');
+            }
+            return out;
+        }
+        j += 1;
+    }
+    "normalized archive IS a subsequence of output — after stripping disabled-module \
+     entries and canonicalizing the ClassesScanner regex, the output only adds lines. \
+     (This file would classify as additive/superset; if compare still flags it, the \
+     difference is a pure line-count/order artifact.)"
+        .to_string()
+}
+
 fn same_bytes(a: &Path, b: &Path) -> bool {
     match (fs::read(a), fs::read(b)) {
         (Ok(x), Ok(y)) => x == y,
