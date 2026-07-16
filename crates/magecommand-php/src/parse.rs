@@ -127,16 +127,28 @@ impl<'a> Parser<'a> {
                         // conditional class enters the universe; `parse_file`
                         // keeps the FIRST declaration of each name, mirroring the
                         // `if`-branch a store with the guarded dependency takes.
+                        //
+                        // ALTERNATIVE syntax (`if (…): … else: … endif;`) has no
+                        // braces, so its guarded class sits at brace depth 0 —
+                        // exactly where Magento's brace-tracking FileClassScanner
+                        // DOES record it (unlike a braced `if { class }`, at depth
+                        // 1, which it skips). So we eat the `:` and let the class
+                        // parse inline as a normal top-level declaration.
                         "if" | "elseif" => {
                             pending_attrs.clear();
                             self.skip_paren_condition();
-                            self.descend_if_braced();
+                            if !self.eat_alt_syntax_colon() {
+                                self.descend_if_braced();
+                            }
                         }
                         "else" => {
-                            // `else { … }` descends; `else if …` leaves the `if`
-                            // for the next iteration's handler.
+                            // `else { … }` descends; `else: …` (alt syntax) eats
+                            // the `:` and continues inline; `else if …` leaves the
+                            // `if` for the next iteration's handler.
                             pending_attrs.clear();
-                            self.descend_if_braced();
+                            if !self.eat_alt_syntax_colon() {
+                                self.descend_if_braced();
+                            }
                         }
                         _ => {
                             // declare(...), const, expressions — top-level code
@@ -158,6 +170,21 @@ impl<'a> Parser<'a> {
         if self.cur.peek() == Some(b'(') {
             self.cur.bump();
             self.cur.skip_parens_body(1);
+        }
+    }
+
+    /// Consume a `:` that opens an alternative-syntax block (`if (…): … endif;`),
+    /// returning whether one was found. The following statements then parse
+    /// inline (no brace boundary), so a guarded class at brace depth 0 is
+    /// recorded — matching Magento's FileClassScanner. `endif`/`endforeach`/…
+    /// are plain identifiers the main loop skips as statements.
+    fn eat_alt_syntax_colon(&mut self) -> bool {
+        self.cur.skip_insignificant();
+        if self.cur.peek() == Some(b':') {
+            self.cur.bump();
+            true
+        } else {
+            false
         }
     }
 
