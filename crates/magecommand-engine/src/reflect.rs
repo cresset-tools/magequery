@@ -329,7 +329,7 @@ fn eval_default(defs: &Definitions, declaring: &str, expr: &str) -> Option<Val> 
 /// class reference so it is valid regardless of the generated file's `use`
 /// context. `None` for shapes not worth reproducing (they don't hit the fatal
 /// case, so the prior drop behaviour is retained for them).
-fn verbatim_expr(expr: &ConstExpr, classes: &[String]) -> Option<String> {
+pub(crate) fn verbatim_expr(expr: &ConstExpr, classes: &[String]) -> Option<String> {
     Some(match expr {
         ConstExpr::Null => "null".to_owned(),
         ConstExpr::Bool(b) => Val::Bool(*b).render(),

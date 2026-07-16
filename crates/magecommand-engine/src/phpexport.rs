@@ -14,6 +14,12 @@ pub enum PhpValue {
     Float(f64),
     Bool(bool),
     Null,
+    /// A verbatim PHP expression emitted UNQUOTED — a class-constant / enum-case
+    /// reference like `\Vendor\Enum::CASE`. Magento's compiled config keeps a
+    /// constructor default that is an enum case as the constant reference (an
+    /// enum case is an object, not a scalar it can fold). The caller is
+    /// responsible for the string already being valid, fully-qualified PHP.
+    Raw(String),
     /// Entries in output order — the caller owns ordering (ksort or
     /// insertion order, whatever the Magento generator being mirrored does).
     Array(Vec<(PhpKey, PhpValue)>),
@@ -69,6 +75,7 @@ fn export(value: &PhpValue, indent: usize, out: &mut String) {
         PhpValue::Bool(true) => out.push_str("true"),
         PhpValue::Bool(false) => out.push_str("false"),
         PhpValue::Null => out.push_str("NULL"),
+        PhpValue::Raw(expr) => out.push_str(expr),
         PhpValue::Array(entries) => {
             out.push_str("array (\n");
             let inner = indent + 2;
@@ -131,6 +138,20 @@ mod tests {
         // Note the trailing space after `=>` before each nested array.
         let expected = "<?php return array (\n  'arguments' => \n  array (\n    'fileName' => \n    array (\n      '_v_' => 'x.xml',\n    ),\n  ),\n);";
         assert_eq!(to_php_file(&v), expected);
+    }
+
+    #[test]
+    fn raw_renders_unquoted_bareword() {
+        // An enum-case default is emitted as a verbatim `\Enum::CASE` reference,
+        // NOT a quoted string (G4).
+        let v = PhpValue::Array(vec![(
+            PhpKey::str("_v_"),
+            PhpValue::Raw("\\Vendor\\Enum::CASE".to_owned()),
+        )]);
+        assert_eq!(
+            to_php_file(&v),
+            "<?php return array (\n  '_v_' => \\Vendor\\Enum::CASE,\n);"
+        );
     }
 
     #[test]

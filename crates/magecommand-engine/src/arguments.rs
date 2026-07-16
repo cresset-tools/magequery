@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use magecommand_php::constexpr::{
-    eval, parse_const_expr, ConstLookup, ConstValue, EvalCtx, ParsedExpr,
+    eval, parse_const_expr, ClassRef, ConstExpr, ConstLookup, ConstValue, EvalCtx, ParsedExpr,
 };
 use magecommand_php::{ClassKind, ParamMeta};
 use magequery_core::{ArgValue, DiExport, Magento};
@@ -23,6 +23,9 @@ pub(crate) enum Cfg {
     Float(f64),
     Bool(bool),
     Null,
+    /// A verbatim, fully-qualified PHP expression (a class-constant / enum-case
+    /// reference) emitted unquoted — see [`crate::phpexport::PhpValue::Raw`].
+    Raw(String),
     Map(Vec<(CfgKey, Cfg)>),
 }
 
@@ -359,12 +362,36 @@ impl<'a> ArgsCtx<'a> {
         match eval(&parsed, &EvalCtx::new(&lookup, Some(definer_fqcn))) {
             Ok(v) => const_to_cfg(&v),
             Err(e) => {
+                // An enum-case default can't fold (an enum case is an object, not
+                // a scalar) — Magento keeps it as the constant reference. Emit the
+                // verbatim `\Enum::CASE` instead of dropping it to null.
+                if let Some(raw) = self.enum_case_default(&parsed) {
+                    return Cfg::Raw(raw);
+                }
                 self.finding(format!(
                     "{definer_fqcn}::${}: default '{default}': {}",
                     param.name, e.message
                 ));
                 Cfg::Null
             }
+        }
+    }
+
+    /// If `parsed` is a bare enum-case reference (`SomeEnum::CASE` where the
+    /// resolved class is an enum and `CASE` is one of its cases), render it
+    /// verbatim as a fully-qualified `\Enum::CASE`. `None` for anything else, so
+    /// only genuine enum cases take the raw path — a real class constant still
+    /// folds to its value, matching Magento (and keeping the oracle byte-exact).
+    fn enum_case_default(&self, parsed: &ParsedExpr) -> Option<String> {
+        let ConstExpr::ClassConst { class: ClassRef::Fqcn(i), name } = &parsed.expr else {
+            return None;
+        };
+        let fqcn = parsed.classes.get(*i)?;
+        let rec = self.defs.get(fqcn)?;
+        if rec.meta.kind == ClassKind::Enum && rec.meta.cases.iter().any(|c| c == name) {
+            crate::reflect::verbatim_expr(&parsed.expr, &parsed.classes)
+        } else {
+            None
         }
     }
 
@@ -475,6 +502,7 @@ fn cfg_to_php(value: &Cfg) -> PhpValue {
         Cfg::Float(f) => PhpValue::Float(*f),
         Cfg::Bool(b) => PhpValue::Bool(*b),
         Cfg::Null => PhpValue::Null,
+        Cfg::Raw(expr) => PhpValue::Raw(expr.clone()),
         Cfg::Map(entries) => PhpValue::Array(
             entries
                 .iter()
