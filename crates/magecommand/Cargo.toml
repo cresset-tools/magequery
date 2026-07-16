@@ -16,6 +16,9 @@ magequery-core = { path = "../magequery-core" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+# File-watching for `magecommand watch` (the long-running compile server).
+# default-features on: brings the platform backend (inotify/fsevents/kqueue).
+notify = "8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

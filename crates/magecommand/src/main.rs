@@ -11,6 +11,8 @@ use std::process::ExitCode;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 
+mod watch;
+
 #[derive(Parser)]
 #[command(
     name = "magecommand",
@@ -45,6 +47,14 @@ enum Command {
         /// normal full compile. The fast path for a tight edit-compile loop.
         #[arg(long)]
         incremental: bool,
+    },
+    /// Long-running compile server: build once, then keep the parsed index in
+    /// memory and recompile on file changes, writing only the delta. The fast
+    /// edit loop (kills the re-scan and the full re-write on each change).
+    Watch {
+        /// Recompile once after the first change, then exit (for testing).
+        #[arg(long)]
+        once: bool,
     },
     /// Compare a generated tree against an archived ground truth
     /// (`generated/_code`, `generated/_metadata`).
@@ -100,6 +110,7 @@ fn main() -> anyhow::Result<ExitCode> {
             compile(cli.root, cli.json, dry_run, force, incremental)
         }
         Command::Digest { stat } => digest(cli.root, stat),
+        Command::Watch { once } => watch::watch(cli.root, cli.json, once),
         Command::Compare {
             ref archive,
             ref output,
@@ -291,17 +302,6 @@ fn compile(
         magecommand_engine::metadata::clear_generated_dir(&root, "metadata")?;
         lap!("clear generated dirs");
 
-        // Metadata files (M2). The output dir is now clean, so force-write.
-        let list = magecommand_engine::metadata::app_action_list(&magento);
-        let content = magecommand_engine::phpexport::to_php_file(&list);
-        let path = magecommand_engine::metadata::write_metadata_file(
-            &root,
-            "app_action_list.php",
-            &content,
-            true,
-        )?;
-        println!("wrote {}", path.display());
-
         // The class universe scans a generated-code tree so reflection over
         // generated artifacts (a proxy's source, an interceptor's subject)
         // resolves. Reproduction mode prefers the frozen archive `_code` (the
@@ -319,98 +319,24 @@ fn compile(
             &generated_code,
         );
         lap!("scan php universe");
-        // Names the class universe must be able to reflect even when the scan
-        // walk didn't collect them: preference TARGETS (the concrete each
-        // interface resolves to) and PLUGIN CLASSES. Magento reflects a plugin
-        // class via autoload during interception, independent of the compile's
-        // scanned collection — so a plugin whose file sits in a scan-EXCLUDED
-        // path (e.g. `<module>/TestFramework/…`, referenced from production
-        // di.xml) is still reflected, and its target methods still wrap. The
-        // resolver here is PSR-4/classmap-based (no exclusion), so passing the
-        // plugin class as an `extra` name pulls it into `classes`.
-        let mut resolve_keys: Vec<String> = Vec::new();
-        for (area, _) in magecommand_engine::areaconfig::AREA_CODES {
-            let export = magento.di_export(area);
-            resolve_keys
-                .extend(export.preferences.iter().map(|p| p.for_type.as_str().to_owned()));
-            resolve_keys.extend(
-                export.plugins.iter().filter_map(|p| p.class.as_ref()).map(|c| c.as_str().to_owned()),
-            );
-        }
-        let unresolved = defs.extend_hierarchy(&magento, &root, resolve_keys);
-        if !unresolved.is_empty() {
+        // The whole compile compute (extend_hierarchy → area files →
+        // interception → plugin-lists → generated/code), as one in-memory output
+        // set. This is the exact path `watch` runs, so the two emit identical
+        // bytes. Per-phase timings print under MAGECOMMAND_PROFILE from inside.
+        let out = magecommand_engine::build::compute_outputs(&magento, &mut defs, &root);
+        if !out.unresolved.is_empty() {
             eprintln!(
                 "note: {} class name(s) unresolvable via autoload maps (first: {})",
-                unresolved.len(),
-                unresolved.first().map(String::as_str).unwrap_or("")
+                out.unresolved.len(),
+                out.unresolved.first().map(String::as_str).unwrap_or("")
             );
         }
-        lap!("extend_hierarchy (reflect)");
-        // Build every area file (the fixed seven + any custom-registered areas
-        // like postcode-nl's postcode_eu) ONCE, in parallel. This is the
-        // compile's most expensive computation; both the `<code>.php` metadata
-        // write below and codegen's incidental class_exists sweep consume the
-        // same set, so it must never be recomputed.
-        let area_files =
-            magecommand_engine::areaconfig::build_all_area_files(&magento, &defs, &root);
-        lap!("build + render area files (x7+)");
-        let mut finding_count = 0usize;
-        for ca in &area_files {
-            finding_count += ca.file.findings.len();
-            let path = magecommand_engine::metadata::write_metadata_file(
-                &root,
-                &format!("{}.php", ca.code),
-                &ca.rendered,
-                true,
-            )?;
-            println!("wrote {}", path.display());
-        }
-        if finding_count > 0 {
-            eprintln!("note: {finding_count} static-analysis finding(s) across areas — see --json");
-        }
-        lap!("write area metadata");
-
-        let interception = magecommand_engine::interception::interception_map(&magento, &defs);
-        let path = magecommand_engine::metadata::write_metadata_file(
-            &root,
-            "interception.php",
-            &magecommand_engine::interception::render(&interception),
-            true,
-        )?;
-        println!("wrote {}", path.display());
-        lap!("interception.php");
-
-        let plugin_lists = magecommand_engine::pluginlist::generate(&magento, &defs);
-        for (name, content) in &plugin_lists.files {
-            let path =
-                magecommand_engine::metadata::write_metadata_file(&root, name, content, true)?;
-            println!("wrote {}", path.display());
-        }
-        if !plugin_lists.findings.is_empty() {
-            eprintln!(
-                "note: {} plugin-list finding(s), first: {}",
-                plugin_lists.findings.len(),
-                plugin_lists.findings.first().map(String::as_str).unwrap_or("")
-            );
-        }
-        lap!("plugin-lists (metadata)");
-
-        // generated/code (M3): factories, extensions, proxies, searchResults,
-        // proxyDeferred, interceptors — the full tree the compare checks
-        // against `generated/_code`.
-        let code = magecommand_engine::codegen::generate_code(
-            &magento,
-            &defs,
-            root.clone(),
-            &area_files,
-            &interception,
-        );
-        lap!("generate_code (in memory)");
-        // Write the whole tree (the compute cleared it first). The write is the
-        // same full parallel write for every path — no reconcile — because on
-        // APFS reusing unchanged files costs more than rewriting them.
-        let written = magecommand_engine::metadata::write_code_files(&root, &code.files, true)?;
-        lap!("write code files (disk)");
+        lap!("compute outputs (in memory)");
+        // Write the whole tree (the compute cleared it first). Direct parallel
+        // write, no reconcile — on APFS reusing unchanged files costs more than
+        // rewriting them (see manifest.rs).
+        let written = magecommand_engine::metadata::write_generated(&root, &out.files)?;
+        lap!("write generated (disk)");
         // Record the input fingerprint so the next --incremental run can
         // short-circuit when nothing changed. Reuse the digest computed by the
         // short-circuit check (the inputs didn't change during the compile — it
@@ -426,12 +352,12 @@ fn compile(
         };
         magecommand_engine::manifest::Manifest::new(&bp, digest).save(&root)?;
         lap!("write manifest + input digest");
-        println!("wrote {written} generated/code file(s)");
-        if !code.findings.is_empty() {
+        println!("wrote {written} generated/ file(s)");
+        if !out.findings.is_empty() {
             eprintln!(
-                "note: {} generated-code finding(s), first: {}",
-                code.findings.len(),
-                code.findings.first().map(String::as_str).unwrap_or("")
+                "note: {} compile finding(s), first: {}",
+                out.findings.len(),
+                out.findings.first().map(String::as_str).unwrap_or("")
             );
         }
     }

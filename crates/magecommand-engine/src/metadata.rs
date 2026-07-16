@@ -151,6 +151,88 @@ pub fn write_code_files(root: &Path, files: &[(String, String)], force: bool) ->
     Ok(files.len())
 }
 
+/// Write every `generated/<rel>` file in `files` (keys relative to `generated/`,
+/// e.g. `metadata/global.php` or `code/Magento/…/Interceptor.php`) — the whole
+/// output of [`crate::build::compute_outputs`]. Parent dirs are pre-created once
+/// (deduped), then the files are written in parallel. The compile's bulk write.
+pub fn write_generated(root: &Path, files: &[(String, String)]) -> Result<usize> {
+    use rayon::prelude::*;
+    use std::collections::HashSet;
+
+    let base = root.join("generated");
+    let dirs: Vec<PathBuf> = files
+        .iter()
+        .filter_map(|(rel, _)| Path::new(rel).parent())
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .map(|p| base.join(p))
+        .collect();
+    dirs.par_iter()
+        .try_for_each(|dir| fs::create_dir_all(dir).map_err(|e| Error::io(dir, e)))?;
+
+    files.par_iter().try_for_each(|(rel, content)| -> Result<()> {
+        let target = base.join(rel);
+        fs::write(&target, content).map_err(|e| Error::io(&target, e))
+    })?;
+    Ok(files.len())
+}
+
+/// What a delta write did, for the `watch` server to report.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DeltaStats {
+    pub written: usize,
+    pub deleted: usize,
+    pub unchanged: usize,
+}
+
+/// Write only the files that changed between `prev` (the last compute's output,
+/// held in memory) and `new` (this compute's output), and delete files that
+/// disappeared — the `watch` server's write. Because both trees are in memory,
+/// the diff is a map compare (no disk reads, no hashing) and only the handful of
+/// genuinely-changed files touch the filesystem — the whole point on APFS, where
+/// touching all ~10k files is the wall. Keys are relative to `generated/`.
+///
+/// Returns the stats and the `new` map (so the caller can make it the next
+/// `prev`). Parent dirs for written files are created as needed.
+pub fn write_generated_delta(
+    root: &Path,
+    new: &[(String, String)],
+    prev: &std::collections::HashMap<String, String>,
+) -> Result<DeltaStats> {
+    let base = root.join("generated");
+    let mut stats = DeltaStats::default();
+    let new_keys: std::collections::HashSet<&str> =
+        new.iter().map(|(k, _)| k.as_str()).collect();
+
+    for (rel, content) in new {
+        if prev.get(rel).map(String::as_str) == Some(content.as_str()) {
+            stats.unchanged += 1;
+            continue;
+        }
+        let target = base.join(rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| Error::io(parent, e))?;
+        }
+        fs::write(&target, content).map_err(|e| Error::io(&target, e))?;
+        stats.written += 1;
+    }
+
+    // Files present last time but not now = removed outputs (e.g. a class that
+    // lost its last plugin no longer needs an Interceptor).
+    for rel in prev.keys() {
+        if !new_keys.contains(rel.as_str()) {
+            let target = base.join(rel);
+            match fs::remove_file(&target) {
+                Ok(()) => stats.deleted += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::io(&target, e)),
+            }
+        }
+    }
+    Ok(stats)
+}
+
 /// Remove a compile output directory (`generated/code` or
 /// `generated/metadata`) so a fresh compile starts clean, exactly as
 /// `setup:di:compile` wipes `generated/code` before running. A missing dir is

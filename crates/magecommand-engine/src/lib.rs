@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 pub mod areaconfig;
 pub mod arguments;
+pub mod build;
 pub mod classify;
 pub mod codegen;
 pub mod compare;

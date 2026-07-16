@@ -24,6 +24,7 @@ enum PathKind {
     Generated,
 }
 
+#[derive(Clone)]
 pub struct ClassRecord {
     pub meta: ClassMeta,
     pub file: PathBuf,
@@ -33,6 +34,11 @@ pub struct ClassRecord {
 /// (Magento's Collection::addCollection is array_merge). `scanned` is the
 /// compile-path membership — the Reader's collection; `extend_hierarchy`
 /// adds ancestor closure classes to `classes` WITHOUT admitting them here.
+///
+/// `Clone` so a long-running `watch` server can hold the pristine post-scan
+/// index and clone it per recompute (each recompute mutates its copy via
+/// `extend_hierarchy`), reusing the expensive PHP scan across edits.
+#[derive(Clone)]
 pub struct Definitions {
     pub classes: HashMap<String, ClassRecord>,
     pub scanned: HashSet<String>,
