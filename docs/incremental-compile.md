@@ -1,53 +1,63 @@
 # magecommand incremental compile (CAS) — design scope
 
-Status: **Wins 1 + 2 shipped** (`compile --incremental`, `digest`); Win 3 + the
-CI-recipe rollout scoped below. Target: cut the re-compile cost, especially on
-APFS where the compile is filesystem-bound (see the perf notes below), and enable
-CI to treat `setup:di:compile` as a **cache restore**.
+Status: **Win 2 shipped** (`compile --incremental` = no-op short-circuit,
+`digest`); **Win 1 retired** (partial reconcile — a net loss on APFS, see below);
+Win 3 + the CI-recipe rollout scoped below. Target: cut the re-compile cost,
+especially on APFS where the compile is filesystem-bound (see the perf notes
+below), and enable CI to treat `setup:di:compile` as a **cache restore**.
 
-**Win 2 (input-digest short-circuit + `digest`) — done.** `compile` records a
-stat-fingerprint of the whole compile INPUT set in the manifest;
-`compile --incremental` recomputes it up front and, on a match, **skips the
-entire compile** (scan + compute + write) — on the oracle a no-op recompile is
-~90ms (the input walk) vs ~890ms full. The input set is
+**Win 2 (input-digest short-circuit + `digest`) — done, and it is the whole
+`--incremental` mechanism.** `compile` records a stat-fingerprint of the whole
+compile INPUT set in `generated/.mqcache/manifest.json` (guarded by format
+version + tool version + `BP`); `compile --incremental` recomputes it up front
+and, on a match, **skips the entire compile** (scan + compute + write) — on the
+oracle a no-op recompile is ~90ms (the input walk) vs ~890ms full, on proforto
+~1.2s vs ~7.4s. On **any** change it falls through to a plain full compile (clear
++ write all) — no partial reconcile. The digest is computed **once**: the same
+walk that detects the change is reused as the new manifest's digest (the inputs
+don't change during a compile — it only writes `generated/`, which is not an
+input), so the tree is never fingerprinted twice. The input set is
 `definitions::compile_input_files` (the `.php` the scan reads + the DI `.xml` +
 config/composer files, under the scan's own exclusion rules — sound by
 construction: over-covering only recompiles unnecessarily, under-covering would
 serve stale). `magecommand digest` prints the same digest as a **CI cache key**
 (content-hashed by default = checkout-independent; `--stat` = the fast local
-variant). Verified: no-op short-circuits + stays byte-exact; touching an input
-bypasses it (and, if only mtime changed, Win 1 then writes 0). Caveat: the
-short-circuit walks the module + framework trees to stat them (~90ms oracle,
-more on APFS); still far below a full compile.
+variant). Verified on the oracle: full compile byte-exact (4106 code + 16
+metadata); no-op short-circuits; touching an input triggers a full recompile that
+stays byte-exact; live mode (archive hidden) incremental-on-change is
+byte-identical to a full compile. Caveat: the short-circuit walks the module +
+framework trees to stat them (~90ms oracle, ~1.2–1.7s APFS); still far below a
+full compile.
 
-**Win 1 (output manifest) — done, with a compute-isolation subtlety.** `compile`
-writes `generated/.mqcache/manifest.json` (blake3 of every output file, guarded
-by format version + tool version + `BP`). `compile --incremental` reconciles
-`generated/code`: re-run the compute, hash the fresh in-memory output, write only
-the files whose hash changed, and reuse the rest. Falls back to a full compile
-with no valid manifest (or under `--force`).
+**Win 1 (partial output reconcile) — built, then RETIRED as an APFS net loss.**
+The idea was to write only the output files whose content changed and reuse the
+rest. It ran headlong into two walls:
 
-The subtlety (found the hard way, and why this must not be "leave the tree in
-place"): a full compile computes with `generated/code` **absent** (it clears
-first), and the generated artifacts otherwise leak into BOTH the scan universe
-and the class resolver — a stale factory makes the compiler think it already
-exists (skip) or re-emit an extra one. The oracle masked this because it always
-scans the frozen `generated/_code` archive; hiding the archive exposed a real
-divergence (4104 or 2489 files vs a full compile's 4103). Fix: `--incremental`
-**moves the old tree aside** (`generated/.mqcache/prev`, an instant rename) so
-the compute sees an empty tree exactly like a full compile, then reconciles —
-**renaming** the byte-identical majority back (a metadata op, no data rewrite)
-and writing only the changed files. Verified: with the archive hidden (true live
-mode), incremental output is now **byte-identical** to a full compile, for both a
-no-op and a changed input; reproduction mode stays byte-exact (4106); unit +
-manifest-perturbation tests cover the write/restore/delete diff.
+- **Compute isolation.** A full compile computes with `generated/code` *absent*
+  (it clears first); a stale tree leaks generated factories/interceptors into
+  BOTH the scan universe and the class resolver, changing what gets emitted (saw
+  4104 or 2489 files vs a full compile's 4103 in live mode — the oracle masked it
+  by always scanning the frozen `_code` archive). So "reuse in place" is
+  incorrect: the old tree MUST be moved aside before the compute, then reconciled
+  back.
+- **APFS renames ≈ writes.** Reconciling back means renaming the unchanged
+  majority (10k+ files) from the moved-aside tree. On APFS a rename is as
+  metadata-lock-bound as a write, so the reconcile measured **~3.6–3.9s** —
+  *slower* than the ~1.8s plain full write it was trying to avoid. Combined with
+  a second input-digest walk at manifest-save time (~1.3–1.6s) and a multi-MB
+  per-file-hash manifest, `--incremental` on a one-plugin change hit **~15–16s vs
+  the ~7.4s a plain full compile takes** — a regression the user caught on
+  proforto.
 
-Perf note: on Linux the rename-back (+ recreating the dir tree) costs ~186ms vs
-~20ms for a plain full write — a regression in absolute terms but trivial, and
-Linux was never the target. On APFS, where writes are ~90× slower, the renames
-should win. Either way the no-op case is really Win 2's job (short-circuit before
-any of this runs); Win 1's reconcile is the "changed a little" path. Still paid
-every run: scan + compute — that's what Win 2 removes.
+The fix was to delete the reconcile entirely: `--incremental` short-circuits on a
+no-op (Win 2) and does a plain full compile on any change. The manifest shrank
+from a 4106-entry hash map (~MB) to the 170-byte input digest, the double walk
+became a single one, and the changed case is back to full-compile cost plus the
+one detection walk. **General rule this nailed down (matches the write/delete
+findings): on APFS the compile saturates one serialized FS-metadata lock, so no
+FS op is cheaper than another — the only lever is doing FEWER FS ops. Skipping a
+write by renaming saves nothing; only Win 2's skip-everything and Win 3's
+read-fewer-files help.**
 
 ## The core observation
 
@@ -109,34 +119,22 @@ over-covered input means an unnecessary recompile (merely slower).
 
 ## Three independent wins (different mechanisms, ship separately)
 
-### Win 1 — output manifest: skip unchanged **writes** (highest value / lowest risk)
+### Win 1 — output manifest: skip unchanged **writes** — RETIRED (APFS net loss)
 
-`generate_code` already produces the full output in memory as `Vec<(path,
-content)>`. Today we `clear` then write all 10 643. Instead:
+The original plan (kept here for the record): keep a per-file blake3 manifest and,
+on recompile, write only the files whose content changed, reuse the rest. It was
+built and reverted — see the retirement note at the top. Two reasons it can't
+work on APFS:
 
-- Keep a manifest `generated/.mqcache/manifest` = `{ tool_version, bp,
-  inputs_digest, files: { rel_path -> blake3(content) } }`.
-- On recompile, after generating content in memory, hash each file and **diff
-  against the manifest**:
-  - hash unchanged → **skip the write**,
-  - hash changed or new path → write,
-  - path in manifest but not in new set → delete (the stale-extra case),
-  - then rewrite the manifest.
-- No need to read the existing output files — the manifest *is* the record of
-  on-disk state. Reconcile replaces the `clear + write-all`.
+- **Reuse requires the old tree moved aside** (a stale `generated/code` pollutes
+  the scan + resolver, so it can't stay in place during the compute), and
+- **an APFS rename is as expensive as a write**, so renaming the unchanged
+  majority back costs *more* than just rewriting every file (~3.9s vs ~1.8s
+  measured on proforto).
 
-**Effect:** a no-op recompile writes **0 files** (APFS write phase ~1.8 s → ~0)
-and deletes 0; a one-module change writes a handful. The `clear` phase also
-disappears — we reconcile in place instead of wiping first.
-
-**Byte-exactness:** trivially preserved — we only skip writing bytes that are
-already identical. Verify on the oracle: `compile; compile; compare` → identical,
-0 writes reported.
-
-**Self-heal / escape hatch:** if the manifest is missing, malformed, its
-`tool_version`/`bp` differ, or `--force`/`--no-cache` is passed → full write
-(and, to be safe against hand-edited output, a `--verify` mode that re-hashes
-disk instead of trusting the manifest).
+So skipping a write buys nothing on APFS — the FS-metadata lock is the wall,
+and a rename hits it just as hard as a write. The manifest now stores only the
+`inputs_digest` (Win 2); there is no per-file hash map and no reconcile.
 
 ### Win 2 — input digest: skip the **whole compile** on a no-op
 
@@ -208,9 +206,10 @@ the `if:`-gate works. `runner.os` in the key encodes the `BP`/path scoping.
 ```
 
 On a near-miss (source changed) the prefix restore-key restores the **previous**
-`.mqcache` (manifest + parse cache), so `compile` runs **incrementally** — Win 1
-writes only the delta, Win 3 reuses unchanged parses — instead of cold. Needs
-Wins 1+3.
+`.mqcache`, so `compile` reuses its cached parses instead of re-reading every PHP
+file. With Win 1 retired the *output write* is always full on a change (the
+reconcile was a net loss), so Level B's payoff is entirely Win 3's parse-cache
+reuse on the scan half. Needs Win 3.
 
 **Feasibility verdict:** viable and a strong fit. The cache key is purely the
 source tree (which CI already hashes), the manifest is small and portable (paths
@@ -224,8 +223,7 @@ cache bug can never ship a wrong compile silently.
 
 ```
 generated/.mqcache/
-  manifest.json         # { version, tool_version, bp, inputs_digest,
-                        #   files: { "Magento/Foo/Interceptor.php": "<blake3>", ... } }
+  manifest.json         # { version, tool_version, bp, inputs_digest }
   parse/                # (Win 3) content-hash -> serialized ClassMeta
 ```
 
@@ -236,21 +234,23 @@ generated/.mqcache/
 
 ## Correctness guarantees (non-negotiable)
 
-1. Incremental output is **byte-identical** to a full compile — Win 1 only skips
-   writing already-identical bytes; the in-memory `generate_code` output stays the
-   single source of truth.
+1. Incremental output is **byte-identical** to a full compile — `--incremental`
+   either skips the whole compile (no input changed) or runs the *identical*
+   clear→compute→write a full compile runs. No partial reconcile, so there is no
+   divergence surface. Verified live-mode byte-identical on the oracle.
 2. The input-digest short-circuit is **sound**: cover the complete input set
    (derive it from the compile's own discovery code, over-cover on doubt).
-3. `--force` bypasses **all** caching (full clear + full write) — the always-safe
-   fallback and the current default in CI examples until trust is established.
+3. `--force` bypasses the short-circuit (full clear + full write) — the
+   always-safe fallback and the current default in CI examples until trust is
+   established.
 4. `magecommand compare` remains the CI gate: a cache defect fails the build, it
    never ships.
 
 ## Phasing
 
-1. **Win 1 — output manifest.** Self-contained in the write path + manifest r/w.
-   Kills the APFS write phase on recompile. Oracle-verifiable (0 writes on no-op,
-   byte-exact). *Do this first.*
+1. **~~Win 1 — output manifest.~~ RETIRED** — a partial reconcile is a net loss on
+   APFS (rename ≈ write, and the compute needs the old tree absent). See the
+   retirement note up top.
 2. **Win 2 — `digest` command + short-circuit.** Enables the no-op fast path and
    the CI Level A key. Small.
 3. **CI Level A recipe** — docs + the `digest` command from Win 2. No new engine

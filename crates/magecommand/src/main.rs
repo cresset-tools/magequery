@@ -40,9 +40,9 @@ enum Command {
         /// Overwrite existing generated files.
         #[arg(long)]
         force: bool,
-        /// Reuse the previous compile's output manifest: reconcile
-        /// generated/code in place, writing only the files whose content
-        /// changed. Falls back to a full compile if no valid manifest exists.
+        /// Skip the compile entirely when no compile input changed since the
+        /// last run (a stat-fingerprint of the input tree). On any change, does a
+        /// normal full compile. The fast path for a tight edit-compile loop.
         #[arg(long)]
         incremental: bool,
     },
@@ -163,11 +163,16 @@ fn compile(
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
     lap!("open + discovery");
 
-    // Incremental setup + fast short-circuit (Win 2). Load the previous
-    // manifest, and if `--incremental` and no compile INPUT changed since it was
-    // written (stat-fingerprint match), the current output is already correct —
-    // skip the entire compile (scan + compute + write) before doing any of it.
-    // `--force` bypasses; a dry-run always reports.
+    // Incremental short-circuit (the CAS design — see manifest.rs). Load the
+    // previous manifest; if `--incremental` and no compile INPUT changed since it
+    // was written (stat-fingerprint match), the current output is already correct
+    // — skip the entire compile (scan + compute + write) before doing any of it.
+    // On ANY input change we fall through to a FULL compile below: a partial
+    // reconcile is a net loss on APFS (rename ≈ write, and the compute needs the
+    // old tree absent), so the win is entirely in this no-op skip. The digest is
+    // computed ONCE here and reused as the new manifest's digest on a miss, so
+    // the input tree is never fingerprinted twice. `--force` bypasses; a dry-run
+    // always reports.
     let bp = root.to_string_lossy().to_string();
     let code_dir = root.join("generated/code");
     let prev_manifest = if incremental && !force && dir_has_files(&code_dir) {
@@ -175,16 +180,17 @@ fn compile(
     } else {
         None
     };
-    let do_incremental = prev_manifest.is_some();
-    if !dry_run && do_incremental {
-        if let Some(prev_digest) = prev_manifest.as_ref().and_then(|m| m.inputs_digest.as_ref()) {
+    // The change-detection walk's result, reused for the manifest on a miss.
+    let mut input_digest: Option<String> = None;
+    if !dry_run {
+        if let Some(prev) = prev_manifest.as_ref() {
             let current = magecommand_engine::manifest::input_digest(
                 &magento,
                 &root,
                 magecommand_engine::manifest::FingerprintMode::Stat,
             );
             lap!("input digest (short-circuit check)");
-            if &current == prev_digest {
+            if current == prev.inputs_digest {
                 if json {
                     println!("{{\"status\":\"up-to-date\",\"reason\":\"no input changed\"}}");
                 } else {
@@ -192,6 +198,7 @@ fn compile(
                 }
                 return Ok(ExitCode::SUCCESS);
             }
+            input_digest = Some(current);
         }
     }
 
@@ -266,9 +273,8 @@ fn compile(
         // existing output tree unless --force, then wipe generated/code +
         // generated/metadata and regenerate both from scratch. (The archive
         // dirs `_code`/`_metadata` are never touched.) `--incremental` is an
-        // intentional overwrite, so it skips the guard. `bp`, `code_dir`,
-        // `prev_manifest` and `do_incremental` were computed above (the
-        // short-circuit uses them too).
+        // intentional overwrite (it only reaches here on a detected change), so
+        // it skips the guard. `bp` and `code_dir` were computed above.
         let meta_dir = root.join("generated/metadata");
         if !force && !incremental && (dir_has_files(&code_dir) || dir_has_files(&meta_dir)) {
             anyhow::bail!(
@@ -276,27 +282,12 @@ fn compile(
             );
         }
 
-        // Incremental must produce a byte-identical result to a full compile,
-        // and a full compile computes with generated/code ABSENT (cleared
-        // first): the generated artifacts otherwise leak into the scan universe
-        // AND the class resolver, perturbing which factories/interceptors get
-        // emitted. So the incremental path MOVES the old tree aside (an instant
-        // rename) rather than clearing it — the compute then sees an empty
-        // generated/code exactly as a full compile does, while the old files
-        // stay available in `prev_dir` to rename back for the untouched
-        // majority during the reconcile write. A full compile clears as before.
-        let prev_dir = root.join("generated/.mqcache/prev");
-        if do_incremental {
-            // Discard any leftover prev tree from a crashed run, then move the
-            // current output aside.
-            let _ = std::fs::remove_dir_all(&prev_dir);
-            if let Some(parent) = prev_dir.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::rename(&code_dir, &prev_dir)?;
-        } else {
-            magecommand_engine::metadata::clear_generated_dir(&root, "code")?;
-        }
+        // The compute must see generated/code ABSENT: stale generated artifacts
+        // otherwise leak into the scan universe AND the class resolver,
+        // perturbing which factories/interceptors get emitted. Clearing first
+        // (as `setup:di:compile` does) is what makes every path — full, forced,
+        // or incremental-on-change — produce a byte-identical tree.
+        magecommand_engine::metadata::clear_generated_dir(&root, "code")?;
         magecommand_engine::metadata::clear_generated_dir(&root, "metadata")?;
         lap!("clear generated dirs");
 
@@ -415,39 +406,27 @@ fn compile(
             &interception,
         );
         lap!("generate_code (in memory)");
-        // Reconcile generated/code against the manifest (writing only changed
-        // files) and record the fresh manifest so the NEXT run can go
-        // incremental. A full compile takes the same path with `prev = None`:
-        // it writes everything and still emits the baseline manifest.
-        let (stats, mut manifest) = magecommand_engine::metadata::write_code_files_incremental(
-            &root,
-            &code.files,
-            prev_manifest.as_ref(),
-            &bp,
-            do_incremental.then_some(prev_dir.as_path()),
-        )?;
+        // Write the whole tree (the compute cleared it first). The write is the
+        // same full parallel write for every path — no reconcile — because on
+        // APFS reusing unchanged files costs more than rewriting them.
+        let written = magecommand_engine::metadata::write_code_files(&root, &code.files, true)?;
         lap!("write code files (disk)");
         // Record the input fingerprint so the next --incremental run can
-        // short-circuit when nothing changed (Win 2). Stat-based to match the
-        // short-circuit check above.
-        manifest.inputs_digest = Some(magecommand_engine::manifest::input_digest(
-            &magento,
-            &root,
-            magecommand_engine::manifest::FingerprintMode::Stat,
-        ));
-        manifest.save(&root)?;
+        // short-circuit when nothing changed. Reuse the digest computed by the
+        // short-circuit check (the inputs didn't change during the compile — it
+        // only writes generated/, which is not an input); compute it fresh only
+        // for a --force / first run that skipped that check. Stat-based to match.
+        let digest = match input_digest {
+            Some(d) => d,
+            None => magecommand_engine::manifest::input_digest(
+                &magento,
+                &root,
+                magecommand_engine::manifest::FingerprintMode::Stat,
+            ),
+        };
+        magecommand_engine::manifest::Manifest::new(&bp, digest).save(&root)?;
         lap!("write manifest + input digest");
-        if do_incremental {
-            println!(
-                "incremental: wrote {} · skipped {} unchanged · deleted {} (of {} files)",
-                stats.written,
-                stats.skipped,
-                stats.deleted,
-                code.files.len()
-            );
-        } else {
-            println!("wrote {} generated/code file(s)", code.files.len());
-        }
+        println!("wrote {written} generated/code file(s)");
         if !code.findings.is_empty() {
             eprintln!(
                 "note: {} generated-code finding(s), first: {}",
