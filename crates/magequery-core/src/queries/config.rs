@@ -52,7 +52,7 @@ impl Magento {
                     _ => None,
                 })
                 .unwrap_or(0);
-            if let Some(kind) = source.and_then(|c| self.classify_config_source(c)) {
+            if let Some(kind) = source.and_then(|c| self.classify_config_source(&c.class)) {
                 ranked.push((sort_order, kind));
             }
         }

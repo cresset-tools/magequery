@@ -124,10 +124,11 @@ pub struct Argument {
 }
 
 /// A di.xml argument value. Objects are the interesting case (what gets injected).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
 pub enum ArgValue {
     /// `xsi:type="object"` — an injected class or virtual type.
-    Object(ClassName),
+    Object(ObjectRef),
     /// Scalar value (`string`/`boolean`/`number`/`init_parameter`/`const`/…): the xsi type
     /// and its text.
     Scalar { xsi_type: String, text: String },
@@ -139,17 +140,38 @@ pub enum ArgValue {
 
 /// One `<item>` of an array argument, with the module/file/line that declared it — so a
 /// merged array (e.g. `routerList`) records which module contributed each entry.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
 pub struct ArgItem {
     pub key: String,
     pub value: ArgValue,
+    /// `sortOrder=` XML attribute on the item (any xsi:type) — Magento's
+    /// ArrayType interpreter stably sorts an array's items by it.
+    pub sort_order: Option<i32>,
     pub source: Source,
 }
 
 impl ArgValue {
-    /// Merge a newer declaration over `self` the way Magento merges di.xml arguments:
-    /// two arrays merge by item key (newer overrides same-key — taking the newer item's
-    /// source — appends new keys, recursing into nested arrays); anything else is replaced.
+    /// The `xsi:type` this value was declared with — `Config\Dom`'s
+    /// type-attribute identity, which decides replace-vs-merge on override.
+    fn xsi_type(&self) -> &str {
+        match self {
+            ArgValue::Object(_) => "object",
+            ArgValue::Array(_) => "array",
+            ArgValue::Null => "null",
+            ArgValue::Scalar { xsi_type, .. } => xsi_type,
+        }
+    }
+
+    /// Merge a newer declaration over `self` the way Magento's `Config\Dom::
+    /// _mergeNode` merges di.xml arguments. A re-declaration with a DIFFERENT
+    /// `xsi:type` replaces the node wholesale — attributes included, so an
+    /// `xsi:type="null"` knockout of an object item drops its `sortOrder` and
+    /// the item falls to sort position 0. Same type merges: arrays item-by-item
+    /// by key (newer overrides same-key — taking the newer item's source —
+    /// appends new keys, recursing into nested arrays); objects override the
+    /// class text but MERGE attributes, keeping `shared`/`sortOrder` the newer
+    /// declaration doesn't restate; scalars take the newer text.
     pub(crate) fn merged_with(&self, newer: &ArgValue) -> ArgValue {
         match (self, newer) {
             (ArgValue::Array(old), ArgValue::Array(new)) => {
@@ -157,7 +179,13 @@ impl ArgValue {
                 for ni in new {
                     match items.iter_mut().find(|i| i.key == ni.key) {
                         Some(ei) => {
-                            ei.value = ei.value.merged_with(&ni.value);
+                            if ei.value.xsi_type() == ni.value.xsi_type() {
+                                ei.value = ei.value.merged_with(&ni.value);
+                                ei.sort_order = ni.sort_order.or(ei.sort_order);
+                            } else {
+                                ei.value = ni.value.clone();
+                                ei.sort_order = ni.sort_order;
+                            }
                             ei.source = ni.source.clone();
                         }
                         None => items.push(ni.clone()),
@@ -165,6 +193,18 @@ impl ArgValue {
                 }
                 ArgValue::Array(items)
             }
+            (ArgValue::Object(old), ArgValue::Object(new)) => ArgValue::Object(ObjectRef {
+                // An empty override (`<item … xsi:type="object" sortOrder=…/>`)
+                // merges attributes only — `_mergeNode` returns before touching
+                // the value when the new node has no children.
+                class: if new.class.as_str().is_empty() {
+                    old.class.clone()
+                } else {
+                    new.class.clone()
+                },
+                shared: new.shared.or(old.shared),
+                sort_order: new.sort_order.or(old.sort_order),
+            }),
             _ => newer.clone(),
         }
     }
@@ -326,4 +366,145 @@ pub struct ControllerAction {
     pub area: Area,
     pub module: ModuleName,
     pub source: Source,
+}
+
+// ---- DI-export declarations (magecommand) ----
+/// One `<preference for= type=>` in the merged config. A declaration, not a
+/// resolution: no fixpoint is followed (that's [`Preference`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct PreferenceDecl {
+    pub for_type: ClassName,
+    pub prefer: ClassName,
+    /// First-declaration order across the merge — the position the entry
+    /// holds in Magento's (insertion-ordered) preference map, which PHP
+    /// preserves across overrides.
+    pub decl_order: u32,
+    pub source: Source,
+}
+
+/// One `<virtualType name= type=>` in the merged config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct VirtualTypeDecl {
+    pub name: ClassName,
+    pub base: ClassName,
+    /// First-declaration order across the merge (see [`PreferenceDecl`]).
+    pub decl_order: u32,
+    pub source: Source,
+}
+
+/// One `<plugin>` as declared on its target in the merged config. Raw: no
+/// ancestor logic is applied — a consumer walking the class hierarchy (a DI
+/// compiler) collects these per ancestor itself; [`Magento::plugins`] is the
+/// resolved per-class view.
+///
+/// [`Magento::plugins`]: crate::Magento::plugins
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct PluginDecl {
+    /// The type the `<plugin>` element sits on (class, interface, or virtual type).
+    pub target: ClassName,
+    pub name: String,
+    /// `None` when attribute-level merging never supplied a `type=` (broken config).
+    pub class: Option<ClassName>,
+    pub sort_order: i32,
+    pub disabled: bool,
+    /// `disabled=` as literally merged: `None` when no file ever wrote the
+    /// attribute (compiled plugin maps carry the key only when declared).
+    pub disabled_attr: Option<bool>,
+    /// Config layer (0 primary, 1 module global, 2 area) where `disabled=`
+    /// first appeared; `None` when never written.
+    pub disabled_layer: Option<u8>,
+    /// Same for `type=`.
+    pub instance_layer: Option<u8>,
+    /// `type=` was written with a leading backslash (the compiled plugin
+    /// lists keep the raw spelling in _data).
+    pub class_backslash: bool,
+    /// The enclosing type node's spelling at first declaration.
+    pub target_backslash: bool,
+    /// First-declaration position: config layer (0 global / 1 area overlay),
+    /// module load order, line — Magento's insertion order for plugin maps.
+    pub decl_layer: u8,
+    pub decl_load_order: u32,
+    pub decl_line: u32,
+    pub source: Source,
+}
+
+/// One explicit `shared=` declaration on a `<type>`/`<virtualType>`. Absent
+/// types default to shared in Magento; only written attributes are exported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct TypeSharedDecl {
+    pub type_name: ClassName,
+    pub shared: bool,
+    pub source: Source,
+}
+
+/// One constructor `<argument>` on a type/virtualType in the merged config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct TypeArgDecl {
+    /// The type (or virtual type) the `<arguments>` block sits on.
+    pub type_name: ClassName,
+    pub arg: String,
+    pub value: ArgValue,
+    pub source: Source,
+}
+
+/// First-mention position of one `<type>`/`<virtualType>` NODE per config
+/// layer. The XML DOM merge pins a node's document position at its first
+/// appearance; per-scope-read iteration (the compiled plugin lists) follows
+/// node order within each layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct TypeNodePosition {
+    /// RAW spelling — `\X` and `X` are distinct nodes.
+    pub name: String,
+    pub primary: Option<u32>,
+    pub modules: Option<u32>,
+    pub overlay: Option<u32>,
+}
+
+/// The fully merged DI configuration of one area, exported wholesale — the
+/// bulk primitive a DI compiler iterates, where the per-class queries
+/// ([`Magento::preference`], [`Magento::plugins`]) answer one name at a time.
+/// Deterministically sorted; every declaration carries provenance.
+///
+/// [`Magento::preference`]: crate::Magento::preference
+/// [`Magento::plugins`]: crate::Magento::plugins
+#[derive(Debug, Clone)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct DiExport {
+    pub area: Area,
+    /// Sorted by `for_type`.
+    pub preferences: Vec<PreferenceDecl>,
+    /// Sorted by `name`.
+    pub virtual_types: Vec<VirtualTypeDecl>,
+    /// Sorted by `target`, then Magento's execution order (`sort_order`
+    /// ascending, ties by declaration order).
+    pub plugins: Vec<PluginDecl>,
+    /// Sorted by `type_name`, then `arg`.
+    pub arguments: Vec<TypeArgDecl>,
+    /// Explicit `shared=` declarations, sorted by `type_name`.
+    pub shared: Vec<TypeSharedDecl>,
+    /// Node first-mention positions per layer, sorted by name.
+    pub node_positions: Vec<TypeNodePosition>,
+}
+
+/// drives ObjectManager's argument-merge ordering).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct ObjectRef {
+    pub class: ClassName,
+    pub shared: Option<bool>,
+    pub sort_order: Option<i32>,
 }

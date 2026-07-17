@@ -13,7 +13,10 @@ use rayon::prelude::*;
 
 use crate::error::Diagnostic;
 use crate::ids::{Area, ClassName, ModuleName};
-use crate::model::Module;
+use crate::model::{
+    DiExport, Module, PluginDecl, PreferenceDecl, TypeArgDecl, TypeNodePosition, TypeSharedDecl,
+    VirtualTypeDecl,
+};
 use crate::parse;
 use crate::source::Source;
 use crate::engine::vfs::Vfs;
@@ -23,13 +26,30 @@ use crate::engine::vfs::Vfs;
 pub(crate) struct Located {
     pub value: ClassName,
     pub source: Source,
+    /// First-declaration order across the whole merge (PHP assoc arrays keep
+    /// a key's original position when re-assigned; Magento's compiled
+    /// nonLazyTypes ordering depends on it).
+    pub decl_order: u32,
 }
 
 #[derive(Clone)]
 pub(crate) struct LocatedPlugin {
     pub class: Option<ClassName>,
     pub sort_order: i32,
-    pub disabled: bool,
+    /// `disabled=` as merged attribute-level: `None` = never written (the
+    /// compiled plugin maps only carry the key when some file declared it).
+    pub disabled: Option<bool>,
+    /// Config layer of the FIRST `disabled=` / `type=` appearance — one
+    /// scope-read's DOM merge always emits [sortOrder, disabled, instance];
+    /// only a LATER read's replace_recursive appends a field after.
+    pub disabled_layer: Option<u8>,
+    pub instance_layer: Option<u8>,
+    /// Raw spelling: `type=` written with a leading backslash (kept verbatim
+    /// in the compiled plugin lists' _data).
+    pub class_backslash: bool,
+    /// The enclosing type node's spelling at FIRST declaration — a
+    /// backslash-spelled node is a distinct DOM position.
+    pub target_backslash: bool,
     pub source: Source,
     /// Declaration order, for breaking `sort_order` ties the way Magento does: by where the
     /// plugin was first declared — `(area_rank, module load_order, line)`. Global (rank 0)
@@ -41,22 +61,159 @@ pub(crate) struct LocatedPlugin {
 pub(crate) struct LocatedArg {
     pub value: crate::model::ArgValue,
     pub source: Source,
+    /// Config layer (0 = primary app/etc, 1 = module global, 2 = area
+    /// overlay). Within one layer array arguments merge item-by-item; across
+    /// layers Magento's Config::extend replaces same-named args wholesale.
+    pub layer: u8,
+}
+
+/// A boolean plus where it was declared.
+#[derive(Clone)]
+pub(crate) struct LocatedBool {
+    pub value: bool,
+    pub source: Source,
 }
 
 /// Fully merged DI config for one area.
 #[derive(Clone, Default)]
 pub(crate) struct AreaConfig {
+    /// Monotonic counter feeding `Located::decl_order` (clones continue
+    /// counting, so area overlays order after the global base).
+    pub next_decl: u32,
     pub preferences: HashMap<ClassName, Located>,
     /// target type -> (plugin name -> plugin)
     pub plugins: HashMap<ClassName, HashMap<String, LocatedPlugin>>,
     pub virtual_types: HashMap<ClassName, Located>,
     /// type/virtualType name -> (argument name -> value). Per-argument last-wins.
     pub type_args: HashMap<ClassName, HashMap<String, LocatedArg>>,
+    /// Explicit `shared=` declarations, last-wins (absent = Magento's default: shared).
+    pub shared: HashMap<ClassName, LocatedBool>,
+    /// First-mention position per virtualType name — anchors (type-less
+    /// re-declarations) count: the XML DOM merge pins node positions at
+    /// first appearance.
+    pub vtype_positions: HashMap<ClassName, u32>,
+    /// First-mention position of every type/virtualType NODE per config
+    /// layer (0 primary, 1 module global, 2 area overlay), keyed by RAW
+    /// spelling — `\X` and `X` are DISTINCT DOM nodes.
+    pub node_positions: HashMap<String, [Option<u32>; 3]>,
+}
+
+impl AreaConfig {
+    /// Export the merged config wholesale as sorted, owned declarations.
+    pub(crate) fn export(&self, area: Area) -> DiExport {
+        let mut preferences: Vec<PreferenceDecl> = self
+            .preferences
+            .iter()
+            .map(|(for_type, located)| PreferenceDecl {
+                for_type: for_type.clone(),
+                prefer: located.value.clone(),
+                decl_order: located.decl_order,
+                source: located.source.clone(),
+            })
+            .collect();
+        preferences.sort_by(|a, b| a.for_type.cmp(&b.for_type));
+
+        let mut virtual_types: Vec<VirtualTypeDecl> = self
+            .virtual_types
+            .iter()
+            .map(|(name, located)| VirtualTypeDecl {
+                name: name.clone(),
+                base: located.value.clone(),
+                decl_order: self
+                    .vtype_positions
+                    .get(name)
+                    .copied()
+                    .unwrap_or(located.decl_order),
+                source: located.source.clone(),
+            })
+            .collect();
+        virtual_types.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Per target: Magento's execution order — sort_order ascending, ties
+        // by declaration order (the stored order_key).
+        let mut plugins: Vec<(i32, (u8, u32, u32), PluginDecl)> = Vec::new();
+        for (target, by_name) in &self.plugins {
+            for (name, plugin) in by_name {
+                plugins.push((
+                    plugin.sort_order,
+                    plugin.order_key,
+                    PluginDecl {
+                        target: target.clone(),
+                        name: name.clone(),
+                        class: plugin.class.clone(),
+                        sort_order: plugin.sort_order,
+                        disabled: plugin.disabled.unwrap_or(false),
+                        disabled_attr: plugin.disabled,
+                        disabled_layer: plugin.disabled_layer,
+                        instance_layer: plugin.instance_layer,
+                        class_backslash: plugin.class_backslash,
+                        target_backslash: plugin.target_backslash,
+                        decl_layer: plugin.order_key.0,
+                        decl_load_order: plugin.order_key.1,
+                        decl_line: plugin.order_key.2,
+                        source: plugin.source.clone(),
+                    },
+                ));
+            }
+        }
+        plugins.sort_by(|a, b| (&a.2.target, a.0, a.1).cmp(&(&b.2.target, b.0, b.1)));
+        let plugins = plugins.into_iter().map(|(_, _, decl)| decl).collect();
+
+        let mut arguments: Vec<TypeArgDecl> = Vec::new();
+        for (type_name, by_arg) in &self.type_args {
+            for (arg, located) in by_arg {
+                arguments.push(TypeArgDecl {
+                    type_name: type_name.clone(),
+                    arg: arg.clone(),
+                    value: located.value.clone(),
+                    source: located.source.clone(),
+                });
+            }
+        }
+        arguments.sort_by(|a, b| (&a.type_name, &a.arg).cmp(&(&b.type_name, &b.arg)));
+
+        let mut shared: Vec<TypeSharedDecl> = self
+            .shared
+            .iter()
+            .map(|(type_name, located)| TypeSharedDecl {
+                type_name: type_name.clone(),
+                shared: located.value,
+                source: located.source.clone(),
+            })
+            .collect();
+        shared.sort_by(|a, b| a.type_name.cmp(&b.type_name));
+
+        let mut node_positions: Vec<TypeNodePosition> = self
+            .node_positions
+            .iter()
+            .map(|(name, slots)| TypeNodePosition {
+                name: name.clone(),
+                primary: slots[0],
+                modules: slots[1],
+                overlay: slots[2],
+            })
+            .collect();
+        node_positions.sort_by(|a, b| a.name.cmp(&b.name));
+
+        DiExport {
+            area,
+            preferences,
+            virtual_types,
+            plugins,
+            arguments,
+            shared,
+            node_positions,
+        }
+    }
 }
 
 pub(crate) struct DiIndex {
     global: AreaConfig,
     areas: HashMap<Area, AreaConfig>,
+    /// Each area's OWN files only (no global base) — what one area-scope
+    /// config read contains, needed by consumers that model Magento's
+    /// scope-by-scope loading (the compiled plugin lists).
+    overlays: HashMap<Area, AreaConfig>,
 }
 
 impl DiIndex {
@@ -66,6 +223,11 @@ impl DiIndex {
             Area::Global => &self.global,
             other => self.areas.get(&other).unwrap_or(&self.global),
         }
+    }
+
+    /// The overlay-only config of `area` (empty for [`Area::Global`]).
+    pub fn overlay(&self, area: Area) -> Option<&AreaConfig> {
+        self.overlays.get(&area)
     }
 }
 
@@ -84,6 +246,7 @@ struct Job {
     area: Area,
     module: ModuleName,
     path: PathBuf,
+    layer: u8,
 }
 
 struct Parsed {
@@ -91,6 +254,7 @@ struct Parsed {
     area: Area,
     module: ModuleName,
     path: PathBuf,
+    layer: u8,
     file: Result<parse::DiFile, String>,
 }
 
@@ -107,6 +271,7 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
             area: Area::Global,
             module: ModuleName::new("(primary)"),
             path,
+            layer: 0,
         });
     }
     for m in modules {
@@ -121,12 +286,13 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
                 area: Area::Global,
                 module: m.name.clone(),
                 path: global,
+                layer: 1,
             });
         }
         for area in REAL_AREAS {
             let p = m.path.join("etc").join(area.dir().unwrap()).join("di.xml");
             if p.is_file() {
-                jobs.push(Job { load_order: m.load_order + 1, area, module: m.name.clone(), path: p });
+                jobs.push(Job { load_order: m.load_order + 1, area, module: m.name.clone(), path: p, layer: 2 });
             }
         }
     }
@@ -143,6 +309,7 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
                 area: j.area,
                 module: j.module.clone(),
                 path: j.path.clone(),
+                layer: j.layer,
                 file,
             }
         })
@@ -181,11 +348,13 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
 
     let global = merge_area(&parsed, Area::Global, AreaConfig::default());
     let mut areas = HashMap::new();
+    let mut overlays = HashMap::new();
     for area in REAL_AREAS {
         areas.insert(area, merge_area(&parsed, area, global.clone()));
+        overlays.insert(area, merge_area(&parsed, area, AreaConfig::default()));
     }
 
-    DiIndex { global, areas }
+    DiIndex { global, areas, overlays }
 }
 
 /// The primary DI config files, exactly as Magento's bootstrap resolves them
@@ -225,12 +394,67 @@ fn merge_area(parsed: &[Parsed], area: Area, mut base: AreaConfig) -> AreaConfig
     base
 }
 
+/// Merge a **custom-registered** area's overlay (`etc/<code>/di.xml` of every
+/// enabled module) onto `base`, in module load order. `code` is an area name
+/// discovered by the caller from `AreaList`'s `areas` argument (Magento's
+/// `AreaList::getCodes()`) — the fixed [`Area`] enum can't name it, so overlay
+/// files are read directly and tagged with a `Global` placeholder [`Source`]
+/// area; the overlay RANK comes from the config layer (2), decoupled from the
+/// enum in [`merge_file`]. Pass `base = global.clone()` for the full area
+/// config (`<code>.php`) or `base = AreaConfig::default()` for the overlay-only
+/// config the compiled plugin lists read.
+pub(crate) fn merge_custom_area(modules: &[Module], code: &str, base: AreaConfig) -> AreaConfig {
+    let jobs: Vec<Job> = modules
+        .iter()
+        .filter(|m| m.enabled)
+        .filter_map(|m| {
+            let path = m.path.join("etc").join(code).join("di.xml");
+            path.is_file().then(|| Job {
+                load_order: m.load_order + 1,
+                area: Area::Global,
+                module: m.name.clone(),
+                path,
+                layer: 2,
+            })
+        })
+        .collect();
+
+    let parsed: Vec<Parsed> = jobs
+        .par_iter()
+        .map(|j| {
+            let file = std::fs::read_to_string(&j.path)
+                .map_err(|e| format!("reading {}: {e}", j.path.display()))
+                .and_then(|text| parse::di_xml(&text));
+            Parsed {
+                load_order: j.load_order,
+                area: j.area,
+                module: j.module.clone(),
+                path: j.path.clone(),
+                layer: j.layer,
+                file,
+            }
+        })
+        .collect();
+
+    let mut base = base;
+    let mut order: Vec<&Parsed> = parsed.iter().filter(|p| p.file.is_ok()).collect();
+    order.sort_by_key(|p| p.load_order);
+    for p in order {
+        merge_file(&mut base, p);
+    }
+    base
+}
+
 /// Convert a parse-level `RawArg` into a `model::ArgValue`, attaching a `Source` to every
 /// array item from the file being merged (`p`).
 fn to_arg_value(raw: &parse::RawArg, p: &Parsed) -> crate::model::ArgValue {
-    use crate::model::{ArgItem, ArgValue};
+    use crate::model::{ArgItem, ArgValue, ObjectRef};
     match raw {
-        parse::RawArg::Object(c) => ArgValue::Object(c.clone()),
+        parse::RawArg::Object { class, shared, sort_order } => ArgValue::Object(ObjectRef {
+            class: class.clone(),
+            shared: *shared,
+            sort_order: *sort_order,
+        }),
         parse::RawArg::Scalar { xsi_type, text } => {
             ArgValue::Scalar { xsi_type: xsi_type.clone(), text: text.clone() }
         }
@@ -238,13 +462,14 @@ fn to_arg_value(raw: &parse::RawArg, p: &Parsed) -> crate::model::ArgValue {
         parse::RawArg::Array(items) => ArgValue::Array(
             items
                 .iter()
-                .map(|(key, value, line)| ArgItem {
-                    key: key.clone(),
-                    value: to_arg_value(value, p),
+                .map(|item| ArgItem {
+                    key: item.key.clone(),
+                    value: to_arg_value(&item.value, p),
+                    sort_order: item.sort_order,
                     source: Source {
                         module: p.module.clone(),
                         file: p.path.clone(),
-                        line: *line,
+                        line: item.line,
                         area: p.area,
                     },
                 })
@@ -266,24 +491,83 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
     };
 
     for (for_, type_, line) in &file.preferences {
-        cfg.preferences
-            .insert(for_.clone(), Located { value: type_.clone(), source: src(*line) });
+        match cfg.preferences.get_mut(for_) {
+            Some(existing) => {
+                existing.value = type_.clone();
+                existing.source = src(*line);
+            }
+            None => {
+                let decl_order = cfg.next_decl;
+                cfg.next_decl += 1;
+                cfg.preferences.insert(
+                    for_.clone(),
+                    Located { value: type_.clone(), source: src(*line), decl_order },
+                );
+            }
+        }
+    }
+    for name in &file.virtual_type_mentions {
+        if !cfg.vtype_positions.contains_key(name) {
+            let decl_order = cfg.next_decl;
+            cfg.next_decl += 1;
+            cfg.vtype_positions.insert(name.clone(), decl_order);
+        }
+    }
+    for name in file
+        .virtual_type_mentions
+        .iter()
+        .map(|c| c.as_str().to_owned())
+        .chain(file.type_mentions.iter().cloned())
+    {
+        let slot = cfg.node_positions.entry(name).or_default();
+        let layer = (p.layer as usize).min(2);
+        if slot[layer].is_none() {
+            slot[layer] = Some(cfg.next_decl);
+            cfg.next_decl += 1;
+        }
     }
     for (name, type_, line) in &file.virtual_types {
-        cfg.virtual_types
-            .insert(name.clone(), Located { value: type_.clone(), source: src(*line) });
+        match cfg.virtual_types.get_mut(name) {
+            Some(existing) => {
+                existing.value = type_.clone();
+                existing.source = src(*line);
+            }
+            None => {
+                let decl_order = cfg.next_decl;
+                cfg.next_decl += 1;
+                cfg.virtual_types.insert(
+                    name.clone(),
+                    Located { value: type_.clone(), source: src(*line), decl_order },
+                );
+            }
+        }
+    }
+    for (name, shared, line) in &file.shared {
+        cfg.shared
+            .insert(name.clone(), LocatedBool { value: *shared, source: src(*line) });
     }
     for (target, arg_name, raw, line) in &file.arguments {
         let value = to_arg_value(raw, p);
         let by_name = cfg.type_args.entry(target.clone()).or_default();
         match by_name.get_mut(arg_name) {
-            // Array arguments merge item-by-item across modules; others replace.
-            Some(existing) => {
+            // Within one config layer, array arguments merge item-by-item
+            // (the layer's files are one XML DOM-merge scope). ACROSS layers
+            // (primary -> module global -> area overlay) Magento's
+            // Config::extend replaces a same-named argument WHOLESALE — the
+            // oracle's OperationPool proves it ('default' from app/etc/di.xml
+            // vanishes when a module re-declares 'operations').
+            Some(existing) if existing.layer == p.layer => {
                 existing.value = existing.value.merged_with(&value);
                 existing.source = src(*line);
             }
+            Some(existing) => {
+                *existing = LocatedArg { value, source: src(*line), layer: p.layer };
+            }
             None => {
-                by_name.insert(arg_name.clone(), LocatedArg { value, source: src(*line) });
+                by_name.insert(
+                    arg_name.clone(),
+                    LocatedArg { value, source: src(*line), layer: p.layer },
+                );
             }
         }
     }
@@ -293,29 +577,150 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
             // Attribute-level merge: only override fields the new declaration specifies.
             Some(existing) => {
                 if let Some(c) = &rp.class {
+                    if existing.class.is_none() {
+                        existing.instance_layer = Some(p.layer);
+                    }
                     existing.class = Some(c.clone());
+                    existing.class_backslash = rp.class_had_backslash;
                 }
                 if let Some(s) = rp.sort_order {
                     existing.sort_order = s;
                 }
                 if let Some(d) = rp.disabled {
-                    existing.disabled = d;
+                    if existing.disabled.is_none() {
+                        existing.disabled_layer = Some(p.layer);
+                    }
+                    existing.disabled = Some(d);
                 }
                 existing.source = src(rp.line);
             }
             None => {
-                let area_rank = if p.area == Area::Global { 0 } else { 1 };
+                // Global base (rank 0) before area overlay (rank 1). Keyed on
+                // the config LAYER, not the `Area` enum: layer 2 is assigned
+                // only to `etc/<area>/di.xml` overlays (primary=0, module
+                // global=1), so this is identical to `p.area != Global` for the
+                // fixed areas — but it also lets a custom-registered area
+                // (merged with a Global placeholder tag) rank as an overlay.
+                let area_rank = if p.layer >= 2 { 1 } else { 0 };
                 by_name.insert(
                     rp.name.clone(),
                     LocatedPlugin {
                         class: rp.class.clone(),
+                        class_backslash: rp.class_had_backslash,
+                        target_backslash: rp.target_backslash,
                         sort_order: rp.sort_order.unwrap_or(0),
-                        disabled: rp.disabled.unwrap_or(false),
+                        disabled: rp.disabled,
+                        disabled_layer: rp.disabled.map(|_| p.layer),
+                        instance_layer: rp.class.as_ref().map(|_| p.layer),
                         source: src(rp.line),
                         order_key: (area_rank, p.load_order as u32, rp.line),
                     },
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    fn src(line: u32) -> Source {
+        Source {
+            module: ModuleName::new("Acme_Test"),
+            file: PathBuf::from("app/code/Acme/Test/etc/di.xml"),
+            line,
+            area: Area::Global,
+        }
+    }
+
+    fn located(class: &str, line: u32) -> Located {
+        Located {
+            value: ClassName::new(class),
+            source: src(line),
+            decl_order: line,
+        }
+    }
+
+    #[test]
+    fn export_is_sorted_and_complete() {
+        let mut config = AreaConfig::default();
+        config
+            .preferences
+            .insert(ClassName::new("Z\\Iface"), located("Z\\Impl", 3));
+        config
+            .preferences
+            .insert(ClassName::new("A\\Iface"), located("A\\Impl", 7));
+        config
+            .virtual_types
+            .insert(ClassName::new("myVirtual"), located("Real\\Base", 9));
+
+        // Three plugins on one target: sort_order wins, declaration order
+        // (order_key) breaks the tie — NOT alphabetical by name.
+        let mut by_name = HashMap::new();
+        by_name.insert(
+            "zz_first_declared".to_owned(),
+            LocatedPlugin {
+                class: Some(ClassName::new("P\\One")),
+                sort_order: 10,
+                disabled: None,
+                disabled_layer: None,
+                instance_layer: Some(1),
+                class_backslash: false,
+                target_backslash: false,
+                source: src(1),
+                order_key: (0, 1, 1),
+            },
+        );
+        by_name.insert(
+            "aa_later_declared".to_owned(),
+            LocatedPlugin {
+                class: Some(ClassName::new("P\\Two")),
+                sort_order: 10,
+                disabled: None,
+                disabled_layer: None,
+                instance_layer: Some(1),
+                class_backslash: false,
+                target_backslash: false,
+                source: src(2),
+                order_key: (0, 2, 2),
+            },
+        );
+        by_name.insert(
+            "runs_first".to_owned(),
+            LocatedPlugin {
+                class: Some(ClassName::new("P\\Zero")),
+                sort_order: 0,
+                disabled: Some(true),
+                disabled_layer: Some(1),
+                instance_layer: Some(1),
+                class_backslash: false,
+                target_backslash: false,
+                source: src(5),
+                order_key: (0, 3, 5),
+            },
+        );
+        config.plugins.insert(ClassName::new("T\\Target"), by_name);
+
+        let export = config.export(Area::Global);
+
+        let prefs: Vec<&str> = export
+            .preferences
+            .iter()
+            .map(|p| p.for_type.as_str())
+            .collect();
+        assert_eq!(prefs, ["A\\Iface", "Z\\Iface"]);
+        assert_eq!(export.preferences[0].prefer, ClassName::new("A\\Impl"));
+
+        assert_eq!(export.virtual_types.len(), 1);
+        assert_eq!(export.virtual_types[0].base, ClassName::new("Real\\Base"));
+
+        let plugin_order: Vec<&str> = export.plugins.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            plugin_order,
+            ["runs_first", "zz_first_declared", "aa_later_declared"]
+        );
+        assert!(export.plugins[0].disabled);
+        assert_eq!(export.plugins[1].class, Some(ClassName::new("P\\One")));
     }
 }

@@ -26,6 +26,8 @@ pub(crate) struct Index {
     pub diagnostics: Vec<Diagnostic>,
     /// Named composer packages (root + `require`), retained for the `deps` graph.
     pub packages: Vec<PackageMeta>,
+    /// Library component paths (magento2-library packages), registration order.
+    pub library_paths: Vec<PathBuf>,
 }
 
 /// The slice of a composer package `deps`/`info` need: who it is, where it lives (to map
@@ -131,6 +133,29 @@ impl Index {
         // only; PHP parsing is lazy), so it stays eager.
         let resolver = resolver::ClassResolver::build(&packages, &modules, root, Arc::clone(&vfs));
 
+        // Library component paths (magento2-library packages), in registration
+        // order: the dirs their `autoload.files` (registration.php) live in.
+        // What Magento's ComponentRegistrar would report as LIBRARY — the DI
+        // compiler scans these alongside modules.
+        let mut library_paths: Vec<PathBuf> = Vec::new();
+        for p in &packages {
+            if p.package_type.as_deref() == Some("magento2-library") {
+                let mut dirs: Vec<PathBuf> = p
+                    .autoload_files
+                    .iter()
+                    .filter_map(|f| p.root.join(f).parent().map(Path::to_path_buf))
+                    .collect();
+                if dirs.is_empty() {
+                    dirs.push(p.root.clone());
+                }
+                for d in dirs {
+                    if !library_paths.contains(&d) {
+                        library_paths.push(d);
+                    }
+                }
+            }
+        }
+
         // Keep the slim package facts (already parsed) for the lazy `deps` graph.
         let packages = packages
             .into_iter()
@@ -152,6 +177,7 @@ impl Index {
             resolver,
             diagnostics,
             packages,
+            library_paths,
         })
     }
 }
@@ -198,6 +224,20 @@ fn discover_vendor(
             Probe::None => {}
             Probe::Found(name, d) => merge(out, diags, name, d),
             Probe::Bad(diag) => diags.push(diag),
+        }
+    }
+
+    // Superpackage fallback. A few vendor packages register a single root
+    // `registration.php` that `require_once`s many modules bundled under an
+    // `app/code/` tree (e.g. `magestore/synthesized-superpackage`, 88 modules).
+    // None of those module roots sit at a composer candidate root, so probe the
+    // `app/code` tree recursively — exactly as we do for the project's own
+    // `app/code`. The `is_dir` gate keeps this free for normal packages (a
+    // vendor package with an `app/code/` dir is the rare superpackage marker).
+    for pkg in packages {
+        let app_code = pkg.root.join("app/code");
+        if app_code.is_dir() {
+            scan(&app_code, ModuleSource::Vendor, 0, out, diags, vfs);
         }
     }
 }

@@ -1,0 +1,1290 @@
+//! The `arguments` section: a port of Magento's compile-time argument
+//! resolution — `ObjectManager\Config::_collectConfiguration` (vtype chains,
+//! relations inheritance, SortItems) feeding `Setup\Di\Compiler\
+//! ArgumentsResolver` (the `_i_/_ins_/_v_/_vn_/_vac_/_a_/_d_` encodings) —
+//! over the parser's constructors and statically evaluated defaults.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use magecommand_php::constexpr::{
+    eval, parse_const_expr, ClassRef, ConstExpr, ConstLookup, ConstValue, EvalCtx, ParsedExpr,
+};
+use magecommand_php::{ClassKind, ParamMeta};
+use magequery_core::{ArgValue, DiExport, Magento};
+
+use crate::definitions::Definitions;
+use crate::phpexport::{PhpKey, PhpValue};
+
+/// A merged-config value in PHP shape (`['instance' => …]` maps included).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Cfg {
+    Str(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Null,
+    /// A verbatim, fully-qualified PHP expression (a class-constant / enum-case
+    /// reference) emitted unquoted — see [`crate::phpexport::PhpValue::Raw`].
+    Raw(String),
+    Map(Vec<(CfgKey, Cfg)>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CfgKey {
+    Int(i64),
+    Str(String),
+}
+
+impl CfgKey {
+    /// XML item names land in PHP arrays, which coerce int-like keys.
+    fn from_xml(name: &str) -> CfgKey {
+        match name.parse::<i64>() {
+            Ok(i) if i.to_string() == name => CfgKey::Int(i),
+            _ => CfgKey::Str(name.to_owned()),
+        }
+    }
+    fn s(name: &str) -> CfgKey {
+        CfgKey::Str(name.to_owned())
+    }
+}
+
+fn map_get<'a>(entries: &'a [(CfgKey, Cfg)], key: &str) -> Option<&'a Cfg> {
+    entries
+        .iter()
+        .find(|(k, _)| matches!(k, CfgKey::Str(s) if s == key))
+        .map(|(_, v)| v)
+}
+
+pub struct Findings {
+    /// Things reflection would know that static analysis couldn't — each one
+    /// a hard fact to fix, never silently guessed around.
+    pub issues: Vec<String>,
+}
+
+pub(crate) struct ArgsCtx<'a> {
+    pub defs: &'a Definitions,
+    /// Scan-set membership (the Reader's collection) — the extended
+    /// hierarchy must not mint argument rows of its own.
+    pub scanned: &'a HashSet<String>,
+    /// DiCompileCommand::configureObjectManager's runtime overrides — they
+    /// extend the very config object the Reader clones, so the compiled
+    /// output bakes them (machine-specific exclude regexes included).
+    overrides: Vec<(String, String, Cfg)>,
+    type_args: HashMap<String, Vec<(String, &'a ArgValue)>>,
+    non_shared: HashSet<String>,
+    vtypes: HashMap<String, String>,
+    pref_keys: Vec<String>,
+    /// Autoload resolution for names outside the scanned universe (vendor
+    /// libraries) — what `ReflectionClass` could load. `None` only in tests.
+    magento: Option<&'a Magento>,
+    /// Whether `laminas/laminas-zendframework-bridge` is installed — its
+    /// append autoloader is what aliases legacy `Zend\…` names to `Laminas\…`
+    /// classes. Mage-OS 3.1.0 does NOT ship it; 2.4.5-era stores do.
+    zend_bridge: bool,
+    merged_cache: std::cell::RefCell<HashMap<String, Vec<(CfgKey, Cfg)>>>,
+    findings: std::cell::RefCell<Vec<String>>,
+}
+
+impl<'a> ArgsCtx<'a> {
+    pub(crate) fn new(
+        defs: &'a Definitions,
+        scanned: &'a HashSet<String>,
+        export: &'a DiExport,
+        overrides: Vec<(String, String, Cfg)>,
+        magento: Option<&'a Magento>,
+        root: Option<&std::path::Path>,
+    ) -> Self {
+        let zend_bridge = root.is_some_and(|r| {
+            r.join("vendor/laminas/laminas-zendframework-bridge/src/Autoloader.php").is_file()
+        });
+        let mut type_args: HashMap<String, Vec<(String, &ArgValue)>> = HashMap::new();
+        for decl in &export.arguments {
+            type_args
+                .entry(decl.type_name.as_str().to_owned())
+                .or_default()
+                .push((decl.arg.clone(), &decl.value));
+        }
+        let non_shared = export
+            .shared
+            .iter()
+            .filter(|s| !s.shared)
+            .map(|s| s.type_name.as_str().to_owned())
+            .collect();
+        let vtypes = export
+            .virtual_types
+            .iter()
+            .map(|v| (v.name.as_str().to_owned(), v.base.as_str().to_owned()))
+            .collect();
+        let pref_keys = export
+            .preferences
+            .iter()
+            .map(|p| p.for_type.as_str().to_owned())
+            .collect();
+        ArgsCtx {
+            defs,
+            scanned,
+            overrides,
+            type_args,
+            non_shared,
+            vtypes,
+            pref_keys,
+            magento,
+            zend_bridge,
+            merged_cache: Default::default(),
+            findings: Default::default(),
+        }
+    }
+
+    /// Whether `ReflectionClass(name)` would succeed for a name outside the
+    /// scanned universe: the autoload maps resolve it to an existing file.
+    fn class_loadable(&self, name: &str) -> bool {
+        self.magento.is_some_and(|m| {
+            m.class_file(&magequery_core::ClassName::new(name.to_owned())).is_some()
+        })
+    }
+
+    fn finding(&self, msg: String) {
+        self.findings.borrow_mut().push(msg);
+    }
+
+    pub fn take_findings(&self) -> Vec<String> {
+        std::mem::take(&mut self.findings.borrow_mut())
+    }
+
+    fn is_shared_type(&self, name: &str) -> bool {
+        !self.non_shared.contains(name)
+    }
+
+    // ---- Config::_collectConfiguration -------------------------------------
+
+    fn own_config(&self, name: &str) -> Option<Vec<(CfgKey, Cfg)>> {
+        let mut entries: Vec<(CfgKey, Cfg)> = self
+            .type_args
+            .get(name)
+            .map(|args| {
+                args.iter()
+                    .map(|(arg_name, value)| (CfgKey::s(arg_name), self.to_cfg(value, name)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        // configureObjectManager layer: array_replace at argument level.
+        for (ty, arg, value) in &self.overrides {
+            if ty == name {
+                match entries.iter_mut().find(
+                    |(k, _)| matches!(k, CfgKey::Str(s) if s == arg),
+                ) {
+                    Some(slot) => slot.1 = value.clone(),
+                    None => entries.push((CfgKey::s(arg), value.clone())),
+                }
+            }
+        }
+        if entries.is_empty() {
+            return None;
+        }
+        Some(entries)
+    }
+
+    fn merged_config(&self, name: &str) -> Vec<(CfgKey, Cfg)> {
+        if let Some(cached) = self.merged_cache.borrow().get(name) {
+            return cached.clone();
+        }
+        // ObjectManager\Config\Config::_collectConfiguration re-runs
+        // Helper\SortItems after every inheritance merge (vtype base collect,
+        // each non-empty relation overlay, the own-args overlay) — and the
+        // `sortOrder` DataObject keeps on object items survives mapping, so the
+        // sort is LIVE at compile for inherited configs. Its firing is gated by
+        // isMultiSortOrder's last-wins assignment bug (see `sort_items`): it
+        // only reorders when the LAST item of the LAST array-valued argument
+        // carries `sortOrder`. That single gate reconciles both oracle facts —
+        // Mq_ModSort's child appends un-keyed items (gate false ⇒ merge order,
+        // parent block then child) while the 2.4.8 store's Amasty ModifierAggregator
+        // vtypes end on a keyed item (gate true ⇒ the archive's fully
+        // sortOrder-sorted union, 10,20,30,40,9000,10000). A plain type with no
+        // contributing base is never sorted here (`$arguments` empty ⇒ own args
+        // assigned verbatim), which is why the all-enabled oracle stayed
+        // byte-exact without any merge-time sort.
+        let mut arguments: Vec<(CfgKey, Cfg)> = Vec::new();
+        if let Some(base) = self.vtypes.get(name) {
+            arguments = self.merged_config(base);
+            sort_items(&mut arguments);
+        } else if self.defs.contains(name) {
+            for relation in self.defs.relations_of(name) {
+                let relation_args = self.merged_config(&relation);
+                if !relation_args.is_empty() {
+                    array_replace(&mut arguments, relation_args);
+                    sort_items(&mut arguments);
+                }
+            }
+        }
+        if let Some(own) = self.own_config(name) {
+            if arguments.is_empty() {
+                arguments = own;
+            } else {
+                array_replace_recursive(&mut arguments, own);
+                sort_items(&mut arguments);
+            }
+        }
+        self.merged_cache
+            .borrow_mut()
+            .insert(name.to_owned(), arguments.clone());
+        arguments
+    }
+
+    // ---- di.xml value → PHP config shape -----------------------------------
+
+    fn to_cfg(&self, value: &ArgValue, context: &str) -> Cfg {
+        match value {
+            ArgValue::Object(o) => {
+                // DataObject interpreter order: instance, sortOrder, shared.
+                let mut map = vec![(CfgKey::s("instance"), Cfg::Str(o.class.as_str().to_owned()))];
+                if let Some(so) = o.sort_order {
+                    map.push((CfgKey::s("sortOrder"), Cfg::Int(so as i64)));
+                }
+                if let Some(shared) = o.shared {
+                    map.push((CfgKey::s("shared"), Cfg::Bool(shared)));
+                }
+                Cfg::Map(map)
+            }
+            ArgValue::Null => Cfg::Null,
+            ArgValue::Array(items) => {
+                // ArrayType interpreter: items stably sorted by their
+                // sortOrder XML attribute at conversion time, each level
+                // independently.
+                let mut sorted: Vec<&magequery_core::ArgItem> = items.iter().collect();
+                sorted.sort_by_key(|item| item.sort_order.unwrap_or(0));
+                Cfg::Map(
+                    sorted
+                        .into_iter()
+                        .map(|item| {
+                            (CfgKey::from_xml(&item.key), self.to_cfg(&item.value, context))
+                        })
+                        .collect(),
+                )
+            }
+            ArgValue::Scalar { xsi_type, text } => match xsi_type.as_str() {
+                "boolean" => match text.trim() {
+                    "true" | "1" => Cfg::Bool(true),
+                    "false" | "0" => Cfg::Bool(false),
+                    other => {
+                        self.finding(format!("{context}: non-boolean boolean '{other}'"));
+                        Cfg::Bool(false)
+                    }
+                },
+                // The Number interpreter passes the raw (numeric) string through.
+                "number" => Cfg::Str(text.clone()),
+                "const" => self.eval_const_text(text, context),
+                "init_parameter" => Cfg::Map(vec![(
+                    CfgKey::s("argument"),
+                    self.eval_const_text(text, context),
+                )]),
+                _ => Cfg::Str(text.clone()),
+            },
+        }
+    }
+
+    fn eval_const_text(&self, text: &str, context: &str) -> Cfg {
+        // di.xml constants are written fully qualified; no use map applies.
+        let parsed = parse_const_expr(text, "", &[]);
+        let lookup = DefsLookup { defs: self.defs };
+        match eval(&parsed, &EvalCtx::new(&lookup, None)) {
+            Ok(v) => const_to_cfg(&v),
+            Err(e) => {
+                self.finding(format!("{context}: const '{text}': {}", e.message));
+                Cfg::Null
+            }
+        }
+    }
+
+    // ---- ArgumentsResolver ---------------------------------------------------
+
+    /// `getResolvedConstructorArguments` for one instance name whose
+    /// constructor is `params` defined by `definer_fqcn`. `None` params (no
+    /// constructor) yields `PhpValue::Null`.
+    pub fn resolve_instance(
+        &self,
+        instance_name: &str,
+        definer_fqcn: &str,
+        definer_uses: &[(String, String)],
+        params: &[ParamMeta],
+    ) -> PhpValue {
+        if params.is_empty() {
+            return PhpValue::Null;
+        }
+        let configured = self.merged_config(instance_name);
+        let definer_ns = definer_fqcn
+            .rsplit_once('\\')
+            .map(|(ns, _)| ns)
+            .unwrap_or("");
+        let optional_tail_start = optional_tail_start(params);
+        let mut out: Vec<(PhpKey, PhpValue)> = Vec::with_capacity(params.len());
+        for (idx, param) in params.iter().enumerate() {
+            let required = idx < optional_tail_start;
+            let class_ty = self.param_class(param, definer_fqcn);
+            let mut arg = if !required {
+                let default = self.eval_default(param, definer_ns, definer_uses, definer_fqcn);
+                self.non_object_argument(&default)
+            } else if let Some(class) = &class_ty {
+                self.instance_pattern(class)
+            } else {
+                vn_pattern()
+            };
+            if let Some(cfg) = map_get(&configured, &param.name) {
+                arg = if class_ty.is_some() {
+                    self.configured_instance(cfg, instance_name, &param.name)
+                } else if let Cfg::Map(entries) = cfg {
+                    if let Some(argument) = map_get(entries, "argument") {
+                        // ['_a_' => value, '_d_' => default]
+                        let default =
+                            self.eval_default(param, definer_ns, definer_uses, definer_fqcn);
+                        PhpValue::Array(vec![
+                            (PhpKey::str("_a_"), cfg_to_php(argument)),
+                            (PhpKey::str("_d_"), cfg_to_php(&default)),
+                        ])
+                    } else {
+                        self.non_object_argument(cfg)
+                    }
+                } else {
+                    self.non_object_argument(cfg)
+                };
+            }
+            out.push((PhpKey::str(param.name.clone()), arg));
+        }
+        PhpValue::Array(out)
+    }
+
+    /// The parameter's CLASS type per Magento's GetParameterClassTrait:
+    /// a single named non-builtin type (nullable ok); unions, intersections,
+    /// and DNF yield None; self/parent/static resolve against the definer.
+    fn param_class(&self, param: &ParamMeta, definer: &str) -> Option<String> {
+        let ty = param.ty.as_deref()?;
+        let ty = ty.strip_prefix('?').unwrap_or(ty);
+        if ty.contains('|') || ty.contains('&') || ty.contains('(') {
+            return None;
+        }
+        match ty {
+            "array" | "callable" | "bool" | "float" | "int" | "string" | "iterable"
+            | "object" | "mixed" | "never" | "void" | "null" | "false" | "true" => None,
+            "self" | "static" => Some(definer.to_owned()),
+            "parent" => self
+                .defs
+                .get(definer)
+                .and_then(|r| r.meta.extends.first().cloned()),
+            // Swoole/OpenSwoole are InterfaceValidator::$optionalPackages.
+            _ if ty.starts_with("Swoole\\") || ty.starts_with("OpenSwoole\\") => None,
+            other => match self.defs.canonical_case(other) {
+                // Reflection reports the DECLARED case, not the use-site
+                // spelling (PageBuilder's Gt\Dom vs phpgt's GT\Dom).
+                Some(declared) => Some(declared.to_owned()),
+                // A LEGACY `Zend\…`-family hint no scanned file declares:
+                // what reflection sees depends on the STORE, not the target.
+                // With laminas-zendframework-bridge installed, its append
+                // autoloader aliases the name to the Laminas class and
+                // reflection reports the CANONICAL name (Amasty hinting
+                // Zend\Uri\Uri compiles as `_i_` Laminas\Uri\Uri — verified
+                // in a real 2.4.5 archive). Without the bridge (Mage-OS
+                // 3.1.0 dropped it) — or without the Laminas target — the
+                // name simply doesn't exist: ReflectionClass throws,
+                // GetParameterClassTrait catches, and the param demotes to
+                // non-class (`_vn_`), unless a real Zend-namespaced class is
+                // genuinely autoloadable. A declared legacy class never gets
+                // the alias (autoload finds it first): the Some arm above.
+                None => match magequery_core::laminas_alias::canonical(other) {
+                    Some(laminas) if self.zend_bridge && self.class_loadable(&laminas) => {
+                        Some(laminas)
+                    }
+                    Some(_) if self.class_loadable(other) => Some(other.to_owned()),
+                    Some(_) => {
+                        // Oracle-proven (bridge-less Mage-OS 3.1.0 synthetic):
+                        // real di:compile FATALS here — ClassReader wraps the
+                        // ReflectionException as "Impossible to process
+                        // constructor argument". No valid 2.4.9 archive can
+                        // contain this case; degrade to non-class and record
+                        // the hard fact.
+                        self.finding(format!(
+                            "{definer}: ${} hints legacy '{other}' — no laminas bridge and no \
+                             such class; a real setup:di:compile fails on this constructor",
+                            param.name
+                        ));
+                        None
+                    }
+                    None => Some(other.to_owned()),
+                },
+            },
+        }
+    }
+
+    fn eval_default(
+        &self,
+        param: &ParamMeta,
+        definer_ns: &str,
+        definer_uses: &[(String, String)],
+        definer_fqcn: &str,
+    ) -> Cfg {
+        if param.variadic {
+            return Cfg::Map(Vec::new()); // ClassReader: variadic default = []
+        }
+        let Some(default) = &param.default else {
+            return Cfg::Null; // getDefaultValue: null when unavailable
+        };
+        let parsed = parse_const_expr(default, definer_ns, definer_uses);
+        let lookup = DefsLookup { defs: self.defs };
+        match eval(&parsed, &EvalCtx::new(&lookup, Some(definer_fqcn))) {
+            Ok(v) => const_to_cfg(&v),
+            Err(e) => {
+                // An enum-case default can't fold (an enum case is an object, not
+                // a scalar) — Magento keeps it as the constant reference. Emit the
+                // verbatim `\Enum::CASE` instead of dropping it to null.
+                if let Some(raw) = self.enum_case_default(&parsed) {
+                    return Cfg::Raw(raw);
+                }
+                self.finding(format!(
+                    "{definer_fqcn}::${}: default '{default}': {}",
+                    param.name, e.message
+                ));
+                Cfg::Null
+            }
+        }
+    }
+
+    /// If `parsed` is a bare enum-case reference (`SomeEnum::CASE` where the
+    /// resolved class is an enum and `CASE` is one of its cases), render it
+    /// verbatim as a fully-qualified `\Enum::CASE`. `None` for anything else, so
+    /// only genuine enum cases take the raw path — a real class constant still
+    /// folds to its value, matching Magento (and keeping the oracle byte-exact).
+    fn enum_case_default(&self, parsed: &ParsedExpr) -> Option<String> {
+        let ConstExpr::ClassConst { class: ClassRef::Fqcn(i), name } = &parsed.expr else {
+            return None;
+        };
+        let fqcn = parsed.classes.get(*i)?;
+        let rec = self.defs.get(fqcn)?;
+        if rec.meta.kind == ClassKind::Enum && rec.meta.cases.iter().any(|c| c == name) {
+            crate::reflect::verbatim_expr(&parsed.expr, &parsed.classes)
+        } else {
+            None
+        }
+    }
+
+    fn instance_pattern(&self, name: &str) -> PhpValue {
+        if self.is_shared_type(name) {
+            PhpValue::Array(vec![(PhpKey::str("_i_"), PhpValue::str(name))])
+        } else {
+            PhpValue::Array(vec![(PhpKey::str("_ins_"), PhpValue::str(name))])
+        }
+    }
+
+    /// getConfiguredInstanceArgument: type-level sharedness of the configured
+    /// instance, overridden by an explicit `shared` on the argument.
+    fn configured_instance(&self, cfg: &Cfg, context: &str, arg: &str) -> PhpValue {
+        let Cfg::Map(entries) = cfg else {
+            self.finding(format!(
+                "{context}: argument '{arg}' configured non-object for class-typed param"
+            ));
+            return vn_pattern();
+        };
+        let Some(Cfg::Str(instance)) = map_get(entries, "instance") else {
+            self.finding(format!("{context}: argument '{arg}' lacks instance"));
+            return vn_pattern();
+        };
+        match map_get(entries, "shared") {
+            Some(Cfg::Bool(true)) => {
+                PhpValue::Array(vec![(PhpKey::str("_i_"), PhpValue::str(instance.clone()))])
+            }
+            Some(Cfg::Bool(false)) => {
+                PhpValue::Array(vec![(PhpKey::str("_ins_"), PhpValue::str(instance.clone()))])
+            }
+            _ => self.instance_pattern(instance),
+        }
+    }
+
+    /// getNonObjectArgument: null → `_vn_`; arrays containing configured
+    /// entries → `_vac_` (transformed); else `_v_` verbatim.
+    fn non_object_argument(&self, value: &Cfg) -> PhpValue {
+        match value {
+            Cfg::Null => vn_pattern(),
+            Cfg::Map(entries) if is_configured_array(entries) => {
+                let transformed = self.configured_array(entries);
+                PhpValue::Array(vec![(PhpKey::str("_vac_"), transformed)])
+            }
+            other => PhpValue::Array(vec![(PhpKey::str("_v_"), cfg_to_php(other))]),
+        }
+    }
+
+    fn configured_array(&self, entries: &[(CfgKey, Cfg)]) -> PhpValue {
+        PhpValue::Array(
+            entries
+                .iter()
+                .map(|(k, v)| {
+                    let key = cfg_key_to_php(k);
+                    let value = match v {
+                        Cfg::Map(inner) => {
+                            if let Some(Cfg::Str(instance)) = map_get(inner, "instance") {
+                                match map_get(inner, "shared") {
+                                    Some(Cfg::Bool(true)) => PhpValue::Array(vec![(
+                                        PhpKey::str("_i_"),
+                                        PhpValue::str(instance.clone()),
+                                    )]),
+                                    Some(Cfg::Bool(false)) => PhpValue::Array(vec![(
+                                        PhpKey::str("_ins_"),
+                                        PhpValue::str(instance.clone()),
+                                    )]),
+                                    _ => self.instance_pattern(instance),
+                                }
+                            } else if let Some(argument) = map_get(inner, "argument") {
+                                PhpValue::Array(vec![
+                                    (PhpKey::str("_a_"), cfg_to_php(argument)),
+                                    (PhpKey::str("_d_"), PhpValue::Null),
+                                ])
+                            } else {
+                                self.configured_array(inner)
+                            }
+                        }
+                        other => cfg_to_php(other),
+                    };
+                    (key, value)
+                })
+                .collect(),
+        )
+    }
+}
+
+fn vn_pattern() -> PhpValue {
+    PhpValue::Array(vec![(PhpKey::str("_vn_"), PhpValue::Bool(true))])
+}
+
+/// Any nested map carrying an `instance` or `argument` key (recursive) —
+/// ArgumentsResolver::isConfiguredArray.
+fn is_configured_array(entries: &[(CfgKey, Cfg)]) -> bool {
+    entries.iter().any(|(_, v)| match v {
+        Cfg::Map(inner) => {
+            map_get(inner, "instance").is_some()
+                || map_get(inner, "argument").is_some()
+                || is_configured_array(inner)
+        }
+        _ => false,
+    })
+}
+
+fn cfg_to_php(value: &Cfg) -> PhpValue {
+    match value {
+        Cfg::Str(s) => PhpValue::Str(s.clone()),
+        Cfg::Int(i) => PhpValue::Int(*i),
+        Cfg::Float(f) => PhpValue::Float(*f),
+        Cfg::Bool(b) => PhpValue::Bool(*b),
+        Cfg::Null => PhpValue::Null,
+        Cfg::Raw(expr) => PhpValue::Raw(expr.clone()),
+        Cfg::Map(entries) => PhpValue::Array(
+            entries
+                .iter()
+                .map(|(k, v)| (cfg_key_to_php(k), cfg_to_php(v)))
+                .collect(),
+        ),
+    }
+}
+
+fn cfg_key_to_php(key: &CfgKey) -> PhpKey {
+    match key {
+        CfgKey::Int(i) => PhpKey::Int(*i),
+        CfgKey::Str(s) => PhpKey::Str(s.clone()),
+    }
+}
+
+fn const_to_cfg(value: &ConstValue) -> Cfg {
+    match value {
+        ConstValue::Null => Cfg::Null,
+        ConstValue::Bool(b) => Cfg::Bool(*b),
+        ConstValue::Int(i) => Cfg::Int(*i),
+        ConstValue::Float(f) => Cfg::Float(*f),
+        ConstValue::Str(s) => Cfg::Str(s.clone()),
+        ConstValue::Array(items) => Cfg::Map(
+            items
+                .iter()
+                .map(|(k, v)| {
+                    let key = match k {
+                        magecommand_php::constexpr::ArrayKey::Int(i) => CfgKey::Int(*i),
+                        magecommand_php::constexpr::ArrayKey::Str(s) => CfgKey::Str(s.clone()),
+                        _ => CfgKey::Str(String::new()),
+                    };
+                    (key, const_to_cfg(v))
+                })
+                .collect(),
+        ),
+        _ => Cfg::Null,
+    }
+}
+
+// ---- array_replace / array_replace_recursive / SortItems --------------------
+
+/// Index of the first parameter of the contiguous optional TAIL — everything
+/// before it is REQUIRED, defaults notwithstanding. PHP's
+/// `ReflectionParameter::isOptional` — which ClassReader negates into
+/// `isRequired` — is POSITIONAL: a defaulted param followed by a required one
+/// cannot actually be omitted, so reflection reports it required and Magento
+/// autowires it. 2.4.5 core still ships the shape (Customer's Address\Book:
+/// `CustomerRepositoryInterface $x = null` before required params; its real
+/// compiled row is an `_i_` instance, never `_vn_`). Unlockable on the 2.4.9
+/// oracle: on PHP 8.5 EVERY defaulted-before-required spelling raises a
+/// deprecation that Magento's dev-mode ErrorHandler turns fatal, so the real
+/// compiler cannot even process such a class there — the shape exists only on
+/// older-PHP stores, and the 2.4.5 store 2.4.5 archive is its ground truth.
+fn optional_tail_start(params: &[ParamMeta]) -> usize {
+    params
+        .iter()
+        .rposition(|p| p.default.is_none() && !p.variadic)
+        .map_or(0, |i| i + 1)
+}
+
+fn array_replace(base: &mut Vec<(CfgKey, Cfg)>, over: Vec<(CfgKey, Cfg)>) {
+    for (key, value) in over {
+        match base.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => slot.1 = value,
+            None => base.push((key, value)),
+        }
+    }
+}
+
+fn array_replace_recursive(base: &mut Vec<(CfgKey, Cfg)>, over: Vec<(CfgKey, Cfg)>) {
+    for (key, value) in over {
+        match base.iter_mut().find(|(k, _)| *k == key) {
+            Some(slot) => match (&mut slot.1, value) {
+                (Cfg::Map(base_inner), Cfg::Map(over_inner)) => {
+                    array_replace_recursive(base_inner, over_inner);
+                }
+                (slot_value, value) => *slot_value = value,
+            },
+            None => base.push((key, value)),
+        }
+    }
+}
+
+/// PHP `isset($v['sortOrder'])`: the key exists AND its value is not null.
+fn has_sort_order(entries: &[(CfgKey, Cfg)]) -> bool {
+    matches!(map_get(entries, "sortOrder"), Some(v) if !matches!(v, Cfg::Null))
+}
+
+/// PHP `(int)` cast of a `sortOrder` value (missing / null ⇒ 0).
+fn sort_order_int(value: &Cfg) -> i64 {
+    match value {
+        Cfg::Int(i) => *i,
+        Cfg::Float(f) => *f as i64,
+        Cfg::Bool(b) => *b as i64,
+        Cfg::Str(s) => {
+            let t = s.trim_start();
+            let end = t
+                .char_indices()
+                .take_while(|(i, c)| c.is_ascii_digit() || (*i == 0 && (*c == '-' || *c == '+')))
+                .count();
+            t[..end].parse().unwrap_or(0)
+        }
+        Cfg::Map(m) => !m.is_empty() as i64,
+        Cfg::Null | Cfg::Raw(_) => 0,
+    }
+}
+
+fn direct_sort_order(value: &Cfg) -> i64 {
+    match value {
+        Cfg::Map(m) if has_sort_order(m) => {
+            sort_order_int(map_get(m, "sortOrder").expect("has_sort_order checked"))
+        }
+        _ => 0,
+    }
+}
+
+/// ObjectManager\Helper\SortItems, ported bug-for-bug — Config::
+/// _collectConfiguration runs it after every inheritance merge, so its quirks
+/// are baked into the compiled metadata:
+/// - `isSortOrderDefined` (OR-accumulate, one level deep): any array-valued
+///   entry with a direct non-null `sortOrder` key, or any of whose sub-entries
+///   is an array carrying one. Nothing defined ⇒ untouched.
+/// - `isMultiSortOrder` is a last-wins ASSIGNMENT, not an OR: the flag ends as
+///   "does the LAST sub-entry of the LAST non-empty array-valued entry carry
+///   `sortOrder`". A trailing un-keyed item — or a trailing object-spec
+///   argument, whose last sub-entry is a scalar — turns the whole sort off.
+/// - multi branch: every array-valued entry's sub-entries are flattened into
+///   ONE list, stably sorted by `sortOrder` (missing ⇒ 0), and rebuilt
+///   per-parent; parents re-appear in sorted-encounter order and NON-array
+///   entries are DROPPED (PHP's `foreach` over a scalar iterates nothing).
+/// - single branch: the entry list itself is stably sorted by each value's
+///   direct `sortOrder` (missing ⇒ 0) — for compiled output a no-op unless an
+///   item is literally named `sortOrder`.
+fn sort_items(arguments: &mut Vec<(CfgKey, Cfg)>) {
+    let defined = arguments.iter().any(|(_, v)| match v {
+        Cfg::Map(entries) => {
+            has_sort_order(entries)
+                || entries
+                    .iter()
+                    .any(|(_, sub)| matches!(sub, Cfg::Map(m) if has_sort_order(m)))
+        }
+        _ => false,
+    });
+    if !defined {
+        return;
+    }
+    let mut multi = false;
+    for (_, v) in arguments.iter() {
+        if let Cfg::Map(entries) = v {
+            if let Some((_, last)) = entries.last() {
+                multi = matches!(last, Cfg::Map(m) if has_sort_order(m));
+            }
+        }
+    }
+    if multi {
+        let mut flat: Vec<(CfgKey, CfgKey, Cfg)> = Vec::new();
+        for (key, value) in arguments.drain(..) {
+            if let Cfg::Map(entries) = value {
+                for (sub_key, sub_value) in entries {
+                    flat.push((key.clone(), sub_key, sub_value));
+                }
+            }
+        }
+        flat.sort_by_key(|(_, _, item)| match item {
+            Cfg::Map(m) if has_sort_order(m) => {
+                sort_order_int(map_get(m, "sortOrder").expect("has_sort_order checked"))
+            }
+            _ => 0,
+        });
+        for (parent, key, item) in flat {
+            match arguments.iter_mut().find(|(k, _)| *k == parent) {
+                Some((_, Cfg::Map(entries))) => entries.push((key, item)),
+                _ => arguments.push((parent, Cfg::Map(vec![(key, item)]))),
+            }
+        }
+    } else {
+        arguments.sort_by_key(|(_, v)| direct_sort_order(v));
+    }
+}
+
+
+// ---- const lookup over the scanned corpus ------------------------------------
+
+pub struct DefsLookup<'a> {
+    pub defs: &'a Definitions,
+}
+
+impl ConstLookup for DefsLookup<'_> {
+    fn class_const(&self, class: &str, name: &str) -> Option<ParsedExpr> {
+        let record = self.defs.get(class)?;
+        let ns = record.meta.fqcn.rsplit_once('\\').map(|(n, _)| n).unwrap_or("");
+        if let Some(c) = record.meta.constants.iter().find(|c| c.name == name) {
+            return Some(parse_const_expr(&c.value, ns, &record.meta.uses));
+        }
+        // Interface constants are reachable through the implementing class.
+        for iface in self.defs.all_interfaces(class) {
+            if let Some(r) = self.defs.get(&iface) {
+                if let Some(c) = r.meta.constants.iter().find(|c| c.name == name) {
+                    let ins = r.meta.fqcn.rsplit_once('\\').map(|(n, _)| n).unwrap_or("");
+                    return Some(parse_const_expr(&c.value, ins, &r.meta.uses));
+                }
+            }
+        }
+        None
+    }
+
+    fn parent_of(&self, class: &str) -> Option<String> {
+        let record = self.defs.get(class)?;
+        if record.meta.kind == ClassKind::Interface {
+            return None;
+        }
+        record.meta.extends.first().cloned()
+    }
+}
+
+/// Build the whole pre-chain `arguments` map for one area: every scanned
+/// Magento-concrete class, plus vtypes over their base's constructor, plus
+/// NULL rows for concrete preference keys outside the scan set.
+pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<String, PhpValue> {
+    let _ = magento;
+    let mut out: BTreeMap<String, PhpValue> = BTreeMap::new();
+    for name in ctx.scanned {
+        if !ctx.defs.is_concrete(name) {
+            continue;
+        }
+        let value = match ctx.defs.constructor_of(name) {
+            Ok(Some(ctor)) => {
+                ctx.resolve_instance(name, ctor.definer_fqcn, ctor.definer_uses, ctor.params)
+            }
+            Ok(None) => PhpValue::Null,
+            Err(missing) => {
+                ctx.finding(format!("{name}: constructor chain leaves known set at {missing}"));
+                PhpValue::Null
+            }
+        };
+        out.insert(name.clone(), value);
+    }
+    // fillThirdPartyInterfaces: preference keys enter the collection with an
+    // empty constructor — concrete ones become NULL rows.
+    for key in &ctx.pref_keys {
+        if !out.contains_key(key) && !ctx.scanned.contains(key) && ctx.defs.is_concrete(key) {
+            out.insert(key.clone(), PhpValue::Null);
+        }
+    }
+    // Virtual types: the base type's constructor, resolved under the vtype's
+    // own (inherited + overlaid) configuration.
+    for (vtype, base) in &ctx.vtypes {
+        let base_real = {
+            // chase vtype-on-vtype to the real class
+            let mut current = base.as_str();
+            let mut seen = HashSet::new();
+            while let Some(next) = ctx.vtypes.get(current) {
+                if !seen.insert(next.as_str()) {
+                    break;
+                }
+                current = next;
+            }
+            current.to_owned()
+        };
+        // Reader: an in-collection base is used as-is (even abstract);
+        // the isConcrete guard applies only to the reflect-fallback path.
+        let in_collection = ctx.scanned.contains(&base_real);
+        let value = if in_collection || ctx.defs.contains(&base_real) {
+            if !in_collection && !ctx.defs.is_concrete(&base_real) {
+                continue;
+            }
+            match ctx.defs.constructor_of(&base_real) {
+                Ok(Some(ctor)) => {
+                    ctx.resolve_instance(vtype, ctor.definer_fqcn, ctor.definer_uses, ctor.params)
+                }
+                Ok(None) => PhpValue::Null,
+                Err(missing) => {
+                    ctx.finding(format!(
+                        "{vtype}: base {base_real} constructor chain leaves known set at {missing}"
+                    ));
+                    PhpValue::Null
+                }
+            }
+        } else {
+            ctx.finding(format!("{vtype}: base {base_real} not found anywhere"));
+            continue;
+        };
+        out.insert(vtype.clone(), value);
+    }
+    out
+}
+
+
+// ---- DiCompileCommand::configureObjectManager overrides ---------------------
+
+/// Reproduce the runtime DI reconfiguration the compile command applies to
+/// its own object manager before running the operations. The compiled area
+/// files bake these — including exclude regexes with absolute paths and the
+/// module list in ComponentRegistrar (autoload_files.php) order.
+pub(crate) fn setup_overrides(
+    magento: &Magento,
+    root: &std::path::Path,
+) -> Vec<(String, String, Cfg)> {
+    let chain = "Magento\\Setup\\Module\\Di\\Compiler\\Config\\Chain";
+    let mods = [
+        ("BackslashTrim", format!("{chain}\\BackslashTrim")),
+        ("PreferencesResolving", format!("{chain}\\PreferencesResolving")),
+        ("InterceptorSubstitution", format!("{chain}\\InterceptorSubstitution")),
+        ("InterceptionPreferencesResolving", format!("{chain}\\PreferencesResolving")),
+        ("NonLazyTypes", format!("{chain}\\NonLazyTypes")),
+    ];
+    let mut overrides: Vec<(String, String, Cfg)> = vec![
+        (
+            "Magento\\Setup\\Module\\Di\\Compiler\\Config\\ModificationChain".to_owned(),
+            "modificationsList".to_owned(),
+            Cfg::Map(
+                mods.into_iter()
+                    .map(|(k, cls)| {
+                        (CfgKey::s(k), Cfg::Map(vec![(CfgKey::s("instance"), Cfg::Str(cls))]))
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            "Magento\\Setup\\Module\\Di\\Code\\Generator\\PluginList".to_owned(),
+            "cache".to_owned(),
+            Cfg::Map(vec![(
+                CfgKey::s("instance"),
+                Cfg::Str("Magento\\Framework\\App\\Interception\\Cache\\CompiledConfig".to_owned()),
+            )]),
+        ),
+    ];
+
+    let module_by_path: HashMap<&std::path::Path, bool> = magento
+        .modules()
+        .iter()
+        .map(|m| (m.path.as_path(), m.enabled))
+        .collect();
+    let library_set: HashSet<&std::path::Path> =
+        magento.library_paths().iter().map(|p| p.as_path()).collect();
+
+    // Module/library paths in ComponentRegistrar order = the order their
+    // registration.php files run = composer's autoload_files.php order.
+    // A single autoload entry may register MANY components (a superpackage
+    // registration.php `require`ing per-module files — Magestore's
+    // synthesized-superpackage loads ~90 modules under its app/code); the
+    // entry's own dir is then no component path, so expand it: the nested
+    // `…/registration.php` string literals in file order (the require order —
+    // never executed, just scanned), else every component under the dir in
+    // sorted order (`glob()`'s default, the loop-over-glob loader shape).
+    let autoload_files = root.join("vendor/composer/autoload_files.php");
+    let text = std::fs::read_to_string(&autoload_files).unwrap_or_default();
+    let vendor = root.join("vendor");
+    let mut registration_dirs: Vec<std::path::PathBuf> = Vec::new();
+    for line in text.lines() {
+        let Some(idx) = line.find("$vendorDir . '") else { continue };
+        let rest = &line[idx + 14..];
+        let Some(end) = rest.find('\'') else { continue };
+        let rel = rest[..end].trim_start_matches('/');
+        let Some(dir) = std::path::Path::new(rel).parent() else { continue };
+        let dir = vendor.join(dir);
+        if module_by_path.contains_key(dir.as_path()) || library_set.contains(dir.as_path()) {
+            registration_dirs.push(dir);
+            continue;
+        }
+        let nested: Vec<std::path::PathBuf> =
+            std::fs::read_to_string(vendor.join(rel))
+                .map(|src| {
+                    string_literals(&src)
+                        .into_iter()
+                        .filter(|lit| lit.ends_with("registration.php"))
+                        .filter_map(|lit| {
+                            dir.join(lit.trim_start_matches('/')).parent().map(Into::into)
+                        })
+                        .filter(|d: &std::path::PathBuf| {
+                            module_by_path.contains_key(d.as_path())
+                                || library_set.contains(d.as_path())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        if !nested.is_empty() {
+            registration_dirs.extend(nested);
+        } else {
+            let mut under: Vec<std::path::PathBuf> = module_by_path
+                .keys()
+                .chain(library_set.iter())
+                .filter(|p| p.starts_with(&dir))
+                .map(|p| p.to_path_buf())
+                .collect();
+            under.sort();
+            under.dedup();
+            registration_dirs.extend(under);
+        }
+    }
+
+    // app/code modules register AFTER composer autoload, via
+    // NonComposerComponentRegistration's `glob('app/code/*/*/registration.php',
+    // GLOB_NOSORT)` — filesystem (readdir) order, no sort. Mirror that so
+    // app/code modules land in the excluded-path regex too (as their own
+    // `app/code` base group, after every vendor module). Without this they were
+    // dropped entirely — invisible on the all-vendor oracle, but every store
+    // with app/code modules diverged on all seven area files.
+    let app_code = root.join("app/code");
+    if let Ok(vendor_dirs) = std::fs::read_dir(&app_code) {
+        for vendor_ent in vendor_dirs.flatten() {
+            if !vendor_ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            if let Ok(module_dirs) = std::fs::read_dir(vendor_ent.path()) {
+                for mod_ent in module_dirs.flatten() {
+                    let dir = mod_ent.path();
+                    if dir.join("registration.php").is_file() {
+                        registration_dirs.push(dir);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut seen_modules: HashSet<&std::path::Path> = HashSet::new();
+    let module_paths: Vec<&std::path::Path> = registration_dirs
+        .iter()
+        .map(|d| d.as_path())
+        .filter(|d| module_by_path.get(d).copied().unwrap_or(false))
+        .filter(|d| seen_modules.insert(*d))
+        .collect();
+    let mut seen_libs: HashSet<&std::path::Path> = HashSet::new();
+    let library_paths: Vec<&std::path::Path> = registration_dirs
+        .iter()
+        .map(|d| d.as_path())
+        .filter(|d| library_set.contains(*d))
+        .filter(|d| seen_libs.insert(*d))
+        .collect();
+
+    // getExcludedModulePaths: group by base path, then vendor dir, keeping
+    // encounter order; only the BASE PATH is preg_quoted.
+    let mut base_order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, (Vec<String>, HashMap<String, Vec<String>>)> = HashMap::new();
+    for path in &module_paths {
+        let module_dir = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let vendor_path = path.parent().unwrap_or(std::path::Path::new(""));
+        let vendor_dir = vendor_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let base_path = vendor_path.parent().unwrap_or(std::path::Path::new("")).to_string_lossy().into_owned();
+        let entry = groups.entry(base_path.clone()).or_insert_with(|| {
+            base_order.push(base_path.clone());
+            (Vec::new(), HashMap::new())
+        });
+        let vendors = &mut entry.0;
+        let by_vendor = &mut entry.1;
+        if !by_vendor.contains_key(&vendor_dir) {
+            vendors.push(vendor_dir.clone());
+        }
+        by_vendor.entry(vendor_dir).or_default().push(module_dir);
+    }
+    let mut base_regexps: Vec<String> = Vec::new();
+    for base in &base_order {
+        let (vendors, by_vendor) = &groups[base];
+        let vendor_parts: Vec<String> = vendors
+            .iter()
+            .map(|v| format!("{}/(?:{})", v, by_vendor[v].join("|")))
+            .collect();
+        base_regexps.push(format!("{}/(?:{})", preg_quote(base), vendor_parts.join("|")));
+    }
+    let application = vec![
+        format!("#^(?:{})/Test#", base_regexps.join("|")),
+        format!("#^(?:{})/tests#", base_regexps.join("|")),
+    ];
+    let libs_quoted: Vec<String> = library_paths.iter().map(|p| preg_quote(&p.to_string_lossy())).collect();
+    let framework = vec![
+        format!("#^(?:{})/([\\w]+/)?Test#", libs_quoted.join("|")),
+        format!("#^(?:{})/([\\w]+/)?tests#", libs_quoted.join("|")),
+    ];
+    let setup_path = root.join("setup/src");
+    let setup = vec![format!(
+        "#^(?:{})(/[\\w]+)*/Test#",
+        preg_quote(&setup_path.to_string_lossy())
+    )];
+
+    let to_list = |items: Vec<String>| {
+        Cfg::Map(
+            items
+                .into_iter()
+                .enumerate()
+                .map(|(i, s)| (CfgKey::Int(i as i64), Cfg::Str(s)))
+                .collect(),
+        )
+    };
+    overrides.push((
+        "Magento\\Setup\\Module\\Di\\Code\\Reader\\ClassesScanner".to_owned(),
+        "excludePatterns".to_owned(),
+        Cfg::Map(vec![
+            (CfgKey::s("application"), to_list(application)),
+            (CfgKey::s("framework"), to_list(framework)),
+            (CfgKey::s("setup"), to_list(setup)),
+        ]),
+    ));
+    overrides
+}
+
+/// Every single-/double-quoted string literal in a PHP source, in file order.
+/// Good enough for scanning a generated multi-module registration loader for
+/// its `require` targets — the paths carry no escapes; a `\'`/`\"` inside a
+/// literal would merely split it, and split fragments don't end in
+/// `registration.php` so they filter out harmlessly.
+fn string_literals(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = src.char_indices();
+    while let Some((_, c)) = chars.next() {
+        if c != '\'' && c != '"' {
+            continue;
+        }
+        let mut lit = String::new();
+        for (_, d) in chars.by_ref() {
+            if d == c {
+                break;
+            }
+            lit.push(d);
+        }
+        out.push(lit);
+    }
+    out
+}
+
+/// PHP's preg_quote with '#' delimiter.
+fn preg_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(
+            ch,
+            '.' | '\\' | '+' | '*' | '?' | '[' | '^' | ']' | '$' | '(' | ')' | '{' | '}'
+                | '=' | '!' | '<' | '>' | '|' | ':' | '-' | '#' | '/'
+        ) && ch != '/'
+        {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn modifier(class: &str, sort_order: Option<i64>) -> Cfg {
+        let mut m = vec![(CfgKey::s("class"), Cfg::Str(class.to_owned()))];
+        if let Some(so) = sort_order {
+            // `sortOrder` as a nested data KEY (Hyva/Amasty convention), NOT the
+            // `sortOrder=` item attribute — the Mapper leaves it as plain data.
+            m.push((CfgKey::s("sortOrder"), Cfg::Int(so)));
+        }
+        Cfg::Map(m)
+    }
+
+    fn item_keys(cfg: &Cfg) -> Vec<String> {
+        match cfg {
+            Cfg::Map(items) => items
+                .iter()
+                .map(|(k, _)| match k {
+                    CfgKey::Str(s) => s.clone(),
+                    CfgKey::Int(i) => i.to_string(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The 2.4.8 store `frontend.php` bug shape (BUG E, `Mq_ModSort` oracle
+    /// synthetic): a child form whose parent declares `entityFormModifiers`
+    /// with sortOrder-keyed items, and the child adds UN-keyed modifiers.
+    /// Real 2.4.9 di:compile keeps the merge in MERGE order — parent block,
+    /// then the child's additions — because SortItems' isMultiSortOrder gate
+    /// is a last-wins assignment: the trailing un-keyed item turns the sort
+    /// off. Verified byte-for-byte against a real compile.
+    #[test]
+    fn hierarchy_merge_preserves_order_and_never_key_sorts() {
+        let mut merged = vec![(
+            CfgKey::s("entityFormModifiers"),
+            Cfg::Map(vec![
+                (CfgKey::s("bAlpha"), modifier("Hyva\\Form\\BAlpha", Some(900))),
+                (CfgKey::s("bBeta"), modifier("Hyva\\Form\\BBeta", Some(940))),
+            ]),
+        )];
+        let child = vec![(
+            CfgKey::s("entityFormModifiers"),
+            Cfg::Map(vec![
+                (CfgKey::s("aGamma"), modifier("Amasty\\Form\\AGamma", None)),
+                (CfgKey::s("aDelta"), modifier("Amasty\\Form\\ADelta", None)),
+            ]),
+        )];
+
+        array_replace_recursive(&mut merged, child);
+        sort_items(&mut merged);
+
+        assert_eq!(merged.len(), 1, "one merged argument");
+        assert_eq!(
+            item_keys(&merged[0].1),
+            ["bAlpha", "bBeta", "aGamma", "aDelta"],
+            "trailing un-keyed item ⇒ multi gate off ⇒ merge order kept \
+             (a key-sort would hoist aGamma/aDelta to the front)"
+        );
+    }
+
+    /// The 2.4.8 store `crontab.php` archive shape (Amasty AiContentGenerator):
+    /// a vtype whose base declares markdown(9000)/disclaimer(10000) and whose
+    /// own items are ALL sortOrder-keyed — the last merged item carries
+    /// `sortOrder`, so the multi gate fires and real di:compile stores the
+    /// union fully sorted (10,20,30,40,9000,10000), parent items LAST.
+    #[test]
+    fn vtype_merge_sorts_when_last_item_is_keyed() {
+        let mut merged = vec![(
+            CfgKey::s("modifiers"),
+            Cfg::Map(vec![
+                (CfgKey::s("markdown"), modifier("Am\\RemoveMarkdowns", Some(9000))),
+                (CfgKey::s("disclaimer"), modifier("Am\\AddDisclaimer", Some(10000))),
+            ]),
+        )];
+        let own = vec![(
+            CfgKey::s("modifiers"),
+            Cfg::Map(vec![
+                (CfgKey::s("cut_new_line"), modifier("Am\\CutNewLine", Some(10))),
+                (CfgKey::s("cut_title"), modifier("Am\\CutTitle", Some(20))),
+                (CfgKey::s("trim_quotes"), modifier("Am\\TrimQuotes", Some(30))),
+                (CfgKey::s("trim_to_dot"), modifier("Am\\TrimToDot", Some(40))),
+            ]),
+        )];
+
+        array_replace_recursive(&mut merged, own);
+        sort_items(&mut merged);
+
+        assert_eq!(
+            item_keys(&merged[0].1),
+            ["cut_new_line", "cut_title", "trim_quotes", "trim_to_dot", "markdown", "disclaimer"],
+            "all items keyed ⇒ multi gate on ⇒ full sortOrder sort across the merge"
+        );
+    }
+
+    /// A trailing object-spec ARGUMENT (its last sub-entry is a scalar) resets
+    /// the last-wins multi gate even when an earlier array argument is fully
+    /// keyed — the whole sort turns off and merge order survives.
+    #[test]
+    fn trailing_object_argument_resets_multi_gate() {
+        let mut merged = vec![
+            (
+                CfgKey::s("modifiers"),
+                Cfg::Map(vec![
+                    (CfgKey::s("zz"), modifier("Am\\Zz", Some(900))),
+                    (CfgKey::s("aa"), modifier("Am\\Aa", Some(10))),
+                ]),
+            ),
+            (
+                CfgKey::s("logger"),
+                Cfg::Map(vec![(CfgKey::s("instance"), Cfg::Str("Psr\\Log".into()))]),
+            ),
+        ];
+        sort_items(&mut merged);
+
+        assert_eq!(
+            item_keys(&merged[0].1),
+            ["zz", "aa"],
+            "object-spec argument walked last ⇒ gate false ⇒ single branch ⇒ items untouched"
+        );
+        assert_eq!(merged.len(), 2, "single branch never drops arguments");
+    }
+
+    /// the 2.4.5 store's Address\Book shape: a defaulted param before a required
+    /// one is REQUIRED (PHP isOptional is positional); only the contiguous
+    /// defaulted/variadic tail is optional. Real-compile-verified against the
+    /// 2.4.5 archive (see `optional_tail_start`'s doc for why the oracle can't
+    /// lock this — PHP 8.5 fatals on the shape).
+    #[test]
+    fn optional_tail_is_positional() {
+        let tail = |sig: &str| {
+            let src =
+                format!("<?php namespace T; class C {{ public function __construct({sig}) {{}} }}");
+            let meta = magecommand_php::parse_file(src.as_bytes());
+            let params = meta.declarations[0]
+                .methods
+                .iter()
+                .find(|m| m.name == "__construct")
+                .expect("ctor parsed")
+                .params
+                .clone();
+            optional_tail_start(&params)
+        };
+        // The Address\Book shape: defaulted-before-required means everything
+        // up to the last required param is required; only the trailing
+        // defaults are optional.
+        assert_eq!(tail("\\M\\Repo $maybe = null, \\M\\Grid $required"), 2);
+        assert_eq!(tail("\\M\\A $a, \\M\\B $b = null, array $c = []"), 1);
+        // A variadic keeps the tail optional; all-defaulted = all optional.
+        assert_eq!(tail("int $a = 1, \\M\\C ...$rest"), 0);
+        assert_eq!(tail("int $a = 1"), 0);
+        // All-required.
+        assert_eq!(tail("\\M\\A $a, \\M\\B $b"), 2);
+    }
+
+    /// The multi branch's rebuild loop iterates only array-valued arguments —
+    /// scalar arguments VANISH from the merged map (PHP `foreach` over a
+    /// scalar iterates nothing), and parents re-appear in sorted-encounter
+    /// order. Bug-for-bug fidelity.
+    #[test]
+    fn multi_branch_drops_scalar_arguments() {
+        let mut merged = vec![
+            (CfgKey::s("cacheId"), Cfg::Str("layout".into())),
+            (
+                CfgKey::s("modifiers"),
+                Cfg::Map(vec![
+                    (CfgKey::s("zz"), modifier("Am\\Zz", Some(900))),
+                    (CfgKey::s("aa"), modifier("Am\\Aa", Some(10))),
+                ]),
+            ),
+        ];
+        sort_items(&mut merged);
+
+        assert_eq!(merged.len(), 1, "scalar argument dropped by the multi rebuild");
+        assert_eq!(item_keys(&merged[0].1), ["aa", "zz"], "items sorted by sortOrder");
+    }
+}

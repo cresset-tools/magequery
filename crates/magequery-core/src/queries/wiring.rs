@@ -130,7 +130,7 @@ impl Magento {
                         out.push(PluginTarget {
                             declared_on: target.clone(),
                             plugin_name: name.clone(),
-                            disabled: plugin.disabled,
+                            disabled: plugin.disabled.unwrap_or(false),
                             source: plugin.source.clone(),
                         });
                     }
@@ -199,7 +199,7 @@ impl Magento {
                         sort_order: lp.sort_order,
                         methods,
                         declared_on: target.clone(),
-                        disabled: lp.disabled,
+                        disabled: lp.disabled.unwrap_or(false),
                         areas: vec![lp.source.area],
                         source: lp.source.clone(),
                     },
@@ -341,12 +341,12 @@ impl Magento {
             .iter()
             .filter_map(|item| {
                 let ArgValue::Object(class) = &item.value else { return None };
-                let (name, description) = self.index.resolver.command_info(class);
+                let (name, description) = self.index.resolver.command_info(&class.class);
                 let cmd = ConsoleCommand {
                     name,
                     description,
                     item_key: item.key.clone(),
-                    class: class.clone(),
+                    class: class.class.clone(),
                     source: item.source.clone(),
                 };
                 match &needle {
@@ -488,8 +488,8 @@ fn scan_arg_for_class(
     };
     match value {
         ArgValue::Object(c) => {
-            if c == scan.class || c == scan.proxy {
-                hit(c.clone(), false);
+            if &c.class == scan.class || &c.class == scan.proxy {
+                hit(c.class.clone(), false);
             }
         }
         ArgValue::Scalar { xsi_type, text } => {

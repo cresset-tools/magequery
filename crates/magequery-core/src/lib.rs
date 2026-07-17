@@ -38,9 +38,14 @@ mod redis;
 mod queries;
 mod sysconfig;
 mod whatis;
+pub mod laminas_alias;
 
 pub use error::{Diagnostic, Error, Result, Severity};
 pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
+pub use model::{
+    DiExport, ObjectRef, PluginDecl, PreferenceDecl, TypeArgDecl, TypeNodePosition, TypeSharedDecl,
+    VirtualTypeDecl,
+};
 pub use model::{
     AclResource, AdminRole, AdminRule, AdminUser, ArgItem, ArgValue, Argument, ByArea,
     ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
@@ -242,6 +247,66 @@ impl Magento {
                 DiBuilt { index, diagnostics }
             })
             .index
+    }
+
+    /// Library component paths (magento2-library composer packages — what
+    /// Magento's ComponentRegistrar reports as LIBRARY), in registration
+    /// order. The DI compiler scans these alongside module paths.
+    pub fn library_paths(&self) -> &[std::path::PathBuf] {
+        &self.index.library_paths
+    }
+
+    /// The fully merged DI configuration of `area`, exported wholesale: every
+    /// preference, virtual type, plugin, and constructor argument as sorted,
+    /// owned declarations with provenance.
+    ///
+    /// This is the bulk primitive for consumers that iterate the whole config
+    /// (a DI compiler) rather than asking about one class at a time —
+    /// [`preference`](Self::preference)/[`plugins`](Self::plugins) stay the
+    /// per-class, resolution-applying views. `Area::Global` exports the base
+    /// config; a real area exports the base overlaid by that area's files.
+    pub fn di_export(&self, area: Area) -> DiExport {
+        self.di_index().config(area).export(area)
+    }
+
+    /// Like [`di_export`](Self::di_export), but ONLY the area's own files —
+    /// no global base. What one area-scope config read contains; empty for
+    /// `Area::Global`. Models Magento's scope-by-scope config loading (the
+    /// compiled plugin lists are built that way).
+    pub fn di_export_overlay(&self, area: Area) -> DiExport {
+        match self.di_index().overlay(area) {
+            Some(config) => config.export(area),
+            None => DiExport {
+                area,
+                preferences: Vec::new(),
+                virtual_types: Vec::new(),
+                plugins: Vec::new(),
+                arguments: Vec::new(),
+                shared: Vec::new(),
+                node_positions: Vec::new(),
+            },
+        }
+    }
+
+    /// The merged DI config of a **custom-registered** area — the global base
+    /// overlaid by every enabled module's `etc/<code>/di.xml`. `code` is an area
+    /// name the caller discovered from `AreaList`'s `areas` argument (Magento's
+    /// `AreaList::getCodes()`); the fixed [`Area`] enum can't name it, so the
+    /// returned [`DiExport`] carries `area = Area::Global` as a placeholder tag —
+    /// the merged *values* and overlay plugin ranking are what a compiler
+    /// consumes. A write-side bulk primitive parallel to [`di_export`](Self::di_export)
+    /// (the read-side query API stays on the fixed seven areas).
+    pub fn di_export_custom_area(&self, code: &str) -> DiExport {
+        let base = self.di_index().config(Area::Global).clone();
+        engine::di::merge_custom_area(&self.index.modules, code, base).export(Area::Global)
+    }
+
+    /// Like [`di_export_custom_area`](Self::di_export_custom_area) but the area's
+    /// OWN overlay files only (no global base) — the per-scope config the
+    /// compiled plugin lists read for a custom area.
+    pub fn di_export_custom_area_overlay(&self, code: &str) -> DiExport {
+        engine::di::merge_custom_area(&self.index.modules, code, engine::di::AreaConfig::default())
+            .export(Area::Global)
     }
 
     /// Non-fatal problems found while indexing. Includes di.xml parse problems once the DI

@@ -26,6 +26,24 @@ fn is_action_base(c: &ClassName) -> bool {
     )
 }
 
+/// Whether `path` lives under an `app/code/` directory — true for the
+/// project's own modules and for a vendor superpackage's bundled modules
+/// (`vendor/x/pkg/app/code/Vendor/Module`), the two cases Magento resolves via
+/// the registrar convention rather than composer PSR-4.
+fn under_app_code(path: &std::path::Path) -> bool {
+    let mut comps = path.components();
+    while let Some(c) = comps.next() {
+        if c.as_os_str() == "app" {
+            if let Some(next) = comps.clone().next() {
+                if next.as_os_str() == "code" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 pub(crate) struct ClassResolver {
     /// PSR-4: `(namespace prefix ending in '\', source dirs)`, sorted longest-prefix-first
     /// so longest-match wins. The prefix is stripped from the path.
@@ -70,9 +88,17 @@ impl ClassResolver {
         prefixes.extend(root_psr4);
         psr0.extend(root_psr0);
 
-        // app/code is not composer-managed; synthesize the Magento convention
-        // `Vendor_Module` -> namespace `Vendor\Module\` rooted at the module dir.
-        for m in modules.iter().filter(|m| m.source == ModuleSource::App) {
+        // Modules that aren't composer-PSR-4-managed: synthesize the Magento
+        // registrar convention `Vendor_Module` -> namespace `Vendor\Module\`
+        // rooted at the module dir. This covers the project's own `app/code`
+        // AND vendor "superpackages" that bundle modules under their own
+        // `app/code/` tree with only a root `registration.php` and no PSR-4
+        // (e.g. `magestore/synthesized-superpackage`) — Magento resolves those
+        // classes through the same registrar autoloader, not composer.
+        for m in modules
+            .iter()
+            .filter(|m| m.source == ModuleSource::App || under_app_code(&m.path))
+        {
             let ns = format!("{}\\", m.name.as_str().replace('_', "\\"));
             prefixes.push((ns, vec![m.path.clone()]));
         }
@@ -85,8 +111,22 @@ impl ClassResolver {
     /// The on-disk file a class maps to, if any PSR-4/PSR-0 prefix resolves it to an
     /// existing `.php`. Scans matching prefixes longest-first and returns the first file
     /// that exists.
+    ///
+    /// Falls back to the legacy-alias rewrite: a `Zend\…`-family name that no prefix
+    /// resolves is retried as the `Laminas\…` class the `laminas-zendframework-bridge`
+    /// aliases it to, so a lookup of a legacy name lands on the real Laminas source. The
+    /// fallback is self-gating — it returns a path only when the Laminas file exists.
     pub fn file_for(&self, class: &ClassName) -> Option<PathBuf> {
         let name = class.as_str();
+        if let Some(found) = self.file_for_name(name) {
+            return Some(found);
+        }
+        crate::laminas_alias::canonical(name).and_then(|canonical| self.file_for_name(&canonical))
+    }
+
+    /// `file_for` for a raw class name, without the legacy-alias fallback (the fallback
+    /// resolves the canonical name through here, so keeping it separate avoids recursion).
+    fn file_for_name(&self, name: &str) -> Option<PathBuf> {
         for (prefix, dirs) in &self.prefixes {
             if let Some(rest) = name.strip_prefix(prefix.as_str()) {
                 let rel = format!("{}.php", rest.replace('\\', "/"));
@@ -98,9 +138,37 @@ impl ClassResolver {
                 }
             }
         }
+        // PHP class names are case-insensitive; a source file may spell a
+        // vendor namespace differently than the package declares it
+        // (PageBuilder writes Gt\Dom, phpgt/dom declares GT\Dom). Exact
+        // matching above wins; fall back to case-insensitive prefix matching.
+        for (prefix, dirs) in &self.prefixes {
+            if name.len() >= prefix.len()
+                && name[..prefix.len()].eq_ignore_ascii_case(prefix.as_str())
+            {
+                let rel = format!("{}.php", name[prefix.len()..].replace('\\', "/"));
+                for dir in dirs {
+                    let candidate = dir.join(&rel);
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
         for (prefix, dirs) in &self.psr0 {
             if name.starts_with(prefix.as_str()) {
-                let rel = format!("{}.php", name.replace('\\', "/"));
+                // PSR-0: namespace separators AND underscores in the class
+                // part map to directories (`Zend_Cache_Core` ->
+                // `Zend/Cache/Core.php` — the zf1 fork ships this way).
+                let (ns, class_part) = match name.rfind('\\') {
+                    Some(i) => name.split_at(i + 1),
+                    None => ("", name),
+                };
+                let rel = format!(
+                    "{}{}.php",
+                    ns.replace('\\', "/"),
+                    class_part.replace('_', "/")
+                );
                 for dir in dirs {
                     let candidate = dir.join(&rel);
                     if candidate.is_file() {
@@ -337,5 +405,63 @@ fn collect_php_classes(
                 rel.truncate(len);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{under_app_code, ClassResolver};
+    use crate::ids::ClassName;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// A resolver with a single PSR-4 prefix and no PSR-0, for unit tests.
+    fn resolver(prefix: &str, dir: &Path) -> ClassResolver {
+        ClassResolver {
+            prefixes: vec![(prefix.to_owned(), vec![dir.to_path_buf()])],
+            psr0: Vec::new(),
+            headers: Mutex::new(HashMap::new()),
+            vfs: std::sync::Arc::new(crate::engine::vfs::Vfs::new(HashMap::new())),
+            root: dir.to_path_buf(),
+        }
+    }
+
+    #[test]
+    fn legacy_zend_name_resolves_to_the_laminas_source() {
+        let dir = tempfile::tempdir().unwrap();
+        // Only the Laminas source exists on disk.
+        let uri = dir.path().join("Uri/Uri.php");
+        std::fs::create_dir_all(uri.parent().unwrap()).unwrap();
+        std::fs::write(&uri, "<?php\n").unwrap();
+        let r = resolver("Laminas\\", dir.path());
+
+        // A legacy Zend hint lands on the real Laminas file via the alias fallback.
+        assert_eq!(r.file_for(&ClassName::new("Zend\\Uri\\Uri")), Some(uri.clone()));
+        // The Laminas name resolves directly (no fallback needed).
+        assert_eq!(r.file_for(&ClassName::new("Laminas\\Uri\\Uri")), Some(uri));
+        // A legacy name whose Laminas target does not exist stays unresolved.
+        assert_eq!(r.file_for(&ClassName::new("Zend\\Nope\\Missing")), None::<PathBuf>);
+        // A non-legacy name with no prefix is unaffected.
+        assert_eq!(r.file_for(&ClassName::new("Magento\\Framework\\App")), None::<PathBuf>);
+    }
+
+    #[test]
+    fn under_app_code_matches_project_and_superpackage() {
+        // Project app/code.
+        assert!(under_app_code(Path::new(
+            "/srv/shop/app/code/Magestore/Webpos"
+        )));
+        // Vendor superpackage bundling modules under its own app/code.
+        assert!(under_app_code(Path::new(
+            "/srv/shop/vendor/magestore/synthesized-superpackage/app/code/Magestore/Webpos"
+        )));
+        // A normal composer-managed vendor module is NOT under app/code.
+        assert!(!under_app_code(Path::new(
+            "/srv/shop/vendor/magento/module-catalog"
+        )));
+        // `app` not immediately followed by `code` must not match.
+        assert!(!under_app_code(Path::new("/srv/app/lib/code/Thing")));
+        assert!(!under_app_code(Path::new("/srv/app")));
     }
 }

@@ -296,7 +296,7 @@ impl Doctor<'_> {
 
             for by_name in cfg.plugins.values() {
                 for (pname, lp) in by_name {
-                    if lp.disabled {
+                    if lp.disabled.unwrap_or(false) {
                         continue; // never instantiated
                     }
                     if let Some(class) = &lp.class {
@@ -329,7 +329,8 @@ impl Doctor<'_> {
     ) {
         use crate::model::ArgValue;
         match value {
-            ArgValue::Object(c) => {
+            ArgValue::Object(o) => {
+                let c = &o.class;
                 if !self.class_known(c) {
                     self.error_on(
                         DoctorLint::DiArgumentClassMissing,
@@ -762,7 +763,7 @@ fn insert_stripped(set: &mut HashSet<ClassName>, class: &ClassName) {
 fn collect_arg_objects(value: &crate::model::ArgValue, out: &mut HashSet<ClassName>) {
     use crate::model::ArgValue;
     match value {
-        ArgValue::Object(c) => insert_stripped(out, c),
+        ArgValue::Object(o) => insert_stripped(out, &o.class),
         ArgValue::Array(items) => {
             for item in items {
                 collect_arg_objects(&item.value, out);

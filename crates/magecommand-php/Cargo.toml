@@ -1,0 +1,17 @@
+[package]
+name = "magecommand-php"
+description = "Structural PHP parser: declarations, signatures, constants — never bodies, never execution."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+memchr = "2"
+
+# Dev-only: the differential harness (examples/differential.rs) shells out to
+# PHP reflection as ground truth and parses its JSON. The library itself
+# stays memchr-only.
+[dev-dependencies]
+serde_json = "1"
+rayon = "1"
