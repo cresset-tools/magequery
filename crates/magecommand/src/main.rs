@@ -374,35 +374,58 @@ fn compile(
     Ok(ExitCode::SUCCESS)
 }
 
-/// After a bulk write: if the output filesystem is case-insensitive AND the
-/// intended output contains paths differing only in case, those collapsed
-/// into one physical dir (first writer wins) — some files now sit at a path
-/// whose case doesn't match their declared namespace, and PSR-4 can't load
-/// them on a case-sensitive (Linux) host. Real `setup:di:compile` on macOS
-/// collapses identically, so this is a build-host warning, not a compile
-/// error: the tree is fine for local inspection/compare, wrong to deploy.
+/// After a bulk write, surface case-collision hazards in the output tree.
+///
+/// FILE-level collisions (two artifacts whose full paths differ only in
+/// case) warn on EVERY platform: PHP class names are case-insensitive, so
+/// the two generated classes are the same class to PHP — the source declares
+/// case-variant duplicates, only one can ever load per request (whichever
+/// spelling is referenced first), and on a case-insensitive volume one
+/// artifact silently overwrote the other.
+///
+/// DIRECTORY-level collisions warn only when the output volume is actually
+/// case-insensitive: on Linux both spellings coexist (Magento core ships
+/// deliberate pairs like Backend\Tierprice vs Backend\TierPrice), but here
+/// they collapsed into one physical dir (first writer wins), leaving files
+/// at paths PSR-4 can't resolve on a case-sensitive host. Real
+/// `setup:di:compile` on macOS collapses identically — a build-host
+/// warning, not a compile error: fine for local inspection, wrong to deploy.
 fn warn_case_collapse(root: &std::path::Path, files: &[(String, String)]) {
     let collisions = magecommand_engine::metadata::case_collisions(files);
-    if collisions.is_empty() {
-        return;
+    if !collisions.files.is_empty() {
+        eprintln!();
+        eprintln!(
+            "WARNING: {} generated file group(s) differ only in letter case — PHP treats\n\
+             their classes as THE SAME class (class names are case-insensitive), so the\n\
+             source likely declares case-variant duplicates of one class. Which file\n\
+             autoloads depends on the first reference's spelling, on every platform.",
+            collisions.files.len()
+        );
+        for group in &collisions.files {
+            eprintln!("  same class: {}", group.join("  <->  "));
+        }
     }
-    let Some((sample, _)) = files.first() else { return };
-    if !magecommand_engine::metadata::output_fs_is_case_insensitive(root, sample) {
-        return;
+    let collapsed_dirs = !collisions.dirs.is_empty()
+        && files.first().is_some_and(|(sample, _)| {
+            magecommand_engine::metadata::output_fs_is_case_insensitive(root, sample)
+        });
+    if collapsed_dirs {
+        eprintln!();
+        eprintln!(
+            "WARNING: this filesystem is case-insensitive, and {} output path group(s) that\n\
+             differ only in letter case collapsed into single directories (first writer wins).\n\
+             Some files now sit at a path whose case does not match their class namespace, so\n\
+             PSR-4 CANNOT AUTOLOAD them on a case-sensitive host. Do NOT deploy this generated/\n\
+             tree to Linux — compile on the target host (or a case-sensitive volume) instead.",
+            collisions.dirs.len()
+        );
+        for group in &collisions.dirs {
+            eprintln!("  collided: {}", group.join("  <->  "));
+        }
     }
-    eprintln!();
-    eprintln!(
-        "WARNING: this filesystem is case-insensitive, and {} output path group(s) that\n\
-         differ only in letter case collapsed into single directories (first writer wins).\n\
-         Some files now sit at a path whose case does not match their class namespace, so\n\
-         PSR-4 CANNOT AUTOLOAD them on a case-sensitive host. Do NOT deploy this generated/\n\
-         tree to Linux — compile on the target host (or a case-sensitive volume) instead.",
-        collisions.len()
-    );
-    for group in &collisions {
-        eprintln!("  collided: {}", group.join("  <->  "));
+    if !collisions.files.is_empty() || collapsed_dirs {
+        eprintln!();
     }
-    eprintln!();
 }
 
 /// `magecommand digest [--stat]` — print the compile-input digest and exit.

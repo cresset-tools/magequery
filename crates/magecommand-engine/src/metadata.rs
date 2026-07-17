@@ -178,25 +178,43 @@ pub fn write_generated(root: &Path, files: &[(String, String)]) -> Result<usize>
     Ok(files.len())
 }
 
-/// Groups of output paths (dirs or files, relative to `generated/`) that
-/// differ only in letter case. Harmless on a case-sensitive filesystem (both
-/// spellings coexist as separate entries, exactly like on a Linux deploy) —
-/// but on a case-INSENSITIVE one (macOS default) they collapse into a single
-/// physical entry whose case the first writer decides, leaving the other
-/// spelling's files at a path that no longer matches their declared
-/// namespace. PSR-4 then can't autoload them on a case-sensitive host: the
-/// classic "works on the Mac, 500s on the Linux deploy" trap. Real
-/// `setup:di:compile` on macOS produces the very same collapse (verified on
-/// proforto: 5 identical mismatches in its `_code` archive), so this is a
-/// build-host hazard to WARN about, not an output difference to fix.
+/// Output paths (relative to `generated/`) that differ only in letter case,
+/// split by what the collision MEANS:
+///
+/// - `dirs` — namespace-level divergence (core's deliberate legacy
+///   `Backend\Tierprice` class next to `Backend\TierPrice\UpdateHandler`;
+///   Magestore's `class FulfilStaff` beside a `Fulfilstaff\Grid` namespace).
+///   Harmless on a case-sensitive filesystem — both spellings coexist as
+///   separate dirs, exactly like on a Linux deploy — but on a
+///   case-INSENSITIVE one (macOS default) they collapse into a single
+///   physical dir whose case the first writer decides, leaving some files at
+///   a path PSR-4 can't resolve on a case-sensitive host: the "works on the
+///   Mac, 500s on the Linux deploy" trap. Real `setup:di:compile` on macOS
+///   collapses identically (proforto's `_code` archive carries the same 5
+///   mismatches), so this is a BUILD-HOST hazard, only worth a warning when
+///   the output volume is actually case-insensitive.
+/// - `files` — two complete artifact paths case-insensitively equal, i.e.
+///   two generated FQCNs PHP considers the SAME class (PHP class names are
+///   case-insensitive): the source declares case-variant duplicates of one
+///   class. A latent bug on EVERY platform — which file autoloads depends on
+///   the spelling of the first reference, and only one can ever be loaded
+///   per request — and on a case-insensitive volume one output silently
+///   overwrites the other. Warn unconditionally.
 ///
 /// Each group lists the distinct spellings of one case-folded path; only the
 /// SHORTEST colliding prefix is reported (children of a colliding dir also
 /// differ textually, but the parent is the root cause). Sources of truth are
 /// the INTENDED output paths, so the check is pure string work — no
 /// filesystem access — and identical on every platform.
-pub fn case_collisions(files: &[(String, String)]) -> Vec<Vec<String>> {
+#[derive(Debug, Default, PartialEq)]
+pub struct CaseCollisions {
+    pub dirs: Vec<Vec<String>>,
+    pub files: Vec<Vec<String>>,
+}
+
+pub fn case_collisions(files: &[(String, String)]) -> CaseCollisions {
     use std::collections::{BTreeMap, BTreeSet};
+    let file_set: BTreeSet<&str> = files.iter().map(|(rel, _)| rel.as_str()).collect();
     let mut spellings: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for (rel, _) in files {
         let mut prefix = String::new();
@@ -210,16 +228,22 @@ pub fn case_collisions(files: &[(String, String)]) -> Vec<Vec<String>> {
     }
     let colliding: BTreeSet<&String> =
         spellings.iter().filter(|(_, s)| s.len() > 1).map(|(k, _)| k).collect();
-    spellings
-        .iter()
-        .filter(|(key, s)| {
-            s.len() > 1
-                && !key
-                    .rmatch_indices('/')
-                    .any(|(i, _)| colliding.contains(&key[..i].to_string()))
-        })
-        .map(|(_, s)| s.iter().cloned().collect())
-        .collect()
+    let mut out = CaseCollisions::default();
+    for (key, group) in &spellings {
+        let shadowed = key
+            .rmatch_indices('/')
+            .any(|(i, _)| colliding.contains(&key[..i].to_string()));
+        if group.len() < 2 || shadowed {
+            continue;
+        }
+        let members: Vec<String> = group.iter().cloned().collect();
+        if members.iter().any(|m| file_set.contains(m.as_str())) {
+            out.files.push(members);
+        } else {
+            out.dirs.push(members);
+        }
+    }
+    out
 }
 
 /// Whether the filesystem holding `generated/` treats the case-flipped
@@ -413,20 +437,22 @@ mod tests {
         ];
         let groups = case_collisions(&files);
         assert_eq!(
-            groups,
-            vec![
-                vec![
-                    "code/Acme/Widget/AFactory.php".to_owned(),
-                    "code/Acme/Widget/aFactory.php".to_owned(),
-                ],
-                vec![
-                    "code/Magestore/Report/FulfilStaff".to_owned(),
-                    "code/Magestore/Report/Fulfilstaff".to_owned(),
-                ],
-            ],
-            "one group per shortest colliding prefix, children absorbed"
+            groups.dirs,
+            vec![vec![
+                "code/Magestore/Report/FulfilStaff".to_owned(),
+                "code/Magestore/Report/Fulfilstaff".to_owned(),
+            ]],
+            "dir group at the shortest colliding prefix, children absorbed"
         );
-        assert!(case_collisions(&[f("code/A/B.php"), f("code/A/C.php")]).is_empty());
+        assert_eq!(
+            groups.files,
+            vec![vec![
+                "code/Acme/Widget/AFactory.php".to_owned(),
+                "code/Acme/Widget/aFactory.php".to_owned(),
+            ]],
+            "full-path collision = case-variant duplicate classes, split out as file-level"
+        );
+        assert_eq!(case_collisions(&[f("code/A/B.php"), f("code/A/C.php")]), CaseCollisions::default());
     }
 
     #[test]
