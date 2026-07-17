@@ -362,6 +362,7 @@ fn compile(
         magecommand_engine::manifest::Manifest::new(&bp, digest).save(&root)?;
         lap!("write manifest + input digest");
         println!("wrote {written} generated/ file(s)");
+        warn_case_collapse(&root, &out.files);
         if !out.findings.is_empty() {
             eprintln!(
                 "note: {} compile finding(s), first: {}",
@@ -371,6 +372,37 @@ fn compile(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// After a bulk write: if the output filesystem is case-insensitive AND the
+/// intended output contains paths differing only in case, those collapsed
+/// into one physical dir (first writer wins) — some files now sit at a path
+/// whose case doesn't match their declared namespace, and PSR-4 can't load
+/// them on a case-sensitive (Linux) host. Real `setup:di:compile` on macOS
+/// collapses identically, so this is a build-host warning, not a compile
+/// error: the tree is fine for local inspection/compare, wrong to deploy.
+fn warn_case_collapse(root: &std::path::Path, files: &[(String, String)]) {
+    let collisions = magecommand_engine::metadata::case_collisions(files);
+    if collisions.is_empty() {
+        return;
+    }
+    let Some((sample, _)) = files.first() else { return };
+    if !magecommand_engine::metadata::output_fs_is_case_insensitive(root, sample) {
+        return;
+    }
+    eprintln!();
+    eprintln!(
+        "WARNING: this filesystem is case-insensitive, and {} output path group(s) that\n\
+         differ only in letter case collapsed into single directories (first writer wins).\n\
+         Some files now sit at a path whose case does not match their class namespace, so\n\
+         PSR-4 CANNOT AUTOLOAD them on a case-sensitive host. Do NOT deploy this generated/\n\
+         tree to Linux — compile on the target host (or a case-sensitive volume) instead.",
+        collisions.len()
+    );
+    for group in &collisions {
+        eprintln!("  collided: {}", group.join("  <->  "));
+    }
+    eprintln!();
 }
 
 /// `magecommand digest [--stat]` — print the compile-input digest and exit.

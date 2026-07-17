@@ -178,6 +178,70 @@ pub fn write_generated(root: &Path, files: &[(String, String)]) -> Result<usize>
     Ok(files.len())
 }
 
+/// Groups of output paths (dirs or files, relative to `generated/`) that
+/// differ only in letter case. Harmless on a case-sensitive filesystem (both
+/// spellings coexist as separate entries, exactly like on a Linux deploy) —
+/// but on a case-INSENSITIVE one (macOS default) they collapse into a single
+/// physical entry whose case the first writer decides, leaving the other
+/// spelling's files at a path that no longer matches their declared
+/// namespace. PSR-4 then can't autoload them on a case-sensitive host: the
+/// classic "works on the Mac, 500s on the Linux deploy" trap. Real
+/// `setup:di:compile` on macOS produces the very same collapse (verified on
+/// proforto: 5 identical mismatches in its `_code` archive), so this is a
+/// build-host hazard to WARN about, not an output difference to fix.
+///
+/// Each group lists the distinct spellings of one case-folded path; only the
+/// SHORTEST colliding prefix is reported (children of a colliding dir also
+/// differ textually, but the parent is the root cause). Sources of truth are
+/// the INTENDED output paths, so the check is pure string work — no
+/// filesystem access — and identical on every platform.
+pub fn case_collisions(files: &[(String, String)]) -> Vec<Vec<String>> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut spellings: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (rel, _) in files {
+        let mut prefix = String::new();
+        for segment in rel.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(segment);
+            spellings.entry(prefix.to_lowercase()).or_default().insert(prefix.clone());
+        }
+    }
+    let colliding: BTreeSet<&String> =
+        spellings.iter().filter(|(_, s)| s.len() > 1).map(|(k, _)| k).collect();
+    spellings
+        .iter()
+        .filter(|(key, s)| {
+            s.len() > 1
+                && !key
+                    .rmatch_indices('/')
+                    .any(|(i, _)| colliding.contains(&key[..i].to_string()))
+        })
+        .map(|(_, s)| s.iter().cloned().collect())
+        .collect()
+}
+
+/// Whether the filesystem holding `generated/` treats the case-flipped
+/// spelling of an existing entry as the same entry. Probed with a real
+/// written path (`sample`, relative to `generated/`) so the answer reflects
+/// the actual volume the output landed on, not an assumption from the OS.
+pub fn output_fs_is_case_insensitive(root: &Path, sample: &str) -> bool {
+    let flipped: String = sample
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() {
+                c.to_ascii_uppercase()
+            } else if c.is_ascii_uppercase() {
+                c.to_ascii_lowercase()
+            } else {
+                c
+            }
+        })
+        .collect();
+    flipped != sample && root.join("generated").join(&flipped).exists()
+}
+
 /// What a delta write did, for the `watch` server to report.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DeltaStats {
@@ -327,6 +391,42 @@ mod tests {
         assert!(write_code_file(root.path(), rel, "<?php // v2\n", false).is_err());
         write_code_file(root.path(), rel, "<?php // v2\n", true).unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "<?php // v2\n");
+    }
+
+    /// The proforto shape: sibling dirs differing only in case (a class named
+    /// `FulfilStaff` next to a `Fulfilstaff\Grid` namespace), reported once at
+    /// the SHORTEST colliding prefix — the deeper `…/Grid` paths textually
+    /// differ too, but only because their parent does. File-level collisions
+    /// (two classes differing only in case) are caught the same way; unrelated
+    /// same-case paths never report.
+    #[test]
+    fn case_collisions_report_shortest_prefix_only() {
+        let f = |rel: &str| (rel.to_owned(), String::new());
+        let files = vec![
+            f("code/Magestore/Report/FulfilStaff/Interceptor.php"),
+            f("code/Magestore/Report/Fulfilstaff/Grid/Interceptor.php"),
+            f("code/Magestore/Report/Fulfilstaff/Grid/Extra/Interceptor.php"),
+            f("code/Acme/Widget/AFactory.php"),
+            f("code/Acme/Widget/aFactory.php"),
+            f("metadata/global.php"),
+            f("metadata/frontend.php"),
+        ];
+        let groups = case_collisions(&files);
+        assert_eq!(
+            groups,
+            vec![
+                vec![
+                    "code/Acme/Widget/AFactory.php".to_owned(),
+                    "code/Acme/Widget/aFactory.php".to_owned(),
+                ],
+                vec![
+                    "code/Magestore/Report/FulfilStaff".to_owned(),
+                    "code/Magestore/Report/Fulfilstaff".to_owned(),
+                ],
+            ],
+            "one group per shortest colliding prefix, children absorbed"
+        );
+        assert!(case_collisions(&[f("code/A/B.php"), f("code/A/C.php")]).is_empty());
     }
 
     #[test]
