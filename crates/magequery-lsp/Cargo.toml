@@ -1,0 +1,19 @@
+[package]
+name = "magequery-lsp"
+description = "LSP server over magequery-core: Magento wiring answers inside the editor."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+magequery-core = { path = "../magequery-core" }
+# The rust-analyzer stack: sync, channel-based, no async runtime (matching core's
+# philosophy). lsp-types is pinned below 0.96, which swapped `Url` for a bare `Uri`
+# type and lost the file-path conversions this crate leans on.
+lsp-server = "0.7"
+lsp-types = "0.95"
+crossbeam-channel = "0.5"
+quick-xml.workspace = true
+serde = { workspace = true }
+serde_json = "1"

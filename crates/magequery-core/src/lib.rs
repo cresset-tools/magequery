@@ -18,37 +18,40 @@
 
 pub mod error;
 pub mod ids;
-pub mod laminas_alias;
 pub mod model;
 pub mod source;
 
 mod breadth;
 mod composer;
+mod engine;
 #[cfg(feature = "db")]
 mod db;
 mod decrypt;
 mod deploy;
-mod di;
 mod doctor;
 mod eav;
 mod graphql;
-mod index;
 mod parse;
 mod php;
 mod phparray;
 mod redis;
-mod resolver;
+mod queries;
 mod sysconfig;
 mod whatis;
+pub mod laminas_alias;
 
 pub use error::{Diagnostic, Error, Result, Severity};
 pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
+pub use model::{
+    DiExport, ObjectRef, PluginDecl, PreferenceDecl, TypeArgDecl, TypeNodePosition, TypeSharedDecl,
+    VirtualTypeDecl,
+};
 pub use model::{
     AclResource, AdminRole, AdminRule, AdminUser, ArgItem, ArgValue, Argument, ByArea,
     ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ConsoleCommand, ControllerAction, CronJob, CronJobLive, CronJobs, CronRun,
     DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
-    DbTable, DepEdge, DiExport, DoctorFinding, DoctorLint, DoctorReport, EavAttribute, EavAttributeCard,
+    DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, EavAttribute, EavAttributeCard,
     EavCatalogFlags, EavEntityType, EavScope, EavSetMembership, EavSetupKind, EavSetupProp,
     EavSetupRef, EavValueKind, EmailTemplate,
     EmailTemplateOverride, ExtendedType, ExtensionAttribute,
@@ -56,7 +59,8 @@ pub use model::{
     Indexer, IndexerLive, InstanceInfo, Integration, InterceptKind,
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
-    MviewSubscription, Observer,
+    Template, TemplateFile, TemplateUsage,
+    MviewSubscription, Observer, PluginTarget,
     BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount,
     CategoryIndexedProduct, CategoryProduct,
     CategoryTreeNode, CategoryVisibilityIssue,
@@ -87,12 +91,11 @@ pub use model::{
     SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses, Whatis,
 };
 pub use model::{CatalogAttribute, CatalogAttributeGroup, ClassRef};
-pub use model::{PluginDecl, PreferenceDecl, TypeArgDecl, TypeNodePosition, TypeSharedDecl, VirtualTypeDecl};
 pub use decrypt::Decryptor;
 pub use sysconfig::ConfigSet;
 pub use source::Source;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// An opened Magento installation. Holds the parsed module index and merged per-area DI
@@ -101,7 +104,7 @@ use std::sync::OnceLock;
 pub struct Magento {
     // Filled in by the indexer (steps 1–3). Kept private so the internal representation
     // can evolve without breaking the public, struct-returning API.
-    index: index::Index,
+    index: engine::index::Index,
     // The di.xml index — the expensive parse — is built lazily so `modules`/`events`/etc.
     // don't pay for it. Carries its own diagnostics, merged into `diagnostics()` once built.
     di: OnceLock<DiBuilt>,
@@ -127,7 +130,7 @@ pub struct Magento {
 }
 
 struct DiBuilt {
-    index: di::DiIndex,
+    index: engine::di::DiIndex,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -153,7 +156,23 @@ impl Magento {
     /// retrieved via [`diagnostics`](Magento::diagnostics) — a single broken file does not
     /// fail the build.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let index = index::Index::build(root.as_ref())?;
+        Self::open_with_overlay(root, std::collections::HashMap::new())
+    }
+
+    /// [`open`](Magento::open) with unsaved-buffer contents overlaid on the checkout:
+    /// every content read of a source file prefers `overlay` (keyed by absolute path)
+    /// over disk, so an editor frontend can analyze what's in its buffers. The overlay
+    /// affects file *content* only — discovery and existence checks stay on the real
+    /// filesystem, so a never-saved new file is invisible until saved. Like `open`, the
+    /// handle is immutable: on buffer change, rebuild.
+    pub fn open_with_overlay(
+        root: impl AsRef<Path>,
+        overlay: std::collections::HashMap<PathBuf, String>,
+    ) -> Result<Self> {
+        let index = engine::index::Index::build(
+            root.as_ref(),
+            std::sync::Arc::new(engine::vfs::Vfs::new(overlay)),
+        )?;
         Ok(Self {
             index,
             di: OnceLock::new(),
@@ -178,45 +197,56 @@ impl Magento {
         })
     }
 
+    /// Locate the Magento root for an arbitrary path inside (or beside) an installation:
+    /// the directory itself, then each ancestor, then — for monorepos that keep the shop
+    /// in a subdirectory — each direct child, in name order so the answer is
+    /// deterministic. A directory is a root iff `app/etc/config.php` exists, the same
+    /// probe [`open`](Magento::open) requires. Editor frontends get handed workspace
+    /// folders, not roots; the CLI's `--root` stays exact.
+    pub fn find_root(start: impl AsRef<Path>) -> Option<PathBuf> {
+        let start = start.as_ref();
+        let is_root = |dir: &Path| dir.join("app/etc/config.php").is_file();
+        for dir in start.ancestors() {
+            if is_root(dir) {
+                return Some(dir.to_path_buf());
+            }
+        }
+        let mut children: Vec<PathBuf> = std::fs::read_dir(start)
+            .ok()?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        children.sort();
+        children.into_iter().find(|child| is_root(child))
+    }
+
+    /// [`find_root`](Magento::find_root) + [`open`](Magento::open): open the installation
+    /// that contains `start`. `Error::NotMagentoRoot` when neither `start`, an ancestor,
+    /// nor a direct child is a Magento root.
+    pub fn discover(start: impl AsRef<Path>) -> Result<Self> {
+        let start = start.as_ref();
+        let root = Self::find_root(start).ok_or_else(|| Error::NotMagentoRoot {
+            path: start.to_path_buf(),
+        })?;
+        Self::open(root)
+    }
+
     /// The merged DI config, built (and its diagnostics collected) on first DI query.
-    fn di_index(&self) -> &di::DiIndex {
+    fn di_index(&self) -> &engine::di::DiIndex {
         &self
             .di
             .get_or_init(|| {
                 let mut diagnostics = Vec::new();
-                let index = di::build(&self.index.root, &self.index.modules, &mut diagnostics);
+                let index = engine::di::build(
+                    &self.index.root,
+                    &self.index.modules,
+                    &self.index.vfs,
+                    &mut diagnostics,
+                );
                 DiBuilt { index, diagnostics }
             })
             .index
-    }
-
-    /// Non-fatal problems found while indexing. Includes di.xml parse problems once the DI
-    /// index has been built (i.e. after a DI query); call after running a DI command to see
-    /// them all.
-    pub fn diagnostics(&self) -> Vec<Diagnostic> {
-        let mut all = self.index.diagnostics.clone();
-        if let Some(di) = self.di.get() {
-            all.extend(di.diagnostics.iter().cloned());
-        }
-        all
-    }
-
-    /// All modules, in `config.php` load order.
-    pub fn modules(&self) -> &[Module] {
-        &self.index.modules
-    }
-
-    /// Consistency between the modules on disk and those listed in `config.php`. A
-    /// non-clean result usually means `bin/magento setup:upgrade` was not run.
-    pub fn module_check(&self) -> &ModuleCheck {
-        &self.index.check
-    }
-
-    /// The source file a class name resolves to via the install's autoload
-    /// maps (PSR-4/PSR-0, vendor + app/code + root composer.json), if it
-    /// exists on disk. No PHP parsing happens — pure path math + stat.
-    pub fn class_file(&self, class: &ClassName) -> Option<std::path::PathBuf> {
-        self.index.resolver.file_for(class)
     }
 
     /// Library component paths (magento2-library composer packages — what
@@ -268,689 +298,86 @@ impl Magento {
     /// (the read-side query API stays on the fixed seven areas).
     pub fn di_export_custom_area(&self, code: &str) -> DiExport {
         let base = self.di_index().config(Area::Global).clone();
-        di::merge_custom_area(&self.index.modules, code, base).export(Area::Global)
+        engine::di::merge_custom_area(&self.index.modules, code, base).export(Area::Global)
     }
 
     /// Like [`di_export_custom_area`](Self::di_export_custom_area) but the area's
     /// OWN overlay files only (no global base) — the per-scope config the
     /// compiled plugin lists read for a custom area.
     pub fn di_export_custom_area_overlay(&self, code: &str) -> DiExport {
-        di::merge_custom_area(&self.index.modules, code, di::AreaConfig::default())
+        engine::di::merge_custom_area(&self.index.modules, code, engine::di::AreaConfig::default())
             .export(Area::Global)
     }
 
-    /// The concrete type Magento instantiates for `class` in `area`, with the full
-    /// preference chain. If no preference applies, the class is its own concrete type
-    /// (empty chain) — matching Magento, which instantiates the requested class directly.
-    pub fn preference(&self, class: &ClassName, area: Area) -> Result<Preference> {
-        let cfg = self.di_index().config(area);
-        let mut current = class.clone();
-        let mut chain = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-
-        // Follow `for -> type` redirects to a fixpoint, guarding against cycles.
-        while seen.insert(current.clone()) {
-            match cfg.preferences.get(&current) {
-                Some(located) => {
-                    let to = located.value.clone();
-                    chain.push(PreferenceStep {
-                        from: current.clone(),
-                        to: to.clone(),
-                        source: located.source.clone(),
-                    });
-                    if to == current {
-                        break;
-                    }
-                    current = to;
-                }
-                None => break,
-            }
+    /// Non-fatal problems found while indexing. Includes di.xml parse problems once the DI
+    /// index has been built (i.e. after a DI query); call after running a DI command to see
+    /// them all.
+    pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        let mut all = self.index.diagnostics.clone();
+        if let Some(di) = self.di.get() {
+            all.extend(di.diagnostics.iter().cloned());
         }
-
-        // With no preference, the class is its own concrete type — but only if it actually
-        // exists. Otherwise the user gave a name that resolves to nothing; say so.
-        if chain.is_empty() && !self.class_known(class, area) {
-            return Err(Error::ClassNotFound(class.clone()));
-        }
-
-        Ok(Preference { requested: class.clone(), concrete: current, chain, area })
+        all
     }
 
-    /// Whether `class` is something we can see: a real source file (PSR-4), a virtualType,
-    /// or a type referenced by DI config. Used to distinguish a real concrete class from a
-    /// name that resolves to nothing. Checks the area's config plus the global base.
-    fn class_known(&self, class: &ClassName, area: Area) -> bool {
-        if self.index.resolver.exists(class) {
-            return true;
-        }
-        let referenced = |cfg: &di::AreaConfig| {
-            cfg.virtual_types.contains_key(class) || cfg.plugins.contains_key(class)
-        };
-        referenced(self.di_index().config(area)) || referenced(self.di_index().config(Area::Global))
+    /// The installation root this handle was opened on.
+    pub fn root(&self) -> &Path {
+        &self.index.root
     }
 
-    /// Plugins that fire on `class` in `area`, in execution order. The preference is
-    /// resolved first, then plugins are collected from the concrete type **and every
-    /// ancestor/interface** — so plugins declared on an interface or parent are included
-    /// (each tagged with `declared_on`). Disabled plugins are included but flagged.
-    ///
-    /// A plugin *name* is unique across the resolved type's hierarchy: if the same name is
-    /// declared on both the concrete class and an ancestor, the nearest one wins (Magento
-    /// merges by name). Order is Magento's: ascending `sort_order`, ties broken by
-    /// declaration order (module load order, then position in file) — not by name.
-    pub fn plugins(&self, class: &ClassName, area: Area) -> Result<Vec<Plugin>> {
-        let concrete = self.preference(class, area)?.concrete;
-        let targets = self.plugin_targets(&concrete);
-        let mut collected = self.collect_plugins(area, &targets);
-        // Execution order: sort_order, then declaration order (load order, then line).
-        collected.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(collected.into_iter().map(|(_, p)| p).collect())
+    /// A source file's content as this handle sees it: the overlay's version for paths
+    /// opened via [`open_with_overlay`](Magento::open_with_overlay), disk otherwise.
+    /// Frontends read files through this so their answers match the index.
+    pub fn read_source(&self, path: &Path) -> std::io::Result<String> {
+        self.index.vfs.read_to_string(path)
     }
 
-    /// Plugins across **all areas**, merged into one set: each plugin appears once, tagged
-    /// (via its `source.area`) with where it's declared — `base` (global) or a specific
-    /// area. Base plugins win a name clash over an area override. Ordered like `plugins()`.
-    /// Targets are taken from the global concrete (preference rarely differs per area).
-    pub fn plugins_all_areas(&self, class: &ClassName) -> Result<Vec<Plugin>> {
-        let concrete = self.preference(class, Area::Global)?.concrete;
-        let targets = self.plugin_targets(&concrete);
-
-        use std::collections::{BTreeSet, HashMap};
-        let mut best: HashMap<String, ((i32, (u8, u32, u32)), Plugin)> = HashMap::new();
-        // Every area a given plugin name is declared in (across the merge).
-        let mut areas_of: HashMap<String, BTreeSet<Area>> = HashMap::new();
-        for area in Area::ALL {
-            for (key, plugin) in self.collect_plugins(area, &targets) {
-                areas_of.entry(plugin.name.clone()).or_default().insert(plugin.source.area);
-                match best.get(&plugin.name) {
-                    // Keep the lowest area_rank (base, rank 0) over an area overlay (rank 1).
-                    Some((bk, _)) if bk.1 .0 <= key.1 .0 => {}
-                    _ => {
-                        best.insert(plugin.name.clone(), (key, plugin));
-                    }
-                }
-            }
-        }
-        let mut v: Vec<_> = best.into_values().collect();
-        for (_, p) in &mut v {
-            p.areas = areas_of[&p.name].iter().copied().collect();
-        }
-        v.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(v.into_iter().map(|(_, p)| p).collect())
+    /// The on-disk PHP file `class` resolves to via the composer PSR-4/PSR-0 maps (plus
+    /// the app/code naming convention), if it exists. The jump-to-source primitive for
+    /// editor frontends. `None` for PHP built-ins, generated code that hasn't been
+    /// generated, and virtual types.
+    pub fn class_file(&self, class: &ClassName) -> Option<PathBuf> {
+        self.index.resolver.file_for(class)
     }
 
-    /// The concrete type plus its ancestors/interfaces — the set of types whose plugins
-    /// apply to the concrete.
-    fn plugin_targets(&self, concrete: &ClassName) -> Vec<ClassName> {
-        let mut targets = vec![concrete.clone()];
-        targets.extend(self.index.resolver.ancestors(concrete));
-        targets
+    /// Glob patterns (relative to [`root`](Magento::root), LSP watcher semantics: `**`
+    /// matches zero or more path segments) of the files the index is computed from. A
+    /// change to a matching file invalidates an open handle; there is no in-place refresh
+    /// — a full [`open`](Magento::open) is the rebuild (~tens of ms warm, by design). One
+    /// canonical list so every long-lived frontend registers the same watches.
+    pub fn watch_globs() -> &'static [&'static str] {
+        &[
+            // Class headers, patches, EAV setup calls, console command names, and
+            // config.php/env.php/registration.php — PHP is parsed on demand, so any .php
+            // edit can change an answer (extends, plugin methods, addAttribute, …).
+            "**/*.php",
+            // Every module + primary config file (di, events, routes, webapi, acl, menu,
+            // system, db_schema, crontab, widget, indexer, mview, queue_*, config.xml).
+            "**/etc/**/*.xml",
+            "**/etc/*.graphqls",
+            // Package metadata: module discovery + the PSR-4 maps.
+            "vendor/composer/installed.json",
+            // Frontend indexes: layout, ui components, module email templates.
+            "**/view/**/*.xml",
+            "**/view/**/email/**",
+            // Themes (layout/email/i18n overrides live outside view/).
+            "app/design/**",
+            // Translations.
+            "**/i18n/*.csv",
+            // Templates: create/delete changes the template catalog and override chains.
+            "**/*.phtml",
+        ]
     }
 
-    /// Collect plugins for `targets` in one area, keyed sort-order + declaration order.
-    /// Dedups by name nearest-target-first (concrete wins over an ancestor).
-    fn collect_plugins(
-        &self,
-        area: Area,
-        targets: &[ClassName],
-    ) -> Vec<((i32, (u8, u32, u32)), Plugin)> {
-        let cfg = self.di_index().config(area);
-        let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for target in targets {
-            let Some(by_name) = cfg.plugins.get(target) else { continue };
-            for (name, lp) in by_name {
-                if !seen.insert(name.clone()) {
-                    continue;
-                }
-                let Some(plugin_class) = lp.class.clone() else { continue };
-                let methods = self.index.resolver.plugin_methods(&plugin_class);
-                out.push((
-                    (lp.sort_order, lp.order_key),
-                    Plugin {
-                        name: name.clone(),
-                        class: plugin_class,
-                        sort_order: lp.sort_order,
-                        methods,
-                        declared_on: target.clone(),
-                        disabled: lp.disabled.unwrap_or(false),
-                        areas: vec![lp.source.area],
-                        source: lp.source.clone(),
-                    },
-                ));
-            }
-        }
-        out
+    /// All modules, in `config.php` load order.
+    pub fn modules(&self) -> &[Module] {
+        &self.index.modules
     }
 
-    /// The interceptor execution chain (the "onion") for each method intercepted on `class`
-    /// in `area`: before plugins (ascending `sort_order`), around plugins nested
-    /// (ascending = outer), the target method, then around unwinding and after plugins
-    /// (descending). Disabled plugins are excluded (they don't run). `only` restricts to a
-    /// single method name.
-    ///
-    /// Note: this is the standard onion. Magento's exact segmentation when `around` plugins
-    /// interleave with the before/after of *other* plugins across sort orders is simplified
-    /// here (all befores, then all arounds, etc.) — accurate for the common case.
-    pub fn plugin_chains(
-        &self,
-        class: &ClassName,
-        area: Area,
-        only: Option<&str>,
-    ) -> Result<Vec<MethodChain>> {
-        Ok(chains_from(&self.plugins(class, area)?, only))
-    }
-
-    /// Like [`plugin_chains`](Magento::plugin_chains) but over the merged all-areas plugin
-    /// set (see [`plugins_all_areas`](Magento::plugins_all_areas)) — one onion per method
-    /// showing every plugin that can intercept it across areas, each tagged by its area.
-    pub fn plugin_chains_all_areas(
-        &self,
-        class: &ClassName,
-        only: Option<&str>,
-    ) -> Result<Vec<MethodChain>> {
-        Ok(chains_from(&self.plugins_all_areas(class)?, only))
-    }
-
-    /// Observers bound to `event` in `area`.
-    pub fn observers(&self, event: &EventName, area: Area) -> Vec<Observer> {
-        self.events_index().observers(event, area)
-    }
-
-    /// All events in `area` with their observer counts.
-    pub fn events(&self, area: Area) -> Vec<(EventName, usize)> {
-        self.events_index().events(area)
-    }
-
-    /// Cron jobs, optionally restricted to one group.
-    pub fn cron_jobs(&self, group: Option<&str>, include_db: bool) -> Result<CronJobs> {
-        let mut jobs =
-            self.cron.get_or_init(|| breadth::CronIndex::build(&self.index.modules)).jobs(group);
-        let mut orphaned_codes = Vec::new();
-        if include_db {
-            orphaned_codes = self.attach_cron_live(&mut jobs)?;
-            if group.is_some() {
-                // Orphans can't be attributed to a group — only meaningful unfiltered.
-                orphaned_codes.clear();
-            }
-        }
-        Ok(CronJobs { jobs, orphaned_codes })
-    }
-
-    /// A job's recent `cron_schedule` rows (runs, errors, misses — not future pendings),
-    /// newest first.
-    #[cfg(feature = "db")]
-    pub fn cron_history(&self, job_code: &str, limit: usize) -> Result<Vec<CronRun>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let rows = db::fetch_cron_history(conn, &cfg.table_prefix, job_code, limit)
-            .map_err(Error::Db)?;
-        Ok(rows
-            .into_iter()
-            .map(|(status, scheduled_at, executed_at, finished_at, duration_secs, messages)| {
-                CronRun {
-                    status,
-                    scheduled_at,
-                    executed_at,
-                    finished_at,
-                    duration_secs,
-                    messages: messages.filter(|m| !m.is_empty()),
-                }
-            })
-            .collect())
-    }
-
-    /// Overlay `cron_schedule` stats onto the job list; returns the job codes present in
-    /// the table that no crontab.xml defines (removed modules' leftover schedules).
-    #[cfg(feature = "db")]
-    fn attach_cron_live(&self, jobs: &mut [CronJob]) -> Result<Vec<String>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let stats = db::fetch_cron_stats(conn, &cfg.table_prefix).map_err(Error::Db)?;
-        for job in jobs.iter_mut() {
-            let s = stats.iter().find(|s| s.job_code == job.name);
-            job.live = Some(match s {
-                Some(s) => CronJobLive {
-                    last_status: s.last_status.clone(),
-                    last_run: s.last_run.clone(),
-                    last_run_secs: s.last_run_secs,
-                    last_duration_secs: s.last_duration_secs,
-                    last_error: s.last_error.clone(),
-                    next_scheduled: s.next_scheduled.clone(),
-                    pending: s.pending,
-                    running: s.running,
-                    success: s.success,
-                    error: s.error,
-                    missed: s.missed,
-                },
-                None => CronJobLive {
-                    last_status: None,
-                    last_run: None,
-                    last_run_secs: None,
-                    last_duration_secs: None,
-                    last_error: None,
-                    next_scheduled: None,
-                    pending: 0,
-                    running: 0,
-                    success: 0,
-                    error: 0,
-                    missed: 0,
-                },
-            });
-        }
-        let known: std::collections::HashSet<&str> =
-            jobs.iter().map(|j| j.name.as_str()).collect();
-        let mut orphans: Vec<String> = stats
-            .iter()
-            .filter(|s| !known.contains(s.job_code.as_str()))
-            .map(|s| s.job_code.clone())
-            .collect();
-        orphans.sort();
-        Ok(orphans)
-    }
-
-    #[cfg(not(feature = "db"))]
-    fn attach_cron_live(&self, _jobs: &mut [CronJob]) -> Result<Vec<String>> {
-        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
-    }
-
-    /// Frontend/adminhtml routes (frontName → modules) in `area`.
-    pub fn routes(&self, area: Area) -> Vec<Route> {
-        self.routes.get_or_init(|| breadth::RouteIndex::build(&self.index.modules)).routes(area)
-    }
-
-    /// REST endpoints from `webapi.xml`, optionally filtered by a URL substring.
-    pub fn webapi(&self, url_filter: Option<&str>) -> Vec<WebapiRoute> {
-        self.webapi.get_or_init(|| breadth::WebapiIndex::build(&self.index.modules)).routes(url_filter)
-    }
-
-    fn schema_index(&self) -> &breadth::SchemaIndex {
-        self.schema.get_or_init(|| breadth::SchemaIndex::build(&self.index.modules))
-    }
-
-    /// Database tables from declarative `db_schema.xml`, merged across modules in load order
-    /// (a module can add columns/indexes/constraints to another's table; `disabled="true"`
-    /// drops them). Static — no DB needed. Filtered by a table-name substring, sorted by name.
-    pub fn schema(&self, name_filter: Option<&str>) -> Vec<DbTable> {
-        self.schema_index().tables(name_filter)
-    }
-
-    /// One table by exact name, with its full column/index/constraint set and provenance.
-    pub fn table(&self, name: &str) -> Option<DbTable> {
-        self.schema_index().table(name)
-    }
-
-    /// Presence-level drift between the declared schema (`db_schema.xml`) and the live
-    /// database: tables/columns declared but missing live (what `setup:upgrade` would
-    /// create) and live-but-undeclared ones (legacy install scripts, non-declarative
-    /// modules). Runtime-managed tables — mview `*_cl` changelogs, `sequence_*`, and the
-    /// setup framework's own bookkeeping — are excluded from the undeclared side and
-    /// counted instead. Requires the `db` feature and a reachable database.
-    pub fn schema_drift(&self) -> Result<SchemaDrift> {
-        let live = self.fetch_live_schema()?;
-        let declared = self.schema_index().tables(None);
-        let whitelist = self.schema_whitelist();
-
-        let mut drift = SchemaDrift {
-            missing_tables: Vec::new(),
-            missing_columns: Vec::new(),
-            would_drop_tables: Vec::new(),
-            would_drop_columns: Vec::new(),
-            not_whitelisted_tables: Vec::new(),
-            not_whitelisted_columns: Vec::new(),
-            undeclared_tables: Vec::new(),
-            undeclared_columns: Vec::new(),
-            runtime_tables_skipped: 0,
-        };
-
-        let declared_names: std::collections::HashSet<&str> =
-            declared.iter().map(|t| t.name.as_str()).collect();
-        let wl_cols = |table: &str| whitelist.get(table);
-
-        for t in &declared {
-            // Declared elements must be whitelisted, or their future removal is inert.
-            match wl_cols(&t.name) {
-                None => drift.not_whitelisted_tables.push(t.name.clone()),
-                Some(wl) => {
-                    for c in &t.columns {
-                        if !wl.contains(c.name.as_str()) {
-                            drift.not_whitelisted_columns.push(TableColumn {
-                                table: t.name.clone(),
-                                column: c.name.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-            match live.get(&t.name) {
-                None => drift.missing_tables.push(t.name.clone()),
-                Some(live_cols) => {
-                    let live_set: std::collections::HashSet<&str> =
-                        live_cols.iter().map(String::as_str).collect();
-                    for c in &t.columns {
-                        if !live_set.contains(c.name.as_str()) {
-                            drift.missing_columns.push(TableColumn {
-                                table: t.name.clone(),
-                                column: c.name.clone(),
-                            });
-                        }
-                    }
-                    let declared_cols: std::collections::HashSet<&str> =
-                        t.columns.iter().map(|c| c.name.as_str()).collect();
-                    for c in live_cols {
-                        if declared_cols.contains(c.as_str()) {
-                            continue;
-                        }
-                        // Whitelisted = the declarative system owns it; no longer
-                        // declared + still live means setup:upgrade would drop it.
-                        if wl_cols(&t.name).is_some_and(|wl| wl.contains(c.as_str())) {
-                            drift.would_drop_columns.push(TableColumn {
-                                table: t.name.clone(),
-                                column: c.clone(),
-                            });
-                        } else {
-                            drift.undeclared_columns.push(TableColumn {
-                                table: t.name.clone(),
-                                column: c.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        for name in live.keys() {
-            if declared_names.contains(name.as_str()) {
-                continue;
-            }
-            // Runtime/bookkeeping tables first: Magento's declarative diff ignores these
-            // even when a whitelist names them (MSI's whitelists infamously include
-            // patch_list — it still never gets dropped).
-            if is_runtime_table(name) {
-                drift.runtime_tables_skipped += 1;
-            } else if whitelist.contains_key(name.as_str()) {
-                drift.would_drop_tables.push(name.clone());
-            } else {
-                drift.undeclared_tables.push(name.clone());
-            }
-        }
-
-        drift.missing_tables.sort();
-        drift.would_drop_tables.sort();
-        drift.not_whitelisted_tables.sort();
-        drift.undeclared_tables.sort();
-        for v in [
-            &mut drift.missing_columns,
-            &mut drift.would_drop_columns,
-            &mut drift.not_whitelisted_columns,
-            &mut drift.undeclared_columns,
-        ] {
-            v.sort_by(|a, b| (&a.table, &a.column).cmp(&(&b.table, &b.column)));
-        }
-        Ok(drift)
-    }
-
-    /// The union of every enabled module's `etc/db_schema_whitelist.json`: table → the
-    /// column names the declarative system is allowed to manage (drop/alter). Generated
-    /// by `setup:db-declaration:generate-whitelist`, one file per module.
-    fn schema_whitelist(
-        &self,
-    ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
-        let mut out: std::collections::HashMap<String, std::collections::HashSet<String>> =
-            std::collections::HashMap::new();
-        for m in self.index.modules.iter().filter(|m| m.enabled) {
-            let Ok(text) = std::fs::read_to_string(m.path.join("etc/db_schema_whitelist.json"))
-            else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
-            let Some(tables) = value.as_object() else { continue };
-            for (table, entry) in tables {
-                let cols = out.entry(table.clone()).or_default();
-                if let Some(columns) = entry.get("column").and_then(|c| c.as_object()) {
-                    cols.extend(columns.keys().cloned());
-                }
-            }
-        }
-        out
-    }
-
-    #[cfg(feature = "db")]
-    fn fetch_live_schema(&self) -> Result<std::collections::HashMap<String, Vec<String>>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        db::fetch_live_schema(conn, &cfg.table_prefix).map_err(Error::Db)
-    }
-
-    #[cfg(not(feature = "db"))]
-    fn fetch_live_schema(&self) -> Result<std::collections::HashMap<String, Vec<String>>> {
-        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
-    }
-
-    /// Admin configuration fields from `adminhtml/system.xml` (where each `Stores →
-    /// Configuration` setting lives: tab → section → group → field, its scopes and models),
-    /// merged across modules. Static. Filtered by a config-path or label substring, sorted by
-    /// path.
-    pub fn system_config(&self, filter: Option<&str>) -> Vec<SystemField> {
-        self.system_config
-            .get_or_init(|| breadth::SystemConfigIndex::build(&self.index.modules))
-            .fields(filter)
-    }
-
-    fn acl_index(&self) -> &breadth::AclIndex {
-        self.acl.get_or_init(|| breadth::AclIndex::build(&self.index.modules))
-    }
-
-    /// Admin ACL resources from `acl.xml`, merged across modules in load order (a module can
-    /// attach resources under another's). Static. No filter → the whole tree in pre-order; a
-    /// filter → resources whose id or title contains it. These are the ids `webapi` and
-    /// `system-config` cite as required `<resource>`s.
-    pub fn acl(&self, filter: Option<&str>) -> Vec<AclResource> {
-        self.acl_index().resources(filter)
-    }
-
-    /// One ACL resource by exact id, with its parent and direct-child ids.
-    pub fn acl_resource(&self, id: &str) -> Option<AclResource> {
-        self.acl_index().resource(id)
-    }
-
-    /// The breadcrumb for an ACL resource: ancestors from the root down to (excluding) `id`.
-    pub fn acl_ancestors(&self, id: &str) -> Vec<AclResource> {
-        self.acl_index().ancestors(id)
-    }
-
-    /// The direct children of an ACL resource — the sub-permissions it groups.
-    pub fn acl_children(&self, id: &str) -> Vec<AclResource> {
-        self.acl_index().children(id)
-    }
-
-    /// Reverse DI — everything the merged di.xml config wires *to* `class` (which may
-    /// itself be a virtual type): the types whose preference resolves to it, the virtual
-    /// types built on it, and every constructor argument (incl. nested array items) that
-    /// injects it — as the class itself, its generated `\Proxy`, or its name as a string
-    /// (factory/pool style). di.xml facts only: plain constructor type-hints resolved by
-    /// autowiring have no di.xml declaration and aren't listed.
-    ///
-    /// With `area: None`, scans the global config plus each area's **own** declarations
-    /// (facts inherited from global aren't repeated per area) — a merged all-areas view;
-    /// each hit's `source.area` says where it was declared. With `Some(area)`, scans that
-    /// area's fully merged config.
-    pub fn uses(&self, class: &ClassName, area: Option<Area>) -> Result<Uses> {
-        let mut uses = Uses {
-            class: class.clone(),
-            preferred_for: Vec::new(),
-            virtual_types: Vec::new(),
-            injections: Vec::new(),
-        };
-        match area {
-            Some(a) => self.scan_uses(a, class, None, &mut uses),
-            None => {
-                self.scan_uses(Area::Global, class, None, &mut uses);
-                for &a in Area::ALL.iter().filter(|&&a| a != Area::Global) {
-                    self.scan_uses(a, class, Some(a), &mut uses);
-                }
-            }
-        }
-        uses.preferred_for.sort_by(|a, b| a.name.cmp(&b.name));
-        uses.virtual_types.sort_by(|a, b| a.name.cmp(&b.name));
-        uses.injections.sort_by(|a, b| {
-            a.consumer
-                .cmp(&b.consumer)
-                .then_with(|| a.argument.cmp(&b.argument))
-                .then_with(|| a.item_path.cmp(&b.item_path))
-        });
-
-        // No references at all: fine for a real class ("unused"), an error for a typo.
-        if uses.preferred_for.is_empty()
-            && uses.virtual_types.is_empty()
-            && uses.injections.is_empty()
-            && !self.class_known(class, area.unwrap_or(Area::Global))
-        {
-            return Err(Error::ClassNotFound(class.clone()));
-        }
-        Ok(uses)
-    }
-
-    /// Scan one area's merged config for references to `class`. `declared_in` restricts
-    /// hits to declarations made in that area's own files (used by the merged view to
-    /// avoid repeating global-inherited facts per area).
-    fn scan_uses(&self, area: Area, class: &ClassName, declared_in: Option<Area>, out: &mut Uses) {
-        let cfg = self.di_index().config(area);
-        let keep = |s: &Source| declared_in.is_none_or(|a| s.area == a);
-        let proxy = ClassName::new(format!("{}\\Proxy", class.as_str()));
-
-        for (for_, located) in &cfg.preferences {
-            if located.value == *class && keep(&located.source) {
-                out.preferred_for.push(UseRef { name: for_.clone(), source: located.source.clone() });
-            }
-        }
-        for (name, vt) in &cfg.virtual_types {
-            if vt.value == *class && keep(&vt.source) {
-                out.virtual_types.push(UseRef { name: name.clone(), source: vt.source.clone() });
-            }
-        }
-        for (consumer, args) in &cfg.type_args {
-            let consumer_is_virtual = cfg.virtual_types.contains_key(consumer);
-            for (arg_name, la) in args {
-                scan_arg_for_class(
-                    &la.value,
-                    &la.source,
-                    &mut Vec::new(),
-                    &UseScan { class, proxy: &proxy, consumer, consumer_is_virtual, argument: arg_name, keep: &keep },
-                    &mut out.injections,
-                );
-            }
-        }
-    }
-
-    /// Console commands modules register on `CommandListInterface`'s `commands` array
-    /// argument in di.xml — what `bin/magento` picks up. Each command's actual CLI name and
-    /// description are extracted from its class (never executed). Optionally filtered by a
-    /// case-insensitive substring of the name, class, or di.xml item key; sorted by command
-    /// name (unknown names last, by class).
-    pub fn console_commands(&self, filter: Option<&str>) -> Vec<ConsoleCommand> {
-        let iface = ClassName::new("Magento\\Framework\\Console\\CommandListInterface");
-        // The preference (app/etc/di.xml) points at the concrete CommandList; `args_of`
-        // then merges arguments declared on the concrete AND — via the ancestor walk — on
-        // the interface, because modules register on either.
-        let concrete = match self.preference(&iface, Area::Global) {
-            Ok(p) => p.concrete,
-            Err(_) => iface,
-        };
-        let args = self.args_of(&concrete, Area::Global, &mut std::collections::HashSet::new());
-        let Some((ArgValue::Array(items), _)) = args.get("commands") else {
-            return Vec::new();
-        };
-
-        let needle = filter.map(str::to_lowercase);
-        let mut out: Vec<ConsoleCommand> = items
-            .iter()
-            .filter_map(|item| {
-                let ArgValue::Object(obj) = &item.value else { return None };
-                let class = &obj.class;
-                let (name, description) = self.index.resolver.command_info(class);
-                let cmd = ConsoleCommand {
-                    name,
-                    description,
-                    item_key: item.key.clone(),
-                    class: class.clone(),
-                    source: item.source.clone(),
-                };
-                match &needle {
-                    Some(n)
-                        if !cmd.name.as_deref().unwrap_or("").to_lowercase().contains(n)
-                            && !cmd.class.as_str().to_lowercase().contains(n)
-                            && !cmd.item_key.to_lowercase().contains(n) =>
-                    {
-                        None
-                    }
-                    _ => Some(cmd),
-                }
-            })
-            .collect();
-        out.sort_by(|a, b| match (&a.name, &b.name) {
-            (Some(x), Some(y)) => x.cmp(y),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.class.cmp(&b.class),
-        });
-        out
-    }
-
-    fn indexer_index(&self) -> &breadth::IndexerIndex {
-        self.indexers.get_or_init(|| breadth::IndexerIndex::build(&self.index.modules))
-    }
-
-    /// Indexers from `indexer.xml`, each joined (on `view_id`) with its `mview.xml` view —
-    /// definition, dependencies, and the tables whose changes feed it. Static by default;
-    /// with `include_db` each gets its live [`IndexerLive`] state (`indexer_state` +
-    /// `mview_state` + changelog backlog; clean [`Error::Db`] when unreachable). Filtered
-    /// by an id/title substring, sorted by id.
-    pub fn indexers(&self, filter: Option<&str>, include_db: bool) -> Result<Vec<Indexer>> {
-        let mut list = self.indexer_index().indexers(filter);
-        if include_db {
-            self.attach_indexer_live(&mut list)?;
-        }
-        Ok(list)
-    }
-
-    /// One indexer by exact id, with its full subscription list (and live state with
-    /// `include_db`).
-    pub fn indexer(&self, id: &str, include_db: bool) -> Result<Option<Indexer>> {
-        let Some(ix) = self.indexer_index().indexer(id) else { return Ok(None) };
-        let mut list = vec![ix];
-        if include_db {
-            self.attach_indexer_live(&mut list)?;
-        }
-        Ok(list.pop())
-    }
-
-    #[cfg(feature = "db")]
-    fn attach_indexer_live(&self, list: &mut [Indexer]) -> Result<()> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (states, views) =
-            db::fetch_indexer_states(conn, &cfg.table_prefix).map_err(Error::Db)?;
-        for ix in list {
-            let state = states.iter().find(|s| s.indexer_id == ix.id);
-            let view = ix
-                .view_id
-                .as_deref()
-                .and_then(|v| views.iter().find(|m| m.view_id == v));
-            ix.live = Some(IndexerLive {
-                status: state.map(|s| s.status.clone()),
-                updated: state.and_then(|s| s.updated.clone()),
-                by_schedule: view.map(|v| v.mode == "enabled"),
-                view_status: view.map(|v| v.status.clone()),
-                backlog: view.and_then(|v| v.backlog),
-            });
-        }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "db"))]
-    fn attach_indexer_live(&self, _list: &mut [Indexer]) -> Result<()> {
-        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
+    /// Consistency between the modules on disk and those listed in `config.php`. A
+    /// non-clean result usually means `bin/magento setup:upgrade` was not run.
+    pub fn module_check(&self) -> &ModuleCheck {
+        &self.index.check
     }
 
     /// Setup patches: every `Setup/Patch/Data|Schema` class of the enabled modules (the
@@ -1047,1060 +474,6 @@ impl Magento {
         Ok(Patches { patches, orphaned_applied })
     }
 
-    /// One product by exact SKU, as the database stores it. Live DB.
-    #[cfg(feature = "db")]
-    pub fn product_by_sku(&self, sku: &str) -> Result<Option<Product>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_product(conn, &cfg.table_prefix, db::ProductIdent::Sku(sku))
-            .map_err(Error::Db)?;
-        Ok(raw.map(|r| to_product(r, false)))
-    }
-
-    /// One product by entity_id (`matched_by_id` is set on the result).
-    #[cfg(feature = "db")]
-    pub fn product_by_id(&self, id: u32) -> Result<Option<Product>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_product(conn, &cfg.table_prefix, db::ProductIdent::Id(id))
-            .map_err(Error::Db)?;
-        Ok(raw.map(|r| to_product(r, true)))
-    }
-
-    /// A product's related / up-sell / cross-sell links by SKU. `reverse` flips to
-    /// the products that link *to* this one. Live DB.
-    #[cfg(feature = "db")]
-    pub fn product_links_by_sku(&self, sku: &str, reverse: bool) -> Result<Option<ProductLinks>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw =
-            db::fetch_product_links(conn, &cfg.table_prefix, db::ProductIdent::Sku(sku), reverse)
-                .map_err(Error::Db)?;
-        Ok(raw.map(|r| to_product_links(r, false)))
-    }
-
-    /// A product's links by entity_id (`matched_by_id` is set on the result). Live DB.
-    #[cfg(feature = "db")]
-    pub fn product_links_by_id(&self, id: u32, reverse: bool) -> Result<Option<ProductLinks>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw =
-            db::fetch_product_links(conn, &cfg.table_prefix, db::ProductIdent::Id(id), reverse)
-                .map_err(Error::Db)?;
-        Ok(raw.map(|r| to_product_links(r, true)))
-    }
-
-    /// The category tree, pre-order flattened (`level` 1 = a root tree), each root
-    /// tagged with the store groups using it. Live DB.
-    #[cfg(feature = "db")]
-    pub fn category_tree(&self) -> Result<Vec<CategoryTreeNode>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (nodes, roots) =
-            db::fetch_category_nodes(conn, &cfg.table_prefix).map_err(Error::Db)?;
-
-        let mut by_parent: std::collections::BTreeMap<u32, Vec<&db::DbCategoryNode>> =
-            std::collections::BTreeMap::new();
-        for n in &nodes {
-            by_parent.entry(n.parent_id).or_default().push(n);
-        }
-        for children in by_parent.values_mut() {
-            children.sort_by_key(|n| (n.position, n.id));
-        }
-        let to_node = |n: &db::DbCategoryNode| CategoryTreeNode {
-            id: n.id,
-            name: n.name.clone().unwrap_or_else(|| format!("(category {})", n.id)),
-            level: n.level,
-            direct_products: n.direct_products,
-            active: n.active,
-            in_menu: n.in_menu,
-            anchor: n.anchor,
-            root_of: roots
-                .iter()
-                .filter(|(root, _)| *root == n.id)
-                .map(|(_, g)| g.clone())
-                .collect(),
-        };
-        // Pre-order DFS from the roots (children of the global root, id 1),
-        // cycle-guarded by a visited set.
-        let mut out = Vec::with_capacity(nodes.len());
-        let mut seen = std::collections::HashSet::new();
-        let mut stack: Vec<&db::DbCategoryNode> = by_parent
-            .get(&1)
-            .map(|roots| roots.iter().rev().copied().collect())
-            .unwrap_or_default();
-        while let Some(n) = stack.pop() {
-            if !seen.insert(n.id) {
-                continue;
-            }
-            out.push(to_node(n));
-            if let Some(children) = by_parent.get(&n.id) {
-                stack.extend(children.iter().rev());
-            }
-        }
-        Ok(out)
-    }
-
-    /// Categories whose name or url_key contains `needle` (case-insensitive). Live DB.
-    #[cfg(feature = "db")]
-    pub fn categories_like(&self, needle: &str) -> Result<Vec<CategoryHit>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (nodes, _) = db::fetch_category_nodes(conn, &cfg.table_prefix).map_err(Error::Db)?;
-        let n = needle.to_lowercase();
-        let mut hits: Vec<CategoryHit> = nodes
-            .into_iter()
-            .filter(|c| {
-                c.name.as_deref().is_some_and(|x| x.to_lowercase().contains(&n))
-                    || c.url_key.as_deref().is_some_and(|x| x.to_lowercase().contains(&n))
-            })
-            .map(|c| CategoryHit {
-                id: c.id,
-                name: c.name.unwrap_or_else(|| format!("(category {})", c.id)),
-                url_key: c.url_key,
-                level: c.level,
-                active: c.active,
-            })
-            .collect();
-        hits.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
-        Ok(hits)
-    }
-
-    /// One category by id: per-scope values, the visibility diagnosis (own scopes + the
-    /// ancestor walk), direct vs indexed product counts, rewrites. `include_products`
-    /// lists the direct assignments; `indexed_store` (`Some(None)` = the first store
-    /// view, `Some(Some(code))` = that store) lists the store's *index* — what the
-    /// storefront shows, anchor-inherited included. Live DB.
-    #[cfg(feature = "db")]
-    pub fn category(
-        &self,
-        id: u32,
-        include_products: bool,
-        indexed_store: Option<Option<&str>>,
-    ) -> Result<Option<Category>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw =
-            db::fetch_category_card(conn, &cfg.table_prefix, id, include_products, indexed_store)
-                .map_err(Error::Db)?;
-        Ok(raw.map(to_category))
-    }
-
-    /// Every CMS page/block row matching an exact identifier (several rows can share
-    /// one, scoped to different stores), or all rows with `None`. `include_content`
-    /// keeps the full content on each entry. Live DB.
-    #[cfg(feature = "db")]
-    pub fn cms_entries(
-        &self,
-        kind: CmsKind,
-        ident: Option<&str>,
-        include_content: bool,
-    ) -> Result<Vec<CmsEntry>> {
-        let sel = match ident {
-            Some(i) => db::CmsSelector::Identifier(i),
-            None => db::CmsSelector::All,
-        };
-        self.cms_fetch(kind, sel, include_content)
-    }
-
-    /// One CMS row by its numeric id — the unambiguous handle when an identifier is
-    /// shared by several store-scoped rows.
-    #[cfg(feature = "db")]
-    pub fn cms_entry_by_id(
-        &self,
-        kind: CmsKind,
-        id: u32,
-        include_content: bool,
-    ) -> Result<Option<CmsEntry>> {
-        Ok(self.cms_fetch(kind, db::CmsSelector::Id(id), include_content)?.into_iter().next())
-    }
-
-    #[cfg(feature = "db")]
-    fn cms_fetch(
-        &self,
-        kind: CmsKind,
-        sel: db::CmsSelector<'_>,
-        include_content: bool,
-    ) -> Result<Vec<CmsEntry>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raws =
-            db::fetch_cms_entries(conn, &cfg.table_prefix, kind, sel).map_err(Error::Db)?;
-        Ok(raws
-            .into_iter()
-            .map(|r| {
-                let content = r.content.unwrap_or_default();
-                let preview: String = content
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .chars()
-                    .take(160)
-                    .collect();
-                CmsEntry {
-                    kind,
-                    id: r.id,
-                    identifier: r.identifier,
-                    title: r.title,
-                    active: r.active,
-                    stores: r.stores,
-                    created: r.created,
-                    updated: r.updated,
-                    page_layout: r.page_layout,
-                    meta_title: r.meta_title,
-                    has_layout_update: r.has_layout_update,
-                    content_len: content.chars().count(),
-                    content_preview: preview,
-                    content: include_content.then_some(content),
-                }
-            })
-            .collect())
-    }
-
-    /// CMS search by identifier/title substring.
-    #[cfg(feature = "db")]
-    pub fn cms_like(
-        &self,
-        kind: CmsKind,
-        needle: &str,
-        limit: usize,
-    ) -> Result<(Vec<CmsHit>, bool)> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (rows, truncated) =
-            db::fetch_cms_like(conn, &cfg.table_prefix, kind, needle, limit).map_err(Error::Db)?;
-        Ok((
-            rows.into_iter()
-                .map(|(id, identifier, title, active)| CmsHit {
-                    id,
-                    identifier,
-                    title,
-                    active,
-                    stores: Vec::new(),
-                })
-                .collect(),
-            truncated,
-        ))
-    }
-
-    /// All four OAuth credentials for one integration, by integration id. `None` = the
-    /// integration has no consumer. This is the ONLY method that returns the secrets — an
-    /// explicit, opt-in escape hatch for scripting (the owner already has DB access);
-    /// [`Self::integrations`] never exposes them. Deliberately **not** `Serialize`, so no
-    /// `--json` path can carry a secret. Live DB.
-    #[cfg(feature = "db")]
-    pub fn integration_credentials(
-        &self,
-        integration_id: u32,
-    ) -> Result<Option<IntegrationCredentials>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_integration_secrets(conn, &cfg.table_prefix, integration_id)
-            .map_err(Error::Db)?;
-        Ok(raw.map(
-            |(consumer_key, consumer_secret, access_token, access_secret, revoked)| {
-                IntegrationCredentials {
-                    consumer_key,
-                    consumer_secret,
-                    access_token,
-                    access_secret,
-                    revoked,
-                }
-            },
-        ))
-    }
-
-    /// API integrations with their token state and granted ACL resources (titled from
-    /// the static acl.xml index — a missing title flags a stale grant). Filtered by a
-    /// name substring. Token secrets are never returned (use [`Self::integration_token`]
-    /// for the explicit opt-in). Live DB.
-    #[cfg(feature = "db")]
-    pub fn integrations(&self, filter: Option<&str>) -> Result<Vec<Integration>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raws = db::fetch_integrations(conn, &cfg.table_prefix).map_err(Error::Db)?;
-        let needle = filter.map(str::to_lowercase);
-        Ok(raws
-            .into_iter()
-            .filter(|(_, name, ..)| {
-                needle.as_deref().map_or(true, |n| name.to_lowercase().contains(n))
-            })
-            .map(
-                |(id, name, email, endpoint, status, setup, created_at, updated_at, token, rules)| {
-                    let rules: Vec<AdminRule> = rules
-                        .into_iter()
-                        .map(|(resource, allow)| AdminRule {
-                            title: self
-                                .acl_resource(&resource)
-                                .map(|r| r.title)
-                                .filter(|t| !t.is_empty()),
-                            resource,
-                            allow,
-                        })
-                        .collect();
-                    let all_resources =
-                        rules.iter().any(|r| r.resource == "Magento_Backend::all" && r.allow);
-                    Integration {
-                        id,
-                        name,
-                        email: email.filter(|e| !e.is_empty()),
-                        endpoint: endpoint.filter(|e| !e.is_empty()),
-                        status: match status {
-                            0 => "inactive".to_string(),
-                            1 => "active".to_string(),
-                            2 => "recreated".to_string(),
-                            other => format!("status {other}"),
-                        },
-                        setup: if setup == 1 { "config".to_string() } else { "manual".to_string() },
-                        created_at,
-                        updated_at,
-                        token,
-                        all_resources,
-                        rules,
-                    }
-                },
-            )
-            .collect())
-    }
-
-    /// The tax picture: classes (flagging ones no rule references — a product class in
-    /// no rule ships untaxed), rules with their class combinations and rates, and rates
-    /// no rule uses. Live DB.
-    #[cfg(feature = "db")]
-    pub fn tax_info(&self) -> Result<TaxInfo> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_tax_info(conn, &cfg.table_prefix).map_err(Error::Db)?;
-
-        let class_name = |id: u32| -> String {
-            raw.classes
-                .iter()
-                .find(|(cid, ..)| *cid == id)
-                .map(|(_, n, _)| n.clone())
-                .unwrap_or_else(|| format!("(class {id})"))
-        };
-        let rate_of = |id: u32| -> Option<TaxRate> {
-            raw.rates.iter().find(|(rid, ..)| *rid == id).map(
-                |(id, code, country, region, postcode, rate)| TaxRate {
-                    id: *id,
-                    code: code.clone(),
-                    country: country.clone(),
-                    region: region.clone(),
-                    postcode: postcode.clone(),
-                    rate: rate.clone(),
-                },
-            )
-        };
-
-        let rules: Vec<TaxRule> = raw
-            .rules
-            .iter()
-            .map(|(rule_id, code, priority, calculate_subtotal)| {
-                let mine: Vec<&(u32, u32, u32, u32)> =
-                    raw.links.iter().filter(|(r, ..)| r == rule_id).collect();
-                let mut customer: Vec<u32> = mine.iter().map(|(_, _, c, _)| *c).collect();
-                let mut product: Vec<u32> = mine.iter().map(|(_, _, _, p)| *p).collect();
-                let mut rate_ids: Vec<u32> = mine.iter().map(|(_, ra, _, _)| *ra).collect();
-                customer.sort_unstable();
-                customer.dedup();
-                product.sort_unstable();
-                product.dedup();
-                rate_ids.sort_unstable();
-                rate_ids.dedup();
-                TaxRule {
-                    id: *rule_id,
-                    code: code.clone(),
-                    priority: *priority,
-                    calculate_subtotal: *calculate_subtotal,
-                    customer_classes: customer.into_iter().map(class_name).collect(),
-                    product_classes: product.into_iter().map(class_name).collect(),
-                    rates: rate_ids.into_iter().filter_map(rate_of).collect(),
-                }
-            })
-            .collect();
-
-        let used_customer: std::collections::HashSet<u32> =
-            raw.links.iter().map(|(_, _, c, _)| *c).collect();
-        let used_product: std::collections::HashSet<u32> =
-            raw.links.iter().map(|(_, _, _, p)| *p).collect();
-        let used_rates: std::collections::HashSet<u32> =
-            raw.links.iter().map(|(_, r, _, _)| *r).collect();
-
-        let classes = raw
-            .classes
-            .iter()
-            .map(|(id, name, class_type)| TaxClassInfo {
-                id: *id,
-                name: name.clone(),
-                in_rules: if class_type == "CUSTOMER" {
-                    used_customer.contains(id)
-                } else {
-                    used_product.contains(id)
-                },
-                class_type: class_type.clone(),
-            })
-            .collect();
-        let unused_rates = raw
-            .rates
-            .iter()
-            .filter(|(id, ..)| !used_rates.contains(id))
-            .map(|(id, code, country, region, postcode, rate)| TaxRate {
-                id: *id,
-                code: code.clone(),
-                country: country.clone(),
-                region: region.clone(),
-                postcode: postcode.clone(),
-                rate: rate.clone(),
-            })
-            .collect();
-
-        Ok(TaxInfo { classes, rules, unused_rates })
-    }
-
-    /// One catalog price rule by rule_id. Live DB.
-    #[cfg(feature = "db")]
-    pub fn catalog_rule(&self, id: u32) -> Result<Option<CatalogRule>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_catalog_rule(conn, &cfg.table_prefix, id).map_err(Error::Db)?;
-        Ok(raw.map(|r| {
-            let amount = r.discount_amount.as_deref().unwrap_or("?");
-            let action = match r.simple_action.as_deref() {
-                Some("by_percent") => format!("{amount}% off"),
-                Some("by_fixed") => format!("{amount} off"),
-                Some("to_percent") => format!("price becomes {amount}% of original"),
-                Some("to_fixed") => format!("price set to {amount}"),
-                Some(other) => format!("{other} ({amount})"),
-                None => "(no action)".to_string(),
-            };
-            CatalogRule {
-                rule_id: r.rule_id,
-                name: r.name,
-                description: r.description,
-                active: r.active,
-                from_date: r.from_date,
-                to_date: r.to_date,
-                in_window: r.in_window,
-                action,
-                sort_order: r.sort_order,
-                stop_rules_processing: r.stop_rules_processing,
-                websites: r.websites,
-                customer_groups: r.customer_groups,
-                conditions: r.conditions,
-                matched_products: r.matched_products,
-            }
-        }))
-    }
-
-    /// Catalog rules by name/description substring (empty = all), with materialized
-    /// product counts.
-    #[cfg(feature = "db")]
-    pub fn catalog_rules_like(
-        &self,
-        needle: &str,
-        limit: usize,
-    ) -> Result<(Vec<CatalogRuleHit>, bool)> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (rows, truncated) =
-            db::fetch_catalog_rules(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
-        Ok((
-            rows.into_iter()
-                .map(|(rule_id, name, active, from_date, to_date, matched_products)| {
-                    CatalogRuleHit { rule_id, name, active, from_date, to_date, matched_products }
-                })
-                .collect(),
-            truncated,
-        ))
-    }
-
-    /// One cart price rule by rule_id. Live DB.
-    #[cfg(feature = "db")]
-    pub fn sales_rule(&self, id: u32) -> Result<Option<SalesRule>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_sales_rule(conn, &cfg.table_prefix, db::RuleIdent::Id(id))
-            .map_err(Error::Db)?;
-        Ok(raw.map(to_sales_rule))
-    }
-
-    /// The rule behind an exact coupon code, with the matched coupon attached.
-    #[cfg(feature = "db")]
-    pub fn sales_rule_by_coupon(&self, code: &str) -> Result<Option<SalesRule>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_sales_rule(conn, &cfg.table_prefix, db::RuleIdent::Coupon(code))
-            .map_err(Error::Db)?;
-        Ok(raw.map(to_sales_rule))
-    }
-
-    /// Rule search by name/description substring, newest first.
-    #[cfg(feature = "db")]
-    pub fn sales_rules_like(&self, needle: &str, limit: usize) -> Result<(Vec<SalesRuleHit>, bool)> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (rows, truncated) =
-            db::fetch_sales_rules_like(conn, &cfg.table_prefix, needle, limit)
-                .map_err(Error::Db)?;
-        Ok((
-            rows.into_iter()
-                .map(|(rule_id, name, active, from_date, to_date)| SalesRuleHit {
-                    rule_id,
-                    name,
-                    active,
-                    from_date,
-                    to_date,
-                })
-                .collect(),
-            truncated,
-        ))
-    }
-
-    /// The scope tree — websites → store groups → store views (admin scopes excluded),
-    /// root categories named, plus the currency rate table. Live DB.
-    #[cfg(feature = "db")]
-    pub fn store_tree(&self) -> Result<StoreTree> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_store_tree(conn, &cfg.table_prefix).map_err(Error::Db)?;
-        let websites = raw
-            .websites
-            .into_iter()
-            .map(|(id, code, name, is_default, default_group)| WebsiteNode {
-                groups: raw
-                    .groups
-                    .iter()
-                    .filter(|(_, wid, ..)| *wid == id)
-                    .map(|(gid, _, gname, root, default_store)| StoreGroupNode {
-                        id: *gid,
-                        name: gname.clone(),
-                        root_category_id: *root,
-                        root_category: raw.category_names.get(root).cloned(),
-                        is_default: *gid == default_group,
-                        views: raw
-                            .views
-                            .iter()
-                            .filter(|(_, _, _, _, vgid, _)| vgid == gid)
-                            .map(|(vid, vcode, vname, _, _, active)| StoreViewNode {
-                                id: *vid,
-                                code: vcode.clone(),
-                                name: vname.clone(),
-                                active: *active,
-                                is_default: vid == default_store,
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-                id,
-                code,
-                name,
-                is_default,
-            })
-            .collect();
-        Ok(StoreTree { websites, currency_rates: raw.currency_rates })
-    }
-
-    /// Every order status with its state mapping(s), filtered by a status/label/state
-    /// substring. Statuses mapped to no state sort last. Live DB.
-    #[cfg(feature = "db")]
-    pub fn order_statuses(&self, filter: Option<&str>) -> Result<Vec<OrderStatus>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (statuses, states) =
-            db::fetch_order_statuses(conn, &cfg.table_prefix).map_err(Error::Db)?;
-        let needle = filter.map(str::to_lowercase);
-        let mut out: Vec<OrderStatus> = statuses
-            .into_iter()
-            .map(|(status, label)| OrderStatus {
-                states: states
-                    .iter()
-                    .filter(|(st, ..)| *st == status)
-                    .map(|(_, state, is_default, visible_on_front)| OrderStatusState {
-                        state: state.clone(),
-                        is_default: *is_default,
-                        visible_on_front: *visible_on_front,
-                    })
-                    .collect(),
-                status,
-                label,
-            })
-            .filter(|s| match &needle {
-                Some(n) => {
-                    s.status.to_lowercase().contains(n)
-                        || s.label.to_lowercase().contains(n)
-                        || s.states.iter().any(|st| st.state.to_lowercase().contains(n))
-                }
-                None => true,
-            })
-            .collect();
-        out.sort_by(|a, b| {
-            let key = |s: &OrderStatus| {
-                (s.states.is_empty(), s.states.first().map(|st| st.state.clone()), s.status.clone())
-            };
-            key(a).cmp(&key(b))
-        });
-        Ok(out)
-    }
-
-    /// Every customer group with its tax class and member count, filtered by a
-    /// code/id/tax-class substring. Live DB.
-    #[cfg(feature = "db")]
-    pub fn customer_groups(&self, filter: Option<&str>) -> Result<Vec<CustomerGroup>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let rows = db::fetch_customer_groups(conn, &cfg.table_prefix).map_err(Error::Db)?;
-        let needle = filter.map(str::to_lowercase);
-        Ok(rows
-            .into_iter()
-            .map(|(id, code, tax_class_id, tax_class, members)| CustomerGroup {
-                id,
-                code,
-                tax_class_id,
-                tax_class,
-                members,
-            })
-            .filter(|g| match &needle {
-                Some(n) => {
-                    g.code.to_lowercase().contains(n)
-                        || g.id.to_string() == *n
-                        || g.tax_class.as_deref().is_some_and(|t| t.to_lowercase().contains(n))
-                }
-                None => true,
-            })
-            .collect())
-    }
-
-    /// The sales increment sequences (per entity type × store): the profile plus the
-    /// sequence table's high-water mark, and the computed next increment id. Live DB.
-    #[cfg(feature = "db")]
-    pub fn sales_sequences(&self, filter: Option<&str>) -> Result<Vec<SalesSequence>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let rows = db::fetch_sales_sequences(conn, &cfg.table_prefix).map_err(Error::Db)?;
-        let needle = filter.map(str::to_lowercase);
-        Ok(rows
-            .into_iter()
-            .filter(|(entity, ..)| {
-                needle.as_deref().map_or(true, |n| entity.to_lowercase().contains(n))
-            })
-            .map(|(entity_type, store, prefix, suffix, step, active, max, warn, current)| {
-                let next_value = current.map(|c| c + step).unwrap_or(1);
-                let next_increment = format!(
-                    "{}{:09}{}",
-                    prefix.as_deref().unwrap_or(""),
-                    next_value,
-                    suffix.as_deref().unwrap_or(""),
-                );
-                SalesSequence {
-                    entity_type,
-                    store,
-                    prefix,
-                    suffix,
-                    step,
-                    active,
-                    current,
-                    next_increment,
-                    max_value: max,
-                    warning_value: warn,
-                }
-            })
-            .collect())
-    }
-
-    /// One sales document (invoice/shipment/creditmemo) by exact increment id. Live DB.
-    #[cfg(feature = "db")]
-    pub fn sales_document(
-        &self,
-        kind: SalesDocKind,
-        increment: &str,
-    ) -> Result<Option<SalesDocument>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_sales_document(conn, &cfg.table_prefix, kind, increment)
-            .map_err(Error::Db)?;
-        Ok(raw.map(|r| to_sales_document(kind, r)))
-    }
-
-    /// Document search by increment substring, newest first.
-    #[cfg(feature = "db")]
-    pub fn sales_documents_like(
-        &self,
-        kind: SalesDocKind,
-        needle: &str,
-        limit: usize,
-    ) -> Result<(Vec<SalesDocumentHit>, bool)> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (rows, truncated) =
-            db::fetch_sales_documents_like(conn, &cfg.table_prefix, kind, needle, limit)
-                .map_err(Error::Db)?;
-        Ok((
-            rows.into_iter()
-                .map(|(increment_id, order_increment, created_at, amount)| SalesDocumentHit {
-                    increment_id,
-                    order_increment,
-                    created_at,
-                    amount,
-                })
-                .collect(),
-            truncated,
-        ))
-    }
-
-    /// One quote (cart) by entity_id. Live DB.
-    #[cfg(feature = "db")]
-    pub fn quote(&self, id: u64) -> Result<Option<Quote>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_quote(conn, &cfg.table_prefix, id).map_err(Error::Db)?;
-        Ok(raw.map(to_quote))
-    }
-
-    /// Quote search by customer email substring, newest first.
-    #[cfg(feature = "db")]
-    pub fn quotes_like(&self, needle: &str, limit: usize) -> Result<(Vec<QuoteHit>, bool)> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (rows, truncated) =
-            db::fetch_quotes_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
-        Ok((
-            rows.into_iter()
-                .map(|(entity_id, active, email, qty, total, currency, updated)| QuoteHit {
-                    entity_id,
-                    active,
-                    customer_email: email,
-                    items_qty: qty,
-                    grand_total: total,
-                    currency,
-                    updated_at: updated,
-                })
-                .collect(),
-            truncated,
-        ))
-    }
-
-    /// One customer by exact email. Live DB.
-    #[cfg(feature = "db")]
-    pub fn customer_by_email(&self, email: &str) -> Result<Option<Customer>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_customer(conn, &cfg.table_prefix, db::CustomerIdent::Email(email))
-            .map_err(Error::Db)?;
-        Ok(raw.map(|r| to_customer(r, false)))
-    }
-
-    /// One customer by entity_id.
-    #[cfg(feature = "db")]
-    pub fn customer_by_id(&self, id: u32) -> Result<Option<Customer>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_customer(conn, &cfg.table_prefix, db::CustomerIdent::Id(id))
-            .map_err(Error::Db)?;
-        Ok(raw.map(|r| to_customer(r, true)))
-    }
-
-    /// Customer search: email or name substring, newest first.
-    #[cfg(feature = "db")]
-    pub fn customers_like(&self, needle: &str, limit: usize) -> Result<(Vec<CustomerHit>, bool)> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (rows, truncated) =
-            db::fetch_customers_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
-        Ok((
-            rows.into_iter()
-                .map(|(entity_id, email, name, group, created_at, _)| CustomerHit {
-                    entity_id,
-                    email,
-                    name: name.unwrap_or_default(),
-                    group,
-                    created_at,
-                })
-                .collect(),
-            truncated,
-        ))
-    }
-
-    /// One order by exact increment_id. Live DB.
-    #[cfg(feature = "db")]
-    pub fn order_by_increment(&self, increment: &str) -> Result<Option<Order>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_order(conn, &cfg.table_prefix, db::OrderIdent::Increment(increment))
-            .map_err(Error::Db)?;
-        Ok(raw.map(|r| to_order(r, false)))
-    }
-
-    /// One order by entity_id (`matched_by_id` set on the result).
-    #[cfg(feature = "db")]
-    pub fn order_by_id(&self, id: u32) -> Result<Option<Order>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_order(conn, &cfg.table_prefix, db::OrderIdent::Id(id))
-            .map_err(Error::Db)?;
-        Ok(raw.map(|r| to_order(r, true)))
-    }
-
-    /// Order search: increment_id or customer email substring, newest first.
-    #[cfg(feature = "db")]
-    pub fn orders_like(&self, needle: &str, limit: usize) -> Result<(Vec<OrderHit>, bool)> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (rows, truncated) =
-            db::fetch_orders_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
-        Ok((
-            rows.into_iter()
-                .map(
-                    |(entity_id, increment_id, status, grand_total, currency, email, created)| {
-                        OrderHit {
-                            entity_id,
-                            increment_id,
-                            status,
-                            grand_total,
-                            currency,
-                            customer_email: email,
-                            created_at: created,
-                        }
-                    },
-                )
-                .collect(),
-            truncated,
-        ))
-    }
-
-    /// Light lookup: the SKU of an entity_id (for shadow-note checks). Live DB.
-    #[cfg(feature = "db")]
-    pub fn product_sku_of_id(&self, id: u32) -> Result<Option<String>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        Ok(db::fetch_product_identity(conn, &cfg.table_prefix, &db::ProductIdent::Id(id))
-            .map_err(Error::Db)?
-            .map(|(_, sku, _)| sku))
-    }
-
-    /// Every price the database stores for a product, by exact SKU. Live DB.
-    #[cfg(feature = "db")]
-    pub fn product_prices_by_sku(&self, sku: &str) -> Result<Option<ProductPrices>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_product_prices(conn, &cfg.table_prefix, db::ProductIdent::Sku(sku))
-            .map_err(Error::Db)?;
-        Ok(raw.map(|r| to_product_prices(r, false)))
-    }
-
-    /// Every price for a product, by entity_id.
-    #[cfg(feature = "db")]
-    pub fn product_prices_by_id(&self, id: u32) -> Result<Option<ProductPrices>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let raw = db::fetch_product_prices(conn, &cfg.table_prefix, db::ProductIdent::Id(id))
-            .map_err(Error::Db)?;
-        Ok(raw.map(|r| to_product_prices(r, true)))
-    }
-
-    /// SKU-substring search, `limit + 1` fetched to flag truncation.
-    #[cfg(feature = "db")]
-    pub fn products_like(&self, needle: &str, limit: usize) -> Result<(Vec<ProductHit>, bool)> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (rows, truncated) =
-            db::fetch_products_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
-        Ok((
-            rows.into_iter()
-                .map(|(entity_id, sku, type_id, name, status)| ProductHit {
-                    entity_id,
-                    sku,
-                    type_id,
-                    name,
-                    enabled: status.map(|s| s == 1),
-                })
-                .collect(),
-            truncated,
-        ))
-    }
-
-    /// Admin users from the live `admin_user` table, each joined with its role name;
-    /// lock state and login age computed on the DB server's clock. Sorted by username.
-    #[cfg(feature = "db")]
-    pub fn admin_users(&self) -> Result<Vec<AdminUser>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let rows = db::fetch_admin_users(conn, &cfg.table_prefix).map_err(Error::Db)?;
-        Ok(rows
-            .into_iter()
-            .map(|u| AdminUser {
-                id: u.id,
-                username: u.username,
-                firstname: u.firstname,
-                lastname: u.lastname,
-                email: u.email,
-                active: u.active,
-                role: u.role,
-                created: u.created,
-                last_login: u.last_login,
-                last_login_secs: u.last_login_secs,
-                logins: u.logins,
-                failures: u.failures,
-                locked: u.locked,
-                lock_expires: u.lock_expires,
-                locale: u.locale,
-            })
-            .collect())
-    }
-
-    /// Admin roles from the live `authorization_role`/`authorization_rule` tables: each
-    /// with its member usernames and permission rules, every rule's resource id joined
-    /// with its title from the static acl.xml index (`None` title = no module declares
-    /// the resource — a stale rule of an uninstalled module). Sorted by role name.
-    #[cfg(feature = "db")]
-    pub fn admin_roles(&self) -> Result<Vec<AdminRole>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (roles, members, rules) =
-            db::fetch_admin_roles(conn, &cfg.table_prefix).map_err(Error::Db)?;
-        Ok(roles
-            .into_iter()
-            .map(|(id, name)| {
-                let users: Vec<String> = members
-                    .iter()
-                    .filter(|(rid, _)| *rid == id)
-                    .map(|(_, u)| u.clone())
-                    .collect();
-                let rules: Vec<AdminRule> = rules
-                    .iter()
-                    .filter(|(rid, _, _)| *rid == id)
-                    .map(|(_, resource, allow)| AdminRule {
-                        title: self
-                            .acl_resource(resource)
-                            .map(|r| r.title)
-                            .filter(|t| !t.is_empty()),
-                        resource: resource.clone(),
-                        allow: *allow,
-                    })
-                    .collect();
-                let all_resources =
-                    rules.iter().any(|r| r.resource == "Magento_Backend::all" && r.allow);
-                AdminRole { id, name, users, all_resources, rules }
-            })
-            .collect())
-    }
-
-    fn eav_setup_index(&self) -> &eav::EavSetupIndex {
-        self.eav_setup.get_or_init(|| eav::EavSetupIndex::build(&self.index.modules))
-    }
-
-    /// Setup-script attribute calls (`addAttribute`/`updateAttribute`/`removeAttribute`
-    /// with literal arguments) across the enabled modules — the static "who created this
-    /// attribute" half of `eav`. Optionally filtered by exact attribute code. Core
-    /// catalog attributes won't appear (Magento installs them from data arrays, not
-    /// `addAttribute`); the value is third-party and project attributes.
-    pub fn eav_setup_refs(&self, code: Option<&str>) -> Vec<EavSetupRef> {
-        let refs = &self.eav_setup_index().refs;
-        match code {
-            Some(c) => refs.iter().filter(|r| r.code == c).cloned().collect(),
-            None => refs.clone(),
-        }
-    }
-
-    /// The `eav_entity_type` rows with attribute counts. Live DB (clean [`Error::Db`]
-    /// when unreachable).
-    #[cfg(feature = "db")]
-    pub fn eav_entity_types(&self) -> Result<Vec<EavEntityType>> {
-        Ok(self
-            .eav_fetch_entities()?
-            .into_iter()
-            .map(|e| EavEntityType {
-                code: e.code,
-                entity_table: e.entity_table,
-                attributes: e.attributes,
-            })
-            .collect())
-    }
-
-    /// Live attributes, optionally restricted to one entity type (aliases accepted:
-    /// `product` → `catalog_product`). Sorted by (entity, code).
-    #[cfg(feature = "db")]
-    pub fn eav_attributes(&self, entity: Option<&str>) -> Result<Vec<EavAttribute>> {
-        let entities = self.eav_fetch_entities()?;
-        let wanted = entity.map(|e| eav::resolve_entity_alias(e));
-        let rows = self.eav_fetch_attributes()?;
-        Ok(rows
-            .into_iter()
-            .filter(|r| wanted.as_deref().map_or(true, |w| r.entity_code == w))
-            .map(|r| to_eav_attribute(r, &entities))
-            .collect())
-    }
-
-    /// The full card(s) for an exact attribute code — one per entity type declaring it
-    /// (`name` exists on both products and categories): the live row plus set
-    /// memberships, options, and the static setup-script join.
-    #[cfg(feature = "db")]
-    pub fn eav_attribute_cards(&self, code: &str) -> Result<Vec<EavAttributeCard>> {
-        let entities = self.eav_fetch_entities()?;
-        let rows: Vec<db::DbEavAttribute> = self
-            .eav_fetch_attributes()?
-            .into_iter()
-            .filter(|r| r.code == code)
-            .collect();
-
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let refs = self.eav_setup_refs(Some(code));
-        let mut cards = Vec::new();
-        for row in rows {
-            let (sets, total_sets) =
-                db::fetch_eav_sets(conn, &cfg.table_prefix, row.attribute_id, &row.entity_code)
-                    .map_err(Error::Db)?;
-            let options = db::fetch_eav_options(conn, &cfg.table_prefix, row.attribute_id)
-                .map_err(Error::Db)?;
-            // Setup calls naming this entity, plus ones whose entity we couldn't resolve.
-            let setup_refs: Vec<EavSetupRef> = refs
-                .iter()
-                .filter(|r| !r.entity_known || r.entity == row.entity_code)
-                .cloned()
-                .collect();
-            let entity_table =
-                entities.iter().find(|e| e.code == row.entity_code).and_then(|e| e.entity_table.clone());
-            cards.push(EavAttributeCard {
-                attribute: to_eav_attribute(row, &entities),
-                entity_table,
-                sets: sets
-                    .into_iter()
-                    .map(|(set, group)| EavSetMembership { set, group })
-                    .collect(),
-                total_sets,
-                options,
-                setup_refs,
-            });
-        }
-        Ok(cards)
-    }
-
-    #[cfg(feature = "db")]
-    fn eav_fetch_entities(&self) -> Result<Vec<db::DbEavEntity>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        db::fetch_eav_entities(conn, &cfg.table_prefix).map_err(Error::Db)
-    }
-
-    #[cfg(feature = "db")]
-    fn eav_fetch_attributes(&self) -> Result<Vec<db::DbEavAttribute>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        db::fetch_eav_attributes(conn, &cfg.table_prefix).map_err(Error::Db)
-    }
-
-    #[cfg(feature = "db")]
-    fn fetch_patch_list(&self) -> Result<Vec<String>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        db::fetch_patch_list(conn, &cfg.table_prefix).map_err(Error::Db)
-    }
-
-    #[cfg(not(feature = "db"))]
-    fn fetch_patch_list(&self) -> Result<Vec<String>> {
-        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
-    }
-
     /// Everything known about one class (or virtual type) on one screen: identity (file,
     /// module, package, hierarchy), a compressed DI summary (forward + reverse), and every
     /// configuration reference — events it observes, cron jobs, webapi routes, console
@@ -2141,7 +514,7 @@ impl Magento {
                 self.index.packages.iter().find(|p| p.name.ends_with(suffix))
             });
 
-        let env = deploy::read_env(&self.index.root).ok();
+        let env = deploy::read_env(&self.index.root, &self.index.vfs).ok();
         let mode = env
             .as_ref()
             .and_then(|e| e.get("MAGE_MODE"))
@@ -2407,7 +780,7 @@ impl Magento {
         let (websites, store_groups, store_views) = match db_counts {
             Some((w, g, s)) => (Some(w), Some(g), Some(s)),
             None => {
-                let config_php = deploy::read_config_php(&self.index.root).ok();
+                let config_php = deploy::read_config_php(&self.index.root, &self.index.vfs).ok();
                 let section = |name: &str| {
                     config_php.as_ref()?.get("scopes")?.get(name)?.as_array()
                 };
@@ -2493,7 +866,7 @@ impl Magento {
         let m = &self.index.modules[me];
 
         // package root -> package, so a module finds its owner by walking its ancestors.
-        let root_of: std::collections::HashMap<&Path, &index::PackageMeta> =
+        let root_of: std::collections::HashMap<&Path, &engine::index::PackageMeta> =
             self.index.packages.iter().map(|p| (p.root.as_path(), p)).collect();
 
         // Every module's composer identity: package name + requires + the declaring
@@ -2509,7 +882,7 @@ impl Magento {
                     require: p.require.clone(),
                     file: p.root.join("composer.json"),
                 }),
-                None => read_app_composer(&x.path),
+                None => read_app_composer(&x.path, &self.index.vfs),
             })
             .collect();
 
@@ -2595,829 +968,6 @@ impl Magento {
         })
     }
 
-    fn mq_index(&self) -> &breadth::MqIndex {
-        self.mq.get_or_init(|| breadth::MqIndex::build(&self.index.modules))
-    }
-
-    /// Every dictionary row whose phrase key contains `needle` (case-insensitive), in
-    /// Magento's verified precedence order — module i18n CSVs (load order; at runtime the
-    /// *current request's controller module* additionally wins within this layer),
-    /// language packs (by `sort_order`), theme i18n (which theme applies depends on the
-    /// active theme), and with `include_db` the `translation` table. An identity row
-    /// (`key == value`) is flagged `reset`: Magento's loader deletes earlier translations
-    /// for it. `locale` defaults to the store's configured `general/locale/code`.
-    pub fn translations(
-        &self,
-        needle: &str,
-        locale: Option<&str>,
-        include_db: bool,
-    ) -> Result<Translations> {
-        let locale = match locale {
-            Some(l) => l.to_string(),
-            None => self
-                .config(false)
-                .ok()
-                .and_then(|set| set.get("default", "general/locale/code").map(|v| v.value.clone()))
-                .unwrap_or_else(|| "en_US".to_string()),
-        };
-        let n = needle.to_lowercase();
-
-        // (layer, csv path, synthetic module tag) per source, in precedence order.
-        let mut jobs: Vec<(TranslationLayer, std::path::PathBuf, ModuleName)> = Vec::new();
-        for m in self.index.modules.iter().filter(|m| m.enabled) {
-            jobs.push((
-                TranslationLayer::Module(m.name.clone()),
-                m.path.join("i18n").join(format!("{locale}.csv")),
-                m.name.clone(),
-            ));
-        }
-        let mut packs = self.discover_language_packs(&locale);
-        packs.sort_by_key(|(_, sort, _)| *sort);
-        for (name, _, dir) in packs {
-            jobs.push((
-                TranslationLayer::Pack(name.clone()),
-                dir.join(format!("{locale}.csv")),
-                ModuleName::new(name),
-            ));
-        }
-        for (id, dir) in self.discover_themes() {
-            jobs.push((
-                TranslationLayer::Theme(id.clone()),
-                dir.join("i18n").join(format!("{locale}.csv")),
-                ModuleName::new(id),
-            ));
-        }
-
-        use rayon::prelude::*;
-        let parsed: Vec<Vec<(String, String, u32)>> = jobs
-            .par_iter()
-            .map(|(_, path, _)| {
-                std::fs::read_to_string(path)
-                    .map(|t| {
-                        parse::i18n_csv(&t)
-                            .into_iter()
-                            .filter(|(k, _, _)| k.to_lowercase().contains(&n))
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            })
-            .collect();
-
-        let mut by_key: std::collections::HashMap<String, Vec<TranslationEntry>> =
-            std::collections::HashMap::new();
-        for ((layer, path, module), rows) in jobs.iter().zip(parsed) {
-            for (key, value, line) in rows {
-                by_key.entry(key.clone()).or_default().push(TranslationEntry {
-                    layer: layer.clone(),
-                    reset: key == value,
-                    value,
-                    store_id: None,
-                    source: Source {
-                        module: module.clone(),
-                        file: path.clone(),
-                        line,
-                        area: Area::Global,
-                    },
-                });
-            }
-        }
-
-        if include_db {
-            for (key, value, store_id) in self.fetch_translations(&locale, needle)? {
-                by_key.entry(key.clone()).or_default().push(TranslationEntry {
-                    layer: TranslationLayer::Db,
-                    reset: key == value,
-                    value,
-                    store_id: Some(store_id),
-                    source: Source {
-                        module: ModuleName::new("(db)"),
-                        file: std::path::PathBuf::from("translation"),
-                        line: 0,
-                        area: Area::Global,
-                    },
-                });
-            }
-        }
-
-        let mut matches: Vec<TranslationMatch> = by_key
-            .into_iter()
-            .map(|(key, entries)| TranslationMatch { key, entries })
-            .collect();
-        matches.sort_by(|a, b| a.key.cmp(&b.key));
-
-        // Context for an honest empty result: what was scanned, and which dictionaries
-        // exist but can never load (disabled / not-in-config.php modules).
-        let dictionaries_scanned = jobs.iter().filter(|(_, p, _)| p.is_file()).count();
-        let dict = format!("{locale}.csv");
-        let mut inactive_dictionaries: Vec<ModuleName> = self
-            .index
-            .modules
-            .iter()
-            .filter(|m| !m.enabled)
-            .filter(|m| m.path.join("i18n").join(&dict).is_file())
-            .map(|m| m.name.clone())
-            .chain(
-                self.index
-                    .check
-                    .on_disk_not_in_config
-                    .iter()
-                    .filter(|m| m.path.join("i18n").join(&dict).is_file())
-                    .map(|m| m.name.clone()),
-            )
-            .collect();
-        inactive_dictionaries.sort();
-
-        Ok(Translations { locale, matches, dictionaries_scanned, inactive_dictionaries })
-    }
-
-    /// Language packs on disk for `locale`: `(name, sort_order, dir)` — composer packages
-    /// with a root `language.xml` plus `app/i18n/<vendor>/<pack>`.
-    fn discover_language_packs(&self, locale: &str) -> Vec<(String, i32, std::path::PathBuf)> {
-        let mut out = Vec::new();
-        let mut probe = |name: String, dir: &std::path::Path| {
-            let Ok(text) = std::fs::read_to_string(dir.join("language.xml")) else { return };
-            let (code, sort) = parse::language_xml(&text);
-            if code.as_deref().is_some_and(|c| c.eq_ignore_ascii_case(locale)) {
-                out.push((name, sort.unwrap_or(0), dir.to_path_buf()));
-            }
-        };
-        for p in &self.index.packages {
-            probe(p.name.clone(), &p.root);
-        }
-        let base = self.index.root.join("app/i18n");
-        if let Ok(vendors) = std::fs::read_dir(&base) {
-            for vendor in vendors.flatten() {
-                if let Ok(packs) = std::fs::read_dir(vendor.path()) {
-                    for pack in packs.flatten() {
-                        let name = format!(
-                            "{}/{}",
-                            vendor.file_name().to_string_lossy(),
-                            pack.file_name().to_string_lossy()
-                        );
-                        probe(name, &pack.path());
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    #[cfg(feature = "db")]
-    fn fetch_translations(&self, locale: &str, needle: &str) -> Result<Vec<(String, String, u32)>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        db::fetch_translations(conn, &cfg.table_prefix, locale, needle).map_err(Error::Db)
-    }
-
-    #[cfg(not(feature = "db"))]
-    fn fetch_translations(&self, _locale: &str, _needle: &str) -> Result<Vec<(String, String, u32)>> {
-        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
-    }
-
-    fn catalog_attr_index(&self) -> &breadth::CatalogAttrIndex {
-        self.catalog_attrs.get_or_init(|| breadth::CatalogAttrIndex::build(&self.index.modules))
-    }
-
-    /// The `catalog_attributes.xml` groups — which attributes load in each context
-    /// (`quote_item`, `wishlist_item`, …), each attribute with its adding module.
-    pub fn catalog_attribute_groups(&self) -> Vec<CatalogAttributeGroup> {
-        self.catalog_attr_index().groups()
-    }
-
-    /// One group by exact name.
-    pub fn catalog_attribute_group(&self, name: &str) -> Option<CatalogAttributeGroup> {
-        self.catalog_attr_index().group(name)
-    }
-
-    fn email_template_index(&self) -> &breadth::EmailTemplateIndex {
-        self.email_templates.get_or_init(|| {
-            breadth::EmailTemplateIndex::build(&self.index.modules, &self.discover_themes())
-        })
-    }
-
-    /// Transactional email templates from `etc/email_templates.xml`, each with its
-    /// resolved module file (`None` = declared but missing) and any theme overrides.
-    /// Filtered by an id/label substring, sorted by id.
-    pub fn email_templates(&self, filter: Option<&str>) -> Vec<EmailTemplate> {
-        self.email_template_index().templates(filter)
-    }
-
-    /// One email template by exact id.
-    pub fn email_template(&self, id: &str) -> Option<EmailTemplate> {
-        self.email_template_index().template(id)
-    }
-
-    fn widget_index(&self) -> &breadth::WidgetIndex {
-        self.widgets.get_or_init(|| breadth::WidgetIndex::build(&self.index.modules))
-    }
-
-    /// Widget types declared in `etc/widget.xml` (what the admin's "Insert Widget"
-    /// offers), merged across modules. Filtered by an id/label substring, sorted by id.
-    pub fn widgets(&self, filter: Option<&str>) -> Vec<Widget> {
-        self.widget_index().widgets(filter)
-    }
-
-    /// One widget by exact id, with its full parameter set.
-    pub fn widget(&self, id: &str) -> Option<Widget> {
-        self.widget_index().widget(id)
-    }
-
-    fn layout_index(&self) -> &breadth::LayoutIndex {
-        self.layout.get_or_init(|| {
-            breadth::LayoutIndex::build(&self.index.modules, &self.discover_themes())
-        })
-    }
-
-    /// Themes on disk as `(id, dir)`: composer packages whose root holds a `theme.xml`
-    /// (id read from `registration.php`) plus `app/design/<area>/<Vendor>/<theme>`.
-    fn discover_themes(&self) -> Vec<(String, std::path::PathBuf)> {
-        let mut out = Vec::new();
-        for p in &self.index.packages {
-            if !p.root.join("theme.xml").is_file() {
-                continue;
-            }
-            let Ok(reg) = std::fs::read_to_string(p.root.join("registration.php")) else {
-                continue;
-            };
-            // ComponentRegistrar::register(THEME, 'frontend/Vendor/name', __DIR__)
-            if let Some(id) = reg
-                .split('\'')
-                .chain(reg.split('"'))
-                .find(|s| s.starts_with("frontend/") || s.starts_with("adminhtml/"))
-            {
-                out.push((id.to_string(), p.root.clone()));
-            }
-        }
-        for area in ["frontend", "adminhtml"] {
-            let base = self.index.root.join("app/design").join(area);
-            let Ok(vendors) = std::fs::read_dir(&base) else { continue };
-            for vendor in vendors.flatten() {
-                let Ok(themes) = std::fs::read_dir(vendor.path()) else { continue };
-                for theme in themes.flatten() {
-                    if theme.path().join("theme.xml").is_file() {
-                        let id = format!(
-                            "{area}/{}/{}",
-                            vendor.file_name().to_string_lossy(),
-                            theme.file_name().to_string_lossy()
-                        );
-                        out.push((id, theme.path()));
-                    }
-                }
-            }
-        }
-        out.sort();
-        out
-    }
-
-    /// Layout handles in `area` with their contributing-file counts (modules + themes).
-    pub fn layout_handles(&self, area: Area) -> Vec<(String, usize)> {
-        self.layout_index().handles(area)
-    }
-
-    /// Everything contributing to one layout handle in `area`: each file's operations
-    /// (module files in load order, then theme files — theme *application* order depends
-    /// on the active theme's ancestry, which is runtime state), plus the handle-inclusion
-    /// graph around it.
-    pub fn layout(&self, handle: &str, area: Area) -> Option<LayoutView> {
-        self.layout_index().view(handle, area)
-    }
-
-    fn ui_component_index(&self) -> &breadth::UiComponentIndex {
-        self.ui_components.get_or_init(|| {
-            breadth::UiComponentIndex::build(&self.index.modules, &self.discover_themes())
-        })
-    }
-
-    /// UI components (admin grids, forms, …) in `area` as `(name, kind, contributing
-    /// files)`, sorted by name. Kind = the first declaring file's root element.
-    pub fn ui_components(&self, area: Area) -> Vec<(String, String, usize)> {
-        self.ui_component_index().list(area)
-    }
-
-    /// Everything contributing to one ui component in `area`: each file's component
-    /// nodes (module files in load order, then theme files — theme *application* order
-    /// depends on the active theme's ancestry, which is runtime state).
-    pub fn ui_component(&self, name: &str, area: Area) -> Option<UiComponentView> {
-        self.ui_component_index().view(name, area)
-    }
-
-    fn ext_attr_index(&self) -> &breadth::ExtAttrIndex {
-        self.ext_attrs.get_or_init(|| breadth::ExtAttrIndex::build(&self.index.modules))
-    }
-
-    /// API data interfaces extended via `extension_attributes.xml`, each with every
-    /// attribute modules bolt on (keyed by code, last wins, per-attribute provenance).
-    /// Filtered by a type-name substring, sorted by type. Static.
-    pub fn extension_attributes(&self, filter: Option<&str>) -> Vec<ExtendedType> {
-        self.ext_attr_index().types(filter)
-    }
-
-    /// One extended type by exact name.
-    pub fn extended_type(&self, name: &ClassName) -> Option<ExtendedType> {
-        self.ext_attr_index().extended_type(name)
-    }
-
-    fn menu_index(&self) -> &breadth::MenuIndex {
-        self.menu.get_or_init(|| breadth::MenuIndex::build(&self.index.modules))
-    }
-
-    /// Admin menu items from `adminhtml/menu.xml`, merged across modules in load order
-    /// (`<add>`/`<update>` upsert attribute-level, `<remove>` deletes). No filter → the
-    /// whole tree in pre-order; a filter → items whose id or title contains it. Static.
-    pub fn menu(&self, filter: Option<&str>) -> Vec<MenuItem> {
-        self.menu_index().items(filter)
-    }
-
-    /// One menu item by exact id.
-    pub fn menu_item(&self, id: &str) -> Option<MenuItem> {
-        self.menu_index().item(id)
-    }
-
-    /// The breadcrumb for a menu item: ancestors from the root down to (excluding) `id`.
-    pub fn menu_ancestors(&self, id: &str) -> Vec<MenuItem> {
-        self.menu_index().ancestors(id)
-    }
-
-    /// The direct children of a menu item.
-    pub fn menu_children(&self, id: &str) -> Vec<MenuItem> {
-        self.menu_index().children(id)
-    }
-
-    fn gql_index(&self) -> &breadth::GqlIndex {
-        self.gql.get_or_init(|| breadth::GqlIndex::build(&self.index.modules))
-    }
-
-    /// GraphQL schema types merged from every module's `schema.graphqls` (fields union by
-    /// name across modules, matching Magento's schema stitching — `Query` is assembled
-    /// from dozens of modules, each field tagged with its declaring module). Filtered by a
-    /// case-insensitive name substring, sorted by name. Static.
-    pub fn graphql_types(&self, filter: Option<&str>) -> Vec<GqlType> {
-        self.gql_index().types(filter)
-    }
-
-    /// One GraphQL type by exact name, fully merged.
-    pub fn graphql_type(&self, name: &str) -> Option<GqlType> {
-        self.gql_index().type_(name)
-    }
-
-    /// Message-queue topics from `communication.xml` (with handlers), optionally filtered
-    /// by a name substring, sorted by name. Static.
-    pub fn queue_topics(&self, filter: Option<&str>) -> Vec<MqTopic> {
-        self.mq_index().topics(filter)
-    }
-
-    /// The full journey of one topic (exact name): definition + handlers, its publisher,
-    /// and every queue its messages reach — via the publisher's direct `queue=` and/or
-    /// each enabled exchange binding whose AMQP pattern matches — with that queue's
-    /// consumers. The "who processes a message published on this topic" answer, joined
-    /// from `communication.xml` + `queue_publisher.xml` + `queue_topology.xml` +
-    /// `queue_consumer.xml`. (Consumers are joined by queue name; a consumer's declared
-    /// connection is reported, not matched.)
-    pub fn queue_topic(&self, name: &str) -> Option<MqTopicRoute> {
-        self.mq_index().topic_route(name)
-    }
-
-    /// Live message backlog per queue: every queue the static config knows (with its
-    /// consumers) joined with the MysqlMq driver's `queue`/`queue_message_status` counts.
-    ///
-    /// **MySQL (db) queue driver only.** AMQP/RabbitMQ state is never read: a static
-    /// queue absent from the `queue` table is reported with `in_db: false` (amqp-only or
-    /// setup:upgrade pending), and — the subtler case — on a store whose env.php
-    /// configures amqp, a queue may have rows here while its real traffic flows through
-    /// the broker, so zero counts are not proof of an empty queue. Check
-    /// [`Self::queue_config`] for configured amqp connections before treating these
-    /// numbers as the whole story. A DB queue no static config references is `orphaned`
-    /// (removed module's leftover). Sorted by queue name. Clean [`Error::Db`] when the
-    /// database is unreachable.
-    #[cfg(feature = "db")]
-    pub fn queue_backlog(&self) -> Result<Vec<QueueBacklog>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let counts = db::fetch_queue_backlog(conn, &cfg.table_prefix).map_err(Error::Db)?;
-
-        let mut out: Vec<QueueBacklog> = Vec::new();
-        for (queue, consumers) in self.mq_index().queues() {
-            let c = counts.iter().find(|c| c.queue == queue);
-            out.push(QueueBacklog {
-                queue,
-                consumers,
-                in_db: c.is_some(),
-                orphaned: false,
-                new: c.map_or(0, |c| c.new),
-                in_progress: c.map_or(0, |c| c.in_progress),
-                retry: c.map_or(0, |c| c.retry),
-                error: c.map_or(0, |c| c.error),
-                done: c.map_or(0, |c| c.done),
-                oldest_waiting_secs: c.and_then(|c| c.oldest_waiting_secs),
-            });
-        }
-        for c in &counts {
-            if !out.iter().any(|q| q.queue == c.queue) {
-                out.push(QueueBacklog {
-                    queue: c.queue.clone(),
-                    consumers: Vec::new(),
-                    in_db: true,
-                    orphaned: true,
-                    new: c.new,
-                    in_progress: c.in_progress,
-                    retry: c.retry,
-                    error: c.error,
-                    done: c.done,
-                    oldest_waiting_secs: c.oldest_waiting_secs,
-                });
-            }
-        }
-        out.sort_by(|a, b| a.queue.cmp(&b.queue));
-        Ok(out)
-    }
-
-    /// The database configuration from `app/etc/env.php` (`db` section).
-    pub fn db_config(&self) -> Result<DbConfig> {
-        let env = deploy::read_env(&self.index.root)?;
-        Ok(deploy::db_config(&env))
-    }
-
-    /// Resolve the system configuration into a queryable [`ConfigSet`]. Always includes the
-    /// static sources (config.xml defaults, config.php/env.php `system`, `CONFIG__*` env
-    /// vars). With `include_db`, also reads `core_config_data` (requires the `db` feature and
-    /// a reachable database; the DB layer sits above config.xml and below the `system`
-    /// overrides).
-    pub fn config(&self, include_db: bool) -> Result<ConfigSet> {
-        let env = deploy::read_env(&self.index.root).unwrap_or(phparray::PhpValue::Null);
-        let config_php =
-            deploy::read_config_php(&self.index.root).unwrap_or(phparray::PhpValue::Null);
-        let db_values = if include_db { self.fetch_core_config_data()? } else { Vec::new() };
-        let order = self.system_config_source_order();
-        Ok(ConfigSet::build(&self.index.root, &self.index.modules, &env, &config_php, db_values, &order))
-    }
-
-    /// The recognized system-config sources in ascending `sortOrder`, as declared by the
-    /// `systemConfigSourceAggregated` virtual type in di.xml. This is what makes config
-    /// precedence architecture-faithful instead of hardcoded: a module that re-orders or
-    /// adds a source via di.xml is honored. Falls back to Magento's default
-    /// modular → dynamic → initial order if the declaration can't be read.
-    fn system_config_source_order(&self) -> Vec<sysconfig::SysCfgSource> {
-        let agg = ClassName::new("systemConfigSourceAggregated");
-        let args = self.args_of(&agg, Area::Global, &mut std::collections::HashSet::new());
-        let Some((ArgValue::Array(items), _)) = args.get("sources") else {
-            return sysconfig::DEFAULT_SOURCE_ORDER.to_vec();
-        };
-
-        let mut ranked: Vec<(i64, sysconfig::SysCfgSource)> = Vec::new();
-        for item in items {
-            let ArgValue::Array(fields) = &item.value else { continue };
-            let source = fields.iter().find(|f| f.key == "source").and_then(|f| match &f.value {
-                ArgValue::Object(o) => Some(&o.class),
-                _ => None,
-            });
-            let sort_order = fields
-                .iter()
-                .find(|f| f.key == "sortOrder")
-                .and_then(|f| match &f.value {
-                    ArgValue::Scalar { text, .. } => text.trim().parse::<i64>().ok(),
-                    _ => None,
-                })
-                .unwrap_or(0);
-            if let Some(kind) = source.and_then(|c| self.classify_config_source(c)) {
-                ranked.push((sort_order, kind));
-            }
-        }
-
-        if ranked.is_empty() {
-            return sysconfig::DEFAULT_SOURCE_ORDER.to_vec();
-        }
-        ranked.sort_by_key(|(s, _)| *s);
-        ranked.into_iter().map(|(_, k)| k).collect()
-    }
-
-    /// Map a di.xml config-source object (following virtual-type indirection to a concrete
-    /// class) to a recognized [`SysCfgSource`], or `None` for an unrecognized custom source.
-    fn classify_config_source(&self, class: &ClassName) -> Option<sysconfig::SysCfgSource> {
-        use sysconfig::SysCfgSource;
-        let cfg = self.di_index().config(Area::Global);
-        let mut cur = class.clone();
-        let mut seen = std::collections::HashSet::new();
-        while let Some(vt) = cfg.virtual_types.get(&cur) {
-            if !seen.insert(cur.clone()) {
-                break;
-            }
-            cur = vt.value.clone();
-        }
-        match cur.as_str() {
-            "Magento\\Config\\App\\Config\\Source\\ModularConfigSource" => Some(SysCfgSource::Modular),
-            "Magento\\Config\\App\\Config\\Source\\RuntimeConfigSource" => Some(SysCfgSource::Dynamic),
-            "Magento\\Framework\\App\\Config\\InitialConfigSource" => Some(SysCfgSource::Initial),
-            _ => None,
-        }
-    }
-
-    #[cfg(feature = "db")]
-    fn fetch_core_config_data(&self) -> Result<Vec<(String, String, String)>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        db::fetch_config(conn, &cfg.table_prefix).map_err(Error::Db)
-    }
-
-    /// Seconds since the last successful cron job finished (DB clock).
-    #[cfg(feature = "db")]
-    fn fetch_cron_last_success(&self) -> Result<Option<i64>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        db::fetch_cron_last_success(conn, &cfg.table_prefix).map_err(Error::Db)
-    }
-
-    #[cfg(not(feature = "db"))]
-    fn fetch_cron_last_success(&self) -> Result<Option<i64>> {
-        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
-    }
-
-    /// `(websites, store groups, store views)` counts, admin scopes excluded.
-    #[cfg(feature = "db")]
-    fn fetch_scope_counts(&self) -> Result<(usize, usize, usize)> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        db::fetch_scope_counts(conn, &cfg.table_prefix).map_err(Error::Db)
-    }
-
-    #[cfg(not(feature = "db"))]
-    fn fetch_scope_counts(&self) -> Result<(usize, usize, usize)> {
-        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
-    }
-
-    /// `(theme_id, parent_id, theme_path, area)` rows from the `theme` table.
-    #[cfg(feature = "db")]
-    fn fetch_theme_rows(&self) -> Result<Vec<(u32, Option<u32>, Option<String>, String)>> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        db::fetch_themes(conn, &cfg.table_prefix).map_err(Error::Db)
-    }
-
-    #[cfg(not(feature = "db"))]
-    fn fetch_theme_rows(&self) -> Result<Vec<(u32, Option<u32>, Option<String>, String)>> {
-        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
-    }
-
-    #[cfg(not(feature = "db"))]
-    fn fetch_core_config_data(&self) -> Result<Vec<(String, String, String)>> {
-        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
-    }
-
-    /// URL rewrites from the `url_rewrite` table (live DB). These are runtime data with no
-    /// static source, so this needs the `db` feature and a reachable database. Filters
-    /// (request/target path substring, store code, redirects-only) and `limit` are pushed
-    /// into SQL; the result flags whether more rows existed beyond `limit`.
-    #[cfg(feature = "db")]
-    pub fn url_rewrites(
-        &self,
-        path_filter: Option<&str>,
-        store: Option<&str>,
-        redirects_only: bool,
-        limit: usize,
-    ) -> Result<UrlRewrites> {
-        let cfg = self.db_config()?;
-        let conn = default_connection(&cfg)?;
-        let (rewrites, truncated) =
-            db::fetch_url_rewrites(conn, &cfg.table_prefix, path_filter, store, redirects_only, limit)
-                .map_err(Error::Db)?;
-        Ok(UrlRewrites { rewrites, truncated })
-    }
-
-    /// Stub when the `db` feature is disabled: URL rewrites are DB-only.
-    #[cfg(not(feature = "db"))]
-    pub fn url_rewrites(
-        &self,
-        _path_filter: Option<&str>,
-        _store: Option<&str>,
-        _redirects_only: bool,
-        _limit: usize,
-    ) -> Result<UrlRewrites> {
-        Err(Error::Db("the `db` feature is not enabled in this build".to_string()))
-    }
-
-    /// A [`Decryptor`] loaded with the `crypt.key`(s) from `env.php`, to decrypt encrypted
-    /// config values (ChaCha20-Poly1305).
-    pub fn decryptor(&self) -> Result<Decryptor> {
-        let env = deploy::read_env(&self.index.root)?;
-        Ok(Decryptor::new(deploy::crypt_keys(&env)))
-    }
-
-    /// Redis/Valkey usages from `app/etc/env.php` (cache, page cache, session).
-    pub fn redis_config(&self) -> Result<RedisConfig> {
-        let env = deploy::read_env(&self.index.root)?;
-        Ok(deploy::redis_config(&env))
-    }
-
-    /// Session storage configuration (`session` section of `env.php`): the save handler and,
-    /// for Redis/file handlers, where sessions live.
-    pub fn session_config(&self) -> Result<SessionConfig> {
-        let env = deploy::read_env(&self.index.root)?;
-        Ok(deploy::session_config(&env))
-    }
-
-    /// Cache configuration (`cache`/`cache_types` of `env.php`): the backend per frontend and
-    /// the per-type enable flags.
-    pub fn cache_config(&self) -> Result<CacheConfig> {
-        let env = deploy::read_env(&self.index.root)?;
-        Ok(deploy::cache_config(&env))
-    }
-
-    /// Locking backend (`lock` section of `env.php`): the provider and its settings.
-    pub fn lock_config(&self) -> Result<LockConfig> {
-        let env = deploy::read_env(&self.index.root)?;
-        Ok(deploy::lock_config(&env))
-    }
-
-    /// Message-queue connections (`queue` section of `env.php`).
-    pub fn queue_config(&self) -> Result<QueueConfig> {
-        let env = deploy::read_env(&self.index.root)?;
-        Ok(deploy::queue_config(&env))
-    }
-
-    /// Ping every configured Redis/Valkey instance (raw RESP — no client crate, works over
-    /// TCP and unix sockets), returning one result per instance.
-    pub fn ping_redis(&self) -> Result<Vec<RedisPing>> {
-        let cfg = self.redis_config()?;
-        Ok(cfg.instances.iter().map(redis::ping).collect())
-    }
-
-    /// Test a database connection (`None` = the `default` connection) by connecting with the
-    /// `env.php` credentials and querying the server version. Requires the `db` feature.
-    #[cfg(feature = "db")]
-    pub fn ping_db(&self, connection: Option<&str>) -> Result<DbPing> {
-        let cfg = self.db_config()?;
-        let conn = match connection {
-            Some(name) => cfg.connections.iter().find(|c| c.name == name),
-            None => cfg
-                .connections
-                .iter()
-                .find(|c| c.name == "default")
-                .or_else(|| cfg.connections.first()),
-        }
-        .ok_or_else(|| Error::Parse {
-            file: self.index.root.join("app/etc/env.php"),
-            detail: match connection {
-                Some(n) => format!("no db connection named `{n}`"),
-                None => "no db connections configured".to_string(),
-            },
-        })?;
-        Ok(db::ping(conn))
-    }
-
-    /// Controller actions (subroutes) for `area` (`Frontend` or `Adminhtml`): every concrete
-    /// `Controller/.../Action.php` in a route's modules, mapped to its `frontName/.../action`
-    /// URL. Optionally filtered by a URL substring (which also avoids parsing non-matching
-    /// controllers). Only classes implementing a Magento action base are included.
-    pub fn actions(&self, area: Area, url_filter: Option<&str>) -> Vec<ControllerAction> {
-        let admin = area == Area::Adminhtml;
-        let routes = self.routes(area);
-        let paths: std::collections::HashMap<&ModuleName, &Path> =
-            self.index.modules.iter().map(|m| (&m.name, m.path.as_path())).collect();
-
-        let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for route in &routes {
-            for module in &route.modules {
-                let Some(&mpath) = paths.get(module) else { continue };
-                let ns = module.as_str().replace('_', "\\");
-                let base = if admin {
-                    mpath.join("Controller/Adminhtml")
-                } else {
-                    mpath.join("Controller")
-                };
-                if !base.is_dir() {
-                    continue;
-                }
-                let ctx = ActionScan {
-                    front_name: &route.front_name,
-                    ns: &ns,
-                    admin,
-                    area,
-                    module,
-                    filter: url_filter,
-                    resolver: &self.index.resolver,
-                };
-                scan_actions(&ctx, &base, &base, &mut seen, &mut out);
-            }
-        }
-        out.sort_by(|a, b| a.url.cmp(&b.url));
-        out
-    }
-
-    fn events_index(&self) -> &breadth::EventIndex {
-        self.events.get_or_init(|| breadth::EventIndex::build(&self.index.modules))
-    }
-
-    /// The flagship: full DI resolution of `class` in a single `area` — the concrete type,
-    /// preference chain, virtual-type indirection, merged constructor arguments, and the
-    /// plugin chain, with provenance throughout.
-    pub fn resolve(&self, class: &ClassName, area: Area) -> Result<Resolution> {
-        let pref = self.preference(class, area)?;
-        let concrete = pref.concrete.clone();
-        let cfg = self.di_index().config(area);
-
-        // If the concrete is a virtual type, follow the type= chain to the real class.
-        let instantiates = {
-            let mut cur = concrete.clone();
-            let mut seen = std::collections::HashSet::new();
-            let mut is_virtual = false;
-            while let Some(vt) = cfg.virtual_types.get(&cur) {
-                if !seen.insert(cur.clone()) {
-                    break;
-                }
-                is_virtual = true;
-                cur = vt.value.clone();
-            }
-            is_virtual.then_some(cur)
-        };
-
-        let arguments = self.resolve_arguments(&concrete, area);
-        let plugins = self.plugins(class, area)?;
-
-        // Ancestors/interfaces that actually contributed plugins or arguments.
-        let contributing_ancestors = self
-            .index
-            .resolver
-            .ancestors(&concrete)
-            .into_iter()
-            .filter(|a| cfg.plugins.contains_key(a) || cfg.type_args.contains_key(a))
-            .collect();
-
-        Ok(Resolution {
-            requested: class.clone(),
-            area,
-            concrete,
-            preference_chain: pref.chain,
-            instantiates,
-            plugins,
-            arguments,
-            contributing_ancestors,
-        })
-    }
-
-    /// Merged constructor arguments for `name` in `area`: virtual-type base args overlaid by
-    /// the virtual type's own; for a real type, parent-type args (along the PHP ancestor
-    /// chain) overlaid by the type's own. Per-argument last-wins; sorted by name.
-    fn resolve_arguments(&self, name: &ClassName, area: Area) -> Vec<Argument> {
-        let map = self.args_of(name, area, &mut std::collections::HashSet::new());
-        let mut v: Vec<Argument> = map
-            .into_iter()
-            .map(|(name, (value, source))| Argument { name, value, source })
-            .collect();
-        v.sort_by(|a, b| a.name.cmp(&b.name));
-        v
-    }
-
-    fn args_of(
-        &self,
-        name: &ClassName,
-        area: Area,
-        seen: &mut std::collections::HashSet<ClassName>,
-    ) -> std::collections::HashMap<String, (ArgValue, Source)> {
-        let mut merged = std::collections::HashMap::new();
-        if !seen.insert(name.clone()) {
-            return merged; // cycle guard
-        }
-        let cfg = self.di_index().config(area);
-
-        if let Some(vt) = cfg.virtual_types.get(name) {
-            // Virtual type: inherit the base type's args, then overlay our own.
-            merged = self.args_of(&vt.value, area, seen);
-        } else {
-            // Real type: merge parent-type args (distant ancestor first), self overrides.
-            let mut chain = self.index.resolver.ancestors(name);
-            chain.reverse();
-            for ancestor in &chain {
-                merge_args_into(&mut merged, cfg.type_args.get(ancestor));
-            }
-        }
-
-        merge_args_into(&mut merged, cfg.type_args.get(name));
-        merged
-    }
-
-    /// [`resolve`](Magento::resolve) across every [`Area`]. The caller renders it directly
-    /// (`--all-areas`) or via [`ByArea::deltas`] (the default collapsed-diff view).
-    pub fn resolve_all(&self, class: &ClassName) -> Result<ByArea<Resolution>> {
-        let _ = class;
-        todo!()
-    }
-}
-
-/// Tables the runtime creates and manages outside `db_schema.xml`: mview changelogs,
-/// per-store sequence and dimension-index tables, indexer flats/replicas, and the
-/// framework's own bootstrap/bookkeeping tables.
-fn is_runtime_table(name: &str) -> bool {
-    name.ends_with("_cl")
-        || name.ends_with("_replica")
-        || name.ends_with("_flat")
-        || name.contains("_index_store")
-        || name.starts_with("sequence_")
-        || name.starts_with("catalog_product_flat_")
-        || name.starts_with("catalog_category_flat_")
-        || matches!(
-            name,
-            "setup_module" | "patch_list" | "cache" | "cache_tag" | "flag" | "session"
-        )
 }
 
 /// The connection used for live introspection: `default`, else the first configured one.
@@ -3430,1161 +980,6 @@ fn default_connection(cfg: &DbConfig) -> Result<&DbConnection> {
         .ok_or_else(|| Error::Db("no db connection configured in env.php".to_string()))
 }
 
-/// Assemble [`SalesRule`]: decode coupon_type and the `simple_action` into a readable
-/// discount summary.
-#[cfg(feature = "db")]
-fn to_sales_rule(raw: db::DbSalesRule) -> SalesRule {
-    let amount = raw.discount_amount.as_deref().unwrap_or("?");
-    let action = match raw.simple_action.as_deref() {
-        Some("by_percent") => format!("{amount}% off"),
-        Some("by_fixed") => format!("{amount} off per item"),
-        Some("cart_fixed") => format!("{amount} off the cart"),
-        Some("buy_x_get_y") => format!(
-            "buy X get {} free (step {})",
-            raw.discount_qty.as_deref().unwrap_or("?"),
-            raw.discount_step.unwrap_or(0),
-        ),
-        Some(other) => format!("{other} ({amount})"),
-        None => "(no action)".to_string(),
-    };
-    let coupon_type = match raw.coupon_type {
-        1 => "no coupon needed".to_string(),
-        2 => "specific coupon".to_string(),
-        3 => "auto-generated coupons".to_string(),
-        other => format!("coupon_type {other}"),
-    };
-    let coupon = |(code, times_used, usage_limit, usage_per_customer, expiration_date, expired): (
-        String,
-        u64,
-        Option<u64>,
-        Option<u64>,
-        Option<String>,
-        bool,
-    )| RuleCoupon {
-        code,
-        times_used,
-        usage_limit: usage_limit.filter(|&l| l > 0),
-        usage_per_customer: usage_per_customer.filter(|&l| l > 0),
-        expiration_date,
-        expired,
-    };
-    SalesRule {
-        rule_id: raw.rule_id,
-        name: raw.name,
-        description: raw.description,
-        active: raw.active,
-        from_date: raw.from_date,
-        to_date: raw.to_date,
-        in_window: raw.in_window,
-        coupon_type,
-        action,
-        apply_to_shipping: raw.apply_to_shipping,
-        free_shipping: raw.free_shipping,
-        stop_rules_processing: raw.stop_rules_processing,
-        sort_order: raw.sort_order,
-        uses_per_customer: raw.uses_per_customer,
-        uses_per_coupon: raw.uses_per_coupon,
-        times_used: raw.times_used,
-        websites: raw.websites,
-        customer_groups: raw.customer_groups,
-        conditions: raw.conditions,
-        coupon_count: raw.coupon_count,
-        coupons: raw.coupons.into_iter().map(coupon).collect(),
-        matched_coupon: raw.matched_coupon.map(coupon),
-    }
-}
-
-/// Assemble [`SalesDocument`]: decode the kind-specific state.
-#[cfg(feature = "db")]
-fn to_sales_document(kind: SalesDocKind, raw: db::DbSalesDocument) -> SalesDocument {
-    let state = raw.state.map(|s| match (kind, s) {
-        (SalesDocKind::Invoice, 1) => "open".to_string(),
-        (SalesDocKind::Invoice, 2) => "paid".to_string(),
-        (SalesDocKind::Invoice, 3) => "canceled".to_string(),
-        (SalesDocKind::Creditmemo, 1) => "open".to_string(),
-        (SalesDocKind::Creditmemo, 2) => "refunded".to_string(),
-        (SalesDocKind::Creditmemo, 3) => "canceled".to_string(),
-        (_, other) => format!("state {other}"),
-    });
-    SalesDocument {
-        kind,
-        entity_id: raw.entity_id,
-        increment_id: raw.increment_id,
-        state,
-        order_increment: raw.order_increment,
-        order_status: raw.order_status,
-        created_at: raw.created_at,
-        currency: raw.currency,
-        totals: raw
-            .totals
-            .into_iter()
-            .map(|(key, amount, base_amount)| OrderTotal { key, amount, base_amount })
-            .collect(),
-        transaction_id: raw.transaction_id,
-        total_qty: raw.total_qty,
-        items: raw
-            .items
-            .into_iter()
-            .map(|(sku, name, qty, price, row_total)| SalesDocumentItem {
-                sku,
-                name,
-                qty,
-                price,
-                row_total,
-            })
-            .collect(),
-        tracks: raw
-            .tracks
-            .into_iter()
-            .map(|(carrier, title, number)| {
-                (
-                    carrier.unwrap_or_default(),
-                    title.unwrap_or_default(),
-                    number.unwrap_or_default(),
-                )
-            })
-            .collect(),
-    }
-}
-
-/// Assemble [`Quote`]: blend the totals (subtotal + grand total from the quote row,
-/// shipping/tax/discount from the shipping address, where checkout collects them) and
-/// flatten the payment blob like the order card does.
-#[cfg(feature = "db")]
-fn to_quote(raw: db::DbQuote) -> Quote {
-    let (subtotal, base_subtotal, grand_total, base_grand_total) = raw.quote_totals;
-    let (shipping, base_shipping, tax, base_tax, discount, base_discount) = raw.address_totals;
-    let totals = vec![
-        OrderTotal { key: "subtotal".into(), amount: subtotal, base_amount: base_subtotal },
-        OrderTotal { key: "shipping".into(), amount: shipping, base_amount: base_shipping },
-        OrderTotal { key: "tax".into(), amount: tax, base_amount: base_tax },
-        OrderTotal { key: "discount".into(), amount: discount, base_amount: base_discount },
-        OrderTotal { key: "grand_total".into(), amount: grand_total, base_amount: base_grand_total },
-    ];
-    let payment = raw.payment.map(|(method, blob)| {
-        let additional: Vec<(String, String)> = blob
-            .as_deref()
-            .and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok())
-            .and_then(|v| match v {
-                serde_json::Value::Object(map) => Some(
-                    map.into_iter()
-                        .map(|(k, v)| {
-                            let val = match v {
-                                serde_json::Value::String(s) => s,
-                                other => other.to_string(),
-                            };
-                            (k, val)
-                        })
-                        .collect(),
-                ),
-                _ => None,
-            })
-            .unwrap_or_default();
-        OrderPayment { method, last_trans_id: None, additional }
-    });
-    let customer_name = match (&raw.customer_firstname, &raw.customer_lastname) {
-        (Some(f), Some(l)) => Some(format!("{f} {l}")),
-        (Some(f), None) => Some(f.clone()),
-        (None, Some(l)) => Some(l.clone()),
-        _ => None,
-    };
-
-    Quote {
-        entity_id: raw.entity_id,
-        active: raw.active,
-        store: raw.store,
-        created_at: raw.created_at,
-        updated_at: raw.updated_at,
-        updated_secs: raw.updated_secs,
-        converted_at: raw.converted_at,
-        customer_id: raw.customer_id,
-        customer_email: raw.customer_email,
-        customer_name,
-        guest: raw.guest,
-        checkout_method: raw.checkout_method,
-        quote_currency: raw.quote_currency,
-        base_currency: raw.base_currency,
-        items_qty: raw.items_qty,
-        is_virtual: raw.is_virtual,
-        coupon: raw.coupon,
-        applied_rule_ids: raw.applied_rule_ids,
-        reserved_order_id: raw.reserved_order_id,
-        order_increment: raw.order_increment,
-        totals,
-        items: raw
-            .items
-            .into_iter()
-            .map(|(sku, name, product_type, is_child, qty, price, row_total, discount)| {
-                QuoteItem { sku, name, product_type, is_child, qty, price, row_total, discount }
-            })
-            .collect(),
-        addresses: raw
-            .addresses
-            .into_iter()
-            .map(
-                |(kind, first, last, company, street, postcode, city, country, method, desc)| {
-                    QuoteAddress {
-                        kind,
-                        name: [first, last].into_iter().flatten().collect::<Vec<_>>().join(" "),
-                        company,
-                        street: street.map(|s| s.replace('\n', ", ")),
-                        postcode,
-                        city,
-                        country,
-                        shipping_method: method,
-                        shipping_description: desc,
-                    }
-                },
-            )
-            .collect(),
-        payment,
-    }
-}
-
-/// Assemble [`Customer`]: decode the newsletter status, name the addresses, and pass
-/// custom EAV values through the shared scope machinery (single `default` scope —
-/// customer attributes aren't store-scoped).
-#[cfg(feature = "db")]
-fn to_customer(raw: db::DbCustomer, matched_by_id: bool) -> Customer {
-    let newsletter_status = |s: i64| match s {
-        1 => "subscribed".to_string(),
-        2 => "not active".to_string(),
-        3 => "unsubscribed".to_string(),
-        4 => "unconfirmed".to_string(),
-        other => format!("status {other}"),
-    };
-    let name = [raw.firstname.clone(), raw.lastname.clone()]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let mut values: Vec<ProductValue> = Vec::new();
-    for v in &raw.values {
-        let scope = ProductScopeValue {
-            store: "default".to_string(),
-            label: None,
-            value: v.value.clone().unwrap_or_else(|| "NULL".to_string()),
-        };
-        match values.iter_mut().find(|e| e.attribute == v.attribute) {
-            Some(e) => e.scopes.push(scope),
-            None => values.push(ProductValue {
-                attribute: v.attribute.clone(),
-                backend_type: v.backend_type.clone(),
-                input: v.input.clone(),
-                scopes: vec![scope],
-            }),
-        }
-    }
-    values.sort_by(|a, b| a.attribute.cmp(&b.attribute));
-
-    Customer {
-        entity_id: raw.entity_id,
-        email: raw.email,
-        name,
-        group: raw.group,
-        website: raw.website,
-        created_in: raw.created_in,
-        created_at: raw.created_at,
-        active: raw.active,
-        confirmed: raw.confirmed,
-        locked: raw.locked,
-        lock_expires: raw.lock_expires,
-        failures: raw.failures,
-        last_login: raw.last_login,
-        last_logout: raw.last_logout,
-        dob: raw.dob,
-        taxvat: raw.taxvat,
-        addresses: raw
-            .addresses
-            .into_iter()
-            .map(|(id, f, l, company, street, postcode, city, region, country, telephone, db, ds)| {
-                CustomerAddress {
-                    id,
-                    name: [f, l].into_iter().flatten().collect::<Vec<_>>().join(" "),
-                    company,
-                    street: street.map(|s| s.replace('\n', ", ")),
-                    postcode,
-                    city,
-                    region,
-                    country,
-                    telephone,
-                    default_billing: db,
-                    default_shipping: ds,
-                }
-            })
-            .collect(),
-        newsletter: raw
-            .newsletter
-            .into_iter()
-            .map(|(store, status)| CustomerNewsletter { store, status: newsletter_status(status) })
-            .collect(),
-        values,
-        orders: CustomerOrders {
-            count: raw.order_stats.0,
-            lifetime: raw.order_stats.1,
-            first_at: raw.order_stats.2,
-            last_at: raw.order_stats.3,
-            last_increment: raw.last_order.as_ref().map(|(i, _)| i.clone()),
-            last_status: raw.last_order.and_then(|(_, s)| s),
-        },
-        guest_orders: raw.guest_orders,
-        matched_by_id,
-    }
-}
-
-/// Assemble [`Order`]: decode document states, join tracks onto their shipments, and
-/// flatten the payment's `additional_information` JSON (top-level keys; nested values
-/// re-serialized compactly).
-#[cfg(feature = "db")]
-fn to_order(raw: db::DbOrder, matched_by_id: bool) -> Order {
-    let invoice_state = |s: Option<i64>| {
-        s.map(|s| match s {
-            1 => "open".to_string(),
-            2 => "paid".to_string(),
-            3 => "canceled".to_string(),
-            other => format!("state {other}"),
-        })
-    };
-    let memo_state = |s: Option<i64>| {
-        s.map(|s| match s {
-            1 => "open".to_string(),
-            2 => "refunded".to_string(),
-            3 => "canceled".to_string(),
-            other => format!("state {other}"),
-        })
-    };
-
-    let payment = raw.payment.map(|(method, last_trans_id, blob)| {
-        let additional: Vec<(String, String)> = blob
-            .as_deref()
-            .and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok())
-            .and_then(|v| match v {
-                serde_json::Value::Object(map) => Some(
-                    map.into_iter()
-                        .map(|(k, v)| {
-                            let val = match v {
-                                serde_json::Value::String(s) => s,
-                                other => other.to_string(),
-                            };
-                            (k, val)
-                        })
-                        .collect(),
-                ),
-                _ => None,
-            })
-            .unwrap_or_default();
-        OrderPayment { method, last_trans_id, additional }
-    });
-
-    let customer_name = match (&raw.customer_firstname, &raw.customer_lastname) {
-        (Some(f), Some(l)) => Some(format!("{f} {l}")),
-        (Some(f), None) => Some(f.clone()),
-        (None, Some(l)) => Some(l.clone()),
-        _ => None,
-    };
-
-    Order {
-        entity_id: raw.entity_id,
-        increment_id: raw.increment_id,
-        state: raw.state,
-        status: raw.status,
-        status_label: raw.status_label,
-        store: raw.store,
-        created_at: raw.created_at,
-        updated_at: raw.updated_at,
-        customer_id: raw.customer_id,
-        customer_email: raw.customer_email,
-        customer_name,
-        guest: raw.guest,
-        order_currency: raw.order_currency,
-        base_currency: raw.base_currency,
-        total_qty: raw.total_qty,
-        coupon: raw.coupon,
-        applied_rule_ids: raw.applied_rule_ids,
-        shipping_method: raw.shipping_method,
-        shipping_description: raw.shipping_description,
-        totals: raw
-            .totals
-            .into_iter()
-            .map(|(key, amount, base_amount)| OrderTotal { key, amount, base_amount })
-            .collect(),
-        items: raw
-            .items
-            .into_iter()
-            .map(
-                |(sku, name, product_type, is_child, ordered, invoiced, shipped, refunded, canceled, price, row_total)| {
-                    OrderItem {
-                        sku,
-                        name,
-                        product_type,
-                        is_child,
-                        qty_ordered: ordered,
-                        qty_invoiced: invoiced,
-                        qty_shipped: shipped,
-                        qty_refunded: refunded,
-                        qty_canceled: canceled,
-                        price,
-                        row_total,
-                    }
-                },
-            )
-            .collect(),
-        addresses: raw
-            .addresses
-            .into_iter()
-            .map(
-                |(kind, first, last, company, street, postcode, city, country, telephone)| {
-                    let name = [first, last].into_iter().flatten().collect::<Vec<_>>().join(" ");
-                    OrderAddress {
-                        kind,
-                        name,
-                        company,
-                        street: street.map(|s| s.replace('\n', ", ")),
-                        postcode,
-                        city,
-                        country,
-                        telephone,
-                    }
-                },
-            )
-            .collect(),
-        payment,
-        transactions: raw
-            .transactions
-            .into_iter()
-            .map(|(txn_id, kind, closed, created_at)| OrderTransaction {
-                txn_id,
-                kind,
-                closed,
-                created_at,
-            })
-            .collect(),
-        invoices: raw
-            .invoices
-            .into_iter()
-            .map(|(increment_id, state, total, created_at)| OrderDocument {
-                increment_id,
-                state: invoice_state(state),
-                total,
-                created_at,
-            })
-            .collect(),
-        shipments: raw
-            .shipments
-            .into_iter()
-            .map(|(sid, increment_id, qty, created_at)| OrderShipment {
-                increment_id,
-                qty,
-                created_at,
-                tracks: raw
-                    .tracks
-                    .iter()
-                    .filter(|(parent, ..)| *parent == sid)
-                    .map(|(_, carrier, title, number)| {
-                        (
-                            carrier.clone().unwrap_or_default(),
-                            title.clone().unwrap_or_default(),
-                            number.clone().unwrap_or_default(),
-                        )
-                    })
-                    .collect(),
-            })
-            .collect(),
-        creditmemos: raw
-            .creditmemos
-            .into_iter()
-            .map(|(increment_id, state, total, created_at)| OrderDocument {
-                increment_id,
-                state: memo_state(state),
-                total,
-                created_at,
-            })
-            .collect(),
-        history: raw
-            .history
-            .into_iter()
-            .map(|(status, comment, created_at, notified)| OrderComment {
-                status,
-                comment,
-                created_at,
-                notified,
-            })
-            .collect(),
-        in_grid: raw.in_grid,
-        quote_id: raw.quote_id,
-        matched_by_id,
-    }
-}
-
-/// Assemble [`Category`]: per-scope values with Yes/No labels for the boolean flags,
-/// the admin-style breadcrumb, and the visibility walk — the category's own effectively
-/// inactive scopes plus every ancestor whose inactivity hides the subtree.
-#[cfg(feature = "db")]
-fn to_category(raw: db::DbCategoryCard) -> Category {
-    let scope_name = |store_id: u32| -> String {
-        if store_id == 0 {
-            "default".to_string()
-        } else {
-            let code = raw
-                .stores
-                .get(&store_id)
-                .cloned()
-                .unwrap_or_else(|| format!("{store_id}"));
-            format!("stores/{code}")
-        }
-    };
-
-    let mut values: Vec<ProductValue> = Vec::new();
-    for v in &raw.values {
-        let label = match (v.attribute.as_str(), v.value.as_deref()) {
-            ("is_active" | "include_in_menu" | "is_anchor", Some("1")) => {
-                Some("Yes".to_string())
-            }
-            ("is_active" | "include_in_menu" | "is_anchor", Some("0")) => Some("No".to_string()),
-            _ => None,
-        };
-        let scope = ProductScopeValue {
-            store: scope_name(v.store_id),
-            label,
-            value: v.value.clone().unwrap_or_else(|| "NULL".to_string()),
-        };
-        match values.iter_mut().find(|e| e.attribute == v.attribute) {
-            Some(e) => e.scopes.push(scope),
-            None => values.push(ProductValue {
-                attribute: v.attribute.clone(),
-                backend_type: v.backend_type.clone(),
-                input: v.input.clone(),
-                scopes: vec![scope],
-            }),
-        }
-    }
-    for v in &mut values {
-        v.scopes.sort_by(|a, b| {
-            (a.store != "default").cmp(&(b.store != "default")).then_with(|| a.store.cmp(&b.store))
-        });
-    }
-    const ORDER: [&str; 10] = [
-        "name",
-        "is_active",
-        "include_in_menu",
-        "is_anchor",
-        "url_key",
-        "url_path",
-        "display_mode",
-        "available_sort_by",
-        "default_sort_by",
-        "landing_page",
-    ];
-    let rank = |a: &str| ORDER.iter().position(|f| *f == a).unwrap_or(ORDER.len());
-    values.sort_by(|a, b| {
-        rank(&a.attribute).cmp(&rank(&b.attribute)).then_with(|| a.attribute.cmp(&b.attribute))
-    });
-
-    // Effective inactivity per entity: the default row unless a store row overrides it.
-    // No is_active row at all = active (the attribute default).
-    let store_ids: Vec<u32> = {
-        let mut v: Vec<u32> = raw.stores.keys().copied().filter(|&s| s > 0).collect();
-        v.sort();
-        v
-    };
-    let inactive_scopes = |entity: u32| -> Vec<String> {
-        let row = |store: u32| {
-            raw.active_rows
-                .iter()
-                .find(|(e, s, _)| *e == entity && *s == store)
-                .and_then(|(_, _, v)| *v)
-        };
-        match row(0) {
-            Some(0) => {
-                let enabling: Vec<u32> =
-                    store_ids.iter().copied().filter(|&s| row(s) == Some(1)).collect();
-                if enabling.is_empty() {
-                    vec!["all scopes".to_string()]
-                } else {
-                    let mut out = vec!["default".to_string()];
-                    out.extend(
-                        store_ids
-                            .iter()
-                            .copied()
-                            .filter(|&s| row(s) != Some(1))
-                            .map(scope_name),
-                    );
-                    out
-                }
-            }
-            _ => store_ids.iter().copied().filter(|&s| row(s) == Some(0)).map(scope_name).collect(),
-        }
-    };
-    let mut visibility: Vec<CategoryVisibilityIssue> = Vec::new();
-    let own = inactive_scopes(raw.id);
-    if !own.is_empty() {
-        visibility.push(CategoryVisibilityIssue {
-            ancestor_id: None,
-            ancestor_name: None,
-            scopes: own,
-        });
-    }
-    for (aid, aname) in &raw.ancestors {
-        let scopes = inactive_scopes(*aid);
-        if !scopes.is_empty() {
-            visibility.push(CategoryVisibilityIssue {
-                ancestor_id: Some(*aid),
-                ancestor_name: Some(aname.clone()),
-                scopes,
-            });
-        }
-    }
-
-    // Admin-style breadcrumb: ancestors past the tree root.
-    let breadcrumb = raw
-        .ancestors
-        .iter()
-        .skip(1)
-        .map(|(_, n)| n.as_str())
-        .collect::<Vec<_>>()
-        .join(" > ");
-    let parent_name = raw.ancestors.last().map(|(_, n)| n.clone());
-
-    Category {
-        id: raw.id,
-        path: raw.path,
-        level: raw.level,
-        position: raw.position,
-        parent_id: (raw.parent_id > 0).then_some(raw.parent_id),
-        parent_name,
-        children: raw.children,
-        breadcrumb,
-        values,
-        visibility,
-        direct_products: raw.direct_products,
-        indexed: raw
-            .indexed
-            .into_iter()
-            .map(|(store, products)| CategoryIndexCount { store, products })
-            .collect(),
-        rewrites: raw
-            .rewrites
-            .into_iter()
-            .map(|(request_path, store, redirect)| ProductRewrite { request_path, store, redirect })
-            .collect(),
-        root_of: raw.root_of,
-        products: raw
-            .products
-            .into_iter()
-            .map(|(entity_id, sku, name, position)| CategoryProduct {
-                entity_id,
-                sku,
-                name,
-                position,
-            })
-            .collect(),
-        indexed_store: raw.indexed_store,
-        indexed_products: raw.indexed_products.map(|rows| {
-            rows.into_iter()
-                .map(|(entity_id, sku, name, position, is_parent, visibility)| {
-                    CategoryIndexedProduct {
-                        entity_id,
-                        sku,
-                        name,
-                        position,
-                        via_anchor: !is_parent,
-                        visibility,
-                    }
-                })
-                .collect()
-        }),
-    }
-}
-
-/// Assemble [`ProductPrices`]: the EAV price attributes reuse the product scope
-/// grouping; tier/rule/index rows resolve website codes and customer-group names.
-#[cfg(feature = "db")]
-fn to_product_prices(raw: db::DbProductPrices, matched_by_id: bool) -> ProductPrices {
-    let website = |id: u32| -> String {
-        if id == 0 {
-            "(all)".to_string()
-        } else {
-            raw.websites.get(&id).cloned().unwrap_or_else(|| format!("website/{id}"))
-        }
-    };
-    let group = |id: u32| -> String {
-        raw.customer_groups.get(&id).cloned().unwrap_or_else(|| format!("group/{id}"))
-    };
-
-    let mut attributes: Vec<ProductValue> = Vec::new();
-    for v in &raw.values {
-        let store = if v.store_id == 0 {
-            "default".to_string()
-        } else {
-            let code = raw
-                .stores
-                .get(&v.store_id)
-                .cloned()
-                .unwrap_or_else(|| format!("{}", v.store_id));
-            format!("stores/{code}")
-        };
-        let scope = ProductScopeValue {
-            store,
-            label: None,
-            value: v.value.clone().unwrap_or_else(|| "NULL".to_string()),
-        };
-        match attributes.iter_mut().find(|e| e.attribute == v.attribute) {
-            Some(e) => e.scopes.push(scope),
-            None => attributes.push(ProductValue {
-                attribute: v.attribute.clone(),
-                backend_type: v.backend_type.clone(),
-                input: v.input.clone(),
-                scopes: vec![scope],
-            }),
-        }
-    }
-    for v in &mut attributes {
-        v.scopes.sort_by(|a, b| {
-            (a.store != "default").cmp(&(b.store != "default")).then_with(|| a.store.cmp(&b.store))
-        });
-    }
-    const ORDER: [&str; 7] = [
-        "price",
-        "special_price",
-        "special_from_date",
-        "special_to_date",
-        "cost",
-        "msrp",
-        "minimal_price",
-    ];
-    let rank = |a: &str| ORDER.iter().position(|f| *f == a).unwrap_or(ORDER.len());
-    attributes.sort_by(|a, b| {
-        rank(&a.attribute).cmp(&rank(&b.attribute)).then_with(|| a.attribute.cmp(&b.attribute))
-    });
-
-    ProductPrices {
-        entity_id: raw.entity_id,
-        sku: raw.sku,
-        type_id: raw.type_id,
-        price_scope_website: raw.price_scope_website,
-        attributes,
-        tier_prices: raw
-            .tiers
-            .into_iter()
-            .map(|(w, all, g, qty, value, percentage)| TierPrice {
-                website: website(w),
-                customer_group: if all { "ALL GROUPS".to_string() } else { group(g) },
-                qty,
-                value,
-                percentage,
-            })
-            .collect(),
-        rule_prices: raw
-            .rules
-            .into_iter()
-            .map(|(date, g, w, rule_price)| RulePrice {
-                date,
-                website: website(w),
-                customer_group: group(g),
-                rule_price,
-            })
-            .collect(),
-        index: raw
-            .index
-            .into_iter()
-            .map(|(g, w, price, final_price, min_price, max_price, tier_price)| IndexedPrice {
-                website: website(w),
-                customer_group: group(g),
-                price,
-                final_price,
-                min_price,
-                max_price,
-                tier_price,
-            })
-            .collect(),
-        children: raw
-            .children
-            .into_iter()
-            .map(|c| ChildPrice {
-                sku: c.sku,
-                entity_id: c.entity_id,
-                enabled: c.enabled,
-                price: c.price,
-                special_price: c.special,
-                final_min: c.final_min,
-                final_max: c.final_max,
-                selection_price: c.selection_price,
-                selection_percent: c.selection_percent,
-            })
-            .collect(),
-        bundle_price_type: raw.bundle_price_type,
-        matched_by_id,
-    }
-}
-
-/// Assemble the public [`Product`] from the raw rows: group values per attribute with
-/// the default scope first, and resolve human labels where the data allows — Yes/No for
-/// booleans, the `Status`/`Visibility` source-model constants (hardcoded faithfully to
-/// core), tax classes from `tax_class`, and admin option labels for table-source
-/// select/multiselect values.
-#[cfg(feature = "db")]
-fn to_product_links(raw: db::DbProductLinks, matched_by_id: bool) -> ProductLinks {
-    let conv = |t: db::DbLinkTarget| {
-        let enabled = t.status.map(|s| s == 1);
-        let visibility = t.visibility.map(|v| {
-            match v {
-                1 => "Not Visible Individually",
-                2 => "Catalog",
-                3 => "Search",
-                4 => "Catalog, Search",
-                _ => "?",
-            }
-            .to_string()
-        });
-        // Won't render in the block: disabled, or Not Visible Individually.
-        let hidden = enabled == Some(false) || t.visibility == Some(1);
-        ProductLinkTarget {
-            position: t.position,
-            sku: t.sku,
-            name: t.name,
-            enabled,
-            visibility,
-            in_stock: t.in_stock,
-            hidden,
-        }
-    };
-    ProductLinks {
-        entity_id: raw.entity_id,
-        sku: raw.sku,
-        type_id: raw.type_id,
-        name: raw.name,
-        reverse: raw.reverse,
-        related: raw.related.into_iter().map(conv).collect(),
-        up_sells: raw.up_sells.into_iter().map(conv).collect(),
-        cross_sells: raw.cross_sells.into_iter().map(conv).collect(),
-        matched_by_id,
-    }
-}
-
-#[cfg(feature = "db")]
-fn to_product(raw: db::DbProduct, matched_by_id: bool) -> Product {
-    let label_of = |v: &db::DbProductValue, value: &str| -> Option<String> {
-        match (v.attribute.as_str(), v.input.as_deref()) {
-            ("status", _) => match value {
-                "1" => Some("Enabled".to_string()),
-                "2" => Some("Disabled".to_string()),
-                _ => None,
-            },
-            ("visibility", _) => match value {
-                "1" => Some("Not Visible Individually".to_string()),
-                "2" => Some("Catalog".to_string()),
-                "3" => Some("Search".to_string()),
-                "4" => Some("Catalog, Search".to_string()),
-                _ => None,
-            },
-            ("tax_class_id", _) => {
-                value.parse::<u32>().ok().and_then(|id| raw.tax_classes.get(&id).cloned())
-            }
-            (_, Some("boolean")) => match value {
-                "1" => Some("Yes".to_string()),
-                "0" => Some("No".to_string()),
-                _ => None,
-            },
-            (_, Some("select")) => value
-                .parse::<u32>()
-                .ok()
-                .and_then(|o| raw.option_labels.get(&(v.attribute_id, o)).cloned()),
-            (_, Some("multiselect")) => {
-                let labels: Vec<String> = value
-                    .split(',')
-                    .filter_map(|part| {
-                        part.trim()
-                            .parse::<u32>()
-                            .ok()
-                            .and_then(|o| raw.option_labels.get(&(v.attribute_id, o)).cloned())
-                    })
-                    .collect();
-                (!labels.is_empty()).then(|| labels.join(", "))
-            }
-            _ => None,
-        }
-    };
-
-    let mut values: Vec<ProductValue> = Vec::new();
-    for v in &raw.values {
-        // The `config` scope convention: `default` = store_id 0, else `stores/<code>` —
-        // a store view *coded* "default" (nearly every install has one) must not collide
-        // with the default scope.
-        let store = if v.store_id == 0 {
-            "default".to_string()
-        } else {
-            let code = raw
-                .stores
-                .get(&v.store_id)
-                .cloned()
-                .unwrap_or_else(|| format!("{}", v.store_id));
-            format!("stores/{code}")
-        };
-        let value = v.value.clone().unwrap_or_else(|| "NULL".to_string());
-        let scope = ProductScopeValue {
-            store,
-            label: v.value.as_deref().and_then(|val| label_of(v, val)),
-            value,
-        };
-        match values.iter_mut().find(|e| e.attribute == v.attribute) {
-            Some(e) => e.scopes.push(scope),
-            None => values.push(ProductValue {
-                attribute: v.attribute.clone(),
-                backend_type: v.backend_type.clone(),
-                input: v.input.clone(),
-                scopes: vec![scope],
-            }),
-        }
-    }
-    for v in &mut values {
-        v.scopes.sort_by(|a, b| {
-            (a.store != "default").cmp(&(b.store != "default")).then_with(|| a.store.cmp(&b.store))
-        });
-    }
-    // The everyday attributes first, the rest alphabetical.
-    const FIRST: [&str; 6] = ["name", "status", "visibility", "price", "special_price", "url_key"];
-    let rank = |a: &str| FIRST.iter().position(|f| *f == a).unwrap_or(FIRST.len());
-    values.sort_by(|a, b| {
-        rank(&a.attribute).cmp(&rank(&b.attribute)).then_with(|| a.attribute.cmp(&b.attribute))
-    });
-
-    // Image roles come for free from the product's role attributes (default scope): the
-    // file a gallery entry fills as base/small/thumbnail/swatch. `no_selection` = unset.
-    let roles_by_file: Vec<(String, &str)> =
-        [("image", "base"), ("small_image", "small"), ("thumbnail", "thumbnail"), ("swatch_image", "swatch")]
-            .iter()
-            .filter_map(|(attr, role)| {
-                raw.values
-                    .iter()
-                    .find(|v| v.attribute == *attr && v.store_id == 0)
-                    .and_then(|v| v.value.as_deref())
-                    .filter(|s| !s.is_empty() && *s != "no_selection")
-                    .map(|f| (f.to_string(), *role))
-            })
-            .collect();
-    let media: Vec<ProductMedia> = raw
-        .media
-        .into_iter()
-        .map(|(file, media_type, label, position, disabled)| {
-            let roles = roles_by_file
-                .iter()
-                .filter(|(f, _)| *f == file)
-                .map(|(_, r)| r.to_string())
-                .collect();
-            ProductMedia { file, media_type, label, position, disabled, roles }
-        })
-        .collect();
-
-    Product {
-        entity_id: raw.entity_id,
-        sku: raw.sku,
-        type_id: raw.type_id,
-        attribute_set: raw.attribute_set,
-        created_at: raw.created_at,
-        updated_at: raw.updated_at,
-        websites: raw.websites,
-        values,
-        stock: raw
-            .stock
-            .into_iter()
-            .map(|(source, quantity, in_stock)| ProductSourceStock { source, quantity, in_stock })
-            .collect(),
-        legacy_stock: raw
-            .legacy_stock
-            .map(|(qty, in_stock, manage_stock)| ProductLegacyStock { qty, in_stock, manage_stock }),
-        categories: raw
-            .categories
-            .into_iter()
-            .map(|(id, breadcrumb)| ProductCategory { id, breadcrumb })
-            .collect(),
-        rewrites: raw
-            .rewrites
-            .into_iter()
-            .map(|(request_path, store, redirect)| ProductRewrite { request_path, store, redirect })
-            .collect(),
-        media,
-        parents: raw.parents,
-        super_attributes: raw.super_attributes,
-        children: raw
-            .children
-            .into_iter()
-            .map(|(entity_id, sku, enabled, options, qty, in_stock, default_qty)| ProductChild {
-                sku,
-                entity_id,
-                enabled,
-                options,
-                qty,
-                in_stock,
-                default_qty,
-            })
-            .collect(),
-        bundle_options: raw
-            .bundle_options
-            .into_iter()
-            .map(|o| BundleOption {
-                title: o.title,
-                required: o.required,
-                input_type: o.input_type,
-                selections: o
-                    .selections
-                    .into_iter()
-                    .map(
-                        |(entity_id, sku, enabled, qty, is_default, price, price_percent, in_stock)| {
-                            BundleSelection {
-                                sku,
-                                entity_id,
-                                enabled,
-                                qty,
-                                is_default,
-                                price,
-                                price_percent,
-                                in_stock,
-                            }
-                        },
-                    )
-                    .collect(),
-            })
-            .collect(),
-        matched_by_id,
-    }
-}
-
-/// Map a raw DB attribute row to the public type: decode `is_global`, split `apply_to`,
-/// and derive the value table (`<entity_table>_<backend_type>`, honoring the rare
-/// `value_table_prefix`; `static` attributes live on the entity table itself).
-#[cfg(feature = "db")]
-fn to_eav_attribute(r: db::DbEavAttribute, entities: &[db::DbEavEntity]) -> EavAttribute {
-    let entity = entities.iter().find(|e| e.code == r.entity_code);
-    let value_table = if r.backend_type == "static" {
-        None
-    } else {
-        entity.and_then(|e| {
-            let base = e.value_table_prefix.clone().or_else(|| e.entity_table.clone())?;
-            Some(format!("{base}_{}", r.backend_type))
-        })
-    };
-    EavAttribute {
-        code: r.code,
-        entity_type: r.entity_code,
-        attribute_id: r.attribute_id,
-        label: r.label,
-        backend_type: r.backend_type,
-        frontend_input: r.frontend_input,
-        required: r.required,
-        unique: r.unique,
-        user_defined: r.user_defined,
-        default_value: r.default_value,
-        source_model: r.source_model.map(ClassName::new),
-        backend_model: r.backend_model.map(ClassName::new),
-        frontend_model: r.frontend_model.map(ClassName::new),
-        catalog: r.catalog.map(|c| EavCatalogFlags {
-            scope: match c.is_global {
-                1 => EavScope::Global,
-                2 => EavScope::Website,
-                _ => EavScope::Store,
-            },
-            searchable: c.searchable,
-            filterable: c.filterable,
-            filterable_in_search: c.filterable_in_search,
-            comparable: c.comparable,
-            used_in_listing: c.used_in_listing,
-            used_for_sort_by: c.used_for_sort_by,
-            visible_on_front: c.visible_on_front,
-            apply_to: c
-                .apply_to
-                .map(|a| {
-                    a.split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default(),
-        }),
-        value_table,
-    }
-}
-
-/// Build the execution chain (onion) per intercepted method from a run-ordered plugin list:
-/// before (ascending) → around (nested ascending) → target → around (unwind) → after
-/// (descending). `plugins` must already be in canonical run order; we only filter, so the
-/// order is preserved. Disabled plugins are excluded.
-struct ActionScan<'a> {
-    front_name: &'a str,
-    ns: &'a str,
-    admin: bool,
-    area: Area,
-    module: &'a ModuleName,
-    filter: Option<&'a str>,
-    resolver: &'a resolver::ClassResolver,
-}
-
-/// Recursively walk a `Controller/` tree, emitting concrete action classes mapped to URLs.
-fn scan_actions(
-    ctx: &ActionScan,
-    base: &Path,
-    dir: &Path,
-    seen: &mut std::collections::HashSet<String>,
-    out: &mut Vec<ControllerAction>,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_dir() {
-            // For frontend, the Adminhtml subtree holds admin actions — skip it.
-            if !ctx.admin && path.file_name().and_then(|n| n.to_str()) == Some("Adminhtml") {
-                continue;
-            }
-            scan_actions(ctx, base, &path, seen, out);
-            continue;
-        }
-        if path.extension().and_then(|e| e.to_str()) != Some("php") {
-            continue;
-        }
-        // Path under the Controller root, e.g. ["Product", "View"].
-        let Ok(rel) = path.strip_prefix(base) else { continue };
-        let stem = rel.with_extension("");
-        let parts: Vec<String> = stem
-            .components()
-            .filter_map(|c| c.as_os_str().to_str().map(String::from))
-            .collect();
-        if parts.is_empty() {
-            continue;
-        }
-
-        let url = std::iter::once(ctx.front_name.to_lowercase())
-            .chain(parts.iter().map(|p| p.to_lowercase()))
-            .collect::<Vec<_>>()
-            .join("/");
-        if ctx.filter.is_some_and(|f| !url.contains(f)) {
-            continue; // skip parsing controllers we won't show
-        }
-
-        let mut class = format!("{}\\Controller", ctx.ns);
-        if ctx.admin {
-            class.push_str("\\Adminhtml");
-        }
-        for p in &parts {
-            class.push('\\');
-            class.push_str(p);
-        }
-        if !seen.insert(class.clone()) {
-            continue;
-        }
-        let class = ClassName::new(class);
-        if ctx.resolver.is_action(&class) {
-            out.push(ControllerAction {
-                url,
-                class,
-                area: ctx.area,
-                module: ctx.module.clone(),
-                source: Source { module: ctx.module.clone(), file: path, line: 0, area: ctx.area },
-            });
-        }
-    }
-}
-
 /// A module's composer identity for the `deps` graph.
 struct DepPkgInfo {
     name: String,
@@ -4593,7 +988,7 @@ struct DepPkgInfo {
 }
 
 /// Read an app/code module's own `composer.json` (they're not in installed.json).
-fn read_app_composer(dir: &Path) -> Option<DepPkgInfo> {
+fn read_app_composer(dir: &Path, vfs: &engine::vfs::Vfs) -> Option<DepPkgInfo> {
     #[derive(serde::Deserialize)]
     struct Cj {
         name: Option<String>,
@@ -4601,7 +996,7 @@ fn read_app_composer(dir: &Path) -> Option<DepPkgInfo> {
         require: std::collections::HashMap<String, serde::de::IgnoredAny>,
     }
     let file = dir.join("composer.json");
-    let cj: Cj = serde_json::from_str(&std::fs::read_to_string(&file).ok()?).ok()?;
+    let cj: Cj = serde_json::from_str(&vfs.read_to_string(&file).ok()?).ok()?;
     let mut require: Vec<String> = cj.require.into_keys().collect();
     require.sort();
     Some(DepPkgInfo { name: cj.name.unwrap_or_default(), require, file })
@@ -4651,114 +1046,199 @@ struct UseScan<'a> {
 /// Walk an argument value looking for references to the scanned class: `object` values
 /// (the class or its `\Proxy`) and `string` values spelling its name, recursing into array
 /// items (each with its own provenance and key path).
-fn scan_arg_for_class(
-    value: &ArgValue,
-    source: &Source,
-    path: &mut Vec<String>,
-    scan: &UseScan<'_>,
-    out: &mut Vec<model::InjectionSite>,
-) {
-    let mut hit = |declared: ClassName, as_string: bool| {
-        if (scan.keep)(source) {
-            out.push(model::InjectionSite {
-                consumer: scan.consumer.clone(),
-                consumer_is_virtual: scan.consumer_is_virtual,
-                argument: scan.argument.to_string(),
-                item_path: path.clone(),
-                declared,
-                as_string,
-                source: source.clone(),
-            });
-        }
-    };
-    match value {
-        ArgValue::Object(o) => {
-            let c = &o.class;
-            if c == scan.class || c == scan.proxy {
-                hit(c.clone(), false);
-            }
-        }
-        ArgValue::Scalar { xsi_type, text } => {
-            if xsi_type == "string" && text.trim().trim_start_matches('\\') == scan.class.as_str() {
-                hit(scan.class.clone(), true);
-            }
-        }
-        ArgValue::Array(items) => {
-            for item in items {
-                path.push(item.key.clone());
-                scan_arg_for_class(&item.value, &item.source, path, scan, out);
-                path.pop();
-            }
-        }
-        ArgValue::Null => {}
-    }
-}
+#[cfg(test)]
+mod handle_tests {
+    use std::path::PathBuf;
 
-/// Deep-merge one type's declared arguments into the accumulator (array args merge
-/// item-by-item; scalars/objects replace).
-fn merge_args_into(
-    merged: &mut std::collections::HashMap<String, (ArgValue, Source)>,
-    args: Option<&std::collections::HashMap<String, di::LocatedArg>>,
-) {
-    let Some(args) = args else { return };
-    for (k, la) in args {
-        let value = match merged.get(k) {
-            Some((existing, _)) => existing.merged_with(&la.value),
-            None => la.value.clone(),
+    /// Long-lived frontends (the LSP server) share one handle across threads and swap it
+    /// on rebuild; a field that isn't `Send + Sync` (an `Rc`, a `RefCell`) must fail here
+    /// at compile time, not at the editor integration.
+    #[test]
+    fn magento_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<super::Magento>();
+    }
+
+    /// A unique throwaway directory tree, removed on drop. std-only on purpose — the
+    /// crate has no dev-dependencies and two tests don't justify one.
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "magequery-test-{}-{}",
+                std::process::id(),
+                name
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn touch(&self, rel: &str) {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn find_root_walks_up_from_a_nested_folder() {
+        let tree = TempTree::new("find-root-up");
+        tree.touch("app/etc/config.php");
+        tree.touch("app/code/Acme/Widget/etc/module.xml");
+
+        let found = super::Magento::find_root(tree.0.join("app/code/Acme/Widget"));
+        assert_eq!(found.as_deref(), Some(tree.0.as_path()));
+    }
+
+    #[test]
+    fn find_root_probes_direct_children_of_a_monorepo_folder() {
+        let tree = TempTree::new("find-root-down");
+        tree.touch("docs/readme.md");
+        tree.touch("shop/app/etc/config.php");
+
+        let found = super::Magento::find_root(&tree.0);
+        assert_eq!(found.as_deref(), Some(tree.0.join("shop").as_path()));
+    }
+
+    #[test]
+    fn find_root_returns_none_outside_an_installation() {
+        let tree = TempTree::new("find-root-none");
+        tree.touch("src/main.rs");
+
+        assert_eq!(super::Magento::find_root(tree.0.join("src")), None);
+    }
+
+    #[test]
+    fn class_names_enumerates_the_convention_tree() {
+        let tree = TempTree::new("class-names");
+        let write = |rel: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "<?php\n").unwrap();
         };
-        merged.insert(k.clone(), (value, la.source.clone()));
+        std::fs::create_dir_all(tree.0.join("app/code/Acme/Widget/etc")).unwrap();
+        std::fs::create_dir_all(tree.0.join("app/etc")).unwrap();
+        std::fs::write(
+            tree.0.join("app/etc/config.php"),
+            "<?php\nreturn ['modules' => ['Acme_Widget' => 1]];\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tree.0.join("app/code/Acme/Widget/etc/module.xml"),
+            r#"<config><module name="Acme_Widget"/></config>"#,
+        )
+        .unwrap();
+        write("app/code/Acme/Widget/Model/Thing.php");
+        write("app/code/Acme/Widget/Api/ThingInterface.php");
+        write("app/code/Acme/Widget/registration.php"); // lowercase stem: not a class
+        write("app/code/Acme/Widget/Test/Unit/ThingTest.php"); // test tree: skipped
+        // Runtime-written code below an autoload-covered dir: never a candidate.
+        write("app/code/Acme/Widget/generated/Thing/Interceptor.php");
+
+        let magento = super::Magento::open(&tree.0).unwrap();
+        let names: Vec<String> =
+            magento.class_names().iter().map(|c| c.as_str().to_string()).collect();
+        assert!(names.contains(&"Acme\\Widget\\Model\\Thing".to_string()), "{names:?}");
+        assert!(names.contains(&"Acme\\Widget\\Api\\ThingInterface".to_string()));
+        assert!(!names.iter().any(|n| n.contains("registration")));
+        assert!(!names.iter().any(|n| n.contains("ThingTest")));
+        assert!(!names.iter().any(|n| n.contains("Interceptor")), "{names:?}");
     }
-}
 
-fn chains_from(plugins: &[Plugin], only: Option<&str>) -> Vec<MethodChain> {
-    use std::collections::BTreeMap;
-
-    let mut by_method: BTreeMap<String, Vec<(InterceptKind, ChainPluginRef)>> = BTreeMap::new();
-    for p in plugins {
-        if p.disabled {
-            continue;
-        }
-        for m in &p.methods {
-            if only.is_some_and(|f| f != m.target) {
-                continue;
-            }
-            let r = ChainPluginRef {
-                name: p.name.clone(),
-                class: p.class.clone(),
-                plugin_method: m.plugin_method.clone(),
-                sort_order: p.sort_order,
-                declared_on: p.declared_on.clone(),
-                source: p.source.clone(),
-                areas: p.areas.clone(),
-            };
-            by_method.entry(m.target.clone()).or_default().push((m.kind, r));
-        }
-    }
-
-    let mut chains = Vec::new();
-    for (method, parts) in by_method {
-        let pick = |kind: InterceptKind| -> Vec<ChainPluginRef> {
-            parts.iter().filter(|(k, _)| *k == kind).map(|(_, r)| r.clone()).collect()
+    /// The two per-file lints fire: a layout template no file provides, and a plugin
+    /// name declared twice for one type in one file.
+    #[test]
+    fn template_and_duplicate_plugin_lints_fire() {
+        let tree = TempTree::new("nit-lints");
+        let write = |rel: &str, content: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
         };
-        let befores = pick(InterceptKind::Before);
-        let arounds = pick(InterceptKind::Around);
-        let afters = pick(InterceptKind::After);
+        write("app/etc/config.php", "<?php\nreturn ['modules' => ['Acme_Widget' => 1]];\n");
+        write(
+            "app/code/Acme/Widget/etc/module.xml",
+            r#"<config><module name="Acme_Widget"/></config>"#,
+        );
+        write(
+            "app/code/Acme/Widget/etc/di.xml",
+            r#"<config>
+    <type name="Acme\Widget\Model\Thing">
+        <plugin name="tweak" type="Acme\Widget\Plugin\A"/>
+        <plugin name="tweak" type="Acme\Widget\Plugin\B"/>
+    </type>
+</config>"#,
+        );
+        write(
+            "app/code/Acme/Widget/view/frontend/layout/default.xml",
+            r#"<page><body>
+    <block class="Acme\Widget\Block\Chip" name="acme.chip" template="Acme_Widget::missing.phtml"/>
+</body></page>"#,
+        );
 
-        let mut steps = Vec::new();
-        for r in &befores {
-            steps.push(ChainStep::Before(r.clone()));
-        }
-        for r in &arounds {
-            steps.push(ChainStep::AroundEnter(r.clone()));
-        }
-        steps.push(ChainStep::Target);
-        for r in arounds.iter().rev() {
-            steps.push(ChainStep::AroundExit(r.clone()));
-        }
-        for r in afters.iter().rev() {
-            steps.push(ChainStep::After(r.clone()));
-        }
-        chains.push(MethodChain { method, steps });
+        let magento = super::Magento::open(&tree.0).unwrap();
+        let report = magento.doctor(None);
+        let template_lint = report
+            .findings
+            .iter()
+            .find(|f| f.lint == crate::model::DoctorLint::TemplateFileMissing)
+            .expect("template lint fires");
+        assert_eq!(template_lint.subject.as_deref(), Some("Acme_Widget::missing.phtml"));
+        assert!(template_lint.source.is_some());
+
+        let diags = magento.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.message.contains("duplicate <plugin name=\"tweak\"")),
+            "{:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
     }
-    chains
+
+    /// The buffer overlay wins over disk: the same root answers differently when a
+    /// di.xml is overlaid — the editor's unsaved state, analyzed without saving.
+    #[test]
+    fn overlay_content_overrides_disk() {
+        let tree = TempTree::new("overlay");
+        let write = |rel: &str, content: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write("app/etc/config.php", "<?php\nreturn ['modules' => ['Acme_Widget' => 1]];\n");
+        write(
+            "app/code/Acme/Widget/etc/module.xml",
+            r#"<config><module name="Acme_Widget"/></config>"#,
+        );
+        let di_path = tree.0.join("app/code/Acme/Widget/etc/di.xml");
+        write(
+            "app/code/Acme/Widget/etc/di.xml",
+            r#"<config><preference for="Acme\Widget\Api\ThingInterface" type="Acme\Widget\Model\Disk"/></config>"#,
+        );
+
+        let iface = crate::ClassName::new("Acme\\Widget\\Api\\ThingInterface");
+        let on_disk = super::Magento::open(&tree.0).unwrap();
+        assert_eq!(
+            on_disk.preference(&iface, crate::Area::Global).unwrap().concrete.as_str(),
+            "Acme\\Widget\\Model\\Disk"
+        );
+
+        let overlay = std::collections::HashMap::from([(
+            di_path,
+            r#"<config><preference for="Acme\Widget\Api\ThingInterface" type="Acme\Widget\Model\Buffer"/></config>"#
+                .to_string(),
+        )]);
+        let overlaid = super::Magento::open_with_overlay(&tree.0, overlay).unwrap();
+        assert_eq!(
+            overlaid.preference(&iface, crate::Area::Global).unwrap().concrete.as_str(),
+            "Acme\\Widget\\Model\\Buffer"
+        );
+    }
 }

@@ -1,0 +1,23 @@
+# The Zed extension shim: compiled to WASM by Zed itself (wasm32-wasip1/2), so this
+# crate deliberately stands alone — the empty [workspace] table detaches it from the
+# repository workspace and its native targets.
+#
+# MIT (unlike the rest of the repo, EUPL-1.2): the Zed extension registry validates the
+# extension directory's LICENSE against an allowlist that doesn't include EUPL. Only
+# this ~100-line launcher is MIT; the magequery binary it downloads stays EUPL.
+
+[package]
+name = "zed-magequery"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.1.0"

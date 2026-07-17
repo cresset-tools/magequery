@@ -16,6 +16,9 @@ pub(crate) struct PhpClass {
     pub implements: Vec<ClassName>,
     pub is_interface: bool,
     pub is_abstract: bool,
+    /// 1-based line of the type declaration — where a finding *about the class itself*
+    /// (doctor's unregistered-code lints) points, rather than line 0 / top of file.
+    pub decl_line: u32,
 }
 
 enum Token {
@@ -28,7 +31,7 @@ enum Token {
 /// Parse the header of a PHP class/interface/trait/enum file. Returns `None` if no type
 /// declaration is found.
 pub(crate) fn parse_header(src: &str) -> Option<PhpClass> {
-    let tokens = tokenize(src);
+    let (tokens, offsets) = tokenize_at(src);
     let mut namespace = String::new();
     let mut uses: HashMap<String, String> = HashMap::new();
     let mut depth: i32 = 0;
@@ -56,7 +59,12 @@ pub(crate) fn parse_header(src: &str) -> Option<PhpClass> {
                     && matches!(kw.as_str(), "class" | "interface" | "trait" | "enum") =>
             {
                 let is_interface = kw == "interface";
-                return parse_type_header(&tokens, i + 1, &namespace, &uses, is_interface, is_abstract);
+                // The declaration's line: the name token when present, else the keyword.
+                let offset = offsets.get(i + 1).or_else(|| offsets.get(i)).copied().unwrap_or(0);
+                let decl_line = 1 + src[..offset].bytes().filter(|b| *b == b'\n').count() as u32;
+                return parse_type_header(
+                    &tokens, i + 1, &namespace, &uses, is_interface, is_abstract, decl_line,
+                );
             }
             Token::Punct('{') => {
                 depth += 1;
@@ -79,6 +87,7 @@ fn parse_type_header(
     uses: &HashMap<String, String>,
     is_interface: bool,
     is_abstract: bool,
+    decl_line: u32,
 ) -> Option<PhpClass> {
     let name = match tokens.get(i) {
         Some(Token::Ident(n)) => n.clone(),
@@ -113,7 +122,7 @@ fn parse_type_header(
     } else {
         ClassName::new(format!("{namespace}\\{name}"))
     };
-    Some(PhpClass { fqcn, extends, implements, is_interface, is_abstract })
+    Some(PhpClass { fqcn, extends, implements, is_interface, is_abstract, decl_line })
 }
 
 /// Parse a `use` statement starting at `i` (after the `use` keyword). Records imports into

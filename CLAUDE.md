@@ -26,8 +26,11 @@ magequery does not.
 Workspace:
 - `magequery-core` — parsing, indexing, resolution. Deps: `quick-xml`, `serde` (default
   feature), `thiserror`. **No `clap`, no output, no `anyhow`.**
-- `magequery-cli` (not built yet) — `clap` + table/`--json` renderers. May use `anyhow`
-  internally to flatten errors for `main`.
+- `magequery-cli` — `clap` + table/`--json` renderers. May use `anyhow` internally to
+  flatten errors for `main`.
+- `magequery-lsp` — the language server (see "LSP + editor plugins"): a third renderer
+  over core, speaking LSP instead of ANSI. Depends on core **without** the `db` feature.
+  (`editors/zed` holds a fourth crate, detached from the workspace — it compiles to WASM.)
 
 ### The central engine
 
@@ -188,8 +191,9 @@ CONFIG & ADMIN (where settings & permissions live)
   admin-users [<user>]   admin-roles [<role>]   integrations [<name>]   (live DB)
 
 FRONTEND      (presentation)
-  layout [<handle>] [--area]    widgets [<id>]    email-templates [<id>]
-  translations <str> [--locale] [--db]   ui-components [<name>] [--area]
+  layout [<handle>] [--area]    templates [<Vendor_Module::path.phtml>] [--area]
+  widgets [<id>]    email-templates [<id>]    translations <str> [--locale] [--db]
+  ui-components [<name>] [--area]
   cms-page|cms-block [<identifier>] [--id <n>] [--content]   (live DB)
 
 RUNTIME       (env.php config & live connections)
@@ -203,16 +207,18 @@ PROJECT       (the codebase itself)
   deps <module>             doctor [--source]          whatis <class>   patches [--db|--pending]
 ```
 
-**Tooling meta-commands** (`completions <shell>`, `man`, `skill`) sit *outside* the seven
-groups — they describe the CLI itself, not a Magento entity, so they'd violate the "noun =
-Magento entity" grammar. All three are `#[command(hide = true)]` (absent from the grouped
-help screen but still `--help`-discoverable and tab-completable) and are dispatched **before**
-`Magento::open` so they work anywhere, no checkout needed. `completions` uses `clap_complete`
-(bash/zsh/fish/elvish/powershell → stdout), `man` uses `clap_mangen` (roff → stdout), and
-`skill` prints `assets/skill/SKILL.md` (embedded via `include_str!`, so it always matches this
-binary's command surface) — the Claude Code agent skill that teaches an AI agent to reach for
-magequery on "how is this wired" questions instead of grepping; users install it with
-`magequery skill > .claude/skills/magequery/SKILL.md`.
+**Tooling meta-commands** (`completions <shell>`, `man`, `skill`, `lsp`) sit *outside* the
+seven groups — they describe/serve the CLI itself, not a Magento entity, so they'd violate the
+"noun = Magento entity" grammar. All four are `#[command(hide = true)]` (absent from the
+grouped help screen but still `--help`-discoverable and tab-completable) and are dispatched
+**before** `Magento::open`. `completions` uses `clap_complete` (bash/zsh/fish/elvish/powershell
+→ stdout), `man` uses `clap_mangen` (roff → stdout), `skill` prints `assets/skill/SKILL.md`
+(embedded via `include_str!`, so it always matches this binary's command surface) — the Claude
+Code agent skill that teaches an AI agent to reach for magequery on "how is this wired"
+questions instead of grepping; users install it with
+`magequery skill > .claude/skills/magequery/SKILL.md` — and `lsp` runs the language server on
+stdio (it discovers Magento roots per workspace folder itself, which is why it too skips the
+CLI's `Magento::open`; spawned by editor plugins, not by hand — see "LSP + editor plugins").
 
 **Keeping `SKILL.md` in sync is a hard rule.** Unlike `completions`/`man` (generated from the
 `Command` enum, so always current), the skill is **hand-maintained**: its frontmatter
@@ -238,9 +244,11 @@ pipe (Rust ignores SIGPIPE by default, which `println!`/clap_complete unwrap int
 
 ### Cross-cutting flag vocabulary (a flag means the same thing everywhere)
 
-- **`--area <name>` / `--all-areas`** — only on area-aware commands (`di`, `preference`,
-  `plugins`, `events`, `routes`, `actions`, `webapi`, `uses`). Default = collapsed diff.
-  (`uses` has `--area` but no `--all-areas`: its default is already the merged union.)
+- **`--area <name>`** — only on area-aware commands (`di`, `preference`, `plugins`,
+  `events`, `routes`, `actions`, `webapi`, `uses`, `layout`, `templates`, `ui-components`).
+  **`--all-areas`** is available on the commands that render per-area DI/config views.
+  Default = collapsed diff where applicable. (`uses` has no `--all-areas`: its default is
+  already the merged union.)
 - **`--json`** and **`--color auto|always|never`** + **`--root <path>`** — global, every command.
 - **`--db`** — the opt-in switch on every *hybrid static-or-live* command (`config`,
   `schema`, `patches`, `eav`, `indexers`, `cron`). Static by default; DB overlay when asked;
@@ -1026,6 +1034,18 @@ theme `layout/override/` replacement semantics not modeled. Validated: Luma's
 catalog_product_view `<move>`s render under the theme layer; commerce-store's `default`
 handle = 53 files, 12ms.
 
+### `templates` (PHTML files, theme overrides, and layout usages, static, done)
+
+`magequery templates [<Vendor_Module::path.phtml>] [--area]` catalogs every `.phtml`
+under enabled modules' `view/{base,frontend,adminhtml}/templates` trees and every theme's
+`<Vendor_Module>/templates` overrides, then joins them to `template=` assignments from the
+layout index. Short module-layout references (`template="path.phtml"`) normalize to the
+owning module's full reference. No arg lists references with file/use counts; an exact or
+single substring match shows module file, every theme override candidate, and each layout
+handle/block/class use with provenance. Missing files and templates unused by layout XML are
+reported honestly. Theme application depends on active-theme state, so candidates are listed,
+never falsely resolved to one.
+
 ### `widgets` (widget types from `etc/widget.xml`, static, done)
 
 What the admin's "Insert Widget" dropdown offers, as data: id, label, the **block class**
@@ -1512,6 +1532,242 @@ commerce-store (single full-access Administrators; never-logged-in rendered hone
 down-DB exits 1 cleanly). The granular-role/deny/stale-rule branches are
 straightforward format arms verified by inspection — neither test store has a granular
 role, and seeding one into a live DB was deliberately not done.
+
+## LSP + editor plugins (done)
+
+The binary doubles as a language server: the hidden `magequery lsp` meta-command runs
+`magequery_lsp::run_stdio()` — a third workspace crate; core computes, the CLI renders
+ANSI, the LSP renders LSP. Stack: `lsp-server` + `lsp-types` **pinned `0.95`** (0.96
+swapped `Url` for a bare `Uri` type and lost the file-path conversions) — the
+rust-analyzer stack: sync, channel-based, no async runtime, matching core's philosophy.
+Three locked design properties:
+- **Open buffers overlay the checkout (the VFS overlay).** Content sync is FULL;
+  didOpen/didChange/didClose maintain a buffers map that every rebuild hands to
+  `Magento::open_with_overlay` — core's `Vfs` (vfs.rs) serves overlay content for open
+  buffers, disk for everything else, so diagnostics/answers are **as-you-type**
+  (didChange marks dirty; the 300ms debounce is the typing cadence). Scope is content
+  only: discovery/existence stay on the real filesystem (a never-saved new file is
+  invisible until saved); composer metadata + `var/.maintenance.ip` deliberately stay
+  disk-only. Overlay keys are inserted under both the URI path and its canonicalized
+  form (macOS `/private`). Frontends read files via `Magento::read_source` so their
+  positions match the index. Pristine didOpen doesn't rebuild; didClose with unsaved
+  changes reverts to disk.
+- **Full rebuild is the invalidation.** Single-threaded event loop over the crossbeam
+  channels; per-workspace dirty flag; a `recv_timeout(300ms)` quiet period is the whole
+  debounce, and a request arriving mid-burst forces the rebuild first so answers never
+  come from a stale index. `Magento::open` at ~tens of ms makes incrementality not worth
+  owning. Gotcha: the `Connection` must drop **before** `io_threads.join()` — the writer
+  thread runs while any sender lives, so exit hangs otherwise (found live).
+- **Not a PHP language server.** Runs alongside Intelephense/Phpactor; owns the XML
+  config layer plus Magento-semantic overlays on PHP.
+
+Features: **diagnostics** — doctor findings (kebab-case `DoctorLint` serialization as the
+LSP code) + parse `Diagnostic`s, grouped per file, whole-line ranges (core has no column
+provenance), published project-wide after every rebuild with stale-file clearing;
+**definition** — class → PSR-4 file at the `class X` header line, and when a preference
+redirects, *also* the resolved concrete (the answer you'd miss reading the file); event →
+its observer declarations; config path → the system.xml field + every static value
+source; ACL id → acl.xml; module → its module.xml; **hover** — class = compressed
+`whatis` card (kind · module · package version, preference resolution, plugin/argument
+counts, wired-in count, observes/cron/webapi/command roles), event = observer list,
+config path = admin breadcrumb + per-scope static values, ACL = title/breadcrumb/grants;
+**references** — `uses()` reverse DI + the whatis sweep + plugins declared on the class,
+deduped by (uri, line); **code lens** — on a PHP class declaration: `N plugin(s)` (with
+"via ancestors" split) and `wired in N config place(s)`; per *method*: `intercepted by N
+plugin method(s)` on each targeted method and `intercepts Save::execute()` on each
+interception method of a plugin class (`method_decl_spans` scans the file's `function
+<name>(` declarations; the plugin set is fetched once per file). All lenses carry the
+command `magequery.showReferences` (the VS Code client maps it onto the peek view;
+clients without it show inert text); **inlay hints** mirror the per-method lens facts
+inline (`« N plugin(s) »` at the end of an intercepted method's signature line,
+`→ Save::execute()` on interception methods; tooltip = the hover breakdown, label part
+links to the first location) — the indicator Zed can render, since it has no code-lens
+support (behind Zed's `"inlay_hints": {"enabled": true}` setting); **plugin-method jump** — definition on a
+`before*/around*/after*` *declaration* in a plugin class lands on the intercepted method:
+`Magento::plugin_targets(class)` (the reverse of `plugins` — which `<plugin>` declarations
+use this class; the old private helper of that name is now `plugin_lookup_chain`) →
+preference-resolve each target → walk `Magento::ancestors` nearest-first for the file
+whose `function <name>(` actually defines it. Hover on the method says what it intercepts
+(target → concrete, plugin name, disabled tag); references are the declaring di.xml
+`<plugin>` lines. Both APIs are public on `Magento` for exactly this. **And the
+reverse**: any other method *declaration* (`Entity::Method`) resolves the plugins
+intercepting it — definition/references land on the `before*/around*/after*` methods in
+the plugin classes (via `plugins_all_areas`, so interface/ancestor-declared plugins show
+up on the concrete's methods — validated live: `Save::execute` → 7 interceptors incl.
+the ActionInterface-declared ones), hover lists them in execution order. An
+interception-*shaped* name that isn't a declared plugin (a model's own `beforeSave`)
+falls back to this reverse lookup; when a class has no plugins every verb returns None
+and the PHP language server keeps the floor.
+
+`entity.rs` is the position→entity inversion layer, deliberately **pure text** (no DOM,
+no `Magento` handle): a line-local scan finds the attribute value / text node / PHP token
+at the offset. Classification is *position first* — `type=`/`instance=`/`class=`/
+`service=`/`for=`/`handler=`, `name=` on di `<type>`/`<virtualType>`, `<event name=>`,
+`<source_model>`-style text elements, and `<argument>`/`<item>` text under
+`xsi:type="object"` are class/event-valued whatever the value looks like (virtual type
+names have no backslash) — *shape second*: `\` → class (`::method` suffixes stripped),
+`Vendor_Module::x` → ACL id, `Vendor_Module` → module, ≥3 lowercase `/`-segments →
+config path (two-segment strings stay unclassified so URL paths don't light up). PHP:
+FQCN tokens, `use`-import resolution for bare identifiers, the file's own declaration via
+its `namespace` line, strings → config path / ACL / event (events only behind `dispatch`
+on the same line). graphqls: `\\`-escaped FQCNs in directive strings. Known limits:
+multi-line XML attribute values, PHP group-`use`. `class_of_file` (code lens) derives
+`Vendor\Module\…` from the owning module's path and **verifies by resolving back through
+PSR-4 to the same file** — doctor's namespace-divergence rule.
+
+Workspaces: folders from `initialize` → `Magento::find_root` each (walk up, then direct
+children in name order); several folders inside one install share a handle; files outside
+every root answer null; a failed rebuild (half-saved config.php) clears the handle so
+requests answer null rather than lying from a stale index. Watched files: dynamic
+registration of the `watch_globs()` set per root (`RelativePattern` when the client
+supports it), `didSave` of interesting extensions as the fallback invalidation.
+
+Core APIs added for the LSP: `Magento::find_root`/`discover` (editors hand you folders,
+not roots), `root()`, `class_file()` (public PSR-4 jump-to-source), `watch_globs()` (one
+canonical watch list, LSP glob semantics), and a compile-time `Send + Sync` assertion on
+`Magento`. CI gained `cargo check -p magequery-lsp` because workspace feature-unification
+otherwise never builds core **without** `db` — that exact configuration had already
+broken silently once (an ungated `to_product`, fixed alongside).
+
+**Completions** — the daily-driver feature. `entity.rs::completion_context` detects the
+value being typed, tolerant of mid-edit states (an unterminated `type="Mag`, an
+auto-paired `type="Mag|"`, a partial text node) — position rules mirror `entity_at`:
+class-valued attributes/text, `<event name=`, `<module name=` in sequences,
+`ref`/`resource` ACL attrs, `referenceTable`, `<config_path>`, and PHP strings behind
+`dispatch`/`getValue`/`isSetFlag`/`isAllowed`. Candidates: **classes** from
+`Magento::class_names()` — a new parallel resolver walk mapping every PSR-4/PSR-0 dir's
+`.php` files back to FQCNs (Test/_files skipped, `generated/`+`var/` autoload roots
+excluded — runtime-written interceptors/proxies are never typed into config; ~24k names
+in ~25-230ms on lite) — plus `virtual_type_names()` (all areas, tagged "virtual type");
+events/config-paths/ACL/modules/tables enumerate cheaply from existing indexes per
+request. **The catalog is cached in the LSP outside the handle** (critical under
+as-you-type rebuilds: the handle dies per keystroke, the class *set* only changes when
+PHP files are created/deleted — watched-file events evict it). Ranking:
+segment-boundary prefix (`Magento\Quote` lists `Quote\Api\…` before `QuoteGraphQl\…`,
+whose `G` would byte-sort first) → plain prefix → short-name prefix → substring, capped
+at 200 with `is_incomplete` so clients re-query; items carry a `TextEdit` over the
+typed span (client word-boundary heuristics break on backslashes). Validated live:
+catalog 21,899 names, 2-28ms per request, full-name query → exactly 1 item.
+
+**Layout-layer navigation + symbols + observer lens** (the second magento2-lsp parity
+round). New entities: `Template` (`Vendor_Module::path.phtml` — the `.`/`/` in the path
+half distinguishes it from ACL ids; `template=` attrs anywhere + PHP strings),
+`LayoutHandle` (`<update handle=>`), `BlockName` (block/container/reference*/move
+attrs), `Table` (db_schema `table=`/`referenceTable=`/`<table name=>`). `layout.rs`
+holds the helpers: `area_of_file` (view/<area>/ path or theme-id prefix; base folds into
+frontend), `resolve_template` (module area+base file, then every theme override —
+candidates reported, never resolved to one: active theme is runtime state; uses the new
+public `Magento::themes()`), `template_ref_of_file` (phtml → its `Module::rel` ref +
+override provenance), `ops_where` (scan over `layout_handles`+`layout` — no new core
+index). Definition on a template → all resolving files; handle → contributing files;
+block name → its declaration (cross-handle: `breadcrumbs` referenced in
+catalog_product_view resolves to its `default`-handle declaration — validated live).
+References/hovers per entity; completions for template refs (the referenced-set, no
+walk), handles, block names. `.phtml` files get lenses (`overrides X`/`overridden in N
+theme(s)`/`used in N layout op(s)`); the VS Code selector gained `**/*.phtml`; watch
+globs gained it too. **Document symbols**: a generic nested XML outline (`symbols.rs`,
+quick-xml) — any element with an identifying attr (name/id/for/code/handle/instance)
+becomes a symbol; covers every config dialect without per-type parsers. **Workspace
+symbols**: query across the class catalog, events, config paths, ACL ids, modules,
+tables (same rank-and-cap as completions, min 2 chars). **Observer lens**: `execute()`
+in a registered observer gets `→ event_name` (events.xml locations). Skipped
+deliberately: short template paths (no module prefix), magic-method gd, XSD/URN.
+
+**Quick fixes (code actions)** — `actions.rs`, driven by structured diagnostic data:
+`DoctorFinding` gained `subject: Option<String>` (the class/module/ACL id the finding is
+*about*; populated at the fix-relevant emission sites via `error_on`/`warn_on`) and
+diag.rs round-trips it as the LSP diagnostic's `data`, so fixes never parse messages.
+Fixes: **did-you-mean** replacements on all ten missing-class lints + `acl-resource-
+unknown` (bounded Levenshtein, early-abandon + length prefilter, against the cached
+class catalog ∪ virtual types / the ACL index; top 3, distance-capped); **remove from
+config.php** on `module-missing-on-disk` (whose finding now carries a real config.php
+line as its Source — it previously had none and was invisible in editors); **register
+boilerplate** on the unregistered trio — `command-unregistered` is fully mechanical
+(CommandListInterface item), observers/plugins insert with an `EVENT_NAME_TODO`/
+`TARGET_CLASS_TODO` placeholder — inserting before `</config>` of the owning module's
+etc file, or CreateFile + full content when absent. Vendor-module fixes are offered
+knowingly (composer wipes them; the edit preview shows the path).
+
+**Parity nits** (closing the magento2-lsp comparison):
+short template paths (`template="x.phtml"`, no module prefix) normalize LSP-side via the
+declaring layout file's owning module — mirroring core's `normalize_template_ref` — and
+the whole LSP template layer now rides the core template index from the `templates`
+command (`Magento::template()` files + usages; physical probe kept as fallback for
+unreferenced overrides). `referenceColumn=` completes the same tag's `referenceTable`
+columns (`CompletionKind::Column(table)`, tag-local scan); `table=` on constraints
+completes tables. routes.xml: `Entity::Route` on `<route id=/frontName=>` —
+gd/references → the declaration, hover → router/frontName/handling modules, area from
+the `etc/<area>/` path segment. Two new checks: `DoctorLint::TemplateFileMissing`
+(layout assigns a template no module/theme file provides — pure projection over the
+template index, `.phtml`-suffix-guarded so dynamic values never flag; zero false
+positives on lite) and a parse-channel diagnostic for a plugin name declared twice for
+one type *in one file* (attribute merge silently keeps the later; cross-file stays
+legal override semantics — detected in di::build beside the parse diagnostics).
+
+**Rename (`textDocument/rename` + `prepareRename`)** — `rename.rs`, the last magento2-lsp
+parity item. Scope is deliberately narrow: the pure-Magento **string** identifiers a PHP
+language server can't see and that are a literal string wherever they occur — **ACL
+resource ids, event names, layout block/container names**. `prepareRename` gates it
+per-cursor (returns the identifier's range + placeholder), so a class, config path, or
+anything unclassified declines cleanly with a null response. Deliberately **not**
+renameable, each for a principled reason: **classes** (the file + `class` decl + every
+`use`/type ref belong to Intelephense — the "not a PHP language server" line; ours would
+leave PHP half-renamed), **config paths** (nested XML *elements* in config.xml/system.xml,
+not a renameable string), **templates/handles** (bound to a `.phtml`/handle *file* — a
+filesystem move, not a text edit). Mechanism: candidate files come from
+`Magento::files_containing(id)` — a new core primitive that greps every enabled module's
+`.php`/`.xml`/`.phtml`/`.graphqls` under its dir in parallel via the VFS (so PHP
+`dispatch()`/`isAllowed()` string literals no index holds are reached; ~30ms warm on lite,
+the class-walk exclusions skip generated/fixtures) — for ACL/event ids, and from the
+already-parsed layout ops for block names. **Precision is re-classification, not
+grep**: every candidate occurrence is run back through `entity_at`, and only a span that
+classifies to the *same* entity is rewritten — so a longer id that has ours as a prefix
+(`Foo::sales` inside `Foo::sales_view`) or a snake_case string that isn't an event (no
+`dispatch` on the line) is left alone; the whole-line `Source` provenance never needed
+column precision this way. `.phtml` is classified as PHP so a template's dispatch/isAllowed
+participates. The core grep is public and reusable; `occurrences()` (the pure edit finder)
+unit-tests without a handle, and the e2e renames `acme_thing_saved` across events.xml + a
+PHP dispatch while a class cursor declines. No editor-side change: rename is a standard LSP
+capability the generic clients pick up from `rename_provider`. (Client applies the
+`WorkspaceEdit`; we never write files.) Known scope limits, by design: config.xml default
+values (structural), theme layout files outside module dirs, and block names in PHP
+`getBlock()` (too common a substring — layout-XML only).
+
+**Editors live in `editors/` (monorepo, locked); publisher identity is `cresset-tools`.**
+- `editors/vscode` — TypeScript client (`vscode-languageclient` 9, esbuild bundle).
+  Activation `workspaceContains:**/app/etc/config.php` (never wakes in non-Magento
+  projects); document selector php/xml/`**/*.graphqls`. Binary resolution:
+  `magequery.serverPath` setting → PATH (min-version handshake via `--version`,
+  `MIN_SERVER_VERSION` const) → download from the GitHub release by cargo-dist triple
+  into globalStorage (extracts with system `tar`, which reads both .tar.gz and .zip on
+  macOS/Linux/Win10+). Registers the `magequery.showReferences` command.
+- `editors/zed` — Rust shim compiled to wasm32-wasip1 against `zed_extension_api` 0.1,
+  with its own empty `[workspace]` table so the root workspace never builds it. Declares
+  `[language_servers.magequery] languages = ["PHP", "XML"]` (Zed binds servers per
+  language, alongside the primary server). PATH first, else `latest_github_release` +
+  `download_file`, one directory per version, older versions swept. Published via PR to
+  zed-industries/extensions (submodule + `path = "editors/zed"` for the monorepo).
+  **MIT-licensed, deliberately unlike the repo's EUPL-1.2**: the Zed registry validates
+  the extension *directory's* LICENSE (verified in their `package-extensions.js`:
+  candidates come from `join(submodule, path)`) against an allowlist — Apache-2.0,
+  BSD-2/3, CC-BY-4.0, GPLv3, LGPLv3, MIT, Unlicense, zlib — that excludes EUPL. Only the
+  shim is MIT; the binary it downloads stays EUPL (explicitly allowed by their docs).
+
+Validated end-to-end against mageos-lite with a python LSP-stdio driver (scratchpad):
+initialize/capabilities, watcher registration (8 globs), the exact 4 doctor findings as
+diagnostics with codes/lines, definition on `CartManagementInterface` in di.xml → both
+the interface file and `QuoteManagement` at their declaration lines, the whatis hover
+card, event hover, references (7 webapi.xml citations), code lens on QuoteManagement.php
+(`2 plugin(s)`, `wired in 3 config place(s)`), watched-file change → debounced rebuild →
+republish, clean shutdown/exit. The CI twin is `crates/magequery-lsp/tests/e2e.rs`:
+`run()` is public and transport-generic, so the test drives the whole protocol through
+`Connection::memory()` against a synthetic root (broken preference → diagnostic with
+code/line, definition, event hover, watched-file fix → diagnostic cleared, shutdown). dist targets grew `aarch64-unknown-linux-gnu` (native arm
+runner via `[dist.github-custom-runners]`; dist computes the release matrix from
+dist-workspace.toml at run time, so no release.yml regeneration was needed) and
+`x86_64-apple-darwin` — **the editor extensions' platform→triple download maps must stay
+in sync with the dist target list** (noted in dist-workspace.toml too). The VS Code
+extension's `MIN_SERVER_VERSION` is 0.5.0 — the release that first ships `magequery lsp`.
 
 ## Future query tools (backlog — empty)
 

@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.9.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.8.0...magequery-v0.9.0) (2026-07-15)
+
+
+### Features
+
+* **vscode:** prompt to update the managed server binary ([#41](https://github.com/cresset-tools/magequery/issues/41)) ([e0eea6f](https://github.com/cresset-tools/magequery/commit/e0eea6f21a3b6b7ce3b0fb7fcbc6db5912b61cbf))
+
+## [0.8.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.7.0...magequery-v0.8.0) (2026-07-13)
+
+
+### Features
+
+* add PHTML template lookup ([#29](https://github.com/cresset-tools/magequery/issues/29)) ([adb5502](https://github.com/cresset-tools/magequery/commit/adb55026a4465ff1235044d4f8a0364c4d0fcde1))
+* **lsp:** parity nits — short templates, column/route nav, two lints ([#33](https://github.com/cresset-tools/magequery/issues/33)) ([ff5e1bf](https://github.com/cresset-tools/magequery/commit/ff5e1bf7a51510674e057ea33c0ad3ac25d727b6))
+* **lsp:** quick fixes for doctor diagnostics ([#26](https://github.com/cresset-tools/magequery/issues/26)) ([1c50eae](https://github.com/cresset-tools/magequery/commit/1c50eaecfe109fd66398fde770811da3f1abfd76))
+* **lsp:** rename ACL ids, event names, block names across config + PHP ([#39](https://github.com/cresset-tools/magequery/issues/39)) ([7e153ff](https://github.com/cresset-tools/magequery/commit/7e153ff76122e7a852cd68f3b12c1a85f7031a40))
+
+## [0.7.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.6.0...magequery-v0.7.0) (2026-07-11)
+
+
+### Features
+
+* **lsp:** layout navigation, symbols, observer lens, table nav ([#24](https://github.com/cresset-tools/magequery/issues/24)) ([e842115](https://github.com/cresset-tools/magequery/commit/e8421150e7d19cb18e6a1acf5045cd667baff9bd))
+
+## [0.6.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.5.0...magequery-v0.6.0) (2026-07-10)
+
+
+### Features
+
+* analyze unsaved buffers — the VFS overlay ([#21](https://github.com/cresset-tools/magequery/issues/21)) ([d26e04d](https://github.com/cresset-tools/magequery/commit/d26e04de5835e41d6ebdf567b6353b31d0b042f8))
+* **lsp:** context-aware completions ([#23](https://github.com/cresset-tools/magequery/issues/23)) ([6ff3b8c](https://github.com/cresset-tools/magequery/commit/6ff3b8c6849604c77797fa626b14fa8214e7bfd4))
+
+## [0.5.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.4.0...magequery-v0.5.0) (2026-07-10)
+
+
+### Features
+
+* LSP server + VS Code and Zed extensions ([#18](https://github.com/cresset-tools/magequery/issues/18)) ([ad42edc](https://github.com/cresset-tools/magequery/commit/ad42edcbad1f0f2da0a0b2093aef1fe029c5c64f))
+
 ## [0.4.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.3.0...magequery-v0.4.0) (2026-07-08)
 
 
