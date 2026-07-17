@@ -163,7 +163,32 @@ impl Definitions {
             if !meta.conditional {
                 from_scan.insert(meta.fqcn.clone());
             }
-            classes.insert(meta.fqcn.clone(), ClassRecord { meta, file });
+            // Two files declaring the same FQCN (sanitairkamer: app/code
+            // BigBridge_CheckoutExtensions vs vendor BigBridge_Checkout, whose
+            // PSR-4 prefix diverges from its files' namespace, leaving that
+            // copy autoload-UNREACHABLE): reflection sees whichever file the
+            // AUTOLOADER loads, so that declaration wins — the real 2.4.5
+            // archive compiled the app/code constructor. Unresolvable names
+            // keep the previous last-wins order.
+            match classes.entry(meta.fqcn.clone()) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(ClassRecord { meta, file });
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let existing_wins = magento
+                        .class_file(&magequery_core::ClassName::new(meta.fqcn.clone()))
+                        .is_some_and(|loaded| {
+                            let loaded = std::path::absolute(&loaded).unwrap_or(loaded);
+                            let a = std::path::absolute(&slot.get().file)
+                                .unwrap_or_else(|_| slot.get().file.clone());
+                            let b = std::path::absolute(&file).unwrap_or_else(|_| file.clone());
+                            loaded == a && loaded != b
+                        });
+                    if !existing_wins {
+                        slot.insert(ClassRecord { meta, file });
+                    }
+                }
+            }
         }
         let canonical = classes
             .keys()

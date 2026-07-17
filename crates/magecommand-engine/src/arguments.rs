@@ -293,9 +293,21 @@ impl<'a> ArgsCtx<'a> {
             .rsplit_once('\\')
             .map(|(ns, _)| ns)
             .unwrap_or("");
+        // PHP's ReflectionParameter::isOptional — which ClassReader negates
+        // into isRequired — is POSITIONAL: a defaulted param followed by a
+        // required one cannot actually be omitted, so reflection reports it
+        // REQUIRED and Magento autowires it. Only the contiguous
+        // defaulted/variadic TAIL is optional. (2.4.5 core still ships the
+        // deprecated shape — Customer's Address\Book has
+        // `CustomerRepositoryInterface $x = null` before required params, and
+        // its archive row is an `_i_` instance, never `_vn_`.)
+        let optional_tail_start = params
+            .iter()
+            .rposition(|p| p.default.is_none() && !p.variadic)
+            .map_or(0, |i| i + 1);
         let mut out: Vec<(PhpKey, PhpValue)> = Vec::with_capacity(params.len());
-        for param in params {
-            let required = param.default.is_none() && !param.variadic;
+        for (idx, param) in params.iter().enumerate() {
+            let required = idx < optional_tail_start;
             let class_ty = self.param_class(param, definer_fqcn);
             let mut arg = if !required {
                 let default = self.eval_default(param, definer_ns, definer_uses, definer_fqcn);
@@ -348,14 +360,20 @@ impl<'a> ArgsCtx<'a> {
                 .and_then(|r| r.meta.extends.first().cloned()),
             // Swoole/OpenSwoole are InterfaceValidator::$optionalPackages.
             _ if ty.starts_with("Swoole\\") || ty.starts_with("OpenSwoole\\") => None,
-            other => Some(
+            other => Some(match self.defs.canonical_case(other) {
                 // Reflection reports the DECLARED case, not the use-site
                 // spelling (PageBuilder's Gt\Dom vs phpgt's GT\Dom).
-                self.defs
-                    .canonical_case(other)
-                    .map(str::to_owned)
+                Some(declared) => declared.to_owned(),
+                // A hint no scanned file declares: the laminas bridge's append
+                // autoloader aliases legacy `Zend\…`-family names to their
+                // `Laminas\…` classes, so reflection — and the real compiled
+                // output — reports the CANONICAL name (Amasty hinting
+                // Zend\Uri\Uri compiles as `_i_` Laminas\Uri\Uri, verified in
+                // a real 2.4.5 archive). A declared legacy class never gets
+                // the alias (autoload finds it first), hence the None gate.
+                None => magequery_core::laminas_alias::canonical(other)
                     .unwrap_or_else(|| other.to_owned()),
-            ),
+            }),
         }
     }
 
