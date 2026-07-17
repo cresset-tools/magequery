@@ -942,6 +942,7 @@ pub fn generate_code(
     root: PathBuf,
     area_files: &[crate::areaconfig::CompiledArea],
     has_plugins: &std::collections::BTreeMap<String, bool>,
+    fused: bool,
 ) -> GeneratedCode {
     let _prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
     macro_rules! ilap {
@@ -1041,6 +1042,11 @@ pub fn generate_code(
     // reused here — the plan needs the same map, never a fresh one.
     let plan = crate::interceptor::plan(magento, defs, has_plugins);
     ilap!(_it, "interceptor plan");
+    // Fused mode (`di compile --fused`): global-only classes render as inlined
+    // plugin chains (creatuity's technique); multi-area classes fall back to
+    // stock until the per-area switch lands. The global chains are computed once.
+    let fused_chains =
+        fused.then(|| crate::pluginlist::global_plugin_chains(magento, defs));
     // Each interceptor's bytes are an independent pure function of the (already
     // fully-populated) definitions, and the final `files.sort_by` makes push
     // order irrelevant — so generate them in parallel (2489 on the oracle).
@@ -1048,14 +1054,16 @@ pub fn generate_code(
     let interceptors: Vec<Result<(String, String), String>> = plan
         .methods
         .par_iter()
-        .map(
-            |(class, methods)| match crate::interceptor::interceptor_bytes(defs, class, methods) {
-                Some(bytes) => {
-                    Ok((format!("{}/Interceptor.php", class.replace('\\', "/")), bytes))
-                }
+        .map(|(class, methods)| {
+            let bytes = fused_chains
+                .as_ref()
+                .and_then(|c| crate::fused::fused_interceptor_bytes(magento, defs, c, class, methods))
+                .or_else(|| crate::interceptor::interceptor_bytes(defs, class, methods));
+            match bytes {
+                Some(bytes) => Ok((format!("{}/Interceptor.php", class.replace('\\', "/")), bytes)),
                 None => Err(format!("interceptor subject unresolved: {class}")),
-            },
-        )
+            }
+        })
         .collect();
     for result in interceptors {
         match result {

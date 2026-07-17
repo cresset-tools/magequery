@@ -462,6 +462,93 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
     GeneratedPluginLists { files, findings }
 }
 
+/// The GLOBAL-scope listener chains, flattened for the fused-interceptor
+/// renderer. `nodes` maps `{type}_{method}_{prev}` → (before names, around name,
+/// after names) — the same `_processed` structure the plugin-list file encodes.
+/// `instances` maps a type to its enabled plugins (name → resolved instance
+/// FQCN, no leading backslash), in sort order.
+pub struct GlobalChains {
+    pub nodes: HashMap<String, (Vec<String>, Option<String>, Vec<String>)>,
+    pub instances: HashMap<String, Vec<(String, String)>>,
+}
+
+/// Run the global-scope inherit/process pass (mirroring `generate`'s Global
+/// iteration) and expose the resolved per-method chains for the fused renderer.
+pub fn global_plugin_chains(magento: &Magento, defs: &Definitions) -> GlobalChains {
+    let global_export = magento.di_export(Area::Global);
+    let global_vtypes: HashMap<String, String> = global_export
+        .virtual_types
+        .iter()
+        .map(|v| (v.name.as_str().to_owned(), v.base.as_str().to_owned()))
+        .collect();
+    let node_pos: HashMap<&str, &magequery_core::TypeNodePosition> =
+        global_export.node_positions.iter().map(|n| (n.name.as_str(), n)).collect();
+    let mut vtype_seeds: Vec<(u8, u32, &str)> = global_export
+        .virtual_types
+        .iter()
+        .map(|v| {
+            let pos = node_pos.get(v.name.as_str());
+            if v.source.module.as_str() == "(primary)" {
+                (1u8, pos.and_then(|n| n.primary).unwrap_or(v.decl_order), v.name.as_str())
+            } else {
+                (0u8, pos.and_then(|n| n.modules).unwrap_or(v.decl_order), v.name.as_str())
+            }
+        })
+        .collect();
+    vtype_seeds.sort();
+
+    let plugin_data = plugin_data_of(&global_export);
+    let mut state = Inherit {
+        defs,
+        global_vtypes: &global_vtypes,
+        plugin_data: &plugin_data,
+        plugin_index: plugin_data.iter().enumerate().map(|(i, (t, _))| (t.as_str(), i)).collect(),
+        inherited: Vec::new(),
+        inherited_index: HashMap::new(),
+        processed: Vec::new(),
+        findings: Vec::new(),
+    };
+    for (_, _, seed) in &vtype_seeds {
+        state.inherit(seed);
+    }
+    let type_names: Vec<String> = plugin_data.iter().map(|(t, _)| t.clone()).collect();
+    for name in &type_names {
+        state.inherit(name);
+    }
+
+    let mut nodes = HashMap::new();
+    for (key, listeners) in &state.processed {
+        let mut before = Vec::new();
+        let mut around = None;
+        let mut after = Vec::new();
+        for (l, v) in listeners {
+            match (*l, v) {
+                (LISTENER_BEFORE, ProcessedValue::List(names)) => before = names.clone(),
+                (LISTENER_AROUND, ProcessedValue::Around(name)) => around = Some(name.clone()),
+                (LISTENER_AFTER, ProcessedValue::List(names)) => after = names.clone(),
+                _ => {}
+            }
+        }
+        nodes.insert(key.clone(), (before, around, after));
+    }
+    let mut instances = HashMap::new();
+    for (t, v) in &state.inherited {
+        if let Some(plugins) = v {
+            let list: Vec<(String, String)> = plugins
+                .iter()
+                .filter(|(_, e)| e.disabled != Some(true))
+                .filter_map(|(n, e)| {
+                    e.instance
+                        .as_ref()
+                        .map(|i| (n.clone(), chase(&global_vtypes, i.trim_start_matches('\\'))))
+                })
+                .collect();
+            instances.insert(t.clone(), list);
+        }
+    }
+    GlobalChains { nodes, instances }
+}
+
 struct Inherit<'a> {
     defs: &'a Definitions,
     global_vtypes: &'a HashMap<String, String>,
