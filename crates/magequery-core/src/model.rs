@@ -585,9 +585,28 @@ pub struct ArgItem {
 }
 
 impl ArgValue {
-    /// Merge a newer declaration over `self` the way Magento merges di.xml arguments:
-    /// two arrays merge by item key (newer overrides same-key — taking the newer item's
-    /// source — appends new keys, recursing into nested arrays); anything else is replaced.
+    /// The `xsi:type` this value was declared with — `Config\Dom`'s
+    /// type-attribute identity, which decides replace-vs-merge on override.
+    fn xsi_type(&self) -> &str {
+        match self {
+            ArgValue::Object(_) => "object",
+            ArgValue::Array(_) => "array",
+            ArgValue::Null => "null",
+            ArgValue::Scalar { xsi_type, .. } => xsi_type,
+        }
+    }
+
+    /// Merge a newer declaration over `self` the way Magento's `Config\Dom::
+    /// _mergeNode` merges di.xml arguments. A re-declaration with a DIFFERENT
+    /// `xsi:type` replaces the node wholesale — attributes included, so an
+    /// `xsi:type="null"` knockout of an object item drops its `sortOrder` and
+    /// the item falls to sort position 0 (proforto's postnl_form_changes, the
+    /// compiled-archive ground truth). Same type merges: arrays item-by-item
+    /// by key (newer overrides same-key — taking the newer item's source —
+    /// appends new keys, recursing into nested arrays); objects override the
+    /// class text but MERGE attributes, keeping `shared`/`sortOrder` the newer
+    /// declaration doesn't restate (proforto's with_address_auto_complete
+    /// keeps its 999); scalars take the newer text.
     pub(crate) fn merged_with(&self, newer: &ArgValue) -> ArgValue {
         match (self, newer) {
             (ArgValue::Array(old), ArgValue::Array(new)) => {
@@ -595,7 +614,13 @@ impl ArgValue {
                 for ni in new {
                     match items.iter_mut().find(|i| i.key == ni.key) {
                         Some(ei) => {
-                            ei.value = ei.value.merged_with(&ni.value);
+                            if ei.value.xsi_type() == ni.value.xsi_type() {
+                                ei.value = ei.value.merged_with(&ni.value);
+                                ei.sort_order = ni.sort_order.or(ei.sort_order);
+                            } else {
+                                ei.value = ni.value.clone();
+                                ei.sort_order = ni.sort_order;
+                            }
                             ei.source = ni.source.clone();
                         }
                         None => items.push(ni.clone()),
@@ -603,6 +628,18 @@ impl ArgValue {
                 }
                 ArgValue::Array(items)
             }
+            (ArgValue::Object(old), ArgValue::Object(new)) => ArgValue::Object(ObjectRef {
+                // An empty override (`<item … xsi:type="object" sortOrder=…/>`)
+                // merges attributes only — `_mergeNode` returns before touching
+                // the value when the new node has no children.
+                class: if new.class.as_str().is_empty() {
+                    old.class.clone()
+                } else {
+                    new.class.clone()
+                },
+                shared: new.shared.or(old.shared),
+                sort_order: new.sort_order.or(old.sort_order),
+            }),
             _ => newer.clone(),
         }
     }
