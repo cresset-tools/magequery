@@ -126,7 +126,24 @@ impl Definitions {
         let mut setup_classes = HashSet::new();
         let mut from_scan = HashSet::new();
         let mut generated_classes = HashSet::new();
+        let mut scanned = HashSet::new();
+        let mut file_claimed: HashSet<PathBuf> = HashSet::new();
         for (file, kind, meta) in parsed {
+            // Magento's FileClassScanner returns ONE name per file: the FIRST
+            // unconditional T_CLASS/T_TRAIT at file scope ("it only searches
+            // for the first match"), skipping interfaces/enums. A second
+            // class in the same file (proforto's Yotpo\Reviews\Model\Config,
+            // declared after a constants-holder class) never enters the
+            // compile universe — no argument row, no interceptor seed — on
+            // 2.4.8 AND 2.4.9 alike (source-verified on both; archive-
+            // verified on proforto). `classes` still records every
+            // declaration for hierarchy walks and const lookups.
+            if matches!(meta.kind, ClassKind::Class | ClassKind::Trait)
+                && !meta.conditional
+                && file_claimed.insert(file.clone())
+            {
+                scanned.insert(meta.fqcn.clone());
+            }
             if kind == PathKind::Setup {
                 setup_classes.insert(meta.fqcn.clone());
             } else {
@@ -148,17 +165,6 @@ impl Definitions {
             }
             classes.insert(meta.fqcn.clone(), ClassRecord { meta, file });
         }
-        // Magento's FileClassScanner switches on T_CLASS and T_TRAIT only —
-        // interfaces and enums never enter the compile universe (they stay
-        // in `classes` for constant lookups and hierarchy walks).
-        let scanned = classes
-            .iter()
-            .filter(|(_, r)| {
-                matches!(r.meta.kind, ClassKind::Class | ClassKind::Trait)
-                    && !r.meta.conditional
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
         let canonical = classes
             .keys()
             .map(|k| (k.to_ascii_lowercase(), k.clone()))
