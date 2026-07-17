@@ -50,7 +50,7 @@ crates/magecommand          the binary: clap + renderers; style copied/shared fr
 ```
 
 Command grammar: magequery is nouns (inspect an entity), magecommand is verbs (act on
-the codebase). `magecommand compile` with magequery's global flags (`--root`,
+the codebase). `magecommand di compile` with magequery's global flags (`--root`,
 `--json`, `--color`) plus `--jobs`, `--dry-run`, `--force`, `--no-cache`,
 `--interceptor-style magento|compiled`.
 
@@ -138,7 +138,7 @@ multi-pattern scan over all PHP + di.xml for `…Factory`, `\Proxy`, `::class`, 
 **Status (2026-07-13): M0–M3 DONE.** Oracle is **mg-install-310** (mageos-lite
 can't `setup:di:compile` — see the oracle-baseline memory), archived as
 `generated/_code` (4106 files) + `generated/_metadata` (16 files). `magecommand
-compile --force` regenerates both trees and `magecommand compare` reports EXACT
+compile --force` regenerates both trees and `magecommand di verify` reports EXACT
 reproduction: 4106/4106 code + 16/16 metadata, zero changed/missing/extra, ~2.4s.
 Code emitters shipped: Factory/ExtensionInterfaceFactory (1093), Extension +
 ExtensionInterface (176 + 174), Proxy + ProxyDeferred (172 + 1), SearchResults (1),

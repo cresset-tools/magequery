@@ -1,4 +1,4 @@
-//! `magecommand watch` — the long-running compile server (v1).
+//! `magecommand di watch` — the long-running compile server (v1).
 //!
 //! The two costs a cold `compile` pays every run are the PHP scan (reading +
 //! parsing thousands of files) and the write of ~10k output files. Both hurt

@@ -1,9 +1,10 @@
 //! magecommand — the write-side companion to magequery.
 //!
-//! magequery reads (nouns: inspect a Magento entity); magecommand writes
-//! (verbs: act on the codebase). M0 surface: `compile --dry-run` (work-plan
-//! preview; generation itself lands milestone by milestone) and `compare`
-//! (the archive oracle every milestone is accepted against).
+//! magequery reads (nouns: inspect a Magento entity); magecommand writes (acts
+//! on the codebase). The grammar is `magecommand <group> <subcommand>` (two
+//! tokens; see `docs/command-surface.md`). Built today: the `di` group —
+//! `di compile` (generate generated/code + metadata), `di verify` (the archive
+//! oracle every milestone is accepted against), `di watch`, `di digest`.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -17,7 +18,8 @@ mod watch;
 #[command(
     name = "magecommand",
     version,
-    about = "Act on a Magento 2 codebase: fast DI compilation."
+    about = "Act on a Magento 2 codebase: fast DI compilation.",
+    arg_required_else_help = true
 )]
 struct Cli {
     /// Path to the Magento root (defaults to the current directory).
@@ -32,8 +34,27 @@ struct Cli {
     command: Command,
 }
 
+/// Top-level groups. The grammar is `magecommand <group> <subcommand>` — two
+/// tokens, mirroring magequery's nouns (magequery reads a noun, magecommand
+/// writes it). Bare `magecommand` and bare `magecommand <group>` print help
+/// (`arg_required_else_help`). Only the `di` group is built today; the planned
+/// groups (`static`, `i18n`, `make`, `module`/`mode`/…, `product`/…) are
+/// documented in `docs/command-surface.md` but not yet wired.
 #[derive(Subcommand)]
 enum Command {
+    /// DI compilation — reproduce `setup:di:compile` (generated/code + metadata).
+    #[command(arg_required_else_help = true)]
+    Di {
+        #[command(subcommand)]
+        command: DiCommand,
+    },
+}
+
+/// `magecommand di <subcommand>` — the DI-compile group. `compile` generates,
+/// `verify` diffs against an archived ground truth, `watch` is the long-running
+/// server, `digest` fingerprints the inputs.
+#[derive(Subcommand)]
+enum DiCommand {
     /// Compile DI configuration and generated code.
     Compile {
         /// Report what would be generated without writing anything.
@@ -56,9 +77,9 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
-    /// Compare a generated tree against an archived ground truth
+    /// Verify a generated tree against an archived ground truth
     /// (`generated/_code`, `generated/_metadata`).
-    Compare {
+    Verify {
         /// The archived ground-truth directory.
         #[arg(long, value_name = "DIR")]
         archive: PathBuf,
@@ -113,30 +134,32 @@ fn main() -> anyhow::Result<ExitCode> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Compile { dry_run, force, incremental } => {
-            compile(cli.root, cli.json, dry_run, force, incremental)
-        }
-        Command::Digest { stat } => digest(cli.root, stat),
-        Command::Watch { once } => watch::watch(cli.root, cli.json, once),
-        Command::Compare {
-            ref archive,
-            ref output,
-            fail_on_diff,
-            sample,
-            no_explain,
-            strict_ordering,
-            ref show_residual,
-        } => compare(
-            cli.root,
-            archive,
-            output,
-            cli.json,
-            fail_on_diff,
-            sample,
-            no_explain,
-            strict_ordering,
-            show_residual.as_deref(),
-        ),
+        Command::Di { command } => match command {
+            DiCommand::Compile { dry_run, force, incremental } => {
+                compile(cli.root, cli.json, dry_run, force, incremental)
+            }
+            DiCommand::Digest { stat } => digest(cli.root, stat),
+            DiCommand::Watch { once } => watch::watch(cli.root, cli.json, once),
+            DiCommand::Verify {
+                ref archive,
+                ref output,
+                fail_on_diff,
+                sample,
+                no_explain,
+                strict_ordering,
+                ref show_residual,
+            } => compare(
+                cli.root,
+                archive,
+                output,
+                cli.json,
+                fail_on_diff,
+                sample,
+                no_explain,
+                strict_ordering,
+                show_residual.as_deref(),
+            ),
+        },
     }
 }
 
@@ -428,7 +451,7 @@ fn warn_case_collapse(root: &std::path::Path, files: &[(String, String)]) {
     }
 }
 
-/// `magecommand digest [--stat]` — print the compile-input digest and exit.
+/// `magecommand di digest [--stat]` — print the compile-input digest and exit.
 fn digest(root: Option<PathBuf>, stat: bool) -> anyhow::Result<ExitCode> {
     let root = root.unwrap_or_else(|| PathBuf::from("."));
     let root = std::path::absolute(&root).unwrap_or(root);

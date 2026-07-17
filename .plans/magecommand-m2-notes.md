@@ -15,7 +15,7 @@ in `magecommand-engine/src/phpexport.rs`).
 | 7 `…\|plugin-list.php` | **byte-identical** | PluginListGenerator port (see the fd9abe7..HEAD commit messages for the scope-order, backslash-node, and linearization semantics) |
 | interception.php | **byte-identical** | Interception\Config::initialize port |
 
-**M2 COMPLETE (2026-07-12): `magecommand compare` reports the full 16-file
+**M2 COMPLETE (2026-07-12): `magecommand di verify` reports the full 16-file
 metadata set reproduces the archive exactly.** Next: M3 (generated/code —
 factories, proxies, interceptors, extension attributes).
 

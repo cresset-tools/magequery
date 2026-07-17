@@ -23,13 +23,13 @@ what changed:
   process holds both trees, so the diff is a free map compare and the write is
   just the delta; no rename-aside, no 10k-file hash).
 
-`magecommand watch`: initial full build (identical to `compile --force`), then on
+`magecommand di watch`: initial full build (identical to `di compile --force`), then on
 each file change re-parse only what's needed, recompute, and write the delta.
 **Correctness by construction:** each recompile runs the *same*
 `build::compute_outputs` a cold compile runs, over a `Definitions` that is either
 freshly re-scanned (a PHP file changed) or unchanged (nothing PHP changed → a
 re-scan would be identical). So the on-disk result after an edit is byte-for-byte
-a cold `compile --force` of that edited state.
+a cold `di compile --force` of that edited state.
 
 Verified on the oracle: disabling one plugin recompiled writing **2 files, 4120
 unchanged** (vs a cold compile re-writing all 4122), and the tree was
@@ -66,7 +66,7 @@ input), so the tree is never fingerprinted twice. The input set is
 `definitions::compile_input_files` (the `.php` the scan reads + the DI `.xml` +
 config/composer files, under the scan's own exclusion rules — sound by
 construction: over-covering only recompiles unnecessarily, under-covering would
-serve stale). `magecommand digest` prints the same digest as a **CI cache key**
+serve stale). `magecommand di digest` prints the same digest as a **CI cache key**
 (content-hashed by default = checkout-independent; `--stat` = the fast local
 variant). Verified on the oracle: full compile byte-exact (4106 code + 16
 metadata); no-op short-circuits; touching an input triggers a full recompile that
@@ -107,7 +107,7 @@ read-fewer-files help.**
 
 ## The core observation
 
-`magecommand compile` is a **pure, deterministic function of the source tree**:
+`magecommand di compile` is a **pure, deterministic function of the source tree**:
 
 ```
 generated/{code,metadata} = compile(inputs, BP)
@@ -184,7 +184,7 @@ and a rename hits it just as hard as a write. The manifest now stores only the
 
 ### Win 2 — input digest: skip the **whole compile** on a no-op
 
-- Add a fast `magecommand digest` subcommand: enumerate + fingerprint the inputs
+- Add a fast `magecommand di digest` subcommand: enumerate + fingerprint the inputs
   above, print a single `inputs_digest`, do **no** compile.
 - At the top of `compile`: if `inputs_digest` matches the manifest's stored value
   (and the manifest matches disk, trusted or `--verify`), the output is already
@@ -239,7 +239,7 @@ Two levels:
 ```yaml
 # GitHub Actions
 - id: di
-  run: echo "key=$(magecommand digest)" >> "$GITHUB_OUTPUT"
+  run: echo "key=$(magecommand di digest)" >> "$GITHUB_OUTPUT"
 - uses: actions/cache@v4
   with:
     path: |
@@ -247,7 +247,7 @@ Two levels:
       generated/metadata
       generated/.mqcache
     key: magento-di-${{ runner.os }}-${{ steps.di.outputs.key }}
-- run: magecommand compile --force        # Win 2 short-circuits on an exact hit
+- run: magecommand di compile --force        # Win 2 short-circuits on an exact hit
 ```
 
 - **Exact cache hit** → `generated/` is restored; `compile` sees a matching
@@ -277,7 +277,7 @@ source tree (which CI already hashes), the manifest is small and portable (paths
 + 32-byte hashes), and `generated/` is smaller than the `vendor/` trees CI caches
 routinely. Caveats to honor: key must include `runner.os` + tool version + `BP`
 scope; `generated/` is 10 k files so archive it (CI cache tars automatically);
-and keep `magecommand compare` in the pipeline as the byte-exact backstop so a
+and keep `magecommand di verify` in the pipeline as the byte-exact backstop so a
 cache bug can never ship a wrong compile silently.
 
 ## Manifest & store layout
@@ -304,7 +304,7 @@ generated/.mqcache/
 3. `--force` bypasses the short-circuit (full clear + full write) — the
    always-safe fallback and the current default in CI examples until trust is
    established.
-4. `magecommand compare` remains the CI gate: a cache defect fails the build, it
+4. `magecommand di verify` remains the CI gate: a cache defect fails the build, it
    never ships.
 
 ## Phasing
