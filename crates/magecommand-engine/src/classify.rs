@@ -944,8 +944,18 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    fn no_blocked() -> &'static HashSet<String> {
+        static EMPTY: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(HashSet::new)
+    }
+
     fn ctx<'a>(disabled: &'a HashSet<String>, dir: &'a Path) -> ClassifyCtx<'a> {
-        ClassifyCtx { archive: dir, output: dir, disabled_modules: disabled }
+        ClassifyCtx {
+            archive: dir,
+            output: dir,
+            disabled_modules: disabled,
+            obfuscation_blocked: no_blocked(),
+        }
     }
 
     fn report(missing: &[&str], extra: &[&str], changed: &[&str]) -> CompareReport {
@@ -1027,6 +1037,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
+            obfuscation_blocked: no_blocked(),
         };
         let r = report(&[], &[], &["global.php", "crontab.php"]);
         let c = classify(&r, &ctx);
@@ -1083,6 +1094,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
+            obfuscation_blocked: no_blocked(),
         };
         let r = report(&[], &[], &["additions.php", "changed.php", "removed.php"]);
         let c = classify(&r, &ctx);
@@ -1174,6 +1186,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
+            obfuscation_blocked: no_blocked(),
         };
         let r = report(&[], &[], &["A/Interceptor.php", "B/Interceptor.php"]);
         let c = classify(&r, &ctx);
@@ -1215,6 +1228,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
+            obfuscation_blocked: no_blocked(),
         };
         let r = report(&[], &[], &["P/Proxy.php"]);
         let c = classify(&r, &ctx);
@@ -1253,6 +1267,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
+            obfuscation_blocked: no_blocked(),
         };
         let r = report(&[], &[], &["interception.php"]);
         let c = classify(&r, &ctx);
@@ -1321,6 +1336,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
+            obfuscation_blocked: no_blocked(),
         };
         let r = report(&[], &[], &["global.php", "other.php"]);
         let c = classify(&r, &ctx);
