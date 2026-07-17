@@ -2,7 +2,7 @@
   "name": "magequery",
   "displayName": "magequery — Magento 2 wiring",
   "description": "Magento 2 DI resolution, plugins, events and config answers inside the editor: doctor diagnostics, go-to-definition and hover in di.xml/events.xml/webapi.xml, reverse-DI references, plugin code lenses.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "cresset-tools",
   "license": "EUPL-1.2",
   "repository": {
