@@ -276,7 +276,7 @@ modules. Use composer metadata:
 - `config.php` order is the authoritative, already-sequence-resolved load order; disk
   discovery only supplies path/source/`<sequence>`.
 
-Result on the proforto checkout: 655 modules (matches `config.php` exactly), ~16ms warm
+Result on the 2.4.8 store checkout: 655 modules (matches `config.php` exactly), ~16ms warm
 (was ~180ms with the brute walk).
 
 Discovery is parallel (rayon): each package's candidate roots are probed via a pure
@@ -330,7 +330,7 @@ last-wins is deterministic.
 - Cost: ~22ms to parse ~900 di.xml files (parallel); ~30ms total index. Now the dominant
   phase, as expected — this is where rayon earns its keep.
 
-Validated on proforto: `CartManagementInterface → QuoteManagement` (di.xml:25);
+Validated on the 2.4.8 store: `CartManagementInterface → QuoteManagement` (di.xml:25);
 `IsProductSalableInterface` collapsed-diff correctly shows global + frontend + graphql
 overrides while adminhtml/crontab/webapi inherit; line numbers exact.
 
@@ -382,7 +382,7 @@ methods, includes-but-flags disabled. **Order = Magento's**: ascending `sort_ord
 broken by *declaration order* — `order_key = (area_rank, module load_order, line)` stored on
 each plugin in the DI index (global rank 0 before area-overlay rank 1; set at first
 declaration, preserved across attribute-merges). NOT alphabetical by name. (Earlier versions
-tiebroke by name — coincidentally identical on proforto, but wrong in general.)
+tiebroke by name — coincidentally identical on the 2.4.8 store, but wrong in general.)
 `magequery plugins <Class>` renders it with `← declared on <Ancestor>` for inherited
 plugins, an `intercepts: before save, after getList` line per plugin, and provenance.
 `--area` overlays that area's plugins.
@@ -401,10 +401,10 @@ each tagged with the **full set** of areas it's declared in (`Plugin.areas`/
 plugin appears once, not per area. Targets come from the global concrete (preference rarely
 differs per area). `--all-areas` is mutually exclusive with `--area`. (Simplification: the standard onion;
 Magento's exact segmentation when arounds interleave with other plugins' before/after across
-sort orders is not modeled — accurate for the common case.) Verified on proforto: webapi_rest
+sort orders is not modeled — accurate for the common case.) Verified on the 2.4.8 store: webapi_rest
 `save()` shows before ascending (so 0,10,10) and after descending (so 10 then 0).
 
-Validated on proforto: `ProductRepositoryInterface` plugins (all declared on the interface)
+Validated on the 2.4.8 store: `ProductRepositoryInterface` plugins (all declared on the interface)
 correctly attributed to the concrete `ProductRepository`; global set exactly matches ground
 truth; `--area webapi_rest` correctly adds the REST-only `product_authorization` + Mirasvit
 plugins. ~38ms total (ancestor walk + header parse is negligible).
@@ -474,7 +474,7 @@ merge) — events ~108ms→25ms, routes ~100ms→21ms.
 - **webapi** — `webapi.xml` (global), keyed by (method, url). `webapi(url_filter?)`. CLI:
   `webapi [<url-substr>]`. Shows service class::method + ACL resources.
 
-Validated on proforto: 269 events, cron groups with literal + `config:` schedules, frontend
+Validated on the 2.4.8 store: 269 events, cron groups with literal + `config:` schedules, frontend
 routes (frontName → modules), 688 REST endpoints — all with provenance.
 
 ### `actions` (controller subroutes)
@@ -521,7 +521,7 @@ the shared `read_parse`, merged in load order.
   `type(len)`/`unsigned`/`NULL`/`auto_increment`/`default`, constraints incl. FK `→
   refTable(refCol) ON DELETE …`, indexes); otherwise a name-substring **list** (`name  N cols
   # loc`); no arg lists all. Columns added by a **different** module than the table's are
-  tagged `← Vendor_Module` — the payoff of cross-module merge. Validated on proforto: 545
+  tagged `← Vendor_Module` — the payoff of cross-module merge. Validated on the 2.4.8 store: 545
   tables; `sales_order` shows 152 columns merged from 8 module files, each third-party
   extension column attributed (`← Magento_Paypal`, `← Billink_Billink`, …); FKs/indexes/types
   exact; ~20ms.
@@ -600,7 +600,7 @@ it behaves. A `SystemConfigIndex` in `breadth.rs`, lazy (`OnceLock`), parsed in 
 - `Magento::system_config(filter?)` — filter matches the config path **or** the label (so you
   can find a setting by its human name without knowing the path). CLI `magequery system-config
   [<filter>]`: greppable `path  Tab > Section > Group > Field  [scopes]  # loc`; hidden
-  config-only fields (no label) fall back to the field id. Validated on proforto: 2656
+  config-only fields (no label) fall back to the field id. Validated on the 2.4.8 store: 2656
   settings; `web/unsecure/base_url → General > Web > Base URLs > Base URL [default, website,
   store]`; cross-module section/group labels resolve (e.g. a third-party delivery method under
   `Sales > Delivery Methods`); ~find by label works (`"sort order"`).
@@ -1553,7 +1553,7 @@ interface-declared plugin) to catch merge-semantics surprises before building br
 - CLI (cli enables the `db` feature): `magequery db info` (connections incl. the real
   password — no masking; `(empty)` shown only when the value is genuinely empty) and
   `magequery db ping [<connection>]` (OK/FAIL + server version + ms, non-zero exit on fail).
-  Validated on proforto: parsed the socket connection / dbname / empty password correctly;
+  Validated on the 2.4.8 store: parsed the socket connection / dbname / empty password correctly;
   ping fails cleanly when the socket isn't reachable.
 - `Magento::redis_config()` + `deploy::redis_config` extract every Redis/Valkey usage from
   `env.php`: cache frontends (`cache/frontend/<id>` with a `Redis`/`RemoteSynchronized…`
@@ -1563,7 +1563,7 @@ interface-declared plugin) to catch merge-semantics surprises before building br
   client crate — pure `std::net`, works over TCP and unix sockets): connect → optional
   `AUTH` → `SELECT <db>` → `PING` → `INFO server` for the version. One result per instance.
 - CLI: `magequery redis info` / `redis ping` (mirrors `db info`/`db ping`).
-  Validated on proforto (Valkey over socket): info shows cache→db3, page_cache→db2,
+  Validated on the 2.4.8 store (Valkey over socket): info shows cache→db3, page_cache→db2,
   session→db1; ping connected to all three (`redis 7.2.4`, ~1ms).
 
 ### Deployment-info commands (`session`/`cache`/`lock`/`queue`, done)
@@ -1581,8 +1581,8 @@ accessor + a CLI renderer; all reuse the shared `redis_endpoint`/`host_port` hel
 - **queue** (`queue` section): the `amqp` block plus any `queue/connections/<name>`, each with
   host/port/user/password/virtualhost; + the `consumers_wait_for_messages` flag. Passwords
   shown raw (matching `db info`). `QueueConfig { connections, consumers_wait_for_messages }`.
-Validated on proforto: session→redis socket db1; cache default→db3/page_cache→db2 + 14/16
-types on (layout, full_page off); lock→db; queue→amqp localhost:5672 vhost proforto.
+Validated on the 2.4.8 store: session→redis socket db1; cache default→db3/page_cache→db2 + 14/16
+types on (layout, full_page off); lock→db; queue→amqp localhost:5672 vhost store.
 
 ### `url-rewrites` (DB-only, done)
 
@@ -1598,7 +1598,7 @@ on stderr (no silent caps). `Magento::url_rewrites(path, store, redirects_only, 
 - CLI `magequery url-rewrites [<path>] [--store <code>] [--redirects] [--limit 200]`: greppable
   aligned lines — `request_path  →|⇒301  target_path  # entity:id · store=code [manual]`
   (internal rewrites use a dim `→`; redirects a red `⇒<code>`; `manual` marks
-  non-autogenerated). Validated on proforto: combined path+store+redirect filtering, manual vs
+  non-autogenerated). Validated on the 2.4.8 store: combined path+store+redirect filtering, manual vs
   autogenerated flagged, store codes resolved, truncation note, clean error on unknown store.
 
 ### `config` (system config resolution — static sources, done)
@@ -1647,7 +1647,7 @@ queries `core_config_data` + `store_website`/`store` (table-prefixed) and resolv
 `ConfigSourceKind::Database` **between** config.xml (modular, 10) and the config.php/env.php
 `system` overrides (initial, 1000) — so the `system` node correctly wins over the DB, matching
 Magento's `sortOrder`. CLI: `magequery config <path> --db` (opt-in; clean `Error::Db` if the
-DB is unreachable; static-only otherwise). Validated on proforto: pulled website-scope
+DB is unreachable; static-only otherwise). Validated on the 2.4.8 store: pulled website-scope
 base_urls that exist only in the DB (`[db]` source), while `default`/store values from env.php
 still won as `[env.php]`. The DB layer's position is **derived** from di.xml's `sortOrder`
 (see "Order is derived from di.xml" above), not hardcoded; custom `ConfigSourceInterface`s
@@ -1679,7 +1679,7 @@ aren't read.
 
 Verified by round-trip unit tests (`decrypt::tests`): ChaCha v3 + AES-ECB v1 + Rijndael-256 v2
 decrypt, correct key-version selection (wrong version fails), wrong IV ≠ plaintext, Blowfish
-returns `None`, `is_encrypted` heuristic. On proforto the DB secrets are v3 from a foreign env,
+returns `None`, `is_encrypted` heuristic. On the 2.4.8 store the DB secrets are v3 from a foreign env,
 so they correctly stay flagged.
 
 **Phase 2 is complete** (db info/ping, redis info/ping, config static + DB source, decrypt;
@@ -1691,6 +1691,6 @@ outstanding.
 
 ## Test checkout
 
-`/Users/jelle/www/proforto` — a real Magento 2.4 install (716 modules: 563 vendor + 153
+`/Users/jelle/www/store` — a real Magento 2.4 install (716 modules: 563 vendor + 153
 app/code). Validated: `config.php` shape, per-area `di.xml` layout, PSR-4 autoload
 (`"Magento\\Catalog\\": ""` = module root), and real plugin-on-interface declarations.

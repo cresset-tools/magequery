@@ -600,12 +600,12 @@ impl ArgValue {
     /// _mergeNode` merges di.xml arguments. A re-declaration with a DIFFERENT
     /// `xsi:type` replaces the node wholesale — attributes included, so an
     /// `xsi:type="null"` knockout of an object item drops its `sortOrder` and
-    /// the item falls to sort position 0 (proforto's postnl_form_changes, the
+    /// the item falls to sort position 0 (the 2.4.8 store's postnl_form_changes, the
     /// compiled-archive ground truth). Same type merges: arrays item-by-item
     /// by key (newer overrides same-key — taking the newer item's source —
     /// appends new keys, recursing into nested arrays); objects override the
     /// class text but MERGE attributes, keeping `shared`/`sortOrder` the newer
-    /// declaration doesn't restate (proforto's with_address_auto_complete
+    /// declaration doesn't restate (the 2.4.8 store's with_address_auto_complete
     /// keeps its 999); scalars take the newer text.
     pub(crate) fn merged_with(&self, newer: &ArgValue) -> ArgValue {
         match (self, newer) {

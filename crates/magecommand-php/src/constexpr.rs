@@ -841,7 +841,7 @@ mod tests {
 
     #[test]
     fn zend_cache_cleaning_modes_resolve_without_a_parsed_class() {
-        // `NoLookup` means no parsed corpus (the proforto case where the zf1
+        // `NoLookup` means no parsed corpus (the 2.4.8 store case where the zf1
         // package isn't reached). The internal table still folds the ZF1
         // cleaning modes to their frozen string values — so the cache Proxies
         // render `clean($mode = 'all', …)` rather than an unresolvable default.

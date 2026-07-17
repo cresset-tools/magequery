@@ -35,7 +35,7 @@ Verified on the oracle: disabling one plugin recompiled writing **2 files, 4120
 unchanged** (vs a cold compile re-writing all 4122), and the tree was
 **byte-identical** to a cold compile of the same edited state; a di-only edit
 skips the PHP scan (`reopen` only). The write-delta is the whole APFS payoff —
-proforto measurement pending. Two fixes the prototype forced: filter watcher
+the 2.4.8 store measurement pending. Two fixes the prototype forced: filter watcher
 events to real writes (Create/Remove/Modify-data — Access events from the
 recompile's own file reads would otherwise feed back into an endless loop), and
 exclude `**/_files/**` fixtures the scan already ignores.
@@ -44,7 +44,7 @@ v1 scope / next steps: on a PHP change it re-scans the whole universe (v2:
 incremental per-file `Definitions` update); it recomputes all 7 areas from the
 in-memory parses (v3: per-area invalidation); it doesn't yet update the input
 digest manifest (a later cold `--incremental` recomputes, which is safe). The
-compute itself (~2s CPU on proforto) is the remaining floor a warm server keeps
+compute itself (~2s CPU on the 2.4.8 store) is the remaining floor a warm server keeps
 paying until v2/v3.
 
 ---
@@ -57,7 +57,7 @@ design and the (now demoted) CI-cache investigation.
 compile INPUT set in `generated/.mqcache/manifest.json` (guarded by format
 version + tool version + `BP`); `compile --incremental` recomputes it up front
 and, on a match, **skips the entire compile** (scan + compute + write) — on the
-oracle a no-op recompile is ~90ms (the input walk) vs ~890ms full, on proforto
+oracle a no-op recompile is ~90ms (the input walk) vs ~890ms full, on the 2.4.8 store
 ~1.2s vs ~7.4s. On **any** change it falls through to a plain full compile (clear
 + write all) — no partial reconcile. The digest is computed **once**: the same
 walk that detects the change is reused as the new manifest's digest (the inputs
@@ -93,7 +93,7 @@ rest. It ran headlong into two walls:
   a second input-digest walk at manifest-save time (~1.3–1.6s) and a multi-MB
   per-file-hash manifest, `--incremental` on a one-plugin change hit **~15–16s vs
   the ~7.4s a plain full compile takes** — a regression the user caught on
-  proforto.
+  the 2.4.8 store.
 
 The fix was to delete the reconcile entirely: `--incremental` short-circuits on a
 no-op (Win 2) and does a plain full compile on any change. The manifest shrank
@@ -123,11 +123,11 @@ hangs on.
 **One caveat up front:** the output is *not* path-independent. `BP` (the absolute
 Magento root) is baked verbatim into some generated arguments (the dev/test
 path-exclusion regexes) and the area metadata. So `BP` is part of the input
-digest, and a cache built at `/Users/jelle/www/proforto` will not byte-match one
+digest, and a cache built at `/Users/jelle/www/store` will not byte-match one
 built at `/home/runner/work/...`. Within one project's CI (stable workspace path)
 this is a non-issue; across machines it just means the cache is path-scoped.
 
-## Where the time goes (measured, proforto = 761 modules / 10 643 output files)
+## Where the time goes (measured, the 2.4.8 store = 761 modules / 10 643 output files)
 
 | phase | macOS/APFS | Linux oracle | nature |
 |---|---|---|---|
@@ -176,7 +176,7 @@ work on APFS:
   the scan + resolver, so it can't stay in place during the compute), and
 - **an APFS rename is as expensive as a write**, so renaming the unchanged
   majority back costs *more* than just rewriting every file (~3.9s vs ~1.8s
-  measured on proforto).
+  measured on the 2.4.8 store).
 
 So skipping a write buys nothing on APFS — the FS-metadata lock is the wall,
 and a rename hits it just as hard as a write. The manifest now stores only the

@@ -1294,7 +1294,7 @@ mod tests {
 
     #[test]
     fn classifies_class_scanner_exclude_regex_membership() {
-        // The proforto shape in miniature: a `global.php` where, relative to the
+        // The 2.4.8 store shape in miniature: a `global.php` where, relative to the
         // stale archive, the output (a) drops a disabled module's entry, (b) adds a
         // new enabled class, and (c) lists a different member set in the generated
         // ClassesScanner exclusion regex. Only after normalizing that one regex line

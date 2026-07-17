@@ -190,7 +190,7 @@ pub fn write_generated(root: &Path, files: &[(String, String)]) -> Result<usize>
 ///   physical dir whose case the first writer decides, leaving some files at
 ///   a path PSR-4 can't resolve on a case-sensitive host: the "works on the
 ///   Mac, 500s on the Linux deploy" trap. Real `setup:di:compile` on macOS
-///   collapses identically (proforto's `_code` archive carries the same 5
+///   collapses identically (the 2.4.8 store's `_code` archive carries the same 5
 ///   mismatches), so this is a BUILD-HOST hazard, only worth a warning when
 ///   the output volume is actually case-insensitive.
 /// - `files` — two complete artifact paths case-insensitively equal, i.e.
@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "<?php // v2\n");
     }
 
-    /// The proforto shape: sibling dirs differing only in case (a class named
+    /// The 2.4.8 store shape: sibling dirs differing only in case (a class named
     /// `FulfilStaff` next to a `Fulfilstaff\Grid` namespace), reported once at
     /// the SHORTEST colliding prefix — the deeper `…/Grid` paths textually
     /// differ too, but only because their parent does. File-level collisions

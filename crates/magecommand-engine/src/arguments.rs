@@ -197,7 +197,7 @@ impl<'a> ArgsCtx<'a> {
         // only reorders when the LAST item of the LAST array-valued argument
         // carries `sortOrder`. That single gate reconciles both oracle facts —
         // Mq_ModSort's child appends un-keyed items (gate false ⇒ merge order,
-        // parent block then child) while proforto's Amasty ModifierAggregator
+        // parent block then child) while the 2.4.8 store's Amasty ModifierAggregator
         // vtypes end on a keyed item (gate true ⇒ the archive's fully
         // sortOrder-sorted union, 10,20,30,40,9000,10000). A plain type with no
         // contributing base is never sorted here (`$arguments` empty ⇒ own args
@@ -625,7 +625,7 @@ fn const_to_cfg(value: &ConstValue) -> Cfg {
 /// oracle: on PHP 8.5 EVERY defaulted-before-required spelling raises a
 /// deprecation that Magento's dev-mode ErrorHandler turns fatal, so the real
 /// compiler cannot even process such a class there — the shape exists only on
-/// older-PHP stores, and the sanitairkamer 2.4.5 archive is its ground truth.
+/// older-PHP stores, and the 2.4.5 store 2.4.5 archive is its ground truth.
 fn optional_tail_start(params: &[ParamMeta]) -> usize {
     params
         .iter()
@@ -1136,7 +1136,7 @@ mod tests {
         }
     }
 
-    /// The proforto `frontend.php` bug shape (BUG E, `Mq_ModSort` oracle
+    /// The 2.4.8 store `frontend.php` bug shape (BUG E, `Mq_ModSort` oracle
     /// synthetic): a child form whose parent declares `entityFormModifiers`
     /// with sortOrder-keyed items, and the child adds UN-keyed modifiers.
     /// Real 2.4.9 di:compile keeps the merge in MERGE order — parent block,
@@ -1172,7 +1172,7 @@ mod tests {
         );
     }
 
-    /// The proforto `crontab.php` archive shape (Amasty AiContentGenerator):
+    /// The 2.4.8 store `crontab.php` archive shape (Amasty AiContentGenerator):
     /// a vtype whose base declares markdown(9000)/disclaimer(10000) and whose
     /// own items are ALL sortOrder-keyed — the last merged item carries
     /// `sortOrder`, so the multi gate fires and real di:compile stores the
@@ -1234,7 +1234,7 @@ mod tests {
         assert_eq!(merged.len(), 2, "single branch never drops arguments");
     }
 
-    /// Sanitairkamer's Address\Book shape: a defaulted param before a required
+    /// the 2.4.5 store's Address\Book shape: a defaulted param before a required
     /// one is REQUIRED (PHP isOptional is positional); only the contiguous
     /// defaulted/variadic tail is optional. Real-compile-verified against the
     /// 2.4.5 archive (see `optional_tail_start`'s doc for why the oracle can't

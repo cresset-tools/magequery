@@ -132,11 +132,11 @@ impl Definitions {
             // Magento's FileClassScanner returns ONE name per file: the FIRST
             // unconditional T_CLASS/T_TRAIT at file scope ("it only searches
             // for the first match"), skipping interfaces/enums. A second
-            // class in the same file (proforto's Yotpo\Reviews\Model\Config,
+            // class in the same file (the 2.4.8 store's Yotpo\Reviews\Model\Config,
             // declared after a constants-holder class) never enters the
             // compile universe — no argument row, no interceptor seed — on
             // 2.4.8 AND 2.4.9 alike (source-verified on both; archive-
-            // verified on proforto). `classes` still records every
+            // verified on the 2.4.8 store). `classes` still records every
             // declaration for hierarchy walks and const lookups.
             if matches!(meta.kind, ClassKind::Class | ClassKind::Trait)
                 && !meta.conditional
@@ -163,7 +163,7 @@ impl Definitions {
             if !meta.conditional {
                 from_scan.insert(meta.fqcn.clone());
             }
-            // Two files declaring the same FQCN (sanitairkamer: app/code
+            // Two files declaring the same FQCN (the 2.4.5 store: app/code
             // BigBridge_CheckoutExtensions vs vendor BigBridge_Checkout, whose
             // PSR-4 prefix diverges from its files' namespace, leaving that
             // copy autoload-UNREACHABLE): reflection sees whichever file the
