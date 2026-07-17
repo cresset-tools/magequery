@@ -315,18 +315,7 @@ impl<'a> ArgsCtx<'a> {
             .rsplit_once('\\')
             .map(|(ns, _)| ns)
             .unwrap_or("");
-        // PHP's ReflectionParameter::isOptional — which ClassReader negates
-        // into isRequired — is POSITIONAL: a defaulted param followed by a
-        // required one cannot actually be omitted, so reflection reports it
-        // REQUIRED and Magento autowires it. Only the contiguous
-        // defaulted/variadic TAIL is optional. (2.4.5 core still ships the
-        // deprecated shape — Customer's Address\Book has
-        // `CustomerRepositoryInterface $x = null` before required params, and
-        // its archive row is an `_i_` instance, never `_vn_`.)
-        let optional_tail_start = params
-            .iter()
-            .rposition(|p| p.default.is_none() && !p.variadic)
-            .map_or(0, |i| i + 1);
+        let optional_tail_start = optional_tail_start(params);
         let mut out: Vec<(PhpKey, PhpValue)> = Vec::with_capacity(params.len());
         for (idx, param) in params.iter().enumerate() {
             let required = idx < optional_tail_start;
@@ -404,7 +393,20 @@ impl<'a> ArgsCtx<'a> {
                         Some(laminas)
                     }
                     Some(_) if self.class_loadable(other) => Some(other.to_owned()),
-                    Some(_) => None,
+                    Some(_) => {
+                        // Oracle-proven (bridge-less Mage-OS 3.1.0 synthetic):
+                        // real di:compile FATALS here — ClassReader wraps the
+                        // ReflectionException as "Impossible to process
+                        // constructor argument". No valid 2.4.9 archive can
+                        // contain this case; degrade to non-class and record
+                        // the hard fact.
+                        self.finding(format!(
+                            "{definer}: ${} hints legacy '{other}' — no laminas bridge and no \
+                             such class; a real setup:di:compile fails on this constructor",
+                            param.name
+                        ));
+                        None
+                    }
                     None => Some(other.to_owned()),
                 },
             },
@@ -611,6 +613,25 @@ fn const_to_cfg(value: &ConstValue) -> Cfg {
 }
 
 // ---- array_replace / array_replace_recursive / SortItems --------------------
+
+/// Index of the first parameter of the contiguous optional TAIL — everything
+/// before it is REQUIRED, defaults notwithstanding. PHP's
+/// `ReflectionParameter::isOptional` — which ClassReader negates into
+/// `isRequired` — is POSITIONAL: a defaulted param followed by a required one
+/// cannot actually be omitted, so reflection reports it required and Magento
+/// autowires it. 2.4.5 core still ships the shape (Customer's Address\Book:
+/// `CustomerRepositoryInterface $x = null` before required params; its real
+/// compiled row is an `_i_` instance, never `_vn_`). Unlockable on the 2.4.9
+/// oracle: on PHP 8.5 EVERY defaulted-before-required spelling raises a
+/// deprecation that Magento's dev-mode ErrorHandler turns fatal, so the real
+/// compiler cannot even process such a class there — the shape exists only on
+/// older-PHP stores, and the sanitairkamer 2.4.5 archive is its ground truth.
+fn optional_tail_start(params: &[ParamMeta]) -> usize {
+    params
+        .iter()
+        .rposition(|p| p.default.is_none() && !p.variadic)
+        .map_or(0, |i| i + 1)
+}
 
 fn array_replace(base: &mut Vec<(CfgKey, Cfg)>, over: Vec<(CfgKey, Cfg)>) {
     for (key, value) in over {
@@ -1211,6 +1232,38 @@ mod tests {
             "object-spec argument walked last ⇒ gate false ⇒ single branch ⇒ items untouched"
         );
         assert_eq!(merged.len(), 2, "single branch never drops arguments");
+    }
+
+    /// Sanitairkamer's Address\Book shape: a defaulted param before a required
+    /// one is REQUIRED (PHP isOptional is positional); only the contiguous
+    /// defaulted/variadic tail is optional. Real-compile-verified against the
+    /// 2.4.5 archive (see `optional_tail_start`'s doc for why the oracle can't
+    /// lock this — PHP 8.5 fatals on the shape).
+    #[test]
+    fn optional_tail_is_positional() {
+        let tail = |sig: &str| {
+            let src =
+                format!("<?php namespace T; class C {{ public function __construct({sig}) {{}} }}");
+            let meta = magecommand_php::parse_file(src.as_bytes());
+            let params = meta.declarations[0]
+                .methods
+                .iter()
+                .find(|m| m.name == "__construct")
+                .expect("ctor parsed")
+                .params
+                .clone();
+            optional_tail_start(&params)
+        };
+        // The Address\Book shape: defaulted-before-required means everything
+        // up to the last required param is required; only the trailing
+        // defaults are optional.
+        assert_eq!(tail("\\M\\Repo $maybe = null, \\M\\Grid $required"), 2);
+        assert_eq!(tail("\\M\\A $a, \\M\\B $b = null, array $c = []"), 1);
+        // A variadic keeps the tail optional; all-defaulted = all optional.
+        assert_eq!(tail("int $a = 1, \\M\\C ...$rest"), 0);
+        assert_eq!(tail("int $a = 1"), 0);
+        // All-required.
+        assert_eq!(tail("\\M\\A $a, \\M\\B $b"), 2);
     }
 
     /// The multi branch's rebuild loop iterates only array-valued arguments —
