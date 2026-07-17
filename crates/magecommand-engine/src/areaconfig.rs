@@ -197,7 +197,7 @@ pub fn build_area_file_from_export(
     root: &std::path::Path,
 ) -> AreaFile {
     let overrides = crate::arguments::setup_overrides(magento, root);
-    let ctx = ArgsCtx::new(defs, &defs.scanned, &export, overrides);
+    let ctx = ArgsCtx::new(defs, &defs.scanned, &export, overrides, Some(magento), Some(root));
 
     // Reader.
     let mut arguments = build_arguments(&ctx, magento);

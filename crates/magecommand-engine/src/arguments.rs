@@ -74,6 +74,13 @@ pub(crate) struct ArgsCtx<'a> {
     non_shared: HashSet<String>,
     vtypes: HashMap<String, String>,
     pref_keys: Vec<String>,
+    /// Autoload resolution for names outside the scanned universe (vendor
+    /// libraries) — what `ReflectionClass` could load. `None` only in tests.
+    magento: Option<&'a Magento>,
+    /// Whether `laminas/laminas-zendframework-bridge` is installed — its
+    /// append autoloader is what aliases legacy `Zend\…` names to `Laminas\…`
+    /// classes. Mage-OS 3.1.0 does NOT ship it; 2.4.5-era stores do.
+    zend_bridge: bool,
     merged_cache: std::cell::RefCell<HashMap<String, Vec<(CfgKey, Cfg)>>>,
     findings: std::cell::RefCell<Vec<String>>,
 }
@@ -84,7 +91,12 @@ impl<'a> ArgsCtx<'a> {
         scanned: &'a HashSet<String>,
         export: &'a DiExport,
         overrides: Vec<(String, String, Cfg)>,
+        magento: Option<&'a Magento>,
+        root: Option<&std::path::Path>,
     ) -> Self {
+        let zend_bridge = root.is_some_and(|r| {
+            r.join("vendor/laminas/laminas-zendframework-bridge/src/Autoloader.php").is_file()
+        });
         let mut type_args: HashMap<String, Vec<(String, &ArgValue)>> = HashMap::new();
         for decl in &export.arguments {
             type_args
@@ -116,9 +128,19 @@ impl<'a> ArgsCtx<'a> {
             non_shared,
             vtypes,
             pref_keys,
+            magento,
+            zend_bridge,
             merged_cache: Default::default(),
             findings: Default::default(),
         }
+    }
+
+    /// Whether `ReflectionClass(name)` would succeed for a name outside the
+    /// scanned universe: the autoload maps resolve it to an existing file.
+    fn class_loadable(&self, name: &str) -> bool {
+        self.magento.is_some_and(|m| {
+            m.class_file(&magequery_core::ClassName::new(name.to_owned())).is_some()
+        })
     }
 
     fn finding(&self, msg: String) {
@@ -360,20 +382,32 @@ impl<'a> ArgsCtx<'a> {
                 .and_then(|r| r.meta.extends.first().cloned()),
             // Swoole/OpenSwoole are InterfaceValidator::$optionalPackages.
             _ if ty.starts_with("Swoole\\") || ty.starts_with("OpenSwoole\\") => None,
-            other => Some(match self.defs.canonical_case(other) {
+            other => match self.defs.canonical_case(other) {
                 // Reflection reports the DECLARED case, not the use-site
                 // spelling (PageBuilder's Gt\Dom vs phpgt's GT\Dom).
-                Some(declared) => declared.to_owned(),
-                // A hint no scanned file declares: the laminas bridge's append
-                // autoloader aliases legacy `Zend\…`-family names to their
-                // `Laminas\…` classes, so reflection — and the real compiled
-                // output — reports the CANONICAL name (Amasty hinting
-                // Zend\Uri\Uri compiles as `_i_` Laminas\Uri\Uri, verified in
-                // a real 2.4.5 archive). A declared legacy class never gets
-                // the alias (autoload finds it first), hence the None gate.
-                None => magequery_core::laminas_alias::canonical(other)
-                    .unwrap_or_else(|| other.to_owned()),
-            }),
+                Some(declared) => Some(declared.to_owned()),
+                // A LEGACY `Zend\…`-family hint no scanned file declares:
+                // what reflection sees depends on the STORE, not the target.
+                // With laminas-zendframework-bridge installed, its append
+                // autoloader aliases the name to the Laminas class and
+                // reflection reports the CANONICAL name (Amasty hinting
+                // Zend\Uri\Uri compiles as `_i_` Laminas\Uri\Uri — verified
+                // in a real 2.4.5 archive). Without the bridge (Mage-OS
+                // 3.1.0 dropped it) — or without the Laminas target — the
+                // name simply doesn't exist: ReflectionClass throws,
+                // GetParameterClassTrait catches, and the param demotes to
+                // non-class (`_vn_`), unless a real Zend-namespaced class is
+                // genuinely autoloadable. A declared legacy class never gets
+                // the alias (autoload finds it first): the Some arm above.
+                None => match magequery_core::laminas_alias::canonical(other) {
+                    Some(laminas) if self.zend_bridge && self.class_loadable(&laminas) => {
+                        Some(laminas)
+                    }
+                    Some(_) if self.class_loadable(other) => Some(other.to_owned()),
+                    Some(_) => None,
+                    None => Some(other.to_owned()),
+                },
+            },
         }
     }
 
