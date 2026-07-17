@@ -49,6 +49,12 @@ pub enum KnownKind {
     /// (return-type spacing, explicit nullable defaults, proxy `__clone`/
     /// `_resetState` null-guards, added `__debugInfo`). Behavior-preserving.
     GeneratorVersionFormatting,
+    /// An arguments entry that resolves to NULL in the output because the
+    /// class (or an ancestor its constructor comes from) lives in
+    /// eval-obfuscated vendor source — the real compiler EXECUTES the
+    /// decrypting stub and reflects the materialized class; magecommand never
+    /// executes PHP, so the constructor is statically invisible.
+    ObfuscatedVendorSource,
 }
 
 impl KnownKind {
@@ -70,6 +76,9 @@ impl KnownKind {
             KnownKind::FilenameCasing => "Filename letter-casing (case-insensitive filesystem)",
             KnownKind::GeneratorVersionFormatting => {
                 "Code-generator formatting (Magento version, behavior-preserving)"
+            }
+            KnownKind::ObfuscatedVendorSource => {
+                "Arguments unresolvable from eval-obfuscated vendor source"
             }
         }
     }
@@ -121,6 +130,10 @@ pub struct ClassifyCtx<'a> {
     pub archive: &'a Path,
     pub output: &'a Path,
     pub disabled_modules: &'a HashSet<String>,
+    /// Class keys (escaped `Vendor\\\\Class` metadata form) whose arguments are
+    /// statically unresolvable because their constructor chain runs through
+    /// eval-obfuscated vendor source — see [`obfuscation_blocked_classes`].
+    pub obfuscation_blocked: &'a HashSet<String>,
 }
 
 /// Partition `report`'s differences into explained known groups and the
@@ -161,7 +174,36 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
         known.push(group);
     }
 
-    // 5. Disabled-module DI-config entries: a changed metadata file (`global.php`,
+    // 5. Obfuscation-blocked entries: report the classes whose arguments are
+    //    statically unresolvable (their constructor chain runs through
+    //    eval-obfuscated vendor source, pre-verified into ctx). Their entries
+    //    are stripped inside rules 5b–7's comparisons, so the files claim
+    //    under their natural patterns; this group is where the WHY lives.
+    if !ctx.obfuscation_blocked.is_empty() {
+        let mut items: Vec<String> = ctx
+            .obfuscation_blocked
+            .iter()
+            .map(|k| k.replace("\\\\", "\\"))
+            .collect();
+        items.sort();
+        known.push(KnownGroup {
+            kind: KnownKind::ObfuscatedVendorSource,
+            title: KnownKind::ObfuscatedVendorSource.title().to_owned(),
+            explanation:
+                "These classes' constructor chains run through vendor source whose class \
+declaration only exists inside an eval() of encrypted code (Anowave-style obfuscation). The real \
+compiler EXECUTES that stub when the autoloader requires the file, then reflects the materialized \
+class; magecommand never executes PHP, so the constructor is statically invisible and the \
+arguments entry honestly degrades to NULL (a compile finding records each one). At runtime the \
+object manager falls back to reflection for a NULL entry, so the store still works — the row is \
+just uncached. This is the one place the no-PHP-execution guarantee costs fidelity."
+                    .to_owned(),
+            items,
+            verified: true,
+        });
+    }
+
+    // 5b. Disabled-module DI-config entries: a changed metadata file (`global.php`,
     //    `<area>.php`) that becomes byte-identical once the top-level entries for
     //    classes in disabled modules are removed from both sides — the metadata
     //    analog of rule 3.
@@ -382,19 +424,24 @@ fn top_level_entry_key(line: &str) -> Option<&str> {
 }
 
 /// Remove every top-level DI-config entry whose class key belongs to a disabled
-/// module, so two metadata files can be compared modulo disabled-module noise.
+/// module — or is a known obfuscation-blocked class — so two metadata files can
+/// be compared modulo that expected noise.
 ///
 /// The block a key introduces is either a single inline line (`'K' => NULL,`) or
 /// a `var_export` array spanning to its own indent-four `    ),` close; both are
 /// dropped in full. Lines are re-joined with `\n`; the same transform on both
 /// sides keeps any surviving difference intact for an exact comparison.
-fn strip_disabled_module_entries(text: &str, disabled: &HashSet<String>) -> (String, bool) {
+fn strip_expected_entries(
+    text: &str,
+    disabled: &HashSet<String>,
+    blocked: &HashSet<String>,
+) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
     let mut stripped = false;
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
         if let Some(key) = top_level_entry_key(line) {
-            if metadata_entry_module_disabled(key, disabled) {
+            if metadata_entry_module_disabled(key, disabled) || blocked.contains(key) {
                 stripped = true;
                 // A block value (`'K' =>` with the value on the following lines)
                 // runs to a `)` at the key's own indentation; an inline value is
@@ -418,6 +465,102 @@ fn strip_disabled_module_entries(text: &str, disabled: &HashSet<String>) -> (Str
     (out, stripped)
 }
 
+/// Find changed-metadata argument entries that are statically unresolvable
+/// because the class's constructor chain runs through EVAL-OBFUSCATED vendor
+/// source (Anowave-style: the real class declaration only exists inside an
+/// `eval(<decrypt>(…))` payload). The real compiler `require`s the file —
+/// executing the stub — and reflects the materialized class; magecommand never
+/// executes PHP, so it sees no constructor and honestly emits NULL (plus a
+/// compile finding).
+///
+/// Candidates are exactly the keys that are a one-line `NULL` entry on one
+/// side and a block on the other; each is confirmed by walking the class's
+/// `extends` chain through real files until one matches the obfuscation
+/// signature (`eval(` + `base64_decode` in the same source). Returns the keys
+/// in their escaped metadata form, for [`ClassifyCtx::obfuscation_blocked`].
+pub fn obfuscation_blocked_classes(
+    report: &CompareReport,
+    archive: &Path,
+    output: &Path,
+    magento: Option<&magequery_core::Magento>,
+) -> HashSet<String> {
+    let Some(magento) = magento else { return HashSet::new() };
+
+    // key -> is the entry a one-line NULL? (block entries map to false)
+    fn entry_shapes(text: &str) -> Vec<(String, bool)> {
+        text.lines()
+            .filter_map(|line| {
+                let key = top_level_entry_key(line)?;
+                Some((key.to_owned(), line.trim_end().ends_with("=> NULL,")))
+            })
+            .collect()
+    }
+
+    let mut candidates: HashSet<String> = HashSet::new();
+    for rel in &report.changed {
+        let (Ok(a), Ok(b)) =
+            (fs::read_to_string(archive.join(rel)), fs::read_to_string(output.join(rel)))
+        else {
+            continue;
+        };
+        if !a.starts_with("<?php return array (") {
+            continue;
+        }
+        let shapes_a: std::collections::HashMap<String, bool> =
+            entry_shapes(&a).into_iter().collect();
+        for (key, b_null) in entry_shapes(&b) {
+            if let Some(&a_null) = shapes_a.get(&key) {
+                if a_null != b_null {
+                    candidates.insert(key);
+                }
+            }
+        }
+    }
+
+    let mut verdict: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    let mut blocked = HashSet::new();
+    for key in candidates {
+        let fqcn = key.replace("\\\\", "\\");
+        if chain_hits_obfuscation(&fqcn, magento, &mut verdict, 0) {
+            blocked.insert(key);
+        }
+    }
+    blocked
+}
+
+fn chain_hits_obfuscation(
+    fqcn: &str,
+    magento: &magequery_core::Magento,
+    verdict: &mut std::collections::HashMap<String, bool>,
+    depth: usize,
+) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    if let Some(&v) = verdict.get(fqcn) {
+        return v;
+    }
+    verdict.insert(fqcn.to_owned(), false); // cycle guard
+    let Some(file) = magento.class_file(&magequery_core::ClassName::new(fqcn.to_owned())) else {
+        return false;
+    };
+    let Ok(src) = fs::read(&file) else { return false };
+    let text = String::from_utf8_lossy(&src);
+    let hit = if text.contains("eval(") && text.contains("base64_decode") {
+        true
+    } else {
+        let meta = magecommand_php::parse_file(&src);
+        meta.declarations
+            .iter()
+            .find(|d| d.fqcn.eq_ignore_ascii_case(fqcn))
+            .or(meta.declarations.first())
+            .and_then(|d| d.extends.first().cloned())
+            .is_some_and(|parent| chain_hits_obfuscation(&parent, magento, verdict, depth + 1))
+    };
+    verdict.insert(fqcn.to_owned(), hit);
+    hit
+}
+
 fn disabled_module_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
     if ctx.disabled_modules.is_empty() {
         return None;
@@ -436,8 +579,8 @@ fn disabled_module_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Opt
         if !a.starts_with("<?php return array (") {
             continue;
         }
-        let (sa, stripped_a) = strip_disabled_module_entries(&a, ctx.disabled_modules);
-        let (sb, stripped_b) = strip_disabled_module_entries(&b, ctx.disabled_modules);
+        let (sa, stripped_a) = strip_expected_entries(&a, ctx.disabled_modules, ctx.obfuscation_blocked);
+        let (sb, stripped_b) = strip_expected_entries(&b, ctx.disabled_modules, ctx.obfuscation_blocked);
         // Claim only when removing disabled-module entries (from at least one
         // side) makes the files identical — so any *other* difference keeps the
         // file flagged.
@@ -513,8 +656,8 @@ fn extra_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownG
         if !a.starts_with("<?php return array (") {
             continue;
         }
-        let (sa, _) = strip_disabled_module_entries(&a, ctx.disabled_modules);
-        let (sb, _) = strip_disabled_module_entries(&b, ctx.disabled_modules);
+        let (sa, _) = strip_expected_entries(&a, ctx.disabled_modules, ctx.obfuscation_blocked);
+        let (sb, _) = strip_expected_entries(&b, ctx.disabled_modules, ctx.obfuscation_blocked);
         // Claim only when the output strictly grew and contains every archive line
         // in order — additions only. `sa.len() < sb.len()` also rules out the
         // equal case (which rule 5 already handles).
@@ -607,8 +750,8 @@ fn class_scanner_exclude_regex(
         if !a.starts_with("<?php return array (") {
             continue;
         }
-        let (sa, _) = strip_disabled_module_entries(&a, ctx.disabled_modules);
-        let (sb, _) = strip_disabled_module_entries(&b, ctx.disabled_modules);
+        let (sa, _) = strip_expected_entries(&a, ctx.disabled_modules, ctx.obfuscation_blocked);
+        let (sb, _) = strip_expected_entries(&b, ctx.disabled_modules, ctx.obfuscation_blocked);
         let ca = canonicalize_class_scanner_regex(&sa);
         let cb = canonicalize_class_scanner_regex(&sb);
         // Only relevant when a scanner regex was actually present and differed;
@@ -744,8 +887,9 @@ PHP 8.4 compat form), and the proxy template's laziness hardening (null-guards i
 /// --show-residual` flag prints so a lone unexplained file can be pinpointed
 /// without hand-rolling the block-aware disabled-strip in a shell.
 pub fn residual_report(archive_text: &str, output_text: &str, disabled: &HashSet<String>) -> String {
-    let (sa, _) = strip_disabled_module_entries(archive_text, disabled);
-    let (sb, _) = strip_disabled_module_entries(output_text, disabled);
+    let no_blocked = HashSet::new();
+    let (sa, _) = strip_expected_entries(archive_text, disabled, &no_blocked);
+    let (sb, _) = strip_expected_entries(output_text, disabled, &no_blocked);
     let na = canonicalize_class_scanner_regex(&sa);
     let nb = canonicalize_class_scanner_regex(&sb);
     let a: Vec<&str> = na.lines().collect();

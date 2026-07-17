@@ -462,23 +462,26 @@ fn compare(
 ) -> anyhow::Result<ExitCode> {
     let report = magecommand_engine::compare_dirs(archive, output, strict_ordering)?;
 
-    // The disabled-module explanation needs config.php. Best-effort: if the
-    // root isn't a Magento checkout (comparing two loose trees), skip it —
-    // those interceptors simply stay unexplained rather than misclassified.
-    let disabled_modules: std::collections::HashSet<String> = if no_explain {
-        std::collections::HashSet::new()
+    // The disabled-module and obfuscation explanations need the checkout.
+    // Best-effort: if the root isn't a Magento checkout (comparing two loose
+    // trees), skip them — those differences simply stay unexplained rather
+    // than misclassified.
+    let magento: Option<magequery_core::Magento> = if no_explain {
+        None
     } else {
         let root = std::path::absolute(root.unwrap_or_else(|| PathBuf::from("."))).unwrap_or_default();
-        magequery_core::Magento::open(&root)
-            .map(|m| {
-                m.modules()
-                    .iter()
-                    .filter(|md| !md.enabled)
-                    .map(|md| md.name.to_string())
-                    .collect()
-            })
-            .unwrap_or_default()
+        magequery_core::Magento::open(&root).ok()
     };
+    let disabled_modules: std::collections::HashSet<String> = magento
+        .as_ref()
+        .map(|m| {
+            m.modules()
+                .iter()
+                .filter(|md| !md.enabled)
+                .map(|md| md.name.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
 
     // Diagnostic mode: pinpoint one file's residual difference and stop.
     if let Some(rel) = show_residual {
@@ -526,10 +529,17 @@ fn compare(
         return Ok(fail_exit(fail_on_diff, !report.is_clean()));
     }
 
+    let obfuscation_blocked = magecommand_engine::obfuscation_blocked_classes(
+        &report,
+        archive,
+        output,
+        magento.as_ref(),
+    );
     let ctx = magecommand_engine::ClassifyCtx {
         archive,
         output,
         disabled_modules: &disabled_modules,
+        obfuscation_blocked: &obfuscation_blocked,
     };
     let classified = magecommand_engine::classify(&report, &ctx);
 

@@ -27,7 +27,7 @@ pub mod reflect;
 pub mod pluginlist;
 pub mod phpexport;
 
-pub use classify::{classify, residual_report, Classified, ClassifyCtx, KnownGroup, KnownKind};
+pub use classify::{classify, obfuscation_blocked_classes, residual_report, Classified, ClassifyCtx, KnownGroup, KnownKind};
 pub use compare::{compare_dirs, CompareReport};
 
 /// Errors the engine can return.
