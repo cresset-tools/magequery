@@ -166,26 +166,31 @@ impl<'a> ArgsCtx<'a> {
         if let Some(cached) = self.merged_cache.borrow().get(name) {
             return cached.clone();
         }
-        // Array-argument items are NOT re-sorted at merge time. Magento's
-        // ObjectManager\Helper\SortItems runs at RUNTIME (Data\Argument\
-        // Interpreter\ArrayType::evaluate), NOT during di:compile — the compiled
-        // metadata stores merged arrays in declaration/merge order. The only
-        // ordering baked in is the `sortOrder=` ATTRIBUTE, which the Mapper
-        // consumes + strips per declaration (replicated in `to_cfg`); a child
-        // `<item name="sortOrder">` is plain data and must keep its position.
-        // Proven on the oracle (Mq_ModSort synthetic): a parent form with
-        // sortOrder-keyed modifiers + a child adding un-keyed ones compiles
-        // parent-block-then-child (merge order), never key-sorted. Re-sorting
-        // here was the proforto `frontend.php` divergence (Amasty modifiers
-        // hoisted before Hyva's).
+        // ObjectManager\Config\Config::_collectConfiguration re-runs
+        // Helper\SortItems after every inheritance merge (vtype base collect,
+        // each non-empty relation overlay, the own-args overlay) — and the
+        // `sortOrder` DataObject keeps on object items survives mapping, so the
+        // sort is LIVE at compile for inherited configs. Its firing is gated by
+        // isMultiSortOrder's last-wins assignment bug (see `sort_items`): it
+        // only reorders when the LAST item of the LAST array-valued argument
+        // carries `sortOrder`. That single gate reconciles both oracle facts —
+        // Mq_ModSort's child appends un-keyed items (gate false ⇒ merge order,
+        // parent block then child) while proforto's Amasty ModifierAggregator
+        // vtypes end on a keyed item (gate true ⇒ the archive's fully
+        // sortOrder-sorted union, 10,20,30,40,9000,10000). A plain type with no
+        // contributing base is never sorted here (`$arguments` empty ⇒ own args
+        // assigned verbatim), which is why the all-enabled oracle stayed
+        // byte-exact without any merge-time sort.
         let mut arguments: Vec<(CfgKey, Cfg)> = Vec::new();
         if let Some(base) = self.vtypes.get(name) {
             arguments = self.merged_config(base);
+            sort_items(&mut arguments);
         } else if self.defs.contains(name) {
             for relation in self.defs.relations_of(name) {
                 let relation_args = self.merged_config(&relation);
                 if !relation_args.is_empty() {
                     array_replace(&mut arguments, relation_args);
+                    sort_items(&mut arguments);
                 }
             }
         }
@@ -194,6 +199,7 @@ impl<'a> ArgsCtx<'a> {
                 arguments = own;
             } else {
                 array_replace_recursive(&mut arguments, own);
+                sort_items(&mut arguments);
             }
         }
         self.merged_cache
@@ -577,6 +583,103 @@ fn array_replace_recursive(base: &mut Vec<(CfgKey, Cfg)>, over: Vec<(CfgKey, Cfg
     }
 }
 
+/// PHP `isset($v['sortOrder'])`: the key exists AND its value is not null.
+fn has_sort_order(entries: &[(CfgKey, Cfg)]) -> bool {
+    matches!(map_get(entries, "sortOrder"), Some(v) if !matches!(v, Cfg::Null))
+}
+
+/// PHP `(int)` cast of a `sortOrder` value (missing / null ⇒ 0).
+fn sort_order_int(value: &Cfg) -> i64 {
+    match value {
+        Cfg::Int(i) => *i,
+        Cfg::Float(f) => *f as i64,
+        Cfg::Bool(b) => *b as i64,
+        Cfg::Str(s) => {
+            let t = s.trim_start();
+            let end = t
+                .char_indices()
+                .take_while(|(i, c)| c.is_ascii_digit() || (*i == 0 && (*c == '-' || *c == '+')))
+                .count();
+            t[..end].parse().unwrap_or(0)
+        }
+        Cfg::Map(m) => !m.is_empty() as i64,
+        Cfg::Null | Cfg::Raw(_) => 0,
+    }
+}
+
+fn direct_sort_order(value: &Cfg) -> i64 {
+    match value {
+        Cfg::Map(m) if has_sort_order(m) => {
+            sort_order_int(map_get(m, "sortOrder").expect("has_sort_order checked"))
+        }
+        _ => 0,
+    }
+}
+
+/// ObjectManager\Helper\SortItems, ported bug-for-bug — Config::
+/// _collectConfiguration runs it after every inheritance merge, so its quirks
+/// are baked into the compiled metadata:
+/// - `isSortOrderDefined` (OR-accumulate, one level deep): any array-valued
+///   entry with a direct non-null `sortOrder` key, or any of whose sub-entries
+///   is an array carrying one. Nothing defined ⇒ untouched.
+/// - `isMultiSortOrder` is a last-wins ASSIGNMENT, not an OR: the flag ends as
+///   "does the LAST sub-entry of the LAST non-empty array-valued entry carry
+///   `sortOrder`". A trailing un-keyed item — or a trailing object-spec
+///   argument, whose last sub-entry is a scalar — turns the whole sort off.
+/// - multi branch: every array-valued entry's sub-entries are flattened into
+///   ONE list, stably sorted by `sortOrder` (missing ⇒ 0), and rebuilt
+///   per-parent; parents re-appear in sorted-encounter order and NON-array
+///   entries are DROPPED (PHP's `foreach` over a scalar iterates nothing).
+/// - single branch: the entry list itself is stably sorted by each value's
+///   direct `sortOrder` (missing ⇒ 0) — for compiled output a no-op unless an
+///   item is literally named `sortOrder`.
+fn sort_items(arguments: &mut Vec<(CfgKey, Cfg)>) {
+    let defined = arguments.iter().any(|(_, v)| match v {
+        Cfg::Map(entries) => {
+            has_sort_order(entries)
+                || entries
+                    .iter()
+                    .any(|(_, sub)| matches!(sub, Cfg::Map(m) if has_sort_order(m)))
+        }
+        _ => false,
+    });
+    if !defined {
+        return;
+    }
+    let mut multi = false;
+    for (_, v) in arguments.iter() {
+        if let Cfg::Map(entries) = v {
+            if let Some((_, last)) = entries.last() {
+                multi = matches!(last, Cfg::Map(m) if has_sort_order(m));
+            }
+        }
+    }
+    if multi {
+        let mut flat: Vec<(CfgKey, CfgKey, Cfg)> = Vec::new();
+        for (key, value) in arguments.drain(..) {
+            if let Cfg::Map(entries) = value {
+                for (sub_key, sub_value) in entries {
+                    flat.push((key.clone(), sub_key, sub_value));
+                }
+            }
+        }
+        flat.sort_by_key(|(_, _, item)| match item {
+            Cfg::Map(m) if has_sort_order(m) => {
+                sort_order_int(map_get(m, "sortOrder").expect("has_sort_order checked"))
+            }
+            _ => 0,
+        });
+        for (parent, key, item) in flat {
+            match arguments.iter_mut().find(|(k, _)| *k == parent) {
+                Some((_, Cfg::Map(entries))) => entries.push((key, item)),
+                _ => arguments.push((parent, Cfg::Map(vec![(key, item)]))),
+            }
+        }
+    } else {
+        arguments.sort_by_key(|(_, v)| direct_sort_order(v));
+    }
+}
+
 
 // ---- const lookup over the scanned corpus ------------------------------------
 
@@ -725,8 +828,23 @@ pub(crate) fn setup_overrides(
         ),
     ];
 
+    let module_by_path: HashMap<&std::path::Path, bool> = magento
+        .modules()
+        .iter()
+        .map(|m| (m.path.as_path(), m.enabled))
+        .collect();
+    let library_set: HashSet<&std::path::Path> =
+        magento.library_paths().iter().map(|p| p.as_path()).collect();
+
     // Module/library paths in ComponentRegistrar order = the order their
     // registration.php files run = composer's autoload_files.php order.
+    // A single autoload entry may register MANY components (a superpackage
+    // registration.php `require`ing per-module files — Magestore's
+    // synthesized-superpackage loads ~90 modules under its app/code); the
+    // entry's own dir is then no component path, so expand it: the nested
+    // `…/registration.php` string literals in file order (the require order —
+    // never executed, just scanned), else every component under the dir in
+    // sorted order (`glob()`'s default, the loop-over-glob loader shape).
     let autoload_files = root.join("vendor/composer/autoload_files.php");
     let text = std::fs::read_to_string(&autoload_files).unwrap_or_default();
     let vendor = root.join("vendor");
@@ -736,8 +854,40 @@ pub(crate) fn setup_overrides(
         let rest = &line[idx + 14..];
         let Some(end) = rest.find('\'') else { continue };
         let rel = rest[..end].trim_start_matches('/');
-        if let Some(dir) = std::path::Path::new(rel).parent() {
-            registration_dirs.push(vendor.join(dir));
+        let Some(dir) = std::path::Path::new(rel).parent() else { continue };
+        let dir = vendor.join(dir);
+        if module_by_path.contains_key(dir.as_path()) || library_set.contains(dir.as_path()) {
+            registration_dirs.push(dir);
+            continue;
+        }
+        let nested: Vec<std::path::PathBuf> =
+            std::fs::read_to_string(vendor.join(rel))
+                .map(|src| {
+                    string_literals(&src)
+                        .into_iter()
+                        .filter(|lit| lit.ends_with("registration.php"))
+                        .filter_map(|lit| {
+                            dir.join(lit.trim_start_matches('/')).parent().map(Into::into)
+                        })
+                        .filter(|d: &std::path::PathBuf| {
+                            module_by_path.contains_key(d.as_path())
+                                || library_set.contains(d.as_path())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        if !nested.is_empty() {
+            registration_dirs.extend(nested);
+        } else {
+            let mut under: Vec<std::path::PathBuf> = module_by_path
+                .keys()
+                .chain(library_set.iter())
+                .filter(|p| p.starts_with(&dir))
+                .map(|p| p.to_path_buf())
+                .collect();
+            under.sort();
+            under.dedup();
+            registration_dirs.extend(under);
         }
     }
 
@@ -765,11 +915,6 @@ pub(crate) fn setup_overrides(
         }
     }
 
-    let module_by_path: HashMap<&std::path::Path, bool> = magento
-        .modules()
-        .iter()
-        .map(|m| (m.path.as_path(), m.enabled))
-        .collect();
     let mut seen_modules: HashSet<&std::path::Path> = HashSet::new();
     let module_paths: Vec<&std::path::Path> = registration_dirs
         .iter()
@@ -777,8 +922,6 @@ pub(crate) fn setup_overrides(
         .filter(|d| module_by_path.get(d).copied().unwrap_or(false))
         .filter(|d| seen_modules.insert(*d))
         .collect();
-    let library_set: HashSet<&std::path::Path> =
-        magento.library_paths().iter().map(|p| p.as_path()).collect();
     let mut seen_libs: HashSet<&std::path::Path> = HashSet::new();
     let library_paths: Vec<&std::path::Path> = registration_dirs
         .iter()
@@ -852,6 +995,30 @@ pub(crate) fn setup_overrides(
     overrides
 }
 
+/// Every single-/double-quoted string literal in a PHP source, in file order.
+/// Good enough for scanning a generated multi-module registration loader for
+/// its `require` targets — the paths carry no escapes; a `\'`/`\"` inside a
+/// literal would merely split it, and split fragments don't end in
+/// `registration.php` so they filter out harmlessly.
+fn string_literals(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = src.char_indices();
+    while let Some((_, c)) = chars.next() {
+        if c != '\'' && c != '"' {
+            continue;
+        }
+        let mut lit = String::new();
+        for (_, d) in chars.by_ref() {
+            if d == c {
+                break;
+            }
+            lit.push(d);
+        }
+        out.push(lit);
+    }
+    out
+}
+
 /// PHP's preg_quote with '#' delimiter.
 fn preg_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -896,17 +1063,16 @@ mod tests {
         }
     }
 
-    /// The proforto `frontend.php` bug shape: a child form (`AttrForm`) whose
-    /// parent (`BaseForm`) declares `entityFormModifiers` with sortOrder-keyed
-    /// items, and the child adds un-keyed modifiers. Real 2.4.9 di:compile keeps
-    /// the type-hierarchy merge in MERGE order — parent block, then the child's
-    /// additions — and does NOT re-sort by the nested `sortOrder` key (that sort
-    /// is runtime-only, `ArrayType::evaluate`). Verified byte-for-byte against a
-    /// real compile via the `Mq_ModSort` oracle synthetic. This locks the merge
-    /// helper so no one reintroduces the compile-time `sort_items` reorder.
+    /// The proforto `frontend.php` bug shape (BUG E, `Mq_ModSort` oracle
+    /// synthetic): a child form whose parent declares `entityFormModifiers`
+    /// with sortOrder-keyed items, and the child adds UN-keyed modifiers.
+    /// Real 2.4.9 di:compile keeps the merge in MERGE order — parent block,
+    /// then the child's additions — because SortItems' isMultiSortOrder gate
+    /// is a last-wins assignment: the trailing un-keyed item turns the sort
+    /// off. Verified byte-for-byte against a real compile.
     #[test]
     fn hierarchy_merge_preserves_order_and_never_key_sorts() {
-        let parent = vec![(
+        let mut merged = vec![(
             CfgKey::s("entityFormModifiers"),
             Cfg::Map(vec![
                 (CfgKey::s("bAlpha"), modifier("Hyva\\Form\\BAlpha", Some(900))),
@@ -921,17 +1087,99 @@ mod tests {
             ]),
         )];
 
-        // merged_config merges the parent-type args, then array_replace_recursive
-        // overlays the child's own — with NO sort afterward.
-        let mut merged = parent;
         array_replace_recursive(&mut merged, child);
+        sort_items(&mut merged);
 
         assert_eq!(merged.len(), 1, "one merged argument");
         assert_eq!(
             item_keys(&merged[0].1),
             ["bAlpha", "bBeta", "aGamma", "aDelta"],
-            "merged modifiers must stay parent-then-child, never key-sorted \
+            "trailing un-keyed item ⇒ multi gate off ⇒ merge order kept \
              (a key-sort would hoist aGamma/aDelta to the front)"
         );
+    }
+
+    /// The proforto `crontab.php` archive shape (Amasty AiContentGenerator):
+    /// a vtype whose base declares markdown(9000)/disclaimer(10000) and whose
+    /// own items are ALL sortOrder-keyed — the last merged item carries
+    /// `sortOrder`, so the multi gate fires and real di:compile stores the
+    /// union fully sorted (10,20,30,40,9000,10000), parent items LAST.
+    #[test]
+    fn vtype_merge_sorts_when_last_item_is_keyed() {
+        let mut merged = vec![(
+            CfgKey::s("modifiers"),
+            Cfg::Map(vec![
+                (CfgKey::s("markdown"), modifier("Am\\RemoveMarkdowns", Some(9000))),
+                (CfgKey::s("disclaimer"), modifier("Am\\AddDisclaimer", Some(10000))),
+            ]),
+        )];
+        let own = vec![(
+            CfgKey::s("modifiers"),
+            Cfg::Map(vec![
+                (CfgKey::s("cut_new_line"), modifier("Am\\CutNewLine", Some(10))),
+                (CfgKey::s("cut_title"), modifier("Am\\CutTitle", Some(20))),
+                (CfgKey::s("trim_quotes"), modifier("Am\\TrimQuotes", Some(30))),
+                (CfgKey::s("trim_to_dot"), modifier("Am\\TrimToDot", Some(40))),
+            ]),
+        )];
+
+        array_replace_recursive(&mut merged, own);
+        sort_items(&mut merged);
+
+        assert_eq!(
+            item_keys(&merged[0].1),
+            ["cut_new_line", "cut_title", "trim_quotes", "trim_to_dot", "markdown", "disclaimer"],
+            "all items keyed ⇒ multi gate on ⇒ full sortOrder sort across the merge"
+        );
+    }
+
+    /// A trailing object-spec ARGUMENT (its last sub-entry is a scalar) resets
+    /// the last-wins multi gate even when an earlier array argument is fully
+    /// keyed — the whole sort turns off and merge order survives.
+    #[test]
+    fn trailing_object_argument_resets_multi_gate() {
+        let mut merged = vec![
+            (
+                CfgKey::s("modifiers"),
+                Cfg::Map(vec![
+                    (CfgKey::s("zz"), modifier("Am\\Zz", Some(900))),
+                    (CfgKey::s("aa"), modifier("Am\\Aa", Some(10))),
+                ]),
+            ),
+            (
+                CfgKey::s("logger"),
+                Cfg::Map(vec![(CfgKey::s("instance"), Cfg::Str("Psr\\Log".into()))]),
+            ),
+        ];
+        sort_items(&mut merged);
+
+        assert_eq!(
+            item_keys(&merged[0].1),
+            ["zz", "aa"],
+            "object-spec argument walked last ⇒ gate false ⇒ single branch ⇒ items untouched"
+        );
+        assert_eq!(merged.len(), 2, "single branch never drops arguments");
+    }
+
+    /// The multi branch's rebuild loop iterates only array-valued arguments —
+    /// scalar arguments VANISH from the merged map (PHP `foreach` over a
+    /// scalar iterates nothing), and parents re-appear in sorted-encounter
+    /// order. Bug-for-bug fidelity.
+    #[test]
+    fn multi_branch_drops_scalar_arguments() {
+        let mut merged = vec![
+            (CfgKey::s("cacheId"), Cfg::Str("layout".into())),
+            (
+                CfgKey::s("modifiers"),
+                Cfg::Map(vec![
+                    (CfgKey::s("zz"), modifier("Am\\Zz", Some(900))),
+                    (CfgKey::s("aa"), modifier("Am\\Aa", Some(10))),
+                ]),
+            ),
+        ];
+        sort_items(&mut merged);
+
+        assert_eq!(merged.len(), 1, "scalar argument dropped by the multi rebuild");
+        assert_eq!(item_keys(&merged[0].1), ["aa", "zz"], "items sorted by sortOrder");
     }
 }
