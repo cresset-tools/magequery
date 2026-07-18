@@ -250,6 +250,14 @@ pub enum Node {
     VariableVariable { name: String, span: Span },
     /// A `$prop` property-as-variable accessor (plan §2.1).
     PropertyAccessor { name: String, span: Span },
+    /// A detached-ruleset call `@dr();` (statement) / `@dr()` (value) — less.js
+    /// `VariableCall` (plan §2.11/§2.12). `name` has no leading `@`.
+    VariableCall { name: String, span: Span },
+    /// A map/namespace lookup chain `target[key][key…]` — less.js
+    /// `NamespaceValue` (plan §2.12). `target` is a [`Node::VariableCall`] or
+    /// [`Node::MixinCall`]; each key keeps its source spelling (`""` for the
+    /// unnamed `[]`, `@var`, `@@dyn`, `$prop`, `$@dyn`, or a bare property name).
+    Lookup { target: Box<Node>, keys: Vec<String>, span: Span },
 }
 
 impl Node {
@@ -267,7 +275,7 @@ impl Node {
             | Node::DetachedRuleset { .. } => false,
             // A bare mixin call yields nothing until evaluated; the plain-CSS
             // path never contains one, so treat it as invisible for pruning.
-            Node::MixinCall(_) => false,
+            Node::MixinCall(_) | Node::VariableCall { .. } => false,
             Node::Ruleset(r) => r.rules.iter().any(Node::is_output_visible),
             Node::AtRule(a) => match &a.block {
                 AtRuleBlock::None => true,

@@ -50,19 +50,23 @@ const SKIP_SUITES: &[&str] = &["javascript", "plugin", "plugin-module", "plugin-
 /// Invariant enforced by the harness: a fixture on this list that regresses, or
 /// an off-list fixture that starts passing, fails the suite. Keep it sorted; when
 /// a phase lands new coverage, ADD the newly-green fixtures here (never remove one
-/// to hide a regression). 48/87 after Phase 3 (function library + strings: the
-/// full §2.7 registry with min/max dual behavior, calc `_SELF` folding + paren
-/// semantics, iterated interpolation, IE filters/`progid`, `anonymousValue`
-/// raw declarations, value comments, merge `+:`/`+_:`, and `each()`) and the
-/// Phase 3 adversarial review fixes (toFixed fround, JS number spellings,
-/// less.js-exact error-vs-passthrough, ieAlpha/url grammar, duplicate-decl
-/// removal — see NOTES.md "Phase 3 review fixes"; the still-red fixtures wait
-/// on Phase 4 subsystems, so the floor holds at 48).
+/// to hide a regression). 64/87 after Phase 4A (detached rulesets §2.11,
+/// maps/lookups/variable calls/`$prop` accessors §2.12, and at-rule
+/// bubbling/merging/ordering §2.13 — nested `@media`/`@container` `and`-merge
+/// with source-order block surfacing, `@supports`/`@document`/`@layer`
+/// selector-wrap bubbling, `@starting-style` in-place nesting, `@charset`
+/// dedup, plus a stopgap `.less` `@import` inline; see NOTES.md "Phase 4A").
+/// The still-red fixtures wait on Phase 4B (`:extend`, full `@import`
+/// machinery) and the residual selector/comment edge cases.
 const EXPECTED_PASS: &[&str] = &[
     "at-rules-declarations/at-rules-declarations",
     "at-rules-empty-block/at-rules-empty-block",
     "at-rules-empty/at-rules-empty",
+    "at-rules-keyword-comments/at-rules-keyword-comments",
+    "at-rules-targeted/at-rules-targeted",
+    "at-rules/at-rules",
     "calc/calc",
+    "container/container",
     "charsets/charsets",
     "color-functions/alpha",
     "color-functions/basic",
@@ -77,11 +81,16 @@ const EXPECTED_PASS: &[&str] = &[
     "css-escapes/css-escapes",
     "css-grid/css-grid",
     "css-guards/css-guards",
+    "detached-rulesets/detached-rulesets",
+    "directives-bubbling/directives-bubbling",
     "empty/empty",
     "extract-and-length/extract-and-length",
+    "functions-each/functions-each",
     "ie-filters/ie-filters",
     "impor/impor",
+    "layer/layer",
     "lazy-eval/lazy-eval",
+    "media/media",
     "merge/merge",
     "mixin-noparens/mixin-noparens",
     "mixins-closure/mixins-closure",
@@ -91,16 +100,23 @@ const EXPECTED_PASS: &[&str] = &[
     "mixins-named-args/mixins-named-args",
     "mixins-nested/mixins-nested",
     "mixins-pattern/mixins-pattern",
+    "mixins/maps",
     "mixins/mixins",
     "mixins/mixins-advanced",
+    "namespace-targeted/namespace-targeted",
+    "nesting/nesting",
     "no-output/no-output",
     "operations/operations",
     "operations/operations-advanced",
+    "parser-property-interp/parser-property-interp",
     "parser-slashed-combinator/parser-slashed-combinator",
     "plugi/plugi",
+    "property-accessors/property-accessors",
     "property-name-interp/property-name-interp",
+    "property-targeted/property-targeted",
     "rulesets/rulesets",
     "scope/scope",
+    "starting-style/starting-style",
     "strings/strings",
     "tailwind/tailwind",
     "variables-in-at-rules/variables-in-at-rules",
@@ -391,8 +407,8 @@ fn main() {
 
     let p = passed.load(Ordering::Relaxed);
     println!(
-        "\nless.js {TAG} default-option compile corpus (Phase 3 — functions + strings): \
-         {p}/{total} passing (ratchet floor {floor}; {} xfail).",
+        "\nless.js {TAG} default-option compile corpus (Phase 4A — detached rulesets + \
+         maps + at-rule bubbling): {p}/{total} passing (ratchet floor {floor}; {} xfail).",
         total - floor
     );
 

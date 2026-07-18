@@ -628,10 +628,107 @@ same-line declaration value swallowing the rest of the line (F9-str), quoted
 lists (F4-residual), `@var` permissive brace values evaluated as rulesets
 (F9-residual), `@media` feature fround (F11-math), parse tolerance for
 `b: img.png` / `unknown(1, , 2)` / parenthesized args like
-`lighten(#800, 20%, ('relative'))` (F10-info), detached-ruleset calls (F17),
-and the harness's missing less.js test-runner custom functions
-(`_color`/`add`/`increment`, F8-residual — moot until Phase 4 makes
+`lighten(#800, 20%, ('relative'))` (F10-info), detached-ruleset calls (F17 —
+**resolved in Phase 4A**), and the harness's missing less.js test-runner custom
+functions (`_color`/`add`/`increment`, F8-residual — moot until Phase 4 makes
 `functions/functions` otherwise reachable).
+
+### Phase 4A — detached rulesets, maps/lookups, at-rule bubbling (§2.11–§2.13)
+
+64/87 (floor 48→64; 16 fixtures newly green: `mixins/maps`, `nesting`,
+`namespace-targeted`, `parser-property-interp`, `property-accessors`,
+`property-targeted`, `functions-each`, `detached-rulesets`, `media`,
+`container`, `layer`, `at-rules`, `at-rules-targeted`,
+`at-rules-keyword-comments`, `directives-bubbling`, `starting-style`). Every
+non-obvious semantic below was probed against a local `less@4.6.7` (several
+multi-construct batches diffed byte-identical against `lessc`).
+
+- **Detached rulesets (§2.11).** `@dr: { … }` values capture the frames at
+  their DECLARATION site (less.js evaluates every declaration during
+  `Ruleset.eval`, so the DR's `frames` snapshot is the defining scope — a
+  `@a: inner` in the *calling* ruleset must NOT win). Implemented as a pass-0
+  in `eval_rules`: DR-literal variable values in the just-pushed frame are
+  wrapped into `Node::Closure` entries indexing the captured-frame side table;
+  `eval_value` on a bare DR literal (mixin args, injected values) captures at
+  evaluation site — which is exactly less.js's `Variable.eval` fallback for
+  never-evaluated frames (namespace bodies). `@dr();` call = `callEval`:
+  captured frames ++ caller frames, body evaluated at the call position;
+  **variables never splice back** ("do not pollute the scope at all") but
+  mixin definitions/rulesets do (the "unlocking mixins" case). A value-position
+  `@dr()` without a `[lookup]` is less.js's `Missing '[...]' lookup in variable
+  call` PARSE error, `@dr() !important` its `Unrecognised input`; a call on a
+  non-DR value errors `Could not evaluate variable call @x`; an unknown name is
+  the plain `variable @x is undefined`.
+- **Mixin/DR/import bodies get a FRESH media context** (the ordering subtlety
+  that broke `detached-rulesets`): less.js's `contexts.Eval` copies neither
+  `mediaPath` nor `mediaBlocks` into a call's context, so `@media` blocks
+  inside a called body materialize standalone and are RE-merged (the "spliced
+  rules are re-evaluated" pass) against the ambient media path at the call's
+  source position. Mirrored by isolating `media_path`/`media_blocks` around
+  pass-1 expansion and re-merging each produced `@media`/`@container` block in
+  pass 2 (`absorb_expansion_outs`) — sibling media stay in source order.
+- **Maps/lookups (§2.12).** `Node::Lookup` (less.js `NamespaceValue`) over a
+  `VariableCall` or value-position `MixinCall` target: property keys (`[k]` ≡
+  `[$k]`, merged via `+:`/`+_:` groups, LAST wins), variable keys (`[@k]`),
+  dynamic keys (`[@@ref]`, `[$@ref]`), the unnamed `[]` (last declaration —
+  property OR variable), chained lookups descending into nested DR values, and
+  less.js's exact `property "x" not found` / `variable @x not found` errors.
+  Mixin-as-map (`@p: .mk-map();` and `.m()[key]` / `#ns.mx(4)[r]`) evaluates
+  every surviving candidate's body in the mixin's own scope, in source order,
+  variables included. A looked-up declaration's raw-capture `!important` splits
+  OUT of the value (the `parseValue` re-parse) and is dropped.
+- **`$prop` accessors + `${prop}` interpolation (§2.12).** `Property.eval`
+  semantics: the nearest frame with the property wins; ALL its same-name
+  declarations merge; the last one's value evaluates in the ACCESSING context;
+  its `!important` propagates to the reading declaration. Mixin-emitted
+  declarations are now SPLICED into the caller's frame at the call position
+  (pass 1), so `$color` last-wins interleaves correctly with call order — and
+  the parseValue mutation quirk is reproduced: a *read* declaration that was
+  already emitted re-renders its important as `red!important` (no space),
+  while later same-name declarations re-normalize (order-faithful via a
+  per-frame trim journal drained after each pass-2 rule).
+- **At-rule bubbling (§2.13).** Nestable `@media`/`@container` merge nested
+  same-kind features with `and` (comma lists cross-multiply, FIRST list varying
+  fastest) and surface merged blocks as siblings of the outermost block in
+  depth-first ENTRY order; mixed-kind nesting stays in place unmerged (the
+  shared-path type check). Every other at-rule is a media boundary (backs up
+  the path/collector). `isRooted=false` kinds (`@supports`/`@document`/
+  `@starting-style`/`@layer`) bubble out of rulesets wrapping bare declarations
+  in the parent's joined selector; rooted kinds (`@font-face`/`@keyframes`/
+  `@page`/unknown) bubble bare. A value-less non-rooted at-rule whose evaluated
+  body is pure declarations (`@starting-style`, bare `@layer` — incl. bodies
+  produced by `each()`/merge) renders NESTED inside the enclosing rule
+  (`simpleBlock`). Nested `@layer` blocks do NOT merge names. Media feature
+  normalization: `(orientation:portrait)` → `(orientation: portrait)` with the
+  value evaluated (vars/escaped strings resolve), `( width<500px )` →
+  `(width < 500px)`, `and(x)` → `and (x)` but `style(…)`/`layer(…)` stay glued;
+  `@media @smartphone` resolves. Empty `@media` blocks prune; empty
+  `@container` blocks KEEP their shell (less.js prunes only `Media`).
+  `@charset`: hoisted AND deduped to the first occurrence. Prelude comments
+  relocate into the block only when directly before a `,`/prelude-end
+  (`@import` feature comments become root-level siblings after the import —
+  the commentStore flush); a mid-query comment is dropped (less.js embeds it
+  inside the feature value — a render-inside-header case no default fixture
+  exercises).
+- **Stopgap `.less` `@import` inline** (full §2.9 two-stage machinery is 4B):
+  resolved through the `ImportResolver`, parsed, evaluated at the import's
+  position with the same fresh-media-context + re-merge treatment as mixin
+  calls, top-level variables/mixins/rulesets spliced into the importing scope
+  (subject to the caller-wins variable filter); `(optional)` misses are silent;
+  `(inline)` splices the payload verbatim. `once`/`reference`/media-feature
+  wrapping/path rewriting remain 4B (`import/*` fixtures stay xfail).
+- **`!important` interplay (§2.15)** probed: DR-call bodies under
+  `.m() !important` force importance (incl. simpleBlock-nested at-rule bodies),
+  `@v: red !important` propagates through DR bodies, and merge groups OR their
+  flags — all byte-identical to less.js.
+- **Selector join fix:** `os.replace('&', parent)` now trims only the LEADING
+  whitespace — a trailing `&` at root keeps its descendant space
+  (`.outOfMedia &` → `.outOfMedia  {`, two spaces, as less.js renders).
+
+Known 4A deviations (deliberate, unfixtured): mid-feature prelude comments are
+dropped rather than embedded in the feature value; `$@ref` outside `[]` parses
+as a `$` accessor runtime error instead of less.js's ParseError; the `.less`
+import stopgap above.
 
 ## What milestone 1 implemented (Steps 1–5 consolidated)
 
@@ -678,10 +775,11 @@ residual mixin fixtures it couldn't green (`maps`, `namespace-targeted`,
 and fold into Phase 4's map/property-accessor work.
 
 - **Phase 3 — full function library** (plan §2.7, Phase 3): **done** — see the
-  Phase 3 section above (48/87). Residue folded into Phase 4: `functions/
-  functions` (DR calls + `$prop` + harness custom-function registry),
-  `functions-each` (maps/lookups + mixin-as-list), `urls` (import inlining +
-  URL rewriting; the resource functions themselves are byte-verified).
+  Phase 3 section above (48/87). Residue: `functions-each` greened in Phase 4A
+  (maps/lookups + mixin-as-list); `functions/functions` now waits only on the
+  harness's less.js test-runner custom functions (`_color`/`add`/`increment`);
+  `urls` waits on Phase 4B import inlining + URL rewriting (the resource
+  functions themselves are byte-verified).
 - **Phase 4 — imports, extend, detached rulesets, merge, at-rule bubbling, maps**
   (plan §2.8–§2.13, Phase 4):
   - **`@import` two-stage + all options** (§2.9): `once`/`reference`/`optional`/
@@ -690,11 +788,15 @@ and fold into Phase 4's map/property-accessor work.
   - **`:extend` full** (§2.8): finder → chaining fixpoint → replace, the `all`
     keyword, `@media` scoping incl. `(reference)` media stacks. Unlocks `extend*`.
   - **detached rulesets** (§2.11), **merge `+:`/`+_:`** (§2.10), **maps/lookups**
-    `@p[key]`/`#ns[k]` (§2.12). Unlocks `detached-rulesets`, `merge`, `mixins/maps`,
-    `property-accessors`.
-  - **all-rule bubbling & output ordering** (§2.13): `@media`/`@supports`/
-    `@container`/`@layer`/`@namespace`/`@property`/`@page`/`@charset`. Unlocks
-    `media`, `container`, `layer`, `directives-bubbling`, `at-rules*`.
+    `@p[key]`/`#ns[k]` (§2.12): **done in Phase 4A** — see the Phase 4A section
+    above (unlocked `detached-rulesets`, `mixins/maps`, `property-accessors`,
+    `property-targeted`, `namespace-targeted`, `functions-each`, `nesting`,
+    `parser-property-interp`; `merge` was already green).
+  - **all-rule bubbling & output ordering** (§2.13): **done in Phase 4A** —
+    `@media`/`@supports`/`@container`/`@layer`/`@namespace`/`@property`/`@page`/
+    `@charset` (unlocked `media`, `container`, `layer`, `directives-bubbling`,
+    `at-rules`, `at-rules-targeted`, `at-rules-keyword-comments`,
+    `starting-style`).
   - the **byte-exact `compress` serializer** (§C4/§9.4 — distinct from the
     expanded genCSS, never delegated to lightningcss).
   - the residual **nesting/selector/interpolation edge cases** (`nesting`,

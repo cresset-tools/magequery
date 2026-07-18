@@ -46,6 +46,16 @@ pub fn parse_value_fragment(src: &str, opts: &LessOptions) -> Result<Node, LessE
     let normalized = normalize_source(src);
     let mut parser = Parser::new(normalized.as_ref(), FileInfo::default(), opts);
     parser.cur.skip_trivia();
+    // A `{ … }` fragment is a detached-ruleset literal (a mixin argument or
+    // parameter default — plan §2.11).
+    if parser.cur.cur() == Some(b'{') {
+        let start = parser.here();
+        let rules = parser.parse_block()?;
+        return Ok(Node::DetachedRuleset {
+            rules,
+            span: parser.span(start),
+        });
+    }
     let value = parser.parse_value()?;
     Ok(value)
 }
@@ -56,6 +66,10 @@ struct Parser<'a> {
     file: FileInfo,
     magento_mode: bool,
     line_map: LineMap,
+    /// Nodes a statement parser wants emitted AFTER the statement itself (an
+    /// `@import`'s media-feature comments become root-level siblings — the
+    /// less.js commentStore flush).
+    pending: Vec<Node>,
 }
 
 impl<'a> Parser<'a> {
@@ -65,6 +79,7 @@ impl<'a> Parser<'a> {
             file,
             magento_mode: opts.magento_mode,
             line_map: LineMap::new(src),
+            pending: Vec::new(),
         }
     }
 
@@ -151,6 +166,7 @@ impl<'a> Parser<'a> {
             }
             let node = self.parse_statement()?;
             rules.push(node);
+            rules.append(&mut self.pending);
         }
         Ok(rules)
     }
@@ -180,6 +196,9 @@ impl<'a> Parser<'a> {
             // `@{x}: …` interpolated property declaration — treat as declaration.
         } else if c == b'@' {
             if let Some(node) = self.try_variable_decl()? {
+                return Ok(node);
+            }
+            if let Some(node) = self.try_variable_call_statement()? {
                 return Ok(node);
             }
             return self.parse_at_rule();
@@ -290,6 +309,71 @@ impl<'a> Parser<'a> {
             // Not a clean declaration — back off to at-rule handling.
             self.cur.i = save;
             Ok(None)
+        }
+    }
+
+    /// A detached-ruleset call statement `@dr();` (less.js `variableCall`,
+    /// plan §2.11). The `(` must follow the name with NO whitespace (so `@media
+    /// (…)` stays an at-rule), and the parens must be empty.
+    fn try_variable_call_statement(&mut self) -> Result<Option<Node>, LessError> {
+        let save = self.here();
+        debug_assert_eq!(self.cur.cur(), Some(b'@'));
+        self.cur.bump(); // @
+        let name = self.cur.scan_ident().to_string();
+        if name.is_empty() || self.cur.cur() != Some(b'(') {
+            self.cur.i = save;
+            return Ok(None);
+        }
+        self.cur.bump();
+        self.cur.skip_whitespace();
+        if !self.cur.eat(b')') {
+            self.cur.i = save;
+            return Ok(None);
+        }
+        self.cur.skip_trivia();
+        if !matches!(self.cur.cur(), None | Some(b';') | Some(b'}')) {
+            // `@dr() !important;` and friends: less.js has no parser that
+            // accepts a variable call followed by anything else — the statement
+            // fails as unrecognised input (verified: ParseError).
+            return Err(self.err("Unrecognised input"));
+        }
+        self.cur.eat(b';');
+        Ok(Some(Node::VariableCall {
+            name,
+            span: self.span(save),
+        }))
+    }
+
+    /// Parse a chain of `[key]` rule lookups (less.js `ruleLookups`, plan §2.12):
+    /// each key matches `[@$]{0,2}[\w-]*` (empty = the unnamed lookup). Returns
+    /// `None` when the cursor isn't at a valid lookup chain.
+    fn try_rule_lookups(&mut self) -> Option<Vec<String>> {
+        let mut keys = Vec::new();
+        while self.cur.cur() == Some(b'[') {
+            let save = self.here();
+            self.cur.bump();
+            let ks = self.here();
+            let mut sigils = 0;
+            while sigils < 2 && matches!(self.cur.cur(), Some(b'@') | Some(b'$')) {
+                self.cur.bump();
+                sigils += 1;
+            }
+            while matches!(self.cur.cur(), Some(b) if b == b'-' || b == b'_'
+                || b.is_ascii_alphanumeric())
+            {
+                self.cur.bump();
+            }
+            let key = self.cur.src()[ks..self.here()].to_string();
+            if !self.cur.eat(b']') {
+                self.cur.i = save;
+                break;
+            }
+            keys.push(key);
+        }
+        if keys.is_empty() {
+            None
+        } else {
+            Some(keys)
         }
     }
 
@@ -416,11 +500,21 @@ impl<'a> Parser<'a> {
             }
             Node::Anonymous(self.cur.src()[ps..self.here()].to_string())
         };
-        // Optional media features up to `;`.
+        // Optional media features up to `;`. Feature-list comments become
+        // root-level siblings AFTER the import (less.js commentStore flush).
         self.cur.skip_whitespace();
         let fs = self.here();
         self.scan_prelude();
-        let feat_raw = self.cur.src()[fs..self.here()].trim();
+        let feat_all = self.cur.src()[fs..self.here()].trim();
+        let (feat_clean, feat_comments) = split_prelude_comments(feat_all);
+        for text in feat_comments {
+            self.pending.push(Node::Comment {
+                text,
+                line: false,
+                span: self.span(start),
+            });
+        }
+        let feat_raw = feat_clean.trim();
         let features = if feat_raw.is_empty() {
             None
         } else {
@@ -1259,7 +1353,12 @@ impl<'a> Parser<'a> {
                 Ok(Node::Anonymous(self.cur.src()[s..self.here()].to_string()))
             }
             Some(b'#') => {
-                // A hex color (or, rarely, an id-ish token) — captured verbatim.
+                // A namespace/mixin call value (`#ns.mx(4)[result]`, `#ns[key]`)
+                // takes precedence when the shape fits (plan §2.12)…
+                if let Some(m) = self.try_mixin_call_arg()? {
+                    return Ok(m);
+                }
+                // …else a hex color (or, rarely, an id-ish token), verbatim.
                 let s = self.here();
                 self.cur.bump();
                 self.cur.scan_ident();
@@ -1267,6 +1366,21 @@ impl<'a> Parser<'a> {
                 match crate::color::Color::from_hex(&text) {
                     Some(color) => Ok(Node::Color(color)),
                     None => Ok(Node::Anonymous(text)),
+                }
+            }
+            Some(b'.') if matches!(self.cur.peek(1), Some(b) if b == b'-' || b == b'_'
+                || b.is_ascii_alphabetic()) =>
+            {
+                // A mixin call in value position (`.mk-map()`, `.m()[key]` —
+                // less.js `mixinLookup`, plan §2.12). Backtracks to the stray-
+                // punctuation arm when the shape doesn't fit.
+                match self.try_mixin_call_arg()? {
+                    Some(m) => Ok(m),
+                    None => {
+                        let s = self.here();
+                        self.cur.bump();
+                        Ok(Node::Anonymous(self.cur.src()[s..self.here()].to_string()))
+                    }
                 }
             }
             Some(b'@') if self.cur.peek(1) == Some(b'{') => {
@@ -1306,6 +1420,42 @@ impl<'a> Parser<'a> {
                 let start = self.here();
                 self.cur.bump();
                 let name = self.cur.scan_ident().to_string();
+                // `@name()` / `@name[...]` — a variable (detached-ruleset) call
+                // and/or a lookup chain (less.js `variableCall`, plan §2.12).
+                // The `(`/`[` must follow the name with NO whitespace.
+                if self.cur.cur() == Some(b'(') {
+                    let save = self.here();
+                    self.cur.bump();
+                    self.cur.skip_whitespace();
+                    if self.cur.eat(b')') {
+                        let call = Node::VariableCall {
+                            name: name.clone(),
+                            span: self.span(start),
+                        };
+                        return match self.try_rule_lookups() {
+                            Some(keys) => Ok(Node::Lookup {
+                                target: Box::new(call),
+                                keys,
+                                span: self.span(start),
+                            }),
+                            // A value-position variable call REQUIRES a lookup
+                            // (less.js `variableCall` inValue, verified 4.6.7).
+                            None => Err(self.err("Missing '[...]' lookup in variable call")),
+                        };
+                    }
+                    self.cur.i = save;
+                } else if self.cur.cur() == Some(b'[') {
+                    if let Some(keys) = self.try_rule_lookups() {
+                        return Ok(Node::Lookup {
+                            target: Box::new(Node::VariableCall {
+                                name: name.clone(),
+                                span: self.span(start),
+                            }),
+                            keys,
+                            span: self.span(start),
+                        });
+                    }
+                }
                 Ok(Node::Variable {
                     name,
                     span: self.span(start),
@@ -1510,20 +1660,41 @@ impl<'a> Parser<'a> {
                 span: self.span(seg_start),
             });
         }
-        if path.is_empty() || self.cur.cur() != Some(b'(') {
+        if path.is_empty() {
             self.cur.i = start;
             return Ok(None);
         }
-        let params_start = self.here();
-        self.skip_balanced(b'(', b')');
-        let args_src =
-            self.cur.src()[params_start + 1..self.here().saturating_sub(1)].to_string();
-        Ok(Some(Node::MixinCall(MixinCall {
+        // Optional `(args)` — a lookup-only form (`#ns[key]`) has none.
+        let mut args = Vec::new();
+        let has_parens = self.cur.cur() == Some(b'(');
+        if has_parens {
+            let params_start = self.here();
+            self.skip_balanced(b'(', b')');
+            let args_src =
+                self.cur.src()[params_start + 1..self.here().saturating_sub(1)].to_string();
+            args = parse_mixin_args(&args_src);
+        }
+        // Optional `[key]` lookups (plan §2.12). A value-position mixin call
+        // needs parens or lookups (less.js `inValue` rule).
+        let keys = self.try_rule_lookups();
+        if !has_parens && keys.is_none() {
+            self.cur.i = start;
+            return Ok(None);
+        }
+        let call = Node::MixinCall(MixinCall {
             path,
-            args: parse_mixin_args(&args_src),
+            args,
             important: false,
             span: self.span(start),
-        })))
+        });
+        Ok(Some(match keys {
+            Some(keys) => Node::Lookup {
+                target: Box::new(call),
+                keys,
+                span: self.span(start),
+            },
+            None => call,
+        }))
     }
 
     /// less.js `parsers.ieAlpha`, tried when an `alpha(` call opens (§2.17).
@@ -1704,7 +1875,18 @@ fn split_prelude_comments(s: &str) -> (String, Vec<String>) {
         match b[i] {
             b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
                 let end = s[i + 2..].find("*/").map(|e| i + 2 + e + 2).unwrap_or(b.len());
-                comments.push(s[i..end].to_string());
+                // Only a comment directly before a `,` (or the prelude's end)
+                // relocates into the block (the less.js commentStore behavior);
+                // a mid-query comment embeds in the feature value — which we
+                // drop (it can only render inside a header, a case no default
+                // fixture exercises).
+                let mut j = end;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j >= b.len() || b[j] == b',' {
+                    comments.push(s[i..end].to_string());
+                }
                 i = end;
             }
             q @ (b'"' | b'\'') => {

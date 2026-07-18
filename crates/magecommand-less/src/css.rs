@@ -254,6 +254,19 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
             out.push('$');
             out.push_str(name);
         }
+        Node::VariableCall { name, .. } => {
+            out.push('@');
+            out.push_str(name);
+            out.push_str("()");
+        }
+        Node::Lookup { target, keys, .. } => {
+            gen(target, ctx, out);
+            for k in keys {
+                out.push('[');
+                out.push_str(k);
+                out.push(']');
+            }
+        }
 
         // Non-output nodes (variable/mixin definitions, detached rulesets, bare
         // mixin calls, the magento directive) emit nothing in the plain-CSS path.

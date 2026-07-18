@@ -53,7 +53,6 @@ fn frame_of(rules: Vec<Node>) -> Frame {
 pub struct Ctx<'a> {
     frames: Vec<Frame>,
     opts: &'a LessOptions,
-    #[allow(dead_code)]
     resolver: &'a dyn ImportResolver,
     math: MathMode,
     math_on: bool,
@@ -72,6 +71,20 @@ pub struct Ctx<'a> {
     /// `Node::Closure`'s `scope` field indexes this. Kept off `Node` so the AST
     /// stays `Send + Sync`; frames are cheap `Rc` clones frozen at injection.
     closures: Vec<Vec<Frame>>,
+    /// `$prop` access events awaiting the less.js `parseValue` important-trim
+    /// side effect (plan §2.12 quirk): when a property accessor reads `name` in
+    /// `frame` (keyed by `Rc` pointer), every matching declaration *already
+    /// emitted* in that frame's block re-renders its `!important` without the
+    /// leading space (less.js mutates the evaluated declaration in place).
+    pending_trims: Vec<(usize, String)>,
+    /// The enclosing nestable at-rules within the current at-rule boundary
+    /// (less.js `context.mediaPath`) — drives nested `@media`/`@container`
+    /// feature merging (plan §2.13).
+    media_path: Vec<MediaFrame>,
+    /// The bubbled blocks collected for the current outermost nestable at-rule
+    /// (less.js `context.mediaBlocks`), in depth-first entry order; `None`
+    /// entries are pruned empties. `None` = no collection in flight.
+    media_blocks: Option<Vec<Option<Out>>>,
     warnings: Vec<Warning>,
 }
 
@@ -117,6 +130,18 @@ enum Out {
     /// at-rules).
     Decls(Vec<Node>),
     Comment(String),
+    /// An at-rule that renders INSIDE the enclosing rule's declaration block
+    /// (the less.js `simpleBlock` form — `@starting-style { decls }`, §2.13).
+    /// The node is an evaluated [`Node::AtRule`] holding declaration rules.
+    Nested(Node),
+}
+
+/// One enclosing nestable at-rule on the bubbling path (less.js
+/// `context.mediaPath`): its kind (`@media`/`@container`) and its evaluated
+/// comma-separated feature queries.
+struct MediaFrame {
+    kind: String,
+    features: Vec<String>,
 }
 
 enum AtBody {
@@ -151,6 +176,9 @@ pub fn eval(
         default_value: None,
         active_rulesets: Vec::new(),
         closures: Vec::new(),
+        pending_trims: Vec::new(),
+        media_path: Vec::new(),
+        media_blocks: None,
         warnings: Vec::new(),
     };
 
@@ -177,6 +205,14 @@ pub fn eval(
         Out::At { header, .. } if header.starts_with("@charset") => 0,
         Out::At { header, .. } if header.starts_with("@import") => 1,
         _ => 2,
+    });
+    // Only the FIRST `@charset` survives (less.js `visitAtRuleWithoutBody`).
+    let mut seen_charset = false;
+    outs.retain(|o| match o {
+        Out::At { header, .. } if header.starts_with("@charset") => {
+            !std::mem::replace(&mut seen_charset, true)
+        }
+        _ => true,
     });
 
     let code = render_all(&outs, opts.num_precision);
@@ -231,6 +267,17 @@ impl<'a> Ctx<'a> {
         let mut own: Vec<Node> = Vec::new();
         let mut children: Vec<Out> = Vec::new();
         self.eval_rules(rules, self_paths, &mut own, &mut children)?;
+        // Drop trim events targeting frames that are no longer on the stack
+        // (guard-only frames never run a rule pass; an `Rc` pointer could be
+        // reused, so stale events must not linger).
+        if !self.pending_trims.is_empty() {
+            let live: Vec<usize> = self
+                .frames
+                .iter()
+                .map(|f| Rc::as_ptr(f) as *const () as usize)
+                .collect();
+            self.pending_trims.retain(|(fp, _)| live.contains(fp));
+        }
         Ok((own, children))
     }
 
@@ -250,38 +297,141 @@ impl<'a> Ctx<'a> {
         own: &mut Vec<Node>,
         children: &mut Vec<Out>,
     ) -> Result<(), LessError> {
-        // Pass 1: expand mixin calls, inject scope, memoize output per position.
-        let mut expansions: Vec<Option<(Vec<Node>, Vec<Out>)>> = Vec::with_capacity(rules.len());
-        for rule in rules {
-            if let Node::MixinCall(call) = rule {
-                let mut ex_own = Vec::new();
-                let mut ex_children = Vec::new();
-                let injected =
-                    self.expand_mixin_call(call, self_paths, &mut ex_own, &mut ex_children)?;
-                if let Some(frame) = self.frames.first().cloned() {
-                    for node in injected {
-                        let keep = match &node {
-                            Node::VariableDecl { name, .. } => !frame_has_var(&frame, name),
-                            _ => true,
-                        };
-                        if keep {
-                            frame.borrow_mut().push(node);
-                        }
+        // Pass 0: eagerly capture detached-ruleset literal values in the current
+        // frame (less.js evaluates every declaration during `Ruleset.eval`, so a
+        // DR value's `frames` snapshot is the DEFINING scope — the lazy lookup
+        // must not re-capture at the call site; plan §2.11).
+        if let Some(frame) = self.frames.first().cloned() {
+            let needs: Vec<usize> = frame
+                .borrow()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, r)| match r {
+                    Node::VariableDecl { value, .. }
+                        if matches!(value.as_ref(), Node::DetachedRuleset { .. }) =>
+                    {
+                        Some(i)
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !needs.is_empty() {
+                let scope = self.closures.len() as u64;
+                self.closures.push(self.frames.clone());
+                let mut fm = frame.borrow_mut();
+                for i in needs {
+                    if let Node::VariableDecl { value, .. } = &mut fm[i] {
+                        let inner = value.clone();
+                        *value = Box::new(Node::Closure { inner, scope });
                     }
                 }
-                expansions.push(Some((ex_own, ex_children)));
-            } else {
-                expansions.push(None);
+            }
+        }
+
+        // Pass 1: expand mixin + detached-ruleset calls, splicing their returned
+        // scope (variables/mixins/rulesets — and declaration clones, which the
+        // `$prop` accessor reads) into the current frame AT THE CALL POSITION
+        // (less.js splices `rsRules`, so relative order vs later declarations is
+        // what makes `$color` last-wins correct); memoize output per position.
+        let mut expansions: Vec<Option<(Vec<Node>, Vec<Out>)>> = Vec::with_capacity(rules.len());
+        let mut inserted = 0usize;
+        for (idx, rule) in rules.iter().enumerate() {
+            // A mixin/DR call body evaluates with a FRESH media context
+            // (less.js `contexts.Eval` copies neither mediaPath nor mediaBlocks
+            // into the call's context): its @media blocks materialize
+            // standalone, and are RE-merged against the ambient media path at
+            // the call's source position in pass 2 (`absorb_expansion_outs`) —
+            // which is what keeps sibling-media output in source order.
+            let expansion = match rule {
+                Node::MixinCall(call) => {
+                    let saved_path = std::mem::take(&mut self.media_path);
+                    let saved_blocks = self.media_blocks.take();
+                    let mut ex_own = Vec::new();
+                    let mut ex_children = Vec::new();
+                    let injected =
+                        self.expand_mixin_call(call, self_paths, &mut ex_own, &mut ex_children);
+                    self.media_path = saved_path;
+                    self.media_blocks = saved_blocks;
+                    Some((injected?, ex_own, ex_children, true))
+                }
+                Node::VariableCall { name, span } => {
+                    let saved_path = std::mem::take(&mut self.media_path);
+                    let saved_blocks = self.media_blocks.take();
+                    let mut ex_own = Vec::new();
+                    let mut ex_children = Vec::new();
+                    let injected = self.expand_variable_call(
+                        name,
+                        *span,
+                        self_paths,
+                        &mut ex_own,
+                        &mut ex_children,
+                    );
+                    self.media_path = saved_path;
+                    self.media_blocks = saved_blocks;
+                    Some((injected?, ex_own, ex_children, false))
+                }
+                Node::Import { path, options, .. } if !is_css_import(path, options) => {
+                    // Phase 4A stopgap `.less` inline (the full two-stage import
+                    // machinery — once/reference/features/rewrites — is 4B): the
+                    // file's rules evaluate at this position and splice into the
+                    // caller's scope, with the same fresh-media-context +
+                    // re-merge treatment as a mixin call.
+                    let saved_path = std::mem::take(&mut self.media_path);
+                    let saved_blocks = self.media_blocks.take();
+                    let mut ex_own = Vec::new();
+                    let mut ex_children = Vec::new();
+                    let injected =
+                        self.expand_import(path, options, self_paths, &mut ex_own, &mut ex_children);
+                    self.media_path = saved_path;
+                    self.media_blocks = saved_blocks;
+                    Some((injected?, ex_own, ex_children, true))
+                }
+                _ => None,
+            };
+            match expansion {
+                Some((injected, ex_own, ex_children, allow_vars)) => {
+                    if let Some(frame) = self.frames.first().cloned() {
+                        let mut to_insert: Vec<Node> = Vec::new();
+                        for node in injected {
+                            let keep = match &node {
+                                // A mixin-returned variable only lands if the
+                                // caller doesn't declare it; a DR call NEVER
+                                // returns variables (less.js `VariableCall`
+                                // splice filter, plan §2.11).
+                                Node::VariableDecl { name, .. } => {
+                                    allow_vars && !frame_has_var(&frame, name)
+                                }
+                                _ => true,
+                            };
+                            if keep {
+                                to_insert.push(node);
+                            }
+                        }
+                        for d in &ex_own {
+                            if matches!(d, Node::Declaration(_)) {
+                                to_insert.push(d.clone());
+                            }
+                        }
+                        if !to_insert.is_empty() {
+                            let mut fm = frame.borrow_mut();
+                            let at = (idx + inserted + 1).min(fm.len());
+                            inserted += to_insert.len();
+                            fm.splice(at..at, to_insert);
+                        }
+                    }
+                    expansions.push(Some((ex_own, ex_children)));
+                }
+                None => expansions.push(None),
             }
         }
 
         // Pass 2: source-order output.
         for (idx, rule) in rules.iter().enumerate() {
             match rule {
-                Node::MixinCall(_) => {
+                Node::MixinCall(_) | Node::VariableCall { .. } => {
                     if let Some((ex_own, ex_children)) = expansions[idx].take() {
                         own.extend(ex_own);
-                        children.extend(ex_children);
+                        self.absorb_expansion_outs(ex_children, children);
                     }
                 }
                 Node::VariableDecl { .. }
@@ -294,17 +444,17 @@ impl<'a> Ctx<'a> {
                 Node::Import {
                     path, features, ..
                 } => {
-                    // `@import` resolution/inlining is Phase 4. Re-emit CSS/`url()`
-                    // imports literally (correct output); `.less` imports would be
-                    // inlined, so drop them here rather than emit a bogus at-rule.
-                    let is_css = matches!(path.as_ref(), Node::Url(_))
-                        || matches!(path.as_ref(), Node::Quoted { value, .. } if value.ends_with(".css"))
-                        || matches!(path.as_ref(), Node::Anonymous(s) if s.ends_with(".css"));
-                    if is_css {
+                    // A `.less` import was inlined in pass 1 — replay its output
+                    // here (source position); a CSS/`url()` import re-emits as a
+                    // literal `@import` at-rule.
+                    if let Some((ex_own, ex_children)) = expansions[idx].take() {
+                        own.extend(ex_own);
+                        self.absorb_expansion_outs(ex_children, children);
+                    } else {
                         let ps = render_value(&self.eval_value(path)?, self.opts.num_precision);
                         let mut header = format!("@import {ps}");
                         if let Some(f) = features {
-                            let fs = self.eval_prelude(f)?;
+                            let fs = self.eval_media_features(f)?.join(", ");
                             if !fs.is_empty() {
                                 header.push(' ');
                                 header.push_str(&fs);
@@ -377,8 +527,15 @@ impl<'a> Ctx<'a> {
                             block: AtRuleBlock::None,
                             span: Default::default(),
                         }));
-                    } else if let Some(out) = self.eval_at_rule(a, self_paths)? {
-                        children.push(out);
+                    } else {
+                        for out in self.eval_at_rule(a, self_paths)? {
+                            match out {
+                                // A simpleBlock at-rule renders inside the
+                                // enclosing rule's declaration block (§2.13).
+                                Out::Nested(node) => own.push(node),
+                                other => children.push(other),
+                            }
+                        }
                     }
                 }
                 Node::DetachedRuleset { .. } => {}
@@ -406,8 +563,93 @@ impl<'a> Ctx<'a> {
                 // Value nodes never appear as statements.
                 _ => {}
             }
+            self.drain_trims(own);
         }
+        self.drain_trims(own);
         Ok(())
+    }
+
+    /// Route a mixin/DR expansion's output blocks into the caller (the less.js
+    /// re-evaluation of spliced rules, §2.13): a standalone `@media`/
+    /// `@container` block re-merges with the ambient media path — entering the
+    /// ambient collector at THIS source position — while everything else (and a
+    /// mixed-kind block) passes through unchanged.
+    fn absorb_expansion_outs(&mut self, outs: Vec<Out>, children: &mut Vec<Out>) {
+        for out in outs {
+            match out {
+                Out::At { header, body } => {
+                    let (name, feats) = match header.split_once(' ') {
+                        Some((n, rest)) => (
+                            n.to_string(),
+                            split_top(rest, ',')
+                                .into_iter()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect::<Vec<_>>(),
+                        ),
+                        None => (header.clone(), Vec::new()),
+                    };
+                    let base = base_at_name(&name);
+                    let nestable = matches!(base.as_str(), "@media" | "@container");
+                    let same_kind =
+                        nestable && self.media_path.iter().all(|m| m.kind == base);
+                    if nestable && !self.media_path.is_empty() && same_kind {
+                        let mut lists: Vec<Vec<String>> =
+                            self.media_path.iter().map(|m| m.features.clone()).collect();
+                        lists.push(feats);
+                        let merged = permute_feature_paths(&lists);
+                        let merged_header = if merged.is_empty() {
+                            name
+                        } else {
+                            format!("{} {}", name, merged.join(", "))
+                        };
+                        self.media_blocks
+                            .get_or_insert_with(Vec::new)
+                            .push(Some(Out::At {
+                                header: merged_header,
+                                body,
+                            }));
+                    } else {
+                        children.push(Out::At { header, body });
+                    }
+                }
+                other => children.push(other),
+            }
+        }
+    }
+
+    /// Apply pending `$prop` important-trim events targeting the CURRENT frame
+    /// to the declarations already emitted in `own` (see `pending_trims`): only
+    /// declarations evaluated *before* the access mirror less.js's in-place
+    /// mutation; later ones re-normalize at their own eval.
+    fn drain_trims(&mut self, own: &mut [Node]) {
+        if self.pending_trims.is_empty() {
+            return;
+        }
+        let Some(frame) = self.frames.first() else { return };
+        let fp = Rc::as_ptr(frame) as *const () as usize;
+        let mut i = 0;
+        while i < self.pending_trims.len() {
+            if self.pending_trims[i].0 == fp {
+                let (_, name) = self.pending_trims.remove(i);
+                for d in own.iter_mut() {
+                    if let Node::Declaration(dd) = d {
+                        if dd.name == name {
+                            // The parseValue re-parse: split an Anonymous raw
+                            // capture's `!important`, and store the flag
+                            // WITHOUT the leading space (less.js writes the
+                            // parsed match straight onto the field).
+                            split_anon_important(dd);
+                            if dd.important.starts_with(' ') {
+                                dd.important = dd.important.trim_start().to_string();
+                            }
+                        }
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Evaluate a nested ruleset: join its selectors with the parent, then emit
@@ -450,7 +692,13 @@ impl<'a> Ctx<'a> {
         &mut self,
         a: &crate::ast::AtRule,
         parent_paths: Option<&[String]>,
-    ) -> Result<Option<Out>, LessError> {
+    ) -> Result<Vec<Out>, LessError> {
+        let base = base_at_name(&a.name);
+        if matches!(base.as_str(), "@media" | "@container")
+            && matches!(a.block, AtRuleBlock::Rules(_))
+        {
+            return self.eval_nestable_at_rule(a, &base, parent_paths);
+        }
         let prelude = match &a.prelude {
             Some(p) => Some(self.eval_prelude(p)?),
             None => None,
@@ -460,46 +708,180 @@ impl<'a> Ctx<'a> {
             _ => a.name.clone(),
         };
         match &a.block {
-            AtRuleBlock::None => Ok(Some(Out::At {
+            AtRuleBlock::None => Ok(vec![Out::At {
                 header,
                 body: AtBody::None,
-            })),
+            }]),
             AtRuleBlock::Rules(rules) => {
-                // A container at-rule (@media/@supports/…) carries the parent
-                // selector into its body; a declaration at-rule (@font-face/@page/
-                // @keyframes) starts a fresh scope for its declarations.
-                let is_container = matches!(
-                    a.name.as_str(),
-                    "@media" | "@supports" | "@document" | "@-moz-document" | "@layer"
-                        | "@container"
+                // less.js `isRooted` (parser directive table, §2.13): a non-rooted
+                // at-rule (@supports/@document/@starting-style/@layer) carries the
+                // enclosing selector into its body — bare declarations wrap in the
+                // parent rule; a rooted one (@font-face/@page/@keyframes/unknown)
+                // starts a fresh root — declarations stay bare even when nested.
+                let wraps = matches!(
+                    base.as_str(),
+                    "@supports" | "@document" | "@starting-style" | "@layer"
                 );
-                let inner_parent = if is_container { parent_paths } else { None };
+                let inner_parent = if wraps { parent_paths } else { None };
+                // Every at-rule is a media-bubbling boundary (less.js
+                // `AtRule.eval` backs up mediaPath/mediaBlocks): an inner @media
+                // must not bubble past this block.
+                let saved_path = std::mem::take(&mut self.media_path);
+                let saved_blocks = self.media_blocks.take();
                 self.push_frame(frame_of(rules.to_vec()));
-                let (own, children) = self.process_body(rules, inner_parent)?;
+                let res = self.process_body(rules, inner_parent);
                 self.pop_frame();
+                self.media_path = saved_path;
+                self.media_blocks = saved_blocks;
+                let (own, children) = res?;
+
+                // The in-place `simpleBlock` form (less.js AtRule constructor +
+                // eval, §2.13): a value-less non-rooted at-rule whose evaluated
+                // body is pure declarations/comments renders NESTED inside the
+                // enclosing rule's block (`@starting-style`, bare `@layer`).
+                if wraps
+                    && prelude.as_deref().unwrap_or("").is_empty()
+                    && parent_paths.is_some()
+                    && children.is_empty()
+                    && own.iter().all(|n| {
+                        matches!(n, Node::Declaration(_) | Node::Comment { .. })
+                    })
+                {
+                    if !has_visible(&own) {
+                        return Ok(Vec::new());
+                    }
+                    return Ok(vec![Out::Nested(Node::AtRule(crate::ast::AtRule {
+                        name: a.name.clone(),
+                        prelude: None,
+                        block: AtRuleBlock::Rules(own),
+                        span: Default::default(),
+                    }))]);
+                }
 
                 // Declarations first (like less.js Ruleset.genCSS), then nested.
                 let mut body_outs: Vec<Out> = Vec::new();
                 if has_visible(&own) {
-                    body_outs.push(Out::Decls(own));
+                    body_outs.push(match parent_paths {
+                        Some(paths) if wraps && !paths.is_empty() => Out::Rule {
+                            selectors: paths.to_vec(),
+                            decls: own,
+                        },
+                        _ => Out::Decls(own),
+                    });
                 }
                 body_outs.extend(children);
 
-                // An at-rule with an empty block emits nothing (plan §2.13).
-                // A bubbling container (@media/…) is empty even when only
-                // comments remain; a declaration at-rule (@keyframes) keeps a
-                // comment-only body (verified against less.js 4.6.7).
-                if body_outs.is_empty()
-                    || (is_container
-                        && body_outs.iter().all(|o| matches!(o, Out::Comment(_))))
-                {
-                    return Ok(None);
+                // An at-rule with an empty block emits nothing (plan §2.13);
+                // comment-only bodies are KEPT (verified against less.js 4.6.7).
+                if body_outs.is_empty() {
+                    return Ok(Vec::new());
                 }
-                Ok(Some(Out::At {
+                Ok(vec![Out::At {
                     header,
                     body: AtBody::Rules(body_outs),
-                }))
+                }])
             }
+        }
+    }
+
+    /// A nestable at-rule (`@media`/`@container`, less.js `Media`/`Container` +
+    /// `NestableAtRulePrototype`, plan §2.13): nested same-kind blocks merge
+    /// their feature lists with `and` (comma lists cross-multiply) and surface
+    /// as SIBLINGS of the outermost block, in depth-first entry order; a
+    /// nested block of the OTHER kind stays in place unmerged.
+    fn eval_nestable_at_rule(
+        &mut self,
+        a: &crate::ast::AtRule,
+        base: &str,
+        parent_paths: Option<&[String]>,
+    ) -> Result<Vec<Out>, LessError> {
+        let AtRuleBlock::Rules(rules) = &a.block else {
+            unreachable!("checked by caller");
+        };
+        let features = match &a.prelude {
+            Some(p) => self.eval_media_features(p)?,
+            None => Vec::new(),
+        };
+
+        let outermost = self.media_path.is_empty();
+        if outermost && self.media_blocks.is_none() {
+            self.media_blocks = Some(Vec::new());
+        }
+        // The merged header: the full path's feature lists cross-multiplied and
+        // `and`-joined (less.js `evalNested`) — only when every enclosing
+        // nestable block is the same kind.
+        let same_kind = self.media_path.iter().all(|m| m.kind == base);
+        let merged: Option<Vec<String>> = if outermost {
+            Some(features.clone())
+        } else if same_kind {
+            let mut lists: Vec<Vec<String>> =
+                self.media_path.iter().map(|m| m.features.clone()).collect();
+            lists.push(features.clone());
+            Some(permute_feature_paths(&lists))
+        } else {
+            None
+        };
+        // Reserve the output slot NOW — blocks surface in entry order.
+        let slot = match &merged {
+            Some(_) => {
+                let blocks = self.media_blocks.as_mut().expect("collector exists");
+                blocks.push(None);
+                Some(blocks.len() - 1)
+            }
+            None => None,
+        };
+
+        self.media_path.push(MediaFrame {
+            kind: base.to_string(),
+            features: features.clone(),
+        });
+        self.push_frame(frame_of(rules.to_vec()));
+        let res = self.process_body(rules, parent_paths);
+        self.pop_frame();
+        self.media_path.pop();
+        let (own, children) = res?;
+
+        let mut body_outs: Vec<Out> = Vec::new();
+        if has_visible(&own) {
+            body_outs.push(match parent_paths {
+                Some(paths) if !paths.is_empty() => Out::Rule {
+                    selectors: paths.to_vec(),
+                    decls: own,
+                },
+                _ => Out::Decls(own),
+            });
+        }
+        body_outs.extend(children);
+
+        let header_features = merged.as_ref().unwrap_or(&features);
+        let header = if header_features.is_empty() {
+            a.name.clone()
+        } else {
+            format!("{} {}", a.name, header_features.join(", "))
+        };
+        // An empty `@media` block is pruned; an empty `@container` still
+        // renders its shell (less.js prunes only Media — verified vs 4.6.7).
+        let out = if body_outs.is_empty() && base == "@media" {
+            None
+        } else {
+            Some(Out::At {
+                header,
+                body: AtBody::Rules(body_outs),
+            })
+        };
+
+        match slot {
+            Some(i) => {
+                self.media_blocks.as_mut().expect("collector exists")[i] = out;
+                if outermost {
+                    let blocks = self.media_blocks.take().expect("collector exists");
+                    Ok(blocks.into_iter().flatten().collect())
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            // Mixed kind — the block stays nested at this position.
+            None => Ok(out.into_iter().collect()),
         }
     }
 
@@ -545,7 +927,10 @@ impl<'a> Ctx<'a> {
         let value = value?;
         // less.js `Declaration.eval`: a detached ruleset landing on a real
         // property (e.g. `d: if(true, {…}, {…})`) is a hard error (F16).
-        if matches!(value, Node::DetachedRuleset { .. }) {
+        if matches!(value, Node::DetachedRuleset { .. })
+            || matches!(&value, Node::Closure { inner, .. }
+                if matches!(inner.as_ref(), Node::DetachedRuleset { .. }))
+        {
             return Err(self.err(
                 ErrorKind::Syntax,
                 "Rulesets cannot be evaluated on a property.",
@@ -628,7 +1013,7 @@ impl<'a> Ctx<'a> {
                 value,
             } => {
                 // Interpolation runs inside quoted strings (plan §2.14).
-                let v = if value.contains("@{") || value.contains("$}") || value.contains("@") {
+                let v = if value.contains("@{") || value.contains("${") || value.contains("@") {
                     self.interpolate(value)?
                 } else {
                     value.clone()
@@ -639,16 +1024,47 @@ impl<'a> Ctx<'a> {
                     value: v,
                 })
             }
-            Node::PropertyAccessor { name, .. } => {
-                // $prop — property-as-variable. Minimal: unresolved → keep literal.
-                Ok(Node::Anonymous(format!("${name}")))
+            Node::PropertyAccessor { name, .. } => self.eval_property(name),
+            // A detached-ruleset literal captures the frames live at its
+            // evaluation site (less.js `DetachedRuleset.eval`, plan §2.11).
+            Node::DetachedRuleset { .. } => {
+                let scope = self.closures.len() as u64;
+                self.closures.push(self.frames.clone());
+                Ok(Node::Closure {
+                    inner: Box::new(node.clone()),
+                    scope,
+                })
+            }
+            // Already captured — evaluating again must NOT re-capture.
+            Node::Closure { .. } => Ok(node.clone()),
+            // A mixin call in value position (`@p: .mk-map();`) evaluates to its
+            // ruleset — a map usable via `[]` lookups / `each()` (plan §2.12).
+            Node::MixinCall(call) => {
+                let call = call.clone();
+                let rules = self.mixin_call_map(&call)?;
+                Ok(Node::DetachedRuleset {
+                    rules,
+                    span: Span::default(),
+                })
+            }
+            // `@dr()` in value position: the called ruleset, evaluated.
+            Node::VariableCall { name, span } => {
+                let (name, span) = (name.clone(), *span);
+                let rules = self.variable_call_map(&name, span)?;
+                Ok(Node::DetachedRuleset {
+                    rules,
+                    span: Span::default(),
+                })
+            }
+            Node::Lookup { target, keys, .. } => {
+                let (target, keys) = (target.clone(), keys.clone());
+                self.eval_lookup(&target, &keys)
             }
             // Self-evaluating leaves.
             Node::Dimension(_)
             | Node::Color(_)
             | Node::Keyword(_)
-            | Node::Anonymous(_)
-            | Node::DetachedRuleset { .. } => Ok(node.clone()),
+            | Node::Anonymous(_) => Ok(node.clone()),
             other => Ok(other.clone()),
         }
     }
@@ -948,6 +1364,11 @@ impl<'a> Ctx<'a> {
             }
             other => other,
         };
+        // A captured DR (Closure) unwraps to its literal rules.
+        let rs_arg = match rs_arg {
+            Node::Closure { inner, .. } => inner.as_ref(),
+            other => other,
+        };
         let (param_names, rules): (Vec<Option<String>>, Vec<Node>) = match rs_arg {
             Node::DetachedRuleset { rules, .. } => (Vec::new(), rules.clone()),
             Node::MixinDefinition(def) if def.name.is_empty() => (
@@ -981,6 +1402,10 @@ impl<'a> Ctx<'a> {
             match &list {
                 Node::Value(v) | Node::Expression(v) => v.clone(),
                 Node::DetachedRuleset { rules, .. } => rules.clone(),
+                Node::Closure { inner, .. } => match inner.as_ref() {
+                    Node::DetachedRuleset { rules, .. } => rules.clone(),
+                    other => vec![other.clone()],
+                },
                 other => vec![other.clone()],
             }
         };
@@ -1049,12 +1474,31 @@ impl<'a> Ctx<'a> {
         own: &mut Vec<Node>,
         children: &mut Vec<Out>,
     ) -> Result<Vec<Node>, LessError> {
+        let (chosen, args) = self.choose_candidates(call)?;
+
+        // Emit every candidate that survived guard/default() selection.
+        let mut injected: Vec<Node> = Vec::new();
+        for cand in &chosen {
+            let inj = self.emit_candidate(cand, &args, call.important, self_paths, own, children)?;
+            injected.extend(inj);
+        }
+        Ok(injected)
+    }
+
+    /// Resolve a mixin call to the candidates that will actually emit (arity/
+    /// pattern match + guards + two-subpass `default()` selection, §2.5/§2.6),
+    /// together with the evaluated call arguments. Shared by statement calls and
+    /// the value-position mixin-as-map form (plan §2.12).
+    fn choose_candidates(
+        &mut self,
+        call: &crate::ast::MixinCall,
+    ) -> Result<(Vec<Candidate>, Vec<EvArg>), LessError> {
         if self.mixin_depth > MAX_MIXIN_DEPTH {
             return Err(self.err(ErrorKind::Runtime, "mixin recursion limit exceeded"));
         }
         let path = mixin_names(&call.path);
         if path.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         // Evaluate call arguments once (values against the caller's frames).
@@ -1130,16 +1574,12 @@ impl<'a> Ctx<'a> {
             1 // defTrue
         };
 
-        // Emit every candidate whose group is defNone or the chosen default.
-        let mut injected: Vec<Node> = Vec::new();
-        for (idx, cand) in chosen.iter().enumerate() {
-            let g = groups[idx];
-            if g == 0 || g == default_result {
-                let inj = self.emit_candidate(cand, &args, call.important, self_paths, own, children)?;
-                injected.extend(inj);
-            }
-        }
-        Ok(injected)
+        let mut keep = groups.iter();
+        chosen.retain(|_| {
+            let g = *keep.next().unwrap();
+            g == 0 || g == default_result
+        });
+        Ok((chosen, args))
     }
 
     /// Evaluate the call's arguments to `(name?, value)` pairs (§2.5). A trailing
@@ -1354,6 +1794,433 @@ impl<'a> Ctx<'a> {
             }
         }
         out
+    }
+
+    /// Expand a detached-ruleset call statement `@dr();` (less.js
+    /// `VariableCall` + `DetachedRuleset.callEval`, plan §2.11): evaluate the
+    /// DR's rules with **its captured definition frames first, then the
+    /// caller's**, emit the output at this position, and return the nodes to
+    /// inject into the caller's scope — mixins/rulesets, but NEVER variables.
+    fn expand_variable_call(
+        &mut self,
+        name: &str,
+        span: Span,
+        self_paths: Option<&[String]>,
+        own: &mut Vec<Node>,
+        children: &mut Vec<Out>,
+    ) -> Result<Vec<Node>, LessError> {
+        if self.mixin_depth > MAX_MIXIN_DEPTH {
+            return Err(self.err(ErrorKind::Runtime, "mixin recursion limit exceeded"));
+        }
+        let v = self.eval_variable(name, span)?;
+        let (rules, captured) = self.as_detached(v, name)?;
+
+        let body_frame = frame_of(rules.clone());
+        let mut new_frames: Vec<Frame> = Vec::with_capacity(self.frames.len() + 2);
+        new_frames.push(body_frame);
+        if let Some(scope) = captured {
+            new_frames.extend(self.closures[scope as usize].iter().cloned());
+        }
+        new_frames.extend(self.frames.iter().cloned());
+        let saved = std::mem::replace(&mut self.frames, new_frames);
+        self.mixin_depth += 1;
+
+        let mut sub_own = Vec::new();
+        let mut sub_children = Vec::new();
+        let res = self.eval_rules(&rules, self_paths, &mut sub_own, &mut sub_children);
+        let injected = if res.is_ok() {
+            self.collect_injected(&rules)
+        } else {
+            Vec::new()
+        };
+
+        self.mixin_depth -= 1;
+        self.frames = saved;
+        res?;
+
+        own.extend(sub_own);
+        children.extend(sub_children);
+        // "do not pollute the scope at all" — a DR call returns no variables.
+        Ok(injected
+            .into_iter()
+            .filter(|n| !matches!(n, Node::VariableDecl { .. }))
+            .collect())
+    }
+
+    /// Phase 4A stopgap `.less` import inline (plan §2.9 is Phase 4B): resolve
+    /// through the [`ImportResolver`], parse, evaluate the file's rules at this
+    /// position, and return its top-level variables/mixins/rulesets for the
+    /// caller-frame splice. `(optional)` misses are silent.
+    fn expand_import(
+        &mut self,
+        path: &Node,
+        options: &[String],
+        self_paths: Option<&[String]>,
+        own: &mut Vec<Node>,
+        children: &mut Vec<Out>,
+    ) -> Result<Vec<Node>, LessError> {
+        use crate::resolver::{ImportOptions, ImportPayload, ImportRequest};
+        if self.mixin_depth > MAX_MIXIN_DEPTH {
+            return Err(self.err(ErrorKind::Import, "import recursion limit exceeded"));
+        }
+        let raw = match path {
+            Node::Quoted { value, .. } => value.clone(),
+            Node::Anonymous(s) => s.clone(),
+            other => render_value(other, self.opts.num_precision),
+        };
+        let raw = if raw.contains("@{") {
+            self.interpolate(&raw)?
+        } else {
+            raw
+        };
+        let has = |o: &str| options.iter().any(|x| x == o);
+        let req = ImportRequest {
+            path: raw.clone(),
+            from: crate::resolver::FileInfo {
+                filename: self.opts.filename.clone().unwrap_or_default(),
+                current_directory: self.current_dir(),
+                ..Default::default()
+            },
+            options: ImportOptions {
+                reference: has("reference"),
+                inline: has("inline"),
+                css: if has("css") {
+                    Some(true)
+                } else if has("less") {
+                    Some(false)
+                } else {
+                    None
+                },
+                once: has("once"),
+                multiple: has("multiple"),
+                optional: has("optional"),
+                layer: None,
+            },
+        };
+        let optional = req.options.optional;
+        let resolved = match self.resolver.resolve(&req) {
+            Ok(r) => r,
+            Err(_) if optional => return Ok(Vec::new()),
+            Err(e) => return Err(self.err(ErrorKind::Import, e.to_string())),
+        };
+        let rules: Vec<Node> = match resolved.payload {
+            ImportPayload::Less(src) => {
+                match crate::parser::parse(&src, resolved.file, self.opts)?.as_ref() {
+                    Node::Root(r) => r.clone(),
+                    other => vec![other.clone()],
+                }
+            }
+            ImportPayload::Ast(node) => match node.as_ref() {
+                Node::Root(r) => r.clone(),
+                other => vec![other.clone()],
+            },
+            // `(inline)` / unexpected-CSS payloads splice verbatim.
+            ImportPayload::Inline(src) | ImportPayload::Css(src) => {
+                children.push(Out::Comment(src.trim_end().to_string()));
+                return Ok(Vec::new());
+            }
+        };
+        self.mixin_depth += 1;
+        self.push_frame(frame_of(rules.clone()));
+        let res = self.eval_rules(&rules, self_paths, own, children);
+        self.pop_frame();
+        self.mixin_depth -= 1;
+        res?;
+        Ok(rules
+            .into_iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    Node::VariableDecl { .. } | Node::MixinDefinition(_) | Node::Ruleset(_)
+                )
+            })
+            .collect())
+    }
+
+    /// Unwrap an evaluated value into detached-ruleset rules + the captured
+    /// scope index (`None` for an already-evaluated/uncaptured body).
+    fn as_detached(&self, v: Node, name: &str) -> Result<(Vec<Node>, Option<u64>), LessError> {
+        match v {
+            Node::Closure { inner, scope } => match *inner {
+                Node::DetachedRuleset { rules, .. } => Ok((rules, Some(scope))),
+                _ => Err(self.err(
+                    ErrorKind::Runtime,
+                    format!("Could not evaluate variable call @{name}"),
+                )),
+            },
+            Node::DetachedRuleset { rules, .. } => Ok((rules, None)),
+            _ => Err(self.err(
+                ErrorKind::Runtime,
+                format!("Could not evaluate variable call @{name}"),
+            )),
+        }
+    }
+
+    /// `@dr()` as a map (value position / lookup target): callEval the DR and
+    /// return its evaluated rules (plan §2.12).
+    fn variable_call_map(&mut self, name: &str, span: Span) -> Result<Vec<Node>, LessError> {
+        let v = self.eval_variable(name, span)?;
+        let (rules, captured) = self.as_detached(v, name)?;
+        self.map_rules_with_frames(&rules, captured)
+    }
+
+    /// A value-position mixin call's evaluated ruleset (map form, plan §2.12):
+    /// every surviving candidate's body, evaluated in the mixin's own scope, in
+    /// source order (declarations AND variables — lookups read both).
+    fn mixin_call_map(&mut self, call: &crate::ast::MixinCall) -> Result<Vec<Node>, LessError> {
+        let (chosen, args) = self.choose_candidates(call)?;
+        let mut out = Vec::new();
+        for cand in &chosen {
+            let param_frame = self.bind_params(cand, &args)?;
+            let body_frame = frame_of(cand.rules.clone());
+            let mut new_frames: Vec<Frame> = Vec::with_capacity(self.frames.len() + 3);
+            new_frames.push(body_frame);
+            new_frames.push(frame_of(param_frame));
+            new_frames.extend(cand.def_scope.iter().cloned());
+            new_frames.extend(self.frames.iter().cloned());
+            let saved = std::mem::replace(&mut self.frames, new_frames);
+            self.mixin_depth += 1;
+            let res = self.eval_map_rules(&cand.rules);
+            self.mixin_depth -= 1;
+            self.frames = saved;
+            out.extend(res?);
+        }
+        Ok(out)
+    }
+
+    /// Evaluate `rules` as map content with the given captured frames installed.
+    fn map_rules_with_frames(
+        &mut self,
+        rules: &[Node],
+        captured: Option<u64>,
+    ) -> Result<Vec<Node>, LessError> {
+        let body_frame = frame_of(rules.to_vec());
+        let mut new_frames: Vec<Frame> = Vec::with_capacity(self.frames.len() + 1);
+        new_frames.push(body_frame);
+        if let Some(scope) = captured {
+            new_frames.extend(self.closures[scope as usize].iter().cloned());
+        }
+        new_frames.extend(self.frames.iter().cloned());
+        let saved = std::mem::replace(&mut self.frames, new_frames);
+        let res = self.eval_map_rules(rules);
+        self.frames = saved;
+        res
+    }
+
+    /// Evaluate a rule list to its map form, in source order: declarations
+    /// evaluated, variables evaluated, mixin definitions frozen as closures,
+    /// nested rulesets kept raw (frames must already be installed).
+    fn eval_map_rules(&mut self, rules: &[Node]) -> Result<Vec<Node>, LessError> {
+        let mut out = Vec::new();
+        for r in rules {
+            match r {
+                Node::Declaration(d) => out.push(self.eval_declaration(d)?),
+                Node::VariableDecl {
+                    name,
+                    value,
+                    important,
+                    ..
+                } => {
+                    let val = self.eval_value(value)?;
+                    out.push(Node::VariableDecl {
+                        name: name.clone(),
+                        value: Box::new(val),
+                        important: important.clone(),
+                        span: Span::default(),
+                    });
+                }
+                Node::MixinDefinition(_) => {
+                    let scope = self.closures.len() as u64;
+                    self.closures.push(self.frames.clone());
+                    out.push(Node::Closure {
+                        inner: Box::new(r.clone()),
+                        scope,
+                    });
+                }
+                Node::Ruleset(_) => out.push(r.clone()),
+                _ => {}
+            }
+        }
+        Ok(out)
+    }
+
+    /// A `[key]` lookup chain over a map value (less.js `NamespaceValue.eval`,
+    /// plan §2.12).
+    fn eval_lookup(&mut self, target: &Node, keys: &[String]) -> Result<Node, LessError> {
+        let mut rules: Vec<Node> = match target {
+            Node::VariableCall { name, span } => self.variable_call_map(name, *span)?,
+            Node::MixinCall(call) => self.mixin_call_map(call)?,
+            other => {
+                let v = self.eval_value(other)?;
+                let (r, captured) = self.as_detached(v, "?")?;
+                self.map_rules_with_frames(&r, captured)?
+            }
+        };
+        let mut current: Option<Node> = None;
+        for key in keys {
+            if let Some(v) = current.take() {
+                // A previous key produced a nested ruleset — descend into it.
+                match v {
+                    Node::DetachedRuleset { rules: r, .. } => rules = r,
+                    Node::Closure { .. } => {
+                        let (r, captured) = self.as_detached(v, "?")?;
+                        rules = self.map_rules_with_frames(&r, captured)?;
+                    }
+                    _ => rules = Vec::new(),
+                }
+            }
+
+            let val = if key.is_empty() {
+                // Unnamed `[]` = the last declaration (property OR variable).
+                let last = rules.iter().rev().find_map(|r| match r {
+                    Node::Declaration(d) => {
+                        // The lazy `parseValue` split: a raw capture's trailing
+                        // `!important` is NOT part of the looked-up value.
+                        let mut dd = d.clone();
+                        split_anon_important(&mut dd);
+                        Some((*dd.value).clone())
+                    }
+                    Node::VariableDecl { value, .. } => Some((**value).clone()),
+                    _ => None,
+                });
+                last.ok_or_else(|| self.err(ErrorKind::Name, "property \"\" not found"))?
+            } else if key.starts_with('@') {
+                let name = if let Some(dynamic) = key.strip_prefix("@@") {
+                    let inner = self.eval_variable(dynamic, Span::default())?;
+                    value_to_plain_string(&inner)
+                } else {
+                    key[1..].to_string()
+                };
+                let found = rules.iter().rev().find_map(|r| match r {
+                    Node::VariableDecl { name: n, value, .. } if *n == name => {
+                        Some((**value).clone())
+                    }
+                    _ => None,
+                });
+                found.ok_or_else(|| {
+                    self.err(ErrorKind::Name, format!("variable @{name} not found"))
+                })?
+            } else {
+                let name = if let Some(dynamic) = key.strip_prefix("$@") {
+                    let inner = self.eval_variable(dynamic, Span::default())?;
+                    value_to_plain_string(&inner)
+                } else {
+                    key.strip_prefix('$').unwrap_or(key).to_string()
+                };
+                let decls: Vec<Node> = rules
+                    .iter()
+                    .filter(|r| matches!(r, Node::Declaration(d) if d.name == name))
+                    .map(|r| match r {
+                        Node::Declaration(d) => {
+                            // parseValue split (see the unnamed branch): the
+                            // trailing `!important` never joins the value.
+                            let mut dd = d.clone();
+                            split_anon_important(&mut dd);
+                            Node::Declaration(dd)
+                        }
+                        other => other.clone(),
+                    })
+                    .collect();
+                if decls.is_empty() {
+                    return Err(
+                        self.err(ErrorKind::Name, format!("property \"{name}\" not found"))
+                    );
+                }
+                let merged = merge_rules(&decls);
+                match merged.last() {
+                    Some(Node::Declaration(d)) => (*d.value).clone(),
+                    _ => unreachable!("merge_rules keeps declarations"),
+                }
+            };
+            // Map-rule values are already evaluated; re-evaluate defensively for
+            // raw nested content (idempotent on finished values).
+            let val = self.eval_value(&val)?;
+            current = Some(val);
+        }
+        // A final ruleset value materializes as its evaluated rules.
+        match current {
+            Some(v @ Node::Closure { .. }) => {
+                let (r, captured) = self.as_detached(v, "?")?;
+                let rules = self.map_rules_with_frames(&r, captured)?;
+                Ok(Node::DetachedRuleset {
+                    rules,
+                    span: Span::default(),
+                })
+            }
+            Some(v) => Ok(v),
+            None => Ok(Node::DetachedRuleset {
+                rules,
+                span: Span::default(),
+            }),
+        }
+    }
+
+    /// `$prop` — resolve a property accessor (less.js `Property.eval`, plan
+    /// §2.12): the nearest frame declaring the property wins; all its same-name
+    /// declarations merge (`+:`/`+_:`), the last one's value is evaluated in the
+    /// CURRENT context, its `!important` propagates to the reading declaration,
+    /// and the read triggers the parseValue important-trim quirk (see
+    /// `pending_trims`).
+    fn eval_property(&mut self, name: &str) -> Result<Node, LessError> {
+        let key = format!("${name}");
+        if self.evaluating.iter().any(|n| n == &key) {
+            return Err(self.err(
+                ErrorKind::Name,
+                format!("Recursive property reference for {key}"),
+            ));
+        }
+
+        let mut found: Option<(usize, Vec<Node>)> = None;
+        for frame in &self.frames {
+            let decls: Vec<Node> = frame
+                .borrow()
+                .iter()
+                .filter(|r| matches!(r, Node::Declaration(d) if d.name == name))
+                .cloned()
+                .collect();
+            if !decls.is_empty() {
+                found = Some((Rc::as_ptr(frame) as *const () as usize, decls));
+                break;
+            }
+        }
+        let Some((fp, decls)) = found else {
+            return Err(self.err(
+                ErrorKind::Name,
+                format!("Property '${name}' is undefined"),
+            ));
+        };
+        self.pending_trims.push((fp, name.to_string()));
+
+        // less.js `parseValue`: lazily-captured Anonymous values split their
+        // trailing `!important` out of the raw text before merging.
+        let decls: Vec<Node> = decls
+            .into_iter()
+            .map(|d| match d {
+                Node::Declaration(mut dd) => {
+                    split_anon_important(&mut dd);
+                    Node::Declaration(dd)
+                }
+                other => other,
+            })
+            .collect();
+
+        let merged = merge_rules(&decls);
+        let Some(Node::Declaration(last)) = merged.last() else {
+            unreachable!("merge_rules keeps declarations");
+        };
+        if !last.important.is_empty() {
+            if let Some(slot) = self.important_scope.last_mut() {
+                *slot = Some(" !important".to_string());
+            }
+        }
+        let value = (*last.value).clone();
+        self.evaluating.push(key);
+        // The found value evaluates in the ACCESSING context (less.js
+        // `Property.eval` runs `v.value.eval(context)` with the reader's
+        // frames); a raw Anonymous capture is re-parsed first.
+        let result = self.reparse_arg(&value);
+        self.evaluating.pop();
+        result
     }
 
     /// Bind a call's arguments to a candidate's parameters (less.js `evalParams`):
@@ -1619,7 +2486,7 @@ impl<'a> Ctx<'a> {
         let mut s = String::new();
         for el in &sel.elements {
             s.push_str(&combinator_css(&el.combinator));
-            if el.value.contains("@{") || el.value.contains("$}") {
+            if el.value.contains("@{") || el.value.contains("${") {
                 // Selector elements genCSS their evaluated value — a quoted
                 // variable keeps its quotes (`.@{v}` with `@v: "sel"` →
                 // `."sel"`, F18); escaped `~"…"` still renders raw.
@@ -1631,10 +2498,188 @@ impl<'a> Ctx<'a> {
         Ok(s)
     }
 
+    /// Evaluate a nestable at-rule's prelude to its comma-separated media
+    /// queries, each normalized the way less.js's structured `mediaFeatures`
+    /// parse + re-render does (plan §2.13): `(key:value)` → `(key: value)`
+    /// with the value evaluated, comparison features get ` op ` spacing,
+    /// variables (`@var`, `@{var}`, escaped strings) resolve.
+    fn eval_media_features(&mut self, node: &Node) -> Result<Vec<String>, LessError> {
+        let raw = match node {
+            Node::Anonymous(s) => s.clone(),
+            other => render_value(&self.eval_value(other)?, self.opts.num_precision),
+        };
+        let raw = if raw.contains("@{") || raw.contains("${") {
+            self.interpolate(&raw)?
+        } else {
+            raw
+        };
+        let raw = self.resolve_prelude_vars(&raw)?;
+        let mut queries = Vec::new();
+        for q in split_top(&raw, ',') {
+            let q = q.trim();
+            if q.is_empty() {
+                continue;
+            }
+            queries.push(self.normalize_media_query(q)?);
+        }
+        Ok(queries)
+    }
+
+    /// One media query: space-joined words and `( … )` feature groups; a word
+    /// glued to a paren (`style(…)`, `layer(…)`, `supports(…)`) keeps no space.
+    fn normalize_media_query(&mut self, q: &str) -> Result<String, LessError> {
+        let bytes = q.as_bytes();
+        let mut parts: Vec<(String, bool)> = Vec::new(); // (text, glued-to-previous)
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b.is_ascii_whitespace() {
+                i += 1;
+                continue;
+            }
+            if b == b'(' {
+                // Balanced group.
+                let mut depth = 0i32;
+                let start = i;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                i += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                let inner = &q[start + 1..i.saturating_sub(1).max(start + 1)];
+                // A paren glued to the preceding word stays attached
+                // (`style(…)`, `layer(…)`) — EXCEPT after the media keywords,
+                // which always force a space (less.js `mediaFeature` spacing).
+                let glued = parts
+                    .last()
+                    .map(|(t, _)| {
+                        !t.is_empty()
+                            && start > 0
+                            && !bytes[start - 1].is_ascii_whitespace()
+                            && !matches!(
+                                t.to_ascii_lowercase().as_str(),
+                                "and" | "or" | "not" | "only"
+                            )
+                    })
+                    .unwrap_or(false);
+                let norm = self.normalize_media_feature(inner)?;
+                parts.push((format!("({norm})"), glued));
+                continue;
+            }
+            // A word / raw run up to whitespace or `(`.
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'(' {
+                i += 1;
+            }
+            parts.push((q[start..i].to_string(), false));
+        }
+        let mut out = String::new();
+        for (idx, (text, glued)) in parts.iter().enumerate() {
+            if idx > 0 && !glued {
+                out.push(' ');
+            }
+            out.push_str(text);
+        }
+        Ok(out)
+    }
+
+    /// The inside of a `( … )` media feature: `key: value` evaluates the value
+    /// (escaped strings render raw); anything else (range syntax, nested
+    /// conditions) collapses whitespace and normalizes comparison spacing.
+    fn normalize_media_feature(&mut self, inner: &str) -> Result<String, LessError> {
+        let inner = inner.trim();
+        // Top-level `key: value`?
+        if let Some(colon) = find_top_level_colon(inner) {
+            let (lhs, rhs) = inner.split_at(colon);
+            let rhs = rhs[1..].trim();
+            let value = match crate::parser::parse_value_fragment(rhs, self.opts) {
+                Ok(v) => {
+                    let ev = self.eval_value(&v)?;
+                    render_value(&ev, self.opts.num_precision)
+                }
+                Err(_) => rhs.to_string(),
+            };
+            return Ok(format!("{}: {}", lhs.trim(), value));
+        }
+        // Range / boolean feature: single-space words, ` op ` comparisons,
+        // nested groups normalized recursively.
+        let bytes = inner.as_bytes();
+        let mut out = String::new();
+        let mut i = 0;
+        let mut pending_space = false;
+        let push_tok = |out: &mut String, tok: &str, pending: &mut bool| {
+            if *pending && !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(tok);
+            *pending = false;
+        };
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b.is_ascii_whitespace() {
+                pending_space = true;
+                i += 1;
+                continue;
+            }
+            match b {
+                b'(' => {
+                    let mut depth = 0i32;
+                    let start = i;
+                    while i < bytes.len() {
+                        match bytes[i] {
+                            b'(' => depth += 1,
+                            b')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    i += 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    let sub = &inner[start + 1..i.saturating_sub(1).max(start + 1)];
+                    let norm = self.normalize_media_feature(sub)?;
+                    push_tok(&mut out, &format!("({norm})"), &mut pending_space);
+                }
+                b'<' | b'>' | b'=' => {
+                    let start = i;
+                    while i < bytes.len() && matches!(bytes[i], b'<' | b'>' | b'=') {
+                        i += 1;
+                    }
+                    pending_space = true;
+                    push_tok(&mut out, &inner[start..i], &mut pending_space);
+                    pending_space = true;
+                }
+                _ => {
+                    let start = i;
+                    while i < bytes.len()
+                        && !bytes[i].is_ascii_whitespace()
+                        && !matches!(bytes[i], b'(' | b'<' | b'>' | b'=')
+                    {
+                        i += 1;
+                    }
+                    push_tok(&mut out, &inner[start..i], &mut pending_space);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn eval_prelude(&mut self, node: &Node) -> Result<String, LessError> {
         match node {
             Node::Anonymous(s) => {
-                let s = if s.contains("@{") || s.contains("$}") {
+                let s = if s.contains("@{") || s.contains("${") {
                     self.interpolate(s)?
                 } else {
                     s.clone()
@@ -1702,14 +2747,20 @@ impl<'a> Ctx<'a> {
             let mut out = String::with_capacity(s.len());
             let mut rest = s.as_str();
             let mut replaced = false;
-            while let Some(start) = find_interp(rest) {
+            while let Some((start, is_prop)) = find_interp(rest) {
                 let after = &rest[start + 2..];
                 // A match needs a `}` with only `[\w-]` name chars before it.
                 let end_rel = after.find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'));
                 match end_rel {
                     Some(e) if e > 0 && after[e..].starts_with('}') => {
                         let name = &after[..e];
-                        let val = self.eval_variable(name, Default::default())?;
+                        // `${prop}` reads a property, `@{var}` a variable
+                        // (less.js `Quoted.eval`'s two replacement passes).
+                        let val = if is_prop {
+                            self.eval_property(name)?
+                        } else {
+                            self.eval_variable(name, Default::default())?
+                        };
                         out.push_str(&rest[..start]);
                         if css {
                             out.push_str(&render_value(&val, 0));
@@ -1720,7 +2771,7 @@ impl<'a> Ctx<'a> {
                         replaced = true;
                     }
                     _ => {
-                        // Not a simple name — emit `@{` literally and move on.
+                        // Not a simple name — emit the opener literally, move on.
                         out.push_str(&rest[..start + 2]);
                         rest = after;
                     }
@@ -1954,6 +3005,25 @@ fn match_prefix(path: &[String], def_names: &[String]) -> Option<usize> {
     Some(def_names.len())
 }
 
+/// Split a trailing `!important` out of a declaration whose value is a raw
+/// `Anonymous` capture (the less.js lazy-declaration `parseValue` step, plan
+/// §2.12): the flag moves to `important` WITHOUT a leading space.
+fn split_anon_important(d: &mut Declaration) {
+    if !d.important.is_empty() {
+        return;
+    }
+    if let Node::Anonymous(s) = d.value.as_ref() {
+        let trimmed = s.trim_end();
+        if let Some(head) = trimmed.strip_suffix("important") {
+            let head = head.trim_end();
+            if let Some(head) = head.strip_suffix('!') {
+                d.value = Box::new(Node::Anonymous(head.trim_end().to_string()));
+                d.important = "!important".to_string();
+            }
+        }
+    }
+}
+
 /// Build a `@name: value` variable declaration node (for a param/injection frame).
 fn var_decl(name: &str, value: Node) -> Node {
     Node::VariableDecl {
@@ -2011,6 +3081,15 @@ fn make_important_out(out: &mut Out) {
         Out::Decls(decls) => {
             for d in decls.iter_mut() {
                 make_important_node(d);
+            }
+        }
+        Out::Nested(node) => {
+            if let Node::AtRule(a) = node {
+                if let AtRuleBlock::Rules(rules) = &mut a.block {
+                    for d in rules.iter_mut() {
+                        make_important_node(d);
+                    }
+                }
             }
         }
         Out::At { body, .. } => {
@@ -2256,6 +3335,100 @@ fn is_just_parent(sel: &Selector) -> bool {
         && matches!(sel.elements[0].combinator.as_str(), "" | " ")
 }
 
+/// Whether an `@import` re-emits as a literal CSS `@import` (by extension /
+/// `url()` / remote, overridable by the `(css)`/`(less)`/`(inline)` options —
+/// plan §2.9).
+fn is_css_import(path: &Node, options: &[String]) -> bool {
+    if options.iter().any(|o| o == "css") {
+        return true;
+    }
+    if options.iter().any(|o| o == "less" || o == "inline") {
+        return false;
+    }
+    match path {
+        Node::Url(_) => true,
+        Node::Quoted { value, .. } => {
+            value.ends_with(".css")
+                || value.starts_with("http://")
+                || value.starts_with("https://")
+                || value.starts_with("//")
+        }
+        Node::Anonymous(s) => {
+            s.ends_with(".css")
+                || s.starts_with("http://")
+                || s.starts_with("https://")
+                || s.starts_with("//")
+        }
+        _ => false,
+    }
+}
+
+/// Strip a vendor prefix from an at-rule name (`@-moz-document` → `@document`,
+/// less.js `nonVendorSpecificName`).
+fn base_at_name(name: &str) -> String {
+    let bytes = name.as_bytes();
+    if bytes.len() > 2 && bytes[1] == b'-' {
+        if let Some(dash) = name[2..].find('-') {
+            return format!("@{}", &name[2 + dash + 1..]);
+        }
+    }
+    name.to_string()
+}
+
+/// Cross-multiply the feature lists of a nested at-rule path and `and`-join
+/// each combination (less.js `permute` + `evalNested`): the FIRST list varies
+/// fastest — `(a, b and c)` nested with `(d, e)` → `a and d`, `b and c and d`,
+/// `a and e`, `b and c and e`.
+fn permute_feature_paths(lists: &[Vec<String>]) -> Vec<String> {
+    fn permute(lists: &[Vec<String>]) -> Vec<Vec<String>> {
+        match lists.len() {
+            0 => Vec::new(),
+            1 => lists[0].iter().map(|s| vec![s.clone()]).collect(),
+            _ => {
+                let rest = permute(&lists[1..]);
+                let mut result = Vec::with_capacity(rest.len() * lists[0].len());
+                for r in &rest {
+                    for x in &lists[0] {
+                        let mut combo = Vec::with_capacity(r.len() + 1);
+                        combo.push(x.clone());
+                        combo.extend(r.iter().cloned());
+                        result.push(combo);
+                    }
+                }
+                result
+            }
+        }
+    }
+    permute(lists)
+        .into_iter()
+        .map(|combo| combo.join(" and "))
+        .collect()
+}
+
+/// The byte index of a top-level `:` (outside parens/brackets/strings), if any.
+fn find_top_level_colon(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'"' | b'\'' => {
+                let q = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    i += 1;
+                }
+            }
+            b':' if depth == 0 => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Combine parent paths with a ruleset's own selectors, resolving `&` (§2.2/§4).
 fn join_selectors(parent: Option<&[String]>, own: &[String]) -> Vec<String> {
     let parents: Vec<String> = match parent {
@@ -2266,7 +3439,10 @@ fn join_selectors(parent: Option<&[String]>, own: &[String]) -> Vec<String> {
     for os in own {
         if os.contains('&') {
             for pp in &parents {
-                out.push(os.replace('&', pp).trim().to_string());
+                // Leading-trim only: a trailing `&` replaced by an empty root
+                // keeps its descendant space (`.a &` at root → `.a `), matching
+                // less.js's element-level join (§2.2).
+                out.push(os.replace('&', pp).trim_start().to_string());
             }
         } else {
             for pp in &parents {
@@ -2359,9 +3535,15 @@ fn split_word(s: &str, word: &str) -> Vec<String> {
     out
 }
 
-/// Find the byte index of the next `@{` (interpolation start) in a string.
-fn find_interp(s: &str) -> Option<usize> {
-    s.find("@{")
+/// Find the next interpolation opener — `@{` (variable) or `${` (property) —
+/// returning its byte index and whether it is the property form.
+fn find_interp(s: &str) -> Option<(usize, bool)> {
+    match (s.find("@{"), s.find("${")) {
+        (Some(v), Some(p)) if p < v => Some((p, true)),
+        (Some(v), _) => Some((v, false)),
+        (None, Some(p)) => Some((p, true)),
+        (None, None) => None,
+    }
 }
 
 /// The byte length of the UTF-8 char whose lead byte is `b`.
@@ -2403,6 +3585,9 @@ fn render_out(out: &Out, indent: usize, np: u8) -> Option<String> {
     let ind = "  ".repeat(indent);
     match out {
         Out::Comment(t) => Some(format!("{ind}{t}")),
+        // Nested at-rules are routed into their rule's declaration block by
+        // `eval_rules`; render standalone (root position) as a plain block.
+        Out::Nested(node) => Some(render_nested_at(node, &ind, np)),
         Out::Decls(decls) => {
             if !has_visible(decls) {
                 return None;
@@ -2817,6 +4002,203 @@ mod tests {
         let out = css("@c: 3;\n.x { w: 1; & when (@c = 3) { h: 2; } }");
         assert_eq!(out, ".x {\n  w: 1;\n  h: 2;\n}");
     }
+
+    // ------------------------------------------------------------------
+    // Phase 4A: detached rulesets (§2.11)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dr_call_uses_definition_scope_precedence() {
+        // The DR value captures the frames at its DECLARATION site; those
+        // frames take precedence over the caller's on call (verified 4.6.7).
+        assert_eq!(
+            css("@a: outer;\n@dr: { v: @a; };\n.x { @a: inner; @dr(); }"),
+            ".x {\n  v: outer;\n}"
+        );
+        // …but names absent from the captured scope fall back to the caller.
+        assert_eq!(
+            css("@dr: { v: @b; };\n.x { @b: caller; @dr(); }"),
+            ".x {\n  v: caller;\n}"
+        );
+    }
+
+    #[test]
+    fn dr_call_drops_variables_but_unlocks_mixins() {
+        // A variable-call splices NO variables into the caller (§2.11)…
+        assert!(errs("@dr: { @v: leaked; a: 1; };\n.x { @dr(); b: @v; }")
+            .contains("variable @v is undefined"));
+        // …but mixin definitions inside the DR become callable.
+        assert_eq!(
+            css("@my: { .mk() { got: yes; } };\n@my();\n.x { .mk(); }"),
+            ".x {\n  got: yes;\n}"
+        );
+        // Call before assignment / unknown DR → the variable-undefined error.
+        assert!(errs(".y { @nope(); }").contains("variable @nope is undefined"));
+    }
+
+    #[test]
+    fn dr_as_mixin_argument_and_default() {
+        // A DR literal argument evaluates in the CALLER's scope, not the
+        // mixin's (the detached-rulesets fixture core).
+        assert_eq!(
+            css("@a: 1px;\n.wrap(@r) { @a: bad; .s { @r(); } }\n.x { .wrap({ one: @a; }); }"),
+            ".x .s {\n  one: 1px;\n}"
+        );
+        // DR parameter defaults (`@b: {d: w;}`) work, incl. semicolon form.
+        assert_eq!(
+            css(".def(@a: {}; @b: {d: w;};) { @a(); @b(); }\n.u { .def({x: y;}); }"),
+            ".u {\n  x: y;\n  d: w;\n}"
+        );
+    }
+
+    #[test]
+    fn dr_media_bubbles_at_call_site() {
+        // @media inside a DR bubbles when called, wrapping the caller (§2.11).
+        assert_eq!(
+            css("@dr: { @media (tv) { b: c; } };\n.host { @dr(); }"),
+            "@media (tv) {\n  .host {\n    b: c;\n  }\n}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 4A: maps / lookups (§2.12)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn map_lookups_all_forms() {
+        // Ruleset-as-map, unnamed [], mixin-as-map, namespace variable +
+        // property + parameterized lookup.
+        let out = css(
+            "@sizes: { mobile: 320px; tablet: 768px; };\n\
+             .m() { sm: 10px; @last: varlast; }\n\
+             #ns { @c: nsvar; prim: nsprop; .mx(@v) { r: (@v + 1); } }\n\
+             .x { a: @sizes[tablet]; b: @sizes[]; c: .m()[]; d: #ns[@c]; e: #ns.mx(4)[r]; f: #ns[prim]; }",
+        );
+        assert_eq!(
+            out,
+            "#ns {\n  prim: nsprop;\n}\n\
+             .x {\n  a: 768px;\n  b: 768px;\n  c: varlast;\n  d: nsvar;\n  e: 5;\n  f: nsprop;\n}"
+        );
+    }
+
+    #[test]
+    fn map_dynamic_keys_and_nested() {
+        // `@@lookup` dynamic variable keys chain through nested DR maps.
+        assert_eq!(
+            css("@config: { @options: { primary: blue; } };\n@lookup: options;\n\
+                 .x { color: @config[@@lookup][primary]; }"),
+            ".x {\n  color: blue;\n}"
+        );
+        // `$@var` dynamic property key.
+        assert_eq!(
+            css("@pn: prim;\n#ns { prim: val; }\n.x { v: #ns[$@pn]; }"),
+            "#ns {\n  prim: val;\n}\n.x {\n  v: val;\n}"
+        );
+        // Unresolved keys use less.js's messages.
+        assert!(errs("@m: { a: 1; };\n.x { v: @m[missing]; }")
+            .contains("property \"missing\" not found"));
+        assert!(errs("@m: { a: 1; };\n.x { v: @m[@nope]; }")
+            .contains("variable @nope not found"));
+    }
+
+    #[test]
+    fn property_accessor_reads_last_and_propagates_important() {
+        // Forward reference: the LAST declaration wins, even declared later.
+        assert_eq!(
+            css(".b { color: red; .c { x: $color; } color: blue; }"),
+            ".b {\n  color: red;\n  color: blue;\n}\n.b .c {\n  x: blue;\n}"
+        );
+        // The parseValue quirk: a read `!important` declaration re-renders
+        // without the space, and the reader gains ` !important` (§2.12).
+        assert_eq!(
+            css(".t { color: red !important; background: $color; }"),
+            ".t {\n  color: red!important;\n  background: red !important;\n}"
+        );
+        // `${prop}` interpolation reads properties.
+        assert_eq!(
+            css(".p { prop: a; content: \"${prop}\"; }"),
+            ".p {\n  prop: a;\n  content: \"a\";\n}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 4A: at-rule bubbling & ordering (§2.13)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn media_nested_merges_with_and() {
+        assert_eq!(
+            css("@media screen { @media (max-width: 768px) { .n { d: b; } } }"),
+            "@media screen and (max-width: 768px) {\n  .n {\n    d: b;\n  }\n}"
+        );
+        // Comma lists cross-multiply, first list varying fastest.
+        assert_eq!(
+            css("@media (m1), (m2) { .t { @media (m3), (m4) { v: 6; } } }"),
+            "@media (m1) and (m3), (m2) and (m3), (m1) and (m4), (m2) and (m4) {\n  .t {\n    v: 6;\n  }\n}"
+        );
+        // Feature normalization: colon spacing + variables resolve.
+        assert_eq!(
+            css("@w: 42;\n@media all and (orientation:portrait) and (min-width: @w) { a { b: c; } }"),
+            "@media all and (orientation: portrait) and (min-width: 42) {\n  a {\n    b: c;\n  }\n}"
+        );
+    }
+
+    #[test]
+    fn media_in_mixin_keeps_source_order() {
+        // A mixin/DR body evaluates with a fresh media context and re-merges at
+        // the call position — sibling media stay in source order (§2.13).
+        assert_eq!(
+            css("@dr: { @media (tv) { .x { a: b; } } };\n\
+                 @media (w) {\n  @media (print) { .p { a: b; } }\n  @dr();\n}"),
+            "@media (w) and (print) {\n  .p {\n    a: b;\n  }\n}\n\
+             @media (w) and (tv) {\n  .x {\n    a: b;\n  }\n}"
+        );
+    }
+
+    #[test]
+    fn supports_bubbles_wrapped_and_stays_inside_media() {
+        // @supports wraps bare decls in the parent selector and bubbles only to
+        // the nearest at-rule boundary (§2.13).
+        assert_eq!(
+            css(".top { @supports (d: g) { .in & { p: v; } } }"),
+            "@supports (d: g) {\n  .in .top {\n    p: v;\n  }\n}"
+        );
+        assert_eq!(
+            css("@media print { html { i: v; @supports (u: t) { s: first; } } }"),
+            "@media print {\n  html {\n    i: v;\n  }\n  @supports (u: t) {\n    html {\n      s: first;\n    }\n  }\n}"
+        );
+    }
+
+    #[test]
+    fn starting_style_stays_nested_and_unknown_bubbles_bare() {
+        // @starting-style with a declaration body renders INSIDE the rule.
+        assert_eq!(
+            css(".u { o: 1; @starting-style { o: 0; } }"),
+            ".u {\n  o: 1;\n  @starting-style {\n    o: 0;\n  }\n}"
+        );
+        // An unknown at-rule bubbles out WITHOUT the selector wrap (isRooted).
+        assert_eq!(
+            css(".p { @unknown-at (x) { u: 7; } }"),
+            "@unknown-at (x) {\n  u: 7;\n}"
+        );
+    }
+
+    #[test]
+    fn container_merges_and_keeps_empty_shell() {
+        assert_eq!(
+            css("@container card (inline-size > 30em) { @container style(--r: true) { .c { g: 1; } } }"),
+            "@container card (inline-size > 30em) {\n}\n\
+             @container card (inline-size > 30em) and style(--r: true) {\n  .c {\n    g: 1;\n  }\n}"
+        );
+    }
+
+    #[test]
+    fn charset_hoists_and_dedups() {
+        assert_eq!(
+            css(".a { x: y; }\n@charset \"UTF-8\";\n@charset \"ISO-8859-1\";"),
+            "@charset \"UTF-8\";\n.a {\n  x: y;\n}"
+        );
+    }
 }
 
 /// less.js `functionCaller.call`'s argument normalization: drop `Comment` args,
@@ -2951,16 +4333,37 @@ fn render_decls(decls: &[Node], dind: &str, np: u8) -> String {
             Node::Comment { line: false, text, .. } => {
                 lines.push(format!("{dind}{text}"));
             }
-            Node::AtRule(a) => {
+            Node::AtRule(a) => match &a.block {
                 // An inline no-block directive (`@apply …;`) inside a ruleset.
-                let prelude = match &a.prelude {
-                    Some(p) => format!(" {}", render_value(p, np)),
-                    None => String::new(),
-                };
-                lines.push(format!("{dind}{}{prelude};", a.name));
-            }
+                AtRuleBlock::None => {
+                    let prelude = match &a.prelude {
+                        Some(p) => format!(" {}", render_value(p, np)),
+                        None => String::new(),
+                    };
+                    lines.push(format!("{dind}{}{prelude};", a.name));
+                }
+                // A simpleBlock at-rule nested inside the rule (§2.13).
+                AtRuleBlock::Rules(_) => lines.push(render_nested_at(d, dind, np)),
+            },
             _ => {}
         }
     }
     lines.join("\n")
+}
+
+/// Render a `simpleBlock` at-rule (`@starting-style { decls }`) at `ind`.
+fn render_nested_at(node: &Node, ind: &str, np: u8) -> String {
+    let Node::AtRule(a) = node else {
+        return String::new();
+    };
+    let prelude = match &a.prelude {
+        Some(p) => format!(" {}", render_value(p, np)),
+        None => String::new(),
+    };
+    let AtRuleBlock::Rules(rules) = &a.block else {
+        return format!("{ind}{}{prelude};", a.name);
+    };
+    let dind = format!("{ind}  ");
+    let body = render_decls(rules, &dind, np);
+    format!("{ind}{}{prelude} {{\n{body}\n{ind}}}", a.name)
 }
