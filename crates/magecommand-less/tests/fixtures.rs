@@ -9,10 +9,18 @@
 //!      trailing-newline normalization to the expected `.css`,
 //!   3. byte-diffs the two.
 //!
-//! The runner prints a pass-rate `X/Y`. **Passthrough state:** nearly every
-//! fixture fails now — that is EXPECTED before the Phase-1 evaluator lands. The
-//! ratchet gate + libtest-mimic per-fixture xfail allowlist (plan §5.6) arrive
-//! with the real engine; today the harness only has to build, run, and report.
+//! The runner prints a pass-rate `X/Y` and enforces a **ratchet gate**
+//! (plan §5.6): [`EXPECTED_PASS`] is the checked-in floor — the set of fixtures
+//! that currently produce byte-identical output. Every other in-scope fixture is
+//! an `xfail` (known-red, the milestone-1 engine doesn't cover it yet) and is
+//! reported but does NOT fail the suite, so `cargo test --workspace` stays green.
+//! Two conditions DO fail the suite, keeping the gate honest:
+//!   - a **regression** — a fixture on the floor that stops passing;
+//!   - an **improvement** — an `xfail` that starts passing (raise the floor:
+//!     add it to [`EXPECTED_PASS`]).
+//! The full manifest-driven ratchet (`min_pass_rate` + per-fixture tracking issue
+//! + `tests-config`/`tests-error` denominator, plan §5.6) is DEFERRED; this is its
+//! milestone-1 form over the default-option compile corpus.
 //!
 //! DEFERRED (plan §5.2, see NOTES.md): the option-driven `tests-config/` and
 //! `tests-error/` suites, and — within `tests-unit/` — the `javascript`/`plugin*`
@@ -33,6 +41,38 @@ const TAG: &str = "v4.6.7";
 
 /// `tests-unit` sub-suites deferred to later phases (JS/plugin — plan §5.2).
 const SKIP_SUITES: &[&str] = &["javascript", "plugin", "plugin-module", "plugin-preeval"];
+
+/// The **ratchet floor** (plan §5.6): fixtures whose output is byte-identical to
+/// the vendored less.js golden under the milestone-1 engine. Every in-scope
+/// fixture NOT listed here is a known `xfail` — reported red, but not a hard
+/// failure, so the workspace test suite stays green while the engine grows.
+///
+/// Invariant enforced by the harness: a fixture on this list that regresses, or
+/// an off-list fixture that starts passing, fails the suite. Keep it sorted; when
+/// a phase lands new coverage, ADD the newly-green fixtures here (never remove one
+/// to hide a regression). 20/87 at milestone 1 (Step 4 evaluator).
+const EXPECTED_PASS: &[&str] = &[
+    "at-rules-declarations/at-rules-declarations",
+    "at-rules-empty-block/at-rules-empty-block",
+    "at-rules-empty/at-rules-empty",
+    "charsets/charsets",
+    "color-functions/modern",
+    "color-functions/operations",
+    "css-3/css-3",
+    "css-grid/css-grid",
+    "empty/empty",
+    "impor/impor",
+    "lazy-eval/lazy-eval",
+    "mixin-noparens/mixin-noparens",
+    "no-output/no-output",
+    "operations/operations",
+    "operations/operations-advanced",
+    "plugi/plugi",
+    "rulesets/rulesets",
+    "tailwind/tailwind",
+    "variables-in-at-rules/variables-in-at-rules",
+    "variables/variables",
+];
 
 /// Absolute path of the vendored fixture root (`…/tests/fixtures/less-testdata`).
 fn testdata_root() -> PathBuf {
@@ -217,15 +257,37 @@ fn run_one(less: &Path, root: &Path, passed: &AtomicUsize) -> Result<(), Failed>
         root: dir.to_path_buf(),
     };
 
-    let got = compile(&src, &opts, &resolver)
-        .map_err(|e| Failed::from(format!("compile error: {e}")))?;
-
-    let expected = do_replacements(&expected_raw, dir, root);
-    if strip_trailing_newlines(&got.code) == strip_trailing_newlines(&expected) {
+    // Raw compile+diff outcome — an error or a byte-mismatch both mean "red".
+    let (did_pass, detail) = match compile(&src, &opts, &resolver) {
+        Ok(got) => {
+            let expected = do_replacements(&expected_raw, dir, root);
+            if strip_trailing_newlines(&got.code) == strip_trailing_newlines(&expected) {
+                (true, String::new())
+            } else {
+                (false, first_diff(&expected, &got.code))
+            }
+        }
+        Err(e) => (false, format!("compile error: {e}")),
+    };
+    if did_pass {
         passed.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    } else {
-        Err(Failed::from(first_diff(&expected, &got.code)))
+    }
+
+    // Ratchet gate (plan §5.6): EXPECTED_PASS is the checked-in floor. A known
+    // xfail staying red is fine; a floor fixture regressing or an xfail newly
+    // passing both fail the suite (and must be reconciled by hand).
+    let name = trial_name(less);
+    let expected_pass = EXPECTED_PASS.contains(&name.as_str());
+    match (expected_pass, did_pass) {
+        (true, true) | (false, false) => Ok(()),
+        (true, false) => Err(Failed::from(format!(
+            "RATCHET REGRESSION: `{name}` is on the expected-pass floor but no longer produces \
+             byte-identical output.\n{detail}"
+        ))),
+        (false, true) => Err(Failed::from(format!(
+            "RATCHET IMPROVEMENT: `{name}` now passes — add it to EXPECTED_PASS in \
+             tests/fixtures.rs to raise the floor (never leave an unrecorded green)."
+        ))),
     }
 }
 
@@ -261,13 +323,21 @@ fn main() {
     let total = fixtures.len();
     let passed = Arc::new(AtomicUsize::new(0));
 
+    let floor = EXPECTED_PASS.len();
     let trials: Vec<Trial> = fixtures
         .into_iter()
         .map(|less| {
             let name = trial_name(&less);
+            // `xfail` fixtures are labelled so the milestone-1 red set is visible
+            // in the libtest output rather than masquerading as a plain pass.
+            let kind = if EXPECTED_PASS.contains(&name.as_str()) {
+                "compile-diff"
+            } else {
+                "xfail"
+            };
             let passed = Arc::clone(&passed);
             let root = root.clone();
-            Trial::test(name, move || run_one(&less, &root, &passed)).with_kind("compile-diff")
+            Trial::test(name, move || run_one(&less, &root, &passed)).with_kind(kind)
         })
         .collect();
 
@@ -275,7 +345,9 @@ fn main() {
 
     let p = passed.load(Ordering::Relaxed);
     println!(
-        "\nless.js {TAG} default-option compile fixtures (Step 3, parser + plain-CSS genCSS): {p}/{total} passing"
+        "\nless.js {TAG} default-option compile corpus (milestone 1 — Step 4 evaluator): \
+         {p}/{total} passing (ratchet floor {floor}; {} xfail).",
+        total - floor
     );
 
     conclusion.exit();

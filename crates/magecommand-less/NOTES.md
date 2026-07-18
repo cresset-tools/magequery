@@ -236,17 +236,194 @@ These are why `nesting` (needs maps), `scope` (mixin scope-injection), `extend*`
 `import/*`, `media`/`container` (bubbling), and the color/string function
 fixtures stay red.
 
-## Not yet started (later steps / phases)
+## Step 5 — CONSOLIDATE + ratchet gate (done, this is milestone 1)
 
-- `README` pinning the §0 success definition verbatim (Gate T0 200/200 + Gate T2
-  zero SCD residuals) — plan §0 asks for this; not part of scaffold.
-- Phase 0 remainder: generate `manifest.json`, extend the harness with the 7-kind
-  error renderer + CI ratchet over `tests-config/`/`tests-error/`; **the §G2
-  compatibility-proof blocker task**.
-- `error::LessError` `Display` is provisional (scaffold `<Kind>: <message>` form);
-  the byte-exact `<Type>Error:` prefix + 3-line source excerpt land in the error
-  phase, gated by the 74 error fixtures.
-- `ast::Node` covers only the passthrough leaf + root; the remaining ~42 `tree/`
-  nodes land as the parser is built (Phase 1+).
-- `functions/*`, `data/*` (148 colors, unit tables, mime table), and `css` genCSS
-  are stubs.
+Froze the milestone-1 state, made the whole workspace test suite green, and
+recorded the honest pass-rate + the deferred roadmap. No engine features added;
+this step is about the gate and the bookkeeping.
+
+### Honest pass-rate: **20/87** default-option compile fixtures
+
+The denominator is the vendored less.js **`v4.6.7`** `tests-unit/` default-option
+compile corpus (every `.less` with a sibling `.css`, minus the deferred
+`javascript`/`plugin*` sub-suites — plan §5.2). The `tests-config/` option-driven
+compile fixtures and the 74 `tests-error/` fixtures are **not yet in the
+denominator** (they need the `manifest.json` + 7-kind error renderer, DEFERRED
+below), so this is a subset of the plan's ultimate 200/200 (Gate T0).
+
+Per-category breakdown (▲ = fully green, △ = partial, ○ = all red / deferred):
+
+```
+▲ variables            variables, variables-in-at-rules, lazy-eval            (variable-advanced ○)
+▲ operations/math      operations, operations-advanced, css-grid              (calc ○)
+▲ at-rules (subset)    at-rules-declarations, at-rules-empty, -empty-block, charsets
+▲ css passthrough      css-3, tailwind, empty, no-output
+△ color-functions      modern, operations green; alpha/basic/comprehensive/formats/
+                       modern-syntax/rgba red (full color fn library = Phase 3)
+▲ basic mixin/ruleset  mixin-noparens, rulesets
+▲ parse-only           impor, plugi  (false-positive-JS, stay in per §5.2)
+
+○ mixins (Phase 2)     mixins, mixins-advanced, maps, mixins-closure, -guards,
+                       -guards-default-func, -important, -interpolated, -named-args,
+                       -nested, -pattern, namespace-targeted, css-guards
+○ functions (Phase 3)  functions, functions-each, extract-and-length, ie-filters,
+                       strings, css-escapes  (+ the 6 red color-functions above)
+○ import (Phase 4)     import, import-inline, -interpolation, -module, -once,
+                       -reference, -reference-issues, -remote
+○ extend (Phase 4)     extend, extend-clearfix(×2), extend-chaining, -exact, -media,
+                       -nest, -selector
+○ dr/merge/maps (P4)   detached-rulesets, merge, mixins/maps, property-accessors
+○ at-rule bubbling(P4) media, container, layer, directives-bubbling, at-rules,
+                       at-rules-targeted, at-rules-keyword-comments
+○ nesting/sel edges    nesting, selectors, scope, parser-slashed-combinator,
+                       whitespace, permissive-parse, starting-style, urls, comments,
+                       comments2, property-targeted
+○ interpolation edges  parse-interpolation, parser-property-interp, property-name-interp
+```
+
+### The ratchet gate (`tests/fixtures.rs`, plan §5.6 — milestone-1 form)
+
+The harness now enforces a **checked-in ratchet floor** (`EXPECTED_PASS`, the 20
+byte-identical fixtures). Every off-floor in-scope fixture is a labelled `[xfail]`
+that is reported red but does **not** fail the suite, so `cargo test --workspace`
+is **green** while the engine is incomplete. Two conditions DO fail the suite,
+keeping it honest:
+- **regression** — a floor fixture stops matching (`RATCHET REGRESSION: …`);
+- **improvement** — an `xfail` starts matching (`RATCHET IMPROVEMENT: … add it to
+  EXPECTED_PASS`) — so new coverage can never land unrecorded.
+
+Both paths were verified (temporarily promoting `calc/calc` onto the floor trips
+`RATCHET REGRESSION`). The reporter still prints `20/87 passing (ratchet floor 20;
+67 xfail)`. **When a phase lands, add its newly-green fixtures to `EXPECTED_PASS`.**
+
+### Gate status (both green)
+
+```
+export CARGO_TARGET_DIR="$HOME/.cache/magecommand-gate-target"
+cargo build --workspace          # GREEN (1 pre-existing warning in magequery-core)
+cargo test  --workspace          # GREEN — every crate binary runs:
+   magecommand_engine 70 · magecommand_less lib 31 · fixtures 87 (20+67 xfail)
+   · magecommand_php 41 · magequery_core 49 · magequery_lsp 17 · e2e 1 · doc-tests
+```
+
+The crate stays **additive** — no existing crate/test was touched. Before Step 5
+the fixtures binary's `conclusion.exit()` hard-failed (67 red), and cargo's
+fail-fast then skipped every *later* crate's tests; the ratchet fixes that.
+
+## What milestone 1 implemented (Steps 1–5 consolidated)
+
+- **Public API (§9.5):** `parse`/`eval`/`compile`; `LessOptions` (+ `MathMode`,
+  `RewriteUrls`, `CompatProfile`, and the `::default()`==less-js /
+  `::magento_production()` / `::magento_developer()` constructors); the
+  `ImportResolver` trait (+ default no-op `magento_import`, §7.1); `Css`,
+  `Warning`, `LessError` + the 7 `ErrorKind`s; import-boundary types.
+- **Lexer (`lex`):** `normalize_source` (BOM strip + CRLF→LF, §H2), `LineMap`
+  (byte→1-based line/col, §5.5), a char-boundary-safe `Cursor` scanner the parser
+  drives directly, plus a coarse `tokenize()`.
+- **Parser (`parser`):** recursive descent with cheap backtracking mirroring
+  less.js's `primary`/`declaration`/`ruleset`/`atrule`/`element`/`addition`/
+  `operand` order; the **whitespace/sign ambiguity** (`@a -1` list vs `@a - 1`
+  subtraction vs `@a-1` ident, §2.4); variable-decl `!important`; `[…]`/`U+…`
+  value tokens; `//`-in-`url()`.
+- **Evaluator (`eval`, §4):** one `Ctx` (innermost-first frames + math/parens
+  state + `importantScope`); **lazy variable resolution** (last-wins, forward
+  refs, child-scope override, `@@`, `!important` bubbling, recursion guard);
+  **`@{}` interpolation** (selectors, property names, quoted strings, at-rule
+  preludes); **operations** (dimension `+ - * /` with unit coercion/conversion,
+  per-channel color math + dim↔color coercion, unary negation, the `isMathOn`
+  gate in all 3 modes, deferred ops emitted literally, `calc()` interior-math
+  suppression); **nested-rule flattening + `&`** (string-level JoinSelector);
+  **at-rules** (`@media`/`@supports` containers, `@font-face`/`@page` decl bodies,
+  empty-block pruning, `@charset`/`@import`/`@namespace` output hoisting); a
+  **minimal function set** (`rgb`/`rgba`/`hsl`/`hsla`, `unit`, `floor`/`ceil`/
+  `round`/`abs`/`sqrt`/`percentage`/`min`/`max`) + the **unknown-function
+  passthrough** (§2.7); **basic mixin calls** (no guards/patterns/overloading).
+- **Value leaves (§9.2/§9.3):** `Dimension` (open-multiset `Unit` + `backupUnit`,
+  f64 + `numPrecision=8` `fround`), `Color` (RGBA f64 + original literal), unit
+  conversion tables + **148 named colors** generated-from-source.
+- **genCSS (`css`):** less.js expanded-output spacing exactly (2-space indent,
+  combinator spacing §4.7, `Value`/`Expression` joins, `fround` formatting).
+- **Harness (`tests/fixtures.rs`):** `libtest-mimic`, `doReplacements` (§5.5),
+  `FsResolver` (the FS `ImportResolver`), and the Step-5 ratchet gate above.
+
+## DEFERRED roadmap (what's left, cross-referenced to the plan)
+
+Nothing below is started; each is gated by its own fixture slice.
+
+- **Phase 2 — mixins + guards + pattern-matching** (plan §2.5/§2.6, Phase 2):
+  parametric mixins (defaults, `;`-arg-separator, named args, `@arguments`, `...`
+  variadic), overloading, **pattern matching** (literal/keyword params by
+  evaluated `toCSS` equality, `@_`, "No matching definition"), **guards** (`and`/
+  comma-OR/`not`, comparisons `> >= = =< <`, the type-check fns `is*`/`isunit`/
+  `isdefined`, **`default()` two-subpass + `Ambiguous use of default()`**), CSS
+  guards + `& when`, **namespaces** (`#ns.m()`, `#ns > .m()`), `!important`
+  propagation via `.m() !important`, recursion + depth cap, scope-injection.
+  Unlocks: `mixins*`, `css-guards`, `namespace-targeted`.
+- **Phase 3 — full function library** (plan §2.7, Phase 3): the complete registry
+  — string (`e`/`escape`/`%`/`replace`), list (`length`/`extract`/`range`/
+  `each`), math (`sin`…`atan`), number (`convert`/`pi`/`mod`/`pow` + **min/max
+  dual behavior**, §4.8), all `is*`/`get-unit`, color def (`argb`/`hsv`/
+  `color()`), color channels, color ops (`saturate`/`lighten`/`mix`/`contrast`/…),
+  color blending (`multiply`/`screen`/…), `data-uri` (mime table + IE-32KB
+  threshold) + `image-size` **real file reads** (§C-assets), `svg-gradient`
+  (URL-encoding parity §3-G); `~"…"`/`e()`/`%()` escaping; **IE-filter/`progid`
+  output** (§2.17). Unlocks: `functions*`, `extract-and-length`, the 6 red
+  `color-functions/*`, `ie-filters`, `strings`, `css-escapes`.
+- **Phase 4 — imports, extend, detached rulesets, merge, at-rule bubbling, maps**
+  (plan §2.8–§2.13, Phase 4):
+  - **`@import` two-stage + all options** (§2.9): `once`/`reference`/`optional`/
+    `inline`/`less`/`css`/**`layer`**, `strictImports`, interpolated paths, CSS
+    re-emit with path rewrite. Unlocks `import/*`.
+  - **`:extend` full** (§2.8): finder → chaining fixpoint → replace, the `all`
+    keyword, `@media` scoping incl. `(reference)` media stacks. Unlocks `extend*`.
+  - **detached rulesets** (§2.11), **merge `+:`/`+_:`** (§2.10), **maps/lookups**
+    `@p[key]`/`#ns[k]` (§2.12). Unlocks `detached-rulesets`, `merge`, `mixins/maps`,
+    `property-accessors`.
+  - **all-rule bubbling & output ordering** (§2.13): `@media`/`@supports`/
+    `@container`/`@layer`/`@namespace`/`@property`/`@page`/`@charset`. Unlocks
+    `media`, `container`, `layer`, `directives-bubbling`, `at-rules*`.
+  - the **byte-exact `compress` serializer** (§C4/§9.4 — distinct from the
+    expanded genCSS, never delegated to lightningcss).
+  - the residual **nesting/selector/interpolation edge cases** (`nesting`,
+    `selectors`, `scope`, `whitespace`, `permissive-parse`, `parse-interpolation`,
+    the `*-interp`/`*-targeted` fixtures, `comments*`, `urls`, `calc`,
+    `variable-advanced`, `starting-style`, `parser-slashed-combinator`).
+  - **This slice is the plan's 200/200 (Gate T0).**
+- **Deferred fixture sub-suites + the `manifest.json`** (plan §5.2/§5.4/§5.6):
+  the Node-toolchain `manifest.json` generation step (folds in per-suite
+  cosmiconfig options), after which the **`tests-config/*`** option-driven compile
+  fixtures (`math*`, `units/*`, `globalVars`/`modifyVars`, `url-args`, `rootpath-*`,
+  `rewrite-urls-*`, `namespacing`, `strict-imports`, `include-path*`,
+  `process-imports`, `compression`/`compress`/`at-rules-compressed*`, `3rd-party`)
+  and the **74 `tests-error/*`** byte-exact error fixtures (incl. the in-scope
+  disabled-JS *error* fixtures, §5.2) join the denominator toward 200/200. These
+  need the **7-kind error renderer + 3-line source excerpt** (§5.5;
+  `LessError::Display` is provisional today) and the **full §5.6 ratchet**
+  (`min_pass_rate` + per-fixture tracking issue + `less-compat-report.json` + the
+  "out-set == the classified 36" meta-test). The Step-5 `EXPECTED_PASS` floor is
+  this ratchet's milestone-1 form.
+- **The §G2 Phase-0 compatibility-proof blocker** (plan §6/§11): the written
+  finding that no in-scope 4.6.7 fixture depends on a less.js-4.0 breaking change
+  absent from less.php-5.5's 3.13.1 feature level. Not yet produced.
+- **less.php compat profiles** (plan §1/§3): the `magento-2.4.8` profile
+  (parens-division, `compress=false`, `relativeUrls=false`, JS off, `calc()`
+  preserved) and the legacy `magento-2.4.7` profile (`math=always` + `calc()`
+  interior math), selected from the target's `composer.lock`; plus the two
+  **diagnostic-only** shims — the PHP-float shim (§3-C, number last-digit +
+  `round()` half-away-from-zero) and the PHP-encoding shim (§3-G, `rawurlencode`
+  set for `svg-gradient`/`data-uri`/`escape`/`%`). `CompatProfile` exists in the
+  API; the behavior switches are not wired.
+- **Minify wiring** (plan §9.7): the `lightningcss` `.min.css` bridge
+  (`feature = "minify"`) compiles but is a stub — not wired into any output path,
+  and never part of a diff gate. The sibling `oxc_minifier` JS crate is future.
+- **Phase 5 — Magento corpus + wire-in** (plan §7/§10): the `//@magento_import`
+  directive in `magento_mode` (§7.1), `Vendor_Module::path` resolution (§7.2),
+  load-order splice (§7.3), the `(reference)`×`extend-all`×detached-ruleset triad
+  with the **G-ref/G-resp/G-detached** gates (§7.4), the Tier-1 less.php
+  differential (§7.6, diagnostic) + the **Tier-2 SCD semantic diff** (§7.7, the
+  contract / Gate T2), and integration into `magecommand-engine static deploy`.
+- **README** pinning the §0 success definition verbatim (Gate T0 200/200 + Gate
+  T2 zero SCD residuals) — plan §0 asks for this; not yet written.
+- **AST completeness:** the parse-side node set is in place; a handful of the 44
+  `tree/` nodes are still parsed structurally rather than fully evaluated (they
+  land with the phase that needs them, above).
