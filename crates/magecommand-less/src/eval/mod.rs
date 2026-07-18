@@ -68,6 +68,10 @@ pub struct Ctx<'a> {
     /// Spans of ruleset-as-mixin bodies currently on the eval stack — the on-stack
     /// identity recursion guard (plan §2.5; MixinDefinitions are exempt).
     active_rulesets: Vec<Span>,
+    /// Captured-frame side table for scope-injected closures (plan §4.3): a
+    /// `Node::Closure`'s `scope` field indexes this. Kept off `Node` so the AST
+    /// stays `Send + Sync`; frames are cheap `Rc` clones frozen at injection.
+    closures: Vec<Vec<Frame>>,
     warnings: Vec<Warning>,
 }
 
@@ -79,6 +83,11 @@ struct Candidate {
     guard: Option<Node>,
     rules: Vec<Node>,
     def_scope: Vec<Frame>,
+    /// Guards of the namespace segments traversed to reach this candidate
+    /// (`#ns when (…) > .m()`). less.js `calcDefGroup` AND-evaluates every
+    /// `namespace.matchCondition(null)` with the mixin's own guard (§2.6), so a
+    /// false namespace guard excludes the mixin even though its args match.
+    path_guards: Vec<Node>,
     /// `Some(span)` for a ruleset-as-mixin (subject to the recursion guard);
     /// `None` for a `MixinDefinition` (exempt).
     ruleset_span: Option<Span>,
@@ -141,6 +150,7 @@ pub fn eval(
         mixin_depth: 0,
         default_value: None,
         active_rulesets: Vec::new(),
+        closures: Vec::new(),
         warnings: Vec::new(),
     };
 
@@ -806,7 +816,7 @@ impl<'a> Ctx<'a> {
         let mut chosen: Vec<Candidate> = Vec::new();
         for k in 0..frames.len() {
             let def_scope: Vec<Frame> = frames[k..].to_vec();
-            let mut found = find_candidates(&frames[k].borrow(), &path, &def_scope);
+            let mut found = find_candidates(&frames[k].borrow(), &path, &def_scope, &self.closures, &[]);
             // Drop ruleset candidates already on the eval stack (recursion guard;
             // MixinDefinitions are exempt — their `ruleset_span` is `None`).
             found.retain(|c| match c.ruleset_span {
@@ -965,15 +975,30 @@ impl<'a> Ctx<'a> {
     /// under `default()==false` then `==true`. Returns defNone(0)/defTrue(1)/
     /// defFalse(2), or -1 when the guard fails either way (not a candidate).
     fn calc_def_group(&mut self, cand: &Candidate, args: &[EvArg]) -> Result<i32, LessError> {
-        let Some(guard) = &cand.guard else {
-            return Ok(0); // no guard → always matches (defNone)
-        };
-        let raw = guard_text(guard);
+        if cand.guard.is_none() && cand.path_guards.is_empty() {
+            return Ok(0); // no guard anywhere → always matches (defNone)
+        }
+        // less.js `calcDefGroup`: AND every traversed namespace's guard (with the
+        // `null`-arg namespace binding) with the mixin's own guard, per subpass.
+        let mixin_guard = cand.guard.as_ref().map(guard_text);
+        let path_guards: Vec<String> = cand.path_guards.iter().map(guard_text).collect();
         let param_frame = self.bind_params(cand, args)?;
         let mut cond = [true, true];
         for (f, slot) in cond.iter_mut().enumerate() {
             self.default_value = Some(f == 1);
-            *slot = self.with_mixin_frames(cand, &param_frame, |s| s.eval_guard_str(&raw))?;
+            let mut ok = true;
+            for pg in &path_guards {
+                if !self.with_mixin_frames(cand, &param_frame, |s| s.eval_guard_str(pg))? {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                if let Some(g) = &mixin_guard {
+                    ok = self.with_mixin_frames(cand, &param_frame, |s| s.eval_guard_str(g))?;
+                }
+            }
+            *slot = ok;
         }
         self.default_value = None;
         if cond[0] || cond[1] {
@@ -1062,7 +1087,17 @@ impl<'a> Ctx<'a> {
                         span: Default::default(),
                     });
                 }
-                Node::MixinDefinition(_) | Node::Ruleset(_) => out.push(r.clone()),
+                Node::MixinDefinition(_) => {
+                    // Freeze the mixin's current eval frames (its bound params +
+                    // definition scope) so a later call on this injected inner
+                    // definition resolves the enclosing mixin's parameters
+                    // (closure over params, §4.3). The frames are stashed in the
+                    // side table; the node carries only the index.
+                    let scope = self.closures.len() as u64;
+                    self.closures.push(self.frames.clone());
+                    out.push(Node::Closure { inner: Box::new(r.clone()), scope });
+                }
+                Node::Ruleset(_) => out.push(r.clone()),
                 _ => {}
             }
         }
@@ -1120,10 +1155,14 @@ impl<'a> Ctx<'a> {
                         Node::Expression(rest.clone())
                     };
                     frame.push(var_decl(key, expr));
+                    // `@arguments` includes the variadic-captured tail: grow the
+                    // bound-value list past the param count so overflow args
+                    // aren't dropped (less.js `evaldArguments[j] = …`, §2.5).
                     for (k, v) in pos.iter().enumerate().skip(arg_index) {
-                        if k < evald.len() {
-                            evald[k] = Some(v.clone());
+                        if k >= evald.len() {
+                            evald.resize(k + 1, None);
                         }
+                        evald[k] = Some(v.clone());
                     }
                 } else if arg_index < pos.len() {
                     let v = pos[arg_index].clone();
@@ -1219,40 +1258,64 @@ impl<'a> Ctx<'a> {
         self.eval_guard_str(&raw)
     }
 
-    /// Evaluate a `when (...)` guard string: top-level commas = OR of `and`-lists.
+    /// Evaluate a `when (...)` guard string. The boolean grammar mirrors less.js
+    /// exactly (`conditions`/`condition`/`conditionAnd`/`negatedCondition`/
+    /// `parenthesisCondition`/`atomicCondition`, §2.6): top-level commas OR whole
+    /// conditions; `or` binds looser than `and`; `not` and `( … )` nest to any
+    /// depth. Precedence: `,`/`or` < `and` < `not`/parens/atomic.
     fn eval_guard_str(&mut self, raw: &str) -> Result<bool, LessError> {
         let s = raw.trim();
         if s.is_empty() {
             return Ok(true);
         }
+        // The outermost guard list: comma-separated conditions are OR'd.
         for clause in split_top(s, ',') {
-            if self.eval_guard_and(&clause)? {
+            if self.eval_guard_or(&clause)? {
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
-    fn eval_guard_and(&mut self, clause: &str) -> Result<bool, LessError> {
-        for part in split_word(clause, "and") {
-            if !self.eval_guard_atom(part.trim())? {
+    /// `or`-separated sub-conditions (OR — less.js `condition`'s `or` keyword).
+    fn eval_guard_or(&mut self, s: &str) -> Result<bool, LessError> {
+        for part in split_word(s, "or") {
+            if self.eval_guard_and(&part)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// `and`-separated terms (AND — less.js `conditionAnd`).
+    fn eval_guard_and(&mut self, s: &str) -> Result<bool, LessError> {
+        for part in split_word(s, "and") {
+            if !self.eval_guard_term(part.trim())? {
                 return Ok(false);
             }
         }
         Ok(true)
     }
 
-    /// One guard atom: optional `not`, then a parenthesized condition.
-    fn eval_guard_atom(&mut self, atom: &str) -> Result<bool, LessError> {
-        let mut a = atom.trim();
-        let mut negate = false;
+    /// One term: a `not <term>` negation, a parenthesized nested condition, or an
+    /// atomic comparison / truthy value (less.js `negatedCondition` →
+    /// `parenthesisCondition` → `atomicCondition`). Recurses so nested `not(…)`
+    /// and arbitrarily deep parens evaluate correctly.
+    fn eval_guard_term(&mut self, atom: &str) -> Result<bool, LessError> {
+        let a = atom.trim();
         if let Some(rest) = strip_not(a) {
-            negate = true;
-            a = rest.trim();
+            return Ok(!self.eval_guard_term(rest.trim())?);
         }
+        // A fully-enclosing `( … )` wraps a nested condition (not a value): strip
+        // it and recurse into the condition grammar. `strip_outer_parens` returns
+        // the inner only when the first `(` balances the last `)`.
         let inner = strip_outer_parens(a);
-        let result = self.eval_condition(inner)?;
-        Ok(negate ^ result)
+        if inner.len() != a.len() {
+            return self.eval_guard_or(inner);
+        }
+        // Atomic: a comparison or a bare truthy value (`default()`, a type-check
+        // function, a variable that resolves to the keyword `true`).
+        self.eval_condition(a)
     }
 
     /// A condition inside a guard: `L op R`, or a bare truthy value.
@@ -1443,13 +1506,56 @@ fn extract_mixin_tokens(s: &str) -> Vec<String> {
     out
 }
 
+/// Whether a mixin/namespace accepts a **zero-argument** call — less.js
+/// `matchArgs(null)`. A namespace segment on a call path (`#ns > .m()`) is only
+/// traversed if it does (§2.6), and intermediate namespaces receive no args.
+fn accepts_zero_args(params: &[MixinParam]) -> bool {
+    params
+        .iter()
+        .all(|p| p.variadic || (p.name.is_some() && p.default.is_some()))
+}
+
 /// Collect mixin candidates matching `path` in a rule list, recursing into
 /// namespaces (less.js `Ruleset.find`). Each recursion prepends the namespace's
-/// body as a definition-scope frame (closure capture, plan §4.3).
-fn find_candidates(rules: &[Node], path: &[String], def_scope: &[Frame]) -> Vec<Candidate> {
+/// body as a definition-scope frame (closure capture, plan §4.3). `path_guards`
+/// accumulates the guards of the namespace segments already traversed, so a
+/// leaf candidate carries every `#ns when (…)` guard on its path (§2.6).
+fn find_candidates(
+    rules: &[Node],
+    path: &[String],
+    def_scope: &[Frame],
+    closures: &[Vec<Frame>],
+    path_guards: &[Node],
+) -> Vec<Candidate> {
     let mut out = Vec::new();
     for r in rules {
         match r {
+            // A scope-injected closure: resolve against the frames frozen at
+            // injection (the enclosing mixin's bound params), not the caller's.
+            Node::Closure { inner, scope } => {
+                if let Node::MixinDefinition(def) = inner.as_ref() {
+                    let captured = &closures[*scope as usize];
+                    let names = extract_names_dropamp(&def.name);
+                    if let Some(m) = match_prefix(path, &names) {
+                        if m == path.len() {
+                            out.push(Candidate {
+                                name: def.name.clone(),
+                                params: def.params.clone(),
+                                guard: def.guard.as_deref().cloned(),
+                                rules: def.rules.clone(),
+                                def_scope: captured.to_vec(),
+                                path_guards: path_guards.to_vec(),
+                                ruleset_span: None,
+                            });
+                        } else if accepts_zero_args(&def.params) {
+                            let mut inner_scope = vec![frame_of(def.rules.clone())];
+                            inner_scope.extend(captured.iter().cloned());
+                            let child = push_guard(path_guards, def.guard.as_deref());
+                            out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child));
+                        }
+                    }
+                }
+            }
             Node::MixinDefinition(def) => {
                 let names = extract_names_dropamp(&def.name);
                 if let Some(m) = match_prefix(path, &names) {
@@ -1460,12 +1566,17 @@ fn find_candidates(rules: &[Node], path: &[String], def_scope: &[Frame]) -> Vec<
                             guard: def.guard.as_deref().cloned(),
                             rules: def.rules.clone(),
                             def_scope: def_scope.to_vec(),
+                            path_guards: path_guards.to_vec(),
                             ruleset_span: None,
                         });
-                    } else {
+                    } else if accepts_zero_args(&def.params) {
+                        // A parametric namespace is only entered with zero args
+                        // (its args aren't the call's args); its guard joins the
+                        // path guards.
                         let mut inner_scope = vec![frame_of(def.rules.clone())];
                         inner_scope.extend(def_scope.iter().cloned());
-                        out.extend(find_candidates(&def.rules, &path[m..], &inner_scope));
+                        let child = push_guard(path_guards, def.guard.as_deref());
+                        out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child));
                     }
                 }
             }
@@ -1484,12 +1595,16 @@ fn find_candidates(rules: &[Node], path: &[String], def_scope: &[Frame]) -> Vec<
                                 guard: sel.guard.as_deref().cloned(),
                                 rules: rs.rules.clone(),
                                 def_scope: def_scope.to_vec(),
+                                path_guards: path_guards.to_vec(),
                                 ruleset_span: Some(rs.span),
                             });
                         } else {
+                            // A ruleset namespace has no params (always zero-arg);
+                            // its selector guard joins the path guards.
                             let mut inner_scope = vec![frame_of(rs.rules.clone())];
                             inner_scope.extend(def_scope.iter().cloned());
-                            out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope));
+                            let child = push_guard(path_guards, sel.guard.as_deref());
+                            out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope, closures, &child));
                         }
                         break; // one selector per ruleset matches the prefix
                     }
@@ -1499,6 +1614,15 @@ fn find_candidates(rules: &[Node], path: &[String], def_scope: &[Frame]) -> Vec<
         }
     }
     out
+}
+
+/// Append an optional namespace guard to the accumulated path-guard list.
+fn push_guard(base: &[Node], guard: Option<&Node>) -> Vec<Node> {
+    let mut v = base.to_vec();
+    if let Some(g) = guard {
+        v.push(g.clone());
+    }
+    v
 }
 
 /// Normalize a mixin-definition name (`.m`, `#ns`) into lookup tokens.
@@ -2111,6 +2235,50 @@ mod tests {
         // A called mixin injects its top-level variable into the caller (§2.5).
         let out = css(".m() { @c: red; }\n.x { color: @c; .m(); }");
         assert_eq!(out, ".x {\n  color: red;\n}");
+    }
+
+    #[test]
+    fn mixin_closure_captures_bound_params() {
+        // An inner mixin injected by a parametric outer mixin must freeze the
+        // outer's bound param (closure over params, §4.3).
+        let out = css(".m(@x) { .inner() { val: @x; } }\n.a { .m(red); .inner(); }");
+        assert_eq!(out, ".a {\n  val: red;\n}");
+        // Two injections both emit, each with its own frozen binding (last-wins is
+        // NOT less.js's behavior — both closures are in scope).
+        let out2 = css(".m(@x) { .inner() { val: @x; } }\n.a { .m(red); .m(green); .inner(); }");
+        assert_eq!(out2, ".a {\n  val: red;\n  val: green;\n}");
+    }
+
+    #[test]
+    fn mixin_arguments_includes_variadic_tail() {
+        // `@arguments` is the full flattened list, incl. variadic-captured args.
+        let out = css(".m(@a, @rest...) { a: @a; r: @rest; args: @arguments; }\n.z { .m(1, 2, 3); }");
+        assert_eq!(out, ".z {\n  a: 1;\n  r: 2 3;\n  args: 1 2 3;\n}");
+    }
+
+    #[test]
+    fn guard_nested_not_and_parens() {
+        // Deeply nested `not(…)` + parens evaluate as a recursive boolean grammar.
+        let out = css(
+            ".t(@v) when ((((@v)))) { a: 1; }\n\
+             .t(@v) when not(((not(@v)))) { b: 2; }\n\
+             .x { .t(true); }",
+        );
+        assert_eq!(out, ".x {\n  a: 1;\n  b: 2;\n}");
+    }
+
+    #[test]
+    fn guarded_namespace_path() {
+        // A false guard on a traversed namespace excludes the inner mixin, and a
+        // parametric namespace is only entered with zero args (§2.6).
+        let out = css(
+            "@g: 1;\n\
+             #ns when (@g > 0) { .m() { ok: yes; } }\n\
+             #ns when (@g < 0) { .m() { no: guard; } }\n\
+             #ns(@x) { .m() { no: arity; } }\n\
+             .x { #ns > .m(); }",
+        );
+        assert_eq!(out, ".x {\n  ok: yes;\n}");
     }
 
     #[test]

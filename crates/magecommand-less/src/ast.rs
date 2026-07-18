@@ -192,6 +192,13 @@ pub enum Node {
     MixinDefinition(MixinDefinition),
     /// A mixin call.
     MixinCall(MixinCall),
+    /// An eval-only closure produced by scope-injection (never parsed): a mixin
+    /// definition frozen with the evaluation frames live at its injection site,
+    /// so a later call resolves the enclosing mixin's *bound parameters* (closure
+    /// over params, plan §4.3). `scope` indexes the evaluator's captured-frame
+    /// side table (the frames themselves can't live in `Node`, which stays
+    /// `Send + Sync` for `Arc`-sharing across compile jobs).
+    Closure { inner: Box<Node>, scope: u64 },
     /// An `@import` (plan §2.9). `options`/`features` retained as source text.
     Import { path: Box<Node>, options: Vec<String>, features: Option<Box<Node>>, span: Span },
     /// A comment. `line` = a `//` comment (stripped from output; plan §2.3).
@@ -251,6 +258,7 @@ impl Node {
             Node::Comment { line, .. } => !line,
             Node::VariableDecl { .. }
             | Node::MixinDefinition(_)
+            | Node::Closure { .. }
             | Node::DetachedRuleset { .. } => false,
             // A bare mixin call yields nothing until evaluated; the plain-CSS
             // path never contains one, so treat it as invisible for pruning.

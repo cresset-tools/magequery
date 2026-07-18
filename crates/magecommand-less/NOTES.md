@@ -302,7 +302,7 @@ Both paths were verified (temporarily promoting `calc/calc` onto the floor trips
 export CARGO_TARGET_DIR="$HOME/.cache/magecommand-gate-target"
 cargo build --workspace          # GREEN (1 pre-existing warning in magequery-core)
 cargo test  --workspace          # GREEN — every crate binary runs:
-   magecommand_engine 70 · magecommand_less lib 31 · fixtures 87 (20+67 xfail)
+   magecommand_engine 70 · magecommand_less lib 42 · fixtures 87 (31+56 xfail)
    · magecommand_php 41 · magequery_core 49 · magequery_lsp 17 · e2e 1 · doc-tests
 ```
 
@@ -316,10 +316,37 @@ Extended the evaluator (plan §2.5/§2.6, §4.4) to the full parametric-mixin +
 guard surface. `cargo build --workspace` + `cargo test --workspace` stay green;
 the crate is additive.
 
-- **Pass-rate delta: 20/87 → 30/87.** Ten newly-green fixtures (added to
+- **Pass-rate delta: 20/87 → 30/87 → 31/87.** Ten newly-green fixtures (added to
   `EXPECTED_PASS`): `mixins/mixins`, `mixins/mixins-advanced`, `mixins-closure`,
   `mixins-nested`, `mixins-named-args`, `mixins-pattern`, `mixins-important`,
-  `css-guards`, `scope`, `mixins-guards-default-func`. Lib tests 31 → 38.
+  `css-guards`, `scope`, `mixins-guards-default-func`. Lib tests 31 → 38. The
+  follow-up fixes below add `mixins-guards` (lib tests 38 → 42).
+
+- **Closure param capture + `@arguments` variadic + recursive guard grammar +
+  guarded namespaces (follow-up).** Four faithfulness fixes (verified against
+  less.js v4.6.7):
+  - **Bound-param closures:** an inner mixin definition injected into the caller
+    by a parametric outer mixin now freezes the outer's evaluation frames (its
+    bound params). `collect_injected` wraps each injected `MixinDefinition` in a
+    new eval-only `Node::Closure { inner, scope }` whose `scope` indexes a
+    captured-frame side table on `Ctx` (`closures: Vec<Vec<Frame>>`); the frames
+    can't live on `Node` (it must stay `Send + Sync` for `Arc`-sharing).
+    `find_candidates` resolves a `Closure` against its frozen frames. Two
+    injections of the same inner name both stay in scope and both emit (matches
+    less.js — NOT last-wins).
+  - **`@arguments` variadic tail:** `bind_params` grew the `@arguments`
+    accumulator past the param count so variadic-overflow args aren't dropped
+    (`.m(@a, @rest...)` with `.m(1,2,3)` → `@arguments == 1 2 3`).
+  - **Recursive guard grammar:** `eval_guard_str` is now a proper recursive
+    boolean parser — `,`/`or` (OR) < `and` < `not`/`( … )`/atomic — so nested
+    `not(…)` and arbitrarily deep parens (the `parenthesisNot`/`orderOfEvaluation`
+    cases) evaluate correctly. Previously it stripped only one `not` + one paren
+    layer.
+  - **Guarded namespaces on a call path:** `find_candidates` gates a namespace
+    segment by `matchArgs(null)` (`accepts_zero_args`) so a parametric namespace
+    is only traversed with zero args, and threads each traversed namespace's guard
+    into `Candidate.path_guards`; `calc_def_group` AND-evaluates them with the
+    mixin's own guard (less.js `calcDefGroup`).
 
 - **Frame model change:** `Frame` is now `Rc<RefCell<Vec<Node>>>` so a mixin call
   can **inject** its returned variables/mixins/rulesets back into the caller's
@@ -360,15 +387,11 @@ the crate is additive.
 
 ### DEFERRED from Phase 2 (needs later-phase subsystems)
 
-- `mixins/maps`, `namespace-targeted` — **property accessors / maps** `@p[key]`,
-  `#ns[prop]`, `$@var` property interpolation (plan §2.12, Phase 4).
+- `mixins/maps`, `nesting`, `namespace-targeted` — **property accessors / maps**
+  `@p[key]`, `#ns[prop]`, `$@var` property interpolation (plan §2.12, Phase 4).
 - `mixins-interpolated` — **interpolated mixin names** (`.@{a1}()` matching a
   ruleset whose selector is `.@{a1}`) — interpolation-as-lookup-key.
-- `mixins-guards` (14 residual lines) — two advanced sub-features: **mixin
-  definitions injected as closures** (an injected `.inner-locked-mixin` must carry
-  the calling mixin's bound params as frozen frames — needs frame-carrying AST
-  nodes) and **guarded namespaces** (`#ns when (…) { … }` guard checked during
-  path recursion). Everything else in the fixture matches.
+- `mixins-guards` — **done** (see the closure/guarded-namespace follow-up above).
 
 ## What milestone 1 implemented (Steps 1–5 consolidated)
 

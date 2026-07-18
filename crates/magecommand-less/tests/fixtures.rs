@@ -50,7 +50,9 @@ const SKIP_SUITES: &[&str] = &["javascript", "plugin", "plugin-module", "plugin-
 /// Invariant enforced by the harness: a fixture on this list that regresses, or
 /// an off-list fixture that starts passing, fails the suite. Keep it sorted; when
 /// a phase lands new coverage, ADD the newly-green fixtures here (never remove one
-/// to hide a regression). 30/87 after Phase 2 (mixins + guards + pattern-matching).
+/// to hide a regression). 31/87 after Phase 2 (mixins + guards + pattern-matching;
+/// closure param capture, `@arguments` variadic, recursive guard grammar +
+/// namespace-path guards).
 const EXPECTED_PASS: &[&str] = &[
     "at-rules-declarations/at-rules-declarations",
     "at-rules-empty-block/at-rules-empty-block",
@@ -67,6 +69,7 @@ const EXPECTED_PASS: &[&str] = &[
     "mixin-noparens/mixin-noparens",
     "mixins-closure/mixins-closure",
     "mixins-guards-default-func/mixins-guards-default-func",
+    "mixins-guards/mixins-guards",
     "mixins-important/mixins-important",
     "mixins-named-args/mixins-named-args",
     "mixins-nested/mixins-nested",

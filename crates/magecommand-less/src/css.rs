@@ -255,6 +255,7 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
         Node::VariableDecl { .. }
         | Node::DetachedRuleset { .. }
         | Node::MixinDefinition(_)
+        | Node::Closure { .. }
         | Node::MixinCall(_)
         | Node::MagentoImport { .. } => {}
     }
