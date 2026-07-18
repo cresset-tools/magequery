@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.9.0...magequery-v0.10.0) (2026-07-18)
+
+
+### Features
+
+* **magecommand:** byte-exact `setup:di:compile` reproduction ([#44](https://github.com/cresset-tools/magequery/issues/44)) ([82b623c](https://github.com/cresset-tools/magequery/commit/82b623c76f69294e5e700f18bf9e98d811c27199))
+* **magecommand:** `di compile --fused` — fused interceptors ([#46](https://github.com/cresset-tools/magequery/issues/46)) ([96b9c2d](https://github.com/cresset-tools/magequery/commit/96b9c2d70c79a29fec7960c3a44d0f53ad774e7d))
+* **vscode:** server auto-update prompt + 0.2.0 release ([#43](https://github.com/cresset-tools/magequery/issues/43)) ([e2dd390](https://github.com/cresset-tools/magequery/commit/e2dd39052eae052bc2a7ef67df787d95faa5ec8e))
+
 ## [0.9.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.8.0...magequery-v0.9.0) (2026-07-15)
 
 
