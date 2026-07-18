@@ -42,10 +42,11 @@ Reproduces `setup:di:compile` byte-for-byte (`generated/code` + `generated/metad
 Global flags plus:
 
 ```
-di compile [--dry-run] [--force] [--incremental]
+di compile [--dry-run] [--force] [--incremental] [--fused]
     Generate the DI config + generated code. --dry-run previews the work plan;
     --force overwrites an existing generated tree; --incremental skips the whole
-    compile when no input changed since the last run (stat-fingerprint short-circuit).
+    compile when no input changed since the last run (stat-fingerprint short-circuit);
+    --fused emits fused interceptors (see below).
 
 di verify --archive <DIR> --output <DIR> [--fail-on-diff] [--sample <N>]
           [--no-explain] [--strict-ordering] [--show-residual <FILE>]
@@ -67,14 +68,16 @@ di digest [--stat]
     (fast, local-only; not a portable CI key). See docs/incremental-compile.md.
 ```
 
-**Planned `di compile` profile — `--fused`.** An opt-in mode that emits creatuity-style
-*fused* interceptors (the plugin chain unrolled into the method body, no runtime
-`PluginList` lookup) instead of Magento's stock interceptors. It reuses the same
-oracle-validated resolution and changes only interceptor rendering. The default stays
-stock/byte-exact so the archive-verify gate stays meaningful. Credit: the fused
-technique is creatuity's (github.com/creatuity/magento2-interceptors); the `default`
-switch branch MUST run the global chain (guards against their issue #28, where global
-plugins silently don't fire in CLI/primary scope).
+**`di compile --fused` (built) — the fused-interceptor profile.** An opt-in mode that
+emits creatuity-style *fused* interceptors (the plugin chain unrolled into the method
+body, no runtime `PluginList` lookup) instead of Magento's stock interceptors. It reuses
+the same oracle-validated resolution and changes only interceptor rendering, so the
+default stays stock/byte-exact and the archive-verify gate stays meaningful. Validated
+byte-exact against a fixed-creatuity `di:compile` across a full codebase (2489 fused
+interceptors, every edge case). The `default` switch branch runs the **global** chain —
+guarding against creatuity's issue #28 (global plugins silently not firing in
+CLI/`primary` scope). Credit: the fused technique is creatuity's prior art
+(github.com/creatuity/magento2-interceptors), reimplemented clean-room.
 
 ## Which groups earn their keep, and in what order
 

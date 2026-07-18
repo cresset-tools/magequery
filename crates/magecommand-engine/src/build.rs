@@ -38,6 +38,17 @@ pub struct CompileOutputs {
 /// across calls (the `watch` server) must pass a fresh clone each time, since the
 /// extend set depends on the current DI config.
 pub fn compute_outputs(magento: &Magento, defs: &mut Definitions, root: &Path) -> CompileOutputs {
+    compute_outputs_opts(magento, defs, root, false)
+}
+
+/// Like [`compute_outputs`], with `fused` selecting the fused-interceptor
+/// renderer (`di compile --fused`) for global-only classes.
+pub fn compute_outputs_opts(
+    magento: &Magento,
+    defs: &mut Definitions,
+    root: &Path,
+    fused: bool,
+) -> CompileOutputs {
     let _prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
     macro_rules! ilap {
         ($t:expr, $label:expr) => {
@@ -73,7 +84,7 @@ pub fn compute_outputs(magento: &Magento, defs: &mut Definitions, root: &Path) -
 
     // The seven (plus any custom) area config files — the compile's most
     // expensive computation, built once and shared with codegen below.
-    let area_files = areaconfig::build_all_area_files(magento, defs, root);
+    let area_files = areaconfig::build_all_area_files(magento, defs, root, fused);
     for ca in &area_files {
         findings.extend(ca.file.findings.iter().cloned());
         files.push((format!("metadata/{}.php", ca.code), ca.rendered.clone()));
@@ -94,7 +105,8 @@ pub fn compute_outputs(magento: &Magento, defs: &mut Definitions, root: &Path) -
     ilap!(_it, "plugin-lists");
 
     // generated/code: factories, proxies, interceptors, … .
-    let code = codegen::generate_code(magento, defs, root.to_path_buf(), &area_files, &interception);
+    let code =
+        codegen::generate_code(magento, defs, root.to_path_buf(), &area_files, &interception, fused);
     for (rel, content) in code.files {
         files.push((format!("code/{rel}"), content));
     }

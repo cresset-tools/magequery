@@ -17,6 +17,7 @@ pub mod classify;
 pub mod codegen;
 pub mod compare;
 pub mod definitions;
+pub mod fused;
 pub mod interception;
 pub mod interceptor;
 pub mod laminas;

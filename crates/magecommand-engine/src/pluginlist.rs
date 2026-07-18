@@ -462,6 +462,143 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
     GeneratedPluginLists { files, findings }
 }
 
+/// The GLOBAL-scope listener chains, flattened for the fused-interceptor
+/// renderer. `nodes` maps `{type}_{method}_{prev}` → (before names, around name,
+/// after names) — the same `_processed` structure the plugin-list file encodes.
+/// `instances` maps a type to its enabled plugins (name → resolved instance
+/// FQCN, no leading backslash), in sort order.
+pub struct GlobalChains {
+    pub nodes: HashMap<String, (Vec<String>, Option<String>, Vec<String>)>,
+    pub instances: HashMap<String, Vec<(String, String)>>,
+}
+
+/// Per-scope resolved chains for the fused renderer. `global` drives the `switch`
+/// `default` branch (and the CLI/`primary` scope, which merges to the same set);
+/// `areas` are the six real areas, each merged over global — a `case` is emitted
+/// only where an area's chain differs from `global`.
+pub struct ScopeChains {
+    pub global: GlobalChains,
+    pub areas: Vec<(&'static str, GlobalChains)>,
+}
+
+/// Compute the per-scope chains fused needs: the global (base) chains plus each
+/// real area's merged chains. `intercepted` are the plan's intercepted classes —
+/// they must be inherited so a class that only INHERITS plugins (e.g. a console
+/// command inheriting a plugin on the Symfony `run` base) still has a resolved
+/// per-method chain.
+pub fn scope_chains(magento: &Magento, defs: &Definitions, intercepted: &[String]) -> ScopeChains {
+    let global = plugin_chains(magento, defs, Area::Global, intercepted);
+    let areas = [
+        ("frontend", Area::Frontend),
+        ("adminhtml", Area::Adminhtml),
+        ("crontab", Area::Crontab),
+        ("webapi_rest", Area::WebapiRest),
+        ("webapi_soap", Area::WebapiSoap),
+        ("graphql", Area::Graphql),
+    ]
+    .into_iter()
+    .map(|(name, area)| (name, plugin_chains(magento, defs, area, intercepted)))
+    .collect();
+    ScopeChains { global, areas }
+}
+
+/// Run the global-scope inherit/process pass (mirroring `generate`'s Global
+/// iteration) and expose the resolved per-method chains for the fused renderer.
+pub fn global_plugin_chains(magento: &Magento, defs: &Definitions) -> GlobalChains {
+    plugin_chains(magento, defs, Area::Global, &[])
+}
+
+/// Like [`global_plugin_chains`] but for an arbitrary scope: runs the inherit/
+/// process pass over that area's merged DI export (global overlaid by the area).
+/// `extra` classes are inherited after the declared-plugin types so
+/// inherit-only intercepted classes get a chain.
+pub fn plugin_chains(
+    magento: &Magento,
+    defs: &Definitions,
+    area: Area,
+    extra: &[String],
+) -> GlobalChains {
+    let global_export = magento.di_export(area);
+    let global_vtypes: HashMap<String, String> = global_export
+        .virtual_types
+        .iter()
+        .map(|v| (v.name.as_str().to_owned(), v.base.as_str().to_owned()))
+        .collect();
+    let node_pos: HashMap<&str, &magequery_core::TypeNodePosition> =
+        global_export.node_positions.iter().map(|n| (n.name.as_str(), n)).collect();
+    let mut vtype_seeds: Vec<(u8, u32, &str)> = global_export
+        .virtual_types
+        .iter()
+        .map(|v| {
+            let pos = node_pos.get(v.name.as_str());
+            if v.source.module.as_str() == "(primary)" {
+                (1u8, pos.and_then(|n| n.primary).unwrap_or(v.decl_order), v.name.as_str())
+            } else {
+                (0u8, pos.and_then(|n| n.modules).unwrap_or(v.decl_order), v.name.as_str())
+            }
+        })
+        .collect();
+    vtype_seeds.sort();
+
+    let plugin_data = plugin_data_of(&global_export);
+    let mut state = Inherit {
+        defs,
+        global_vtypes: &global_vtypes,
+        plugin_data: &plugin_data,
+        plugin_index: plugin_data.iter().enumerate().map(|(i, (t, _))| (t.as_str(), i)).collect(),
+        inherited: Vec::new(),
+        inherited_index: HashMap::new(),
+        processed: Vec::new(),
+        findings: Vec::new(),
+    };
+    for (_, _, seed) in &vtype_seeds {
+        state.inherit(seed);
+    }
+    let type_names: Vec<String> = plugin_data.iter().map(|(t, _)| t.clone()).collect();
+    for name in &type_names {
+        state.inherit(name);
+    }
+    // Inherit-only intercepted classes (sorted for determinism): a class with no
+    // OWN plugins but a plugin on an ancestor still needs its resolved chain.
+    let mut extra_sorted: Vec<&String> = extra.iter().collect();
+    extra_sorted.sort();
+    for name in extra_sorted {
+        state.inherit(name.trim_start_matches('\\'));
+    }
+
+    let mut nodes = HashMap::new();
+    for (key, listeners) in &state.processed {
+        let mut before = Vec::new();
+        let mut around = None;
+        let mut after = Vec::new();
+        for (l, v) in listeners {
+            match (*l, v) {
+                (LISTENER_BEFORE, ProcessedValue::List(names)) => before = names.clone(),
+                (LISTENER_AROUND, ProcessedValue::Around(name)) => around = Some(name.clone()),
+                (LISTENER_AFTER, ProcessedValue::List(names)) => after = names.clone(),
+                _ => {}
+            }
+        }
+        nodes.insert(key.clone(), (before, around, after));
+    }
+    let mut instances = HashMap::new();
+    for (t, v) in &state.inherited {
+        if let Some(plugins) = v {
+            let list: Vec<(String, String)> = plugins
+                .iter()
+                .filter(|(_, e)| e.disabled != Some(true))
+                .filter_map(|(n, e)| {
+                    e.instance
+                        .as_ref()
+                        .map(|i| (n.clone(), chase(&global_vtypes, i.trim_start_matches('\\'))))
+                })
+                .collect();
+            instances.insert(t.clone(), list);
+        }
+    }
+    GlobalChains { nodes, instances }
+}
+
 struct Inherit<'a> {
     defs: &'a Definitions,
     global_vtypes: &'a HashMap<String, String>,

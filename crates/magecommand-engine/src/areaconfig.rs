@@ -176,13 +176,28 @@ pub struct AreaFile {
 
 /// Reader + modification chain for one area: arguments, preferences,
 /// instanceTypes — in Magento's exact order of operations.
+/// Follow `preferences` from `name` to its concrete (fixpoint, cycle-guarded);
+/// a name with no preference resolves to itself.
+fn resolve_preference(preferences: &BTreeMap<String, String>, name: &str) -> String {
+    let mut cur = name.to_owned();
+    let mut seen = std::collections::HashSet::new();
+    while let Some(next) = preferences.get(&cur) {
+        if next == &cur || !seen.insert(cur.clone()) {
+            break;
+        }
+        cur = next.clone();
+    }
+    cur
+}
+
 pub fn build_area_file(
     magento: &Magento,
     defs: &Definitions,
     area: Area,
     root: &std::path::Path,
+    fused: bool,
 ) -> AreaFile {
-    build_area_file_from_export(magento, defs, magento.di_export(area), root)
+    build_area_file_from_export(magento, defs, magento.di_export(area), root, fused)
 }
 
 /// Like [`build_area_file`] but driven by a caller-supplied [`DiExport`] — used
@@ -195,6 +210,7 @@ pub fn build_area_file_from_export(
     defs: &Definitions,
     export: magequery_core::DiExport,
     root: &std::path::Path,
+    fused: bool,
 ) -> AreaFile {
     let overrides = crate::arguments::setup_overrides(magento, root);
     let ctx = ArgsCtx::new(defs, &defs.scanned, &export, overrides, Some(magento), Some(root));
@@ -246,6 +262,31 @@ pub fn build_area_file_from_export(
     // PreferencesResolving pass 2, now through interceptor-augmented prefs.
     resolve_preferences_in_args(&mut arguments, &preferences);
 
+    // Fused mode (`di compile --fused`): creatuity's CompiledInterceptorSubstitution
+    // prepends the two constructor deps every fused interceptor gains — the
+    // ObjectManager and the scope service — to each `\Interceptor`'s arguments,
+    // each resolved through `preferences` (ObjectManagerInterface has none → itself;
+    // Config\ScopeInterface → Config\Scope). Only interceptors that already have an
+    // arguments row get them (a constructor-less subject has no row and stays that
+    // way — its ctor deps autowire), matching the reference exactly.
+    if fused {
+        let om = resolve_preference(&preferences, "Magento\\Framework\\ObjectManagerInterface");
+        let scope = resolve_preference(&preferences, "Magento\\Framework\\Config\\ScopeInterface");
+        let inst = |fqcn: &str| {
+            PhpValue::Array(vec![(PhpKey::Str("_i_".to_owned()), PhpValue::Str(fqcn.to_owned()))])
+        };
+        for interceptor in interceptors.values() {
+            if let Some(PhpValue::Array(entries)) = arguments.get_mut(interceptor) {
+                let mut prepend = vec![
+                    (PhpKey::Str("____om".to_owned()), inst(&om)),
+                    (PhpKey::Str("____scope".to_owned()), inst(&scope)),
+                ];
+                prepend.append(entries);
+                *entries = prepend;
+            }
+        }
+    }
+
     // NonLazyTypes: candidates = chain-time arguments keys, then
     // instanceTypes values, then preferences values — each in Magento's
     // insertion order (reconstructed below), deduped first-wins, filtered to
@@ -290,13 +331,14 @@ pub fn build_all_area_files(
     magento: &Magento,
     defs: &Definitions,
     root: &std::path::Path,
+    fused: bool,
 ) -> Vec<CompiledArea> {
     use rayon::prelude::*;
     let custom = custom_area_codes(magento);
     let mut files: Vec<CompiledArea> = AREA_CODES
         .par_iter()
         .map(|(area, code)| {
-            let file = build_area_file(magento, defs, *area, root);
+            let file = build_area_file(magento, defs, *area, root, fused);
             let rendered = file.render();
             CompiledArea { code: (*code).to_owned(), file, rendered }
         })
@@ -305,7 +347,7 @@ pub fn build_all_area_files(
         .par_iter()
         .map(|code| {
             let export = magento.di_export_custom_area(code);
-            let file = build_area_file_from_export(magento, defs, export, root);
+            let file = build_area_file_from_export(magento, defs, export, root, fused);
             let rendered = file.render();
             CompiledArea { code: code.clone(), file, rendered }
         })

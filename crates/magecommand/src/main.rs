@@ -68,6 +68,11 @@ enum DiCommand {
         /// normal full compile. The fast path for a tight edit-compile loop.
         #[arg(long)]
         incremental: bool,
+        /// Emit fused interceptors (inlined plugin chains) instead of stock
+        /// runtime-dispatch ones — creatuity's technique. Global-only classes
+        /// only for now; multi-area classes still emit stock interceptors.
+        #[arg(long)]
+        fused: bool,
     },
     /// Long-running compile server: build once, then keep the parsed index in
     /// memory and recompile on file changes, writing only the delta. The fast
@@ -135,8 +140,8 @@ fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     match cli.command {
         Command::Di { command } => match command {
-            DiCommand::Compile { dry_run, force, incremental } => {
-                compile(cli.root, cli.json, dry_run, force, incremental)
+            DiCommand::Compile { dry_run, force, incremental, fused } => {
+                compile(cli.root, cli.json, dry_run, force, incremental, fused)
             }
             DiCommand::Digest { stat } => digest(cli.root, stat),
             DiCommand::Watch { once } => watch::watch(cli.root, cli.json, once),
@@ -172,6 +177,7 @@ fn compile(
     dry_run: bool,
     force: bool,
     incremental: bool,
+    fused: bool,
 ) -> anyhow::Result<ExitCode> {
     use magequery_core::Area;
 
@@ -355,7 +361,7 @@ fn compile(
         // interception → plugin-lists → generated/code), as one in-memory output
         // set. This is the exact path `watch` runs, so the two emit identical
         // bytes. Per-phase timings print under MAGECOMMAND_PROFILE from inside.
-        let out = magecommand_engine::build::compute_outputs(&magento, &mut defs, &root);
+        let out = magecommand_engine::build::compute_outputs_opts(&magento, &mut defs, &root, fused);
         if !out.unresolved.is_empty() {
             eprintln!(
                 "note: {} class name(s) unresolvable via autoload maps (first: {})",
