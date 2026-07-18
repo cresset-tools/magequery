@@ -180,6 +180,62 @@ CSS round-trips**. `cargo build --workspace` stays green; the crate is additive.
   split on `;`/`,`; guards + literal params retained as raw `Anonymous`) — enough
   to build the AST and not error, refined when eval needs them.
 
+## Step 4 — EVALUATOR + genCSS (milestone 1) (done)
+
+The tree-rewriting evaluator (plan §4) and the flat expanded serializer. `cargo
+build --workspace` stays green; the crate is additive.
+
+- **Pass-rate delta: 9/87 → 20/87** default-option compile fixtures, plus **31
+  lib unit tests** (was 6): `variables`, `variables-in-at-rules`, `lazy-eval`,
+  `operations`, `operations-advanced`, `color-functions/{operations,modern}`,
+  `css-3`, `css-grid`, `rulesets`, `charsets`, `at-rules-{declarations,empty,
+  empty-block}`, `tailwind`, `mixin-noparens`, `empty`, `no-output`, `impor`,
+  `plugi`.
+- **Rich value leaves (plan §9.2/§9.3):** `Node::Dimension`/`Node::Color` now
+  carry the runtime `value::Dimension` (open-multiset `unit::Unit` +
+  `backupUnit`) and `color::Color` (RGBA `f64` + original literal). Unit
+  conversion tables + the 148 named colors are generated-from-source
+  (`data/colors.rs`, `value.rs`). `1px / 1px → 1px` (backup-unit persistence)
+  and the per-channel color math are locked by tests.
+- **Evaluator (`eval/mod.rs`):** one `Ctx` (innermost-first frame stack, math
+  state + parens stack, `importantScope`). Implements:
+  - **lazy variable resolution** — last-declaration-wins per frame scanned from
+    the unevaluated rules (forward refs + child-scope override, §4.1/§4.3), `@@`
+    variable-variables, `!important` bubbling via `importantScope`, recursion
+    guard;
+  - **`@{}` interpolation** (selectors, property names, quoted strings, at-rule
+    preludes) + bare-`@var` prelude resolution;
+  - **operations** — dimension `+ - * /` with unit coercion/conversion, per-
+    channel color math + dim↔color coercion, unary negation, the `isMathOn` gate
+    (all 3 math modes; parens-division default), deferred ops emitted literally
+    with source spacing; `calc()` suppresses interior math;
+  - **nested-rule flattening + `&`** (string-level JoinSelector: descendant
+    join, `&` substitution, leading-combinator handling);
+  - **at-rules** — `@media`/`@supports`/… container bodies, `@font-face`/`@page`
+    declaration bodies (decls interleaved with nested at-rules), empty-block
+    pruning, inline no-block directives (`@apply`), and `@charset`/`@import`/
+    `@namespace` output hoisting (§2.13);
+  - a **minimal function set** the gates need (`rgb`/`rgba`/`hsl`/`hsla`,
+    `unit`, `floor`/`ceil`/`round`/`abs`/`sqrt`/`percentage`/`min`/`max`) + the
+    unknown-function passthrough (§2.7); **basic mixin calls** (no
+    guards/patterns/overloading — a `when` guard is evaluated best-effort).
+- **Parser fixes** feeding the evaluator: variable-decl `!important`; the
+  less.js `addition` operator/sign rule (`@a -1` list vs `@a - 1` subtraction vs
+  `2px+6px` add, §2.4); `[…]` value tokens; `U+…` unicode-range; `//` inside
+  `url(…)` no longer eaten as a line comment in at-rule preludes;
+  `parse_value_fragment` for re-parsing mixin args/guards.
+
+### DEFERRED (later phases, by design — NOT milestone 1)
+
+Mixins-with-guards/patterns/overloading/`default()` (Phase 2); the full function
+library incl. string/list/each/color-op/data-uri (Phase 3); `@import` resolution
+& inlining, `:extend`, detached-ruleset replay, maps/lookups (`@p[key]`), merge
+`+:`, full at-rule bubbling/`@media` merging (Phase 4); `$prop` property
+accessors; the 7-kind error renderer + `tests-error`/`tests-config` denominator.
+These are why `nesting` (needs maps), `scope` (mixin scope-injection), `extend*`,
+`import/*`, `media`/`container` (bubbling), and the color/string function
+fixtures stay red.
+
 ## Not yet started (later steps / phases)
 
 - `README` pinning the §0 success definition verbatim (Gate T0 200/200 + Gate T2

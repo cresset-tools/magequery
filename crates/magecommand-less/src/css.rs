@@ -82,6 +82,20 @@ pub fn render_root(root: &Node) -> String {
     out
 }
 
+/// Render a single (already-evaluated) value node to its CSS string — the
+/// evaluator's flat serializer reuses this so value spacing/number formatting
+/// lives in one place (plan §4.7).
+pub(crate) fn render_value(node: &Node, num_precision: u8) -> String {
+    let mut ctx = GenContext {
+        compress: false,
+        tab_level: 0,
+        num_precision,
+    };
+    let mut out = String::new();
+    gen(node, &mut ctx, &mut out);
+    out
+}
+
 /// The `root=true, firstRoot=true` rule list (no selector/braces; §4.7).
 fn gen_root_rules(rules: &[Node], ctx: &mut GenContext, out: &mut String) {
     let visible: Vec<&Node> = rules.iter().filter(|r| r.is_output_visible()).collect();
@@ -158,11 +172,11 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
             }
         }
         Node::Anonymous(s) => out.push_str(s),
-        Node::Dimension { value, unit } => {
-            out.push_str(&format_number(*value, ctx.num_precision));
-            out.push_str(unit);
+        Node::Dimension(d) => {
+            out.push_str(&format_number(d.value, ctx.num_precision));
+            d.unit.gen_css(false, out);
         }
-        Node::Color { original } => out.push_str(original),
+        Node::Color(c) => out.push_str(&c.to_css(ctx.num_precision)),
         Node::Quoted {
             escaped,
             quote,
@@ -326,30 +340,7 @@ fn combinator_css(c: &str) -> String {
     }
 }
 
-/// Format a dimension's numeric value like less.js `Dimension.genCSS`:
-/// `fround` (add `2e-16`, round to `numPrecision`), then `String(value)`, with
-/// the tiny-value `toFixed(20)` guard and `-0`→`0` normalization (plan §2.18).
-fn format_number(v: f64, num_precision: u8) -> String {
-    let value = if num_precision > 0 {
-        format!("{:.*}", num_precision as usize, v + 2e-16)
-            .parse::<f64>()
-            .unwrap_or(v)
-    } else {
-        v
-    };
-
-    if value == 0.0 {
-        return "0".to_string(); // also normalizes -0
-    }
-    if value.abs() < 1e-6 {
-        // Would print in exponential form — emit fixed then strip trailing zeros.
-        let s = format!("{value:.20}");
-        return s.trim_end_matches('0').trim_end_matches('.').to_string();
-    }
-    // Rust's `{}` for f64 is the shortest round-trip form, matching JS `String`
-    // for the normal-magnitude values LESS produces (integers print unadorned).
-    format!("{value}")
-}
+use crate::value::format_number;
 
 /// Serialize a CSS identifier with proper escaping, via cssparser (plan §9:
 /// cssparser is used only for CSS-side serialization helpers, never to tokenize

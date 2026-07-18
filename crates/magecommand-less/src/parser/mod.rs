@@ -39,6 +39,17 @@ pub fn parse(source: &str, file: FileInfo, opts: &LessOptions) -> Result<Arc<Nod
     Ok(Arc::new(Node::Root(rules)))
 }
 
+/// Parse a bare value fragment (a declaration RHS: comma-separated expressions)
+/// from a string — used by the evaluator to (re-)parse mixin arguments, defaults,
+/// and guard operands that the structural parser kept as raw text.
+pub fn parse_value_fragment(src: &str, opts: &LessOptions) -> Result<Node, LessError> {
+    let normalized = normalize_source(src);
+    let mut parser = Parser::new(normalized.as_ref(), FileInfo::default(), opts);
+    parser.cur.skip_trivia();
+    let value = parser.parse_value()?;
+    Ok(value)
+}
+
 /// The recursive-descent parser state.
 struct Parser<'a> {
     cur: Cursor<'a>,
@@ -221,16 +232,20 @@ impl<'a> Parser<'a> {
                     rules,
                     span: self.span(start),
                 }),
+                important: String::new(),
                 span: self.span(start),
             }));
         }
         let value = self.parse_value()?;
+        self.cur.skip_whitespace();
+        let important = self.parse_important();
         self.cur.skip_trivia();
         if self.cur.cur() == Some(b';') || self.cur.cur() == Some(b'}') || self.cur.eof() {
             self.cur.eat(b';');
             Ok(Some(Node::VariableDecl {
                 name,
                 value: Box::new(value),
+                important,
                 span: self.span(start),
             }))
         } else {
@@ -297,7 +312,11 @@ impl<'a> Parser<'a> {
                 b'"' | b'\'' => {
                     self.cur.scan_string();
                 }
-                b'/' if self.cur.at_block_comment() || self.cur.at_line_comment() => {
+                // A `//` inside parens (e.g. `url(http://…)`) is part of the
+                // value, not a line comment — only scan line comments at depth 0.
+                b'/' if self.cur.at_block_comment()
+                    || (depth == 0 && self.cur.at_line_comment()) =>
+                {
                     self.cur.scan_comment();
                 }
                 _ => self.cur.bump(),
@@ -894,27 +913,34 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_multiplication()?;
         loop {
             let save = self.here();
-            let had_ws = self.cur.skip_whitespace();
+            // less.js `addition`: op is `[-+]` when whitespace *follows* it, OR
+            // when there is no whitespace *before* it. Only `<space><op><no-space>`
+            // (`@a -1`) is a sign, not an operator (plan §2.4).
+            let sp_before = self.cur.skip_whitespace();
             let op = self.cur.cur();
-            if had_ws && matches!(op, Some(b'+') | Some(b'-')) {
-                let opc = op.unwrap();
-                self.cur.bump();
-                let ws_after = self.cur.skip_whitespace();
-                if !ws_after {
-                    self.cur.i = save; // a sign, not an operator
-                    break;
-                }
-                let right = self.parse_multiplication()?;
-                left = Node::Operation {
-                    op: (opc as char).to_string(),
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    spaced: true,
-                };
-            } else {
+            if !matches!(op, Some(b'+') | Some(b'-')) {
                 self.cur.i = save;
                 break;
             }
+            let opc = op.unwrap();
+            self.cur.bump();
+            let sp_after = self.cur.skip_whitespace();
+            if !(sp_after || !sp_before) {
+                self.cur.i = save; // a sign, not an operator
+                break;
+            }
+            let before = self.here();
+            let right = self.parse_multiplication()?;
+            if self.here() == before {
+                self.cur.i = save; // no right operand
+                break;
+            }
+            left = Node::Operation {
+                op: (opc as char).to_string(),
+                left: Box::new(left),
+                right: Box::new(right),
+                spaced: sp_before || sp_after,
+            };
         }
         Ok(left)
     }
@@ -978,14 +1004,23 @@ impl<'a> Parser<'a> {
                 self.cur.eat(b')');
                 Ok(Node::Paren(Box::new(inner)))
             }
+            Some(b'[') => {
+                // A bracketed value token (`[line-name]` in grid, an attribute-ish
+                // run) — captured verbatim as one entity.
+                let s = self.here();
+                self.skip_balanced(b'[', b']');
+                Ok(Node::Anonymous(self.cur.src()[s..self.here()].to_string()))
+            }
             Some(b'#') => {
                 // A hex color (or, rarely, an id-ish token) — captured verbatim.
                 let s = self.here();
                 self.cur.bump();
                 self.cur.scan_ident();
-                Ok(Node::Color {
-                    original: self.cur.src()[s..self.here()].to_string(),
-                })
+                let text = self.cur.src()[s..self.here()].to_string();
+                match crate::color::Color::from_hex(&text) {
+                    Some(color) => Ok(Node::Color(color)),
+                    None => Ok(Node::Anonymous(text)),
+                }
             }
             Some(b'@') if self.cur.peek(1) == Some(b'{') => {
                 let start = self.here();
@@ -1032,10 +1067,17 @@ impl<'a> Parser<'a> {
             _ if self.cur.at_number() => {
                 let (n, u) = self.cur.scan_number();
                 let value: f64 = n.parse().unwrap_or(0.0);
-                Ok(Node::Dimension {
-                    value,
-                    unit: u.to_string(),
-                })
+                Ok(Node::Dimension(crate::value::Dimension::with_unit(value, u)))
+            }
+            Some(b'U') | Some(b'u') if self.cur.peek(1) == Some(b'+') => {
+                // A unicode-range descriptor: `U+[0-9A-Fa-f?]+(-[0-9A-Fa-f?]+)?`.
+                let s = self.here();
+                self.cur.bump(); // U
+                self.cur.bump(); // +
+                while matches!(self.cur.cur(), Some(b) if b.is_ascii_hexdigit() || b == b'?' || b == b'-') {
+                    self.cur.bump();
+                }
+                Ok(Node::Anonymous(self.cur.src()[s..self.here()].to_string()))
             }
             Some(b) if b.is_ascii_alphabetic() || b == b'-' || b == b'_' || b >= 0x80 => {
                 let start = self.here();
@@ -1309,7 +1351,7 @@ mod tests {
         let Node::Declaration(d1) = &rs.rules[1] else {
             panic!()
         };
-        assert!(matches!(d1.value.as_ref(), Node::Color { original } if original == "#abc"));
+        assert!(matches!(d1.value.as_ref(), Node::Color(c) if c.original.as_deref() == Some("#abc")));
     }
 
     #[test]

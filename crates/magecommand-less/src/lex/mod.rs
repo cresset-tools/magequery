@@ -318,7 +318,8 @@ impl<'a> Cursor<'a> {
         if self.cur() == Some(b'%') {
             self.i += 1;
         } else {
-            while matches!(self.cur(), Some(b) if b.is_ascii_alphabetic()) {
+            // less.js unit regex: `%|[a-z_]+` — underscores are part of the unit.
+            while matches!(self.cur(), Some(b) if b.is_ascii_alphabetic() || b == b'_') {
                 self.i += 1;
             }
         }

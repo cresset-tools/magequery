@@ -182,8 +182,10 @@ pub enum Node {
     Declaration(Declaration),
     /// A generic at-rule.
     AtRule(AtRule),
-    /// A variable declaration `@x: value;` (produces no CSS; plan §2.1).
-    VariableDecl { name: String, value: Box<Node>, span: Span },
+    /// A variable declaration `@x: value;` (produces no CSS; plan §2.1). A
+    /// trailing `!important` propagates up to any declaration that reads it
+    /// (`importantScope`, plan §2.1); stored normalized (` !important` or empty).
+    VariableDecl { name: String, value: Box<Node>, important: String, span: Span },
     /// A detached ruleset value `@dr: { … };` / an inline `{ … }` (plan §2.11).
     DetachedRuleset { rules: Vec<Node>, span: Span },
     /// A mixin definition.
@@ -204,12 +206,13 @@ pub enum Node {
     Expression(Vec<Node>),
     /// Raw passthrough text (an anonymous value or unparsed run; plan value model).
     Anonymous(String),
-    /// A number with an optional unit (plan §2.18; unit is single-string for this
-    /// step — the open multiset lands with operations in the eval step).
-    Dimension { value: f64, unit: String },
-    /// A color literal, kept as its original source text for faithful round-trip
-    /// (plan §2.18/§H3). Color math (eval step) reconstructs from channels.
-    Color { original: String },
+    /// A number with a (possibly compound) unit (plan §2.18/§9.3). The rich
+    /// [`crate::value::Dimension`] doubles as the runtime value: it carries the
+    /// open-multiset [`crate::unit::Unit`] + `backupUnit` that operations need.
+    Dimension(crate::value::Dimension),
+    /// A color value (plan §2.18/§H3). The rich [`crate::color::Color`] keeps the
+    /// original literal for round-trip and RGBA channels for per-channel math.
+    Color(crate::color::Color),
     /// A quoted string (`escaped` = the `~"…"` form; plan §2.14).
     Quoted { escaped: bool, quote: char, value: String },
     /// A CSS keyword / bare identifier (incl. named colors, emitted verbatim).
