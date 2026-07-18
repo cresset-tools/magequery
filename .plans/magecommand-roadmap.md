@@ -54,13 +54,24 @@ drives sequencing and risk, more than the surface grouping does:
   setup:di:compile` (`~/oracle-gate.sh`, 8246/8246). `--fused` proved the "second
   renderer over a validated plan" pattern (`~/oracle-gate-fused.sh`).
 - **`static deploy`** — reproduce `setup:static-content:deploy` → `pub/static`. Pure
-  file generation, no DB, fits the model — but the **largest surface** on the board:
-  LESS/SCSS compilation, RequireJS config, JS/CSS minification, static file merge/
-  fallback resolution, `.less`→`.css` deploy per theme/locale/area. Oracle = a real SCD
-  run archived like `_code`. **Open decision (blocking):** reimplement LESS/RequireJS/
-  minify in Rust (huge, keeps no-bootstrap) vs shell out to `node`/`lessc` (breaks the
-  no-bootstrap purity for this command only). Likely itself multi-phase (start with the
-  static-file merge + fallback map; defer LESS/JS).
+  file generation, no DB. **Strategy — Hyvä-first, delegate Luma** (validated by
+  [elgentos/magento2-static-deploy](https://github.com/elgentos/magento2-static-deploy),
+  a Go tool doing exactly this at ~230–380× native speed, ~40k files/s):
+  - **Hyvä themes ship pre-built** (Tailwind via npm), so their deploy is *pure
+    fallback-resolution + parallel file copy* — no LESS/RequireJS/minify. This is the
+    perfect no-bootstrap fit and where the huge win is. **Primary target.**
+  - **Luma needs Magento's LESS/RequireJS/minify pipeline** — the "largest surface"
+    concern. **Do NOT reimplement it; delegate to `bin/magento setup:static-content:deploy`**
+    (elgentos does exactly this; only email CSS uses a `wikimedia/less.php` shim). This
+    **resolves the old blocking decision**: no LESS/JS reimplementation.
+  - **Where we go beyond elgentos:** it does raw copy with *no* fallback resolution;
+    magecommand must do the real theme→parent→module + locale fallback so the Hyvä output
+    is **byte-exact** against a real SCD run (the reproduction-command bar).
+  - Oracle = a real **Hyvä** SCD run archived like `_code`; byte-exact scoped to Hyvä
+    (Luma's LESS output isn't reproducible). Borrow: theme-type auto-detect
+    (`Hyva/default`|`reset` inheritance or a `web/tailwind/` dir), `-j/--jobs`,
+    `--symlink=file|locale` (disk footprint), `--content-version` reuse, graceful
+    skip/delegate. Credit elgentos (prior art).
 - **`i18n collect`** — reproduce `i18n:collect-phrases` → the phrase CSV. Scan source
   (`__('…')`, `.phtml`, `.xml`, JS `$t`) for translatable strings. Pure static, medium
   surface (reuses the PHP/XML scanning already in the tree). Oracle = a real collect run.
@@ -150,8 +161,12 @@ standalone. Depends on `cache clean` + the generation commands it orchestrates.
 
 ## Open decisions (need a call before their phase)
 
-1. **`static`: reimplement vs shell out** for LESS/SCSS/RequireJS/minify. Reimplement =
-   big, preserves no-bootstrap; shell out = fast, breaks purity for one command.
+1. **`static`: reimplement vs shell out** — **largely RESOLVED** by elgentos's approach
+   (see the `static deploy` entry): go **Hyvä-first** (pure fallback-resolution + parallel
+   copy, no-bootstrap, byte-exact) and **delegate Luma** to `bin/magento` — don't
+   reimplement LESS/RequireJS/minify. Remaining sub-question: whether to support Luma at
+   all eventually (an email-CSS `wikimedia/less.php` shim is the one small exception
+   elgentos makes) or stay Hyvä-only.
 2. **`DATA` validation** with no byte-exact oracle — diff-against-a-twin vs a scoped
    minimal bootstrap. Determines whether DATA is even in-scope for the no-bootstrap tool.
 3. **`make` fidelity** — how closely to mirror Magento's own module skeletons; flag-only
