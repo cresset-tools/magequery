@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.9.0...magequery-v0.10.0) (2026-07-18)
+
+
+### Features
+
+* **vscode:** server auto-update prompt + 0.2.0 release ([#43](https://github.com/cresset-tools/magequery/issues/43)) ([e2dd390](https://github.com/cresset-tools/magequery/commit/e2dd39052eae052bc2a7ef67df787d95faa5ec8e))
+
 ## [0.9.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.8.0...magequery-v0.9.0) (2026-07-15)
 
 
