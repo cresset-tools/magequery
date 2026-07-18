@@ -23,3 +23,15 @@ lightningcss = { version = "=1.0.0-alpha.71", optional = true }
 default = []
 # Downstream .min.css bridge (lightningcss). Not needed for the diffable .css.
 minify = ["dep:lightningcss"]
+
+[dev-dependencies]
+# Custom test harness so every vendored less.js fixture is one named test and
+# the runner prints a pass-rate summary (plan §5.5). Test-only; never in the lib.
+libtest-mimic = "0.8"
+
+# The less.js compile-fixture compat harness (plan §5.5). Its own runner
+# (harness = false) synthesizes one Trial per vendored (input, expected) pair.
+[[test]]
+name = "fixtures"
+path = "tests/fixtures.rs"
+harness = false

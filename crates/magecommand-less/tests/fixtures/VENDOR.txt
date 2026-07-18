@@ -1,0 +1,46 @@
+Vendored less.js test fixtures
+==============================
+
+Upstream:  https://github.com/less/less.js
+Tag:       v4.6.7
+Commit:    8ae2cc3bfa79f0718ad6fe5f263a1d6819fe9d5c
+License:   Apache-2.0 (see less-testdata/LICENSE)
+Vendored:  by crates/magecommand-less/scripts/vendor-less-testdata.sh
+
+What is vendored (STEP 2 scope — DEFAULT-OPTION compile fixtures only)
+---------------------------------------------------------------------
+less-testdata/tests-unit/   The default-option compile+diff corpus. Each
+                            <name>.less with a sibling <name>.css is a test
+                            entry (plan §5.1); subdirectories hold import
+                            helpers. Runs under less.js's own `tests-unit`
+                            group, which sets only relativeUrls/silent/
+                            javascriptEnabled — treated as "default options"
+                            here (the harness passes LessOptions::default()).
+less-testdata/data/         Binary assets (image.jpg/.svg, data-uri-fail.png,
+                            page.html) for the data-uri/image-size fixtures
+                            (plan §C-assets), wired through the harness's
+                            filesystem ImportResolver.
+
+DEFERRED to later phases (NOT vendored here — see NOTES.md, plan §5.2/§5.4)
+--------------------------------------------------------------------------
+- tests-config/  (math/*, strict-units, globalVars/modifyVars, url-args,
+                  rootpath/static-urls, rewrite-urls, namespacing, compression,
+                  include-path, strict-imports, sourcemaps, plugins) — every
+                  option-driven sub-suite.
+- tests-error/   the 74 error-message fixtures (byte-exact err.toString()).
+- the cosmiconfig `styles.config.cjs` option files (recorded here, deleted from
+  the vendored tree) and the generated `manifest.json` (a Node-toolchain
+  maintenance step, plan §G-node).
+- plugin/@plugin, inline-JS, source-map, dumpLineNumbers fixtures (out of scope
+  for a pure headless compiler, plan §5.2/§8).
+
+Within tests-unit, the harness additionally SKIPS the `javascript/`, `plugin/`,
+`plugin-module/`, `plugin-preeval/` sub-suites (JS/plugin — plan §5.2). The
+`plugi/` and `parser-property-interp` typo dirs stay IN (false-positive-JS,
+plan §5.2).
+
+Refreshing on a tag bump
+------------------------
+Run scripts/vendor-less-testdata.sh (edit TAG + EXPECT_SHA first). Node is not
+needed for this step; regenerating the option manifest in later phases is a
+documented Node-toolchain maintenance dependency (plan §G-node).
