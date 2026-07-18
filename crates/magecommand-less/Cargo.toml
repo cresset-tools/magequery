@@ -1,0 +1,25 @@
+[package]
+name = "magecommand-less"
+description = "Pure-Rust LESS compiler for magecommand's static deploy (the Luma CSS path). No JS, no PHP, no node."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Hand-written front-end (lexer/parser/eval) — see plan §9. cssparser cannot
+# tokenize LESS; it is used only for CSS-side identifier/string serialization
+# helpers in genCSS.
+cssparser = "0.37"
+smallvec = "1"
+rustc-hash = "2"
+thiserror.workspace = true
+
+# .min.css production minification ONLY, behind the `minify` feature — never
+# part of any diff gate (plan §9.4/§9.7). Pinned exactly per plan.
+lightningcss = { version = "=1.0.0-alpha.71", optional = true }
+
+[features]
+default = []
+# Downstream .min.css bridge (lightningcss). Not needed for the diffable .css.
+minify = ["dep:lightningcss"]

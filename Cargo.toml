@@ -7,6 +7,7 @@ members = [
     "crates/magecommand-php",
     "crates/magecommand-engine",
     "crates/magecommand",
+    "crates/magecommand-less",
 ]
 
 [workspace.package]
