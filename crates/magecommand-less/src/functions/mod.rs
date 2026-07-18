@@ -9,10 +9,13 @@
 //! resource functions (`data-uri`, `image-size`) are dispatched in the
 //! evaluator, which owns the scope frames and the [`crate::resolver`] boundary.
 //!
-//! A registered function returning `None` (wrong argument types — less.js's
-//! caught `throw`) also falls through to the passthrough rule; that is how
-//! `saturate(5%)` / `contrast(30%)` survive as plain CSS filters and how
-//! incompatible-unit `min()`/`max()` emit literally (§4.8).
+//! A registered function returning `Ok(None)` falls through to the passthrough
+//! rule — but ONLY where less.js itself null-returns or catches: `min`/`max`
+//! (their whole body is try/caught), `rgb[a]`/`hsl[a]` (internal try/catch),
+//! the `saturate(5%)` / `contrast(30%)` `!color.rgb → null` filter carve-outs,
+//! and out-of-range `extract()`. Every OTHER wrong-arity/wrong-type call
+//! **throws** in less.js and must be a compile `Err` here, wrapped as
+//! ``Error evaluating function `name`: <message>`` (Phase 3 review, C9/F4/F16).
 
 pub mod boolean;
 pub mod color_blend;
@@ -32,32 +35,39 @@ pub mod types;
 
 use crate::ast::Node;
 use crate::color::Color;
-use crate::error::LessError;
+use crate::error::{ErrorKind, LessError};
+use crate::unit::Unit;
 use crate::value::Dimension;
+
+/// A registered function's outcome: `Ok(None)` = fall through to the
+/// passthrough rule; `Err` = less.js's propagated throw (a compile error,
+/// wrapped by [`dispatch`] as ``Error evaluating function `name`: …``).
+pub(crate) type FnResult = Result<Option<Node>, LessError>;
 
 /// Dispatch a built-in function by (lowercased) name over already-evaluated
 /// arguments. Returns `Ok(None)` for an unregistered name — or a registered one
-/// whose arguments don't fit — so the caller falls through to the passthrough
-/// rule (plan §2.7/§4.8).
+/// whose non-fit is one less.js *catches* — so the caller falls through to the
+/// passthrough rule (plan §2.7/§4.8). Registered functions whose throw
+/// propagates in less.js return `Err`.
 pub fn dispatch(name: &str, args: &[Node], np: u8) -> Result<Option<Node>, LessError> {
     // less.js turns named-color keywords into `Color` nodes at *parse* time; we
     // keep them as keywords until an operation needs them, so the function
     // boundary applies the same coercion (`lighten(blue, 10%)`, `iscolor(red)`).
     let coerced: Vec<Node> = args.iter().cloned().map(coerce_keyword_color).collect();
     let a = coerced.as_slice();
-    let out = match name {
+    let out: FnResult = match name {
         // --- string (plan §2.14) ---
         "e" => string::e(a),
         "escape" => string::escape(a),
-        "%" => string::format(a, np),
-        "replace" => string::replace(a, np),
+        "%" => string::format(a),
+        "replace" => string::replace(a),
 
         // --- list ---
         "length" => list::length(a),
         "extract" => list::extract(a),
-        "range" => list::range(a),
-        "~" => list::tilde(a),
-        "_self" => a.first().cloned(),
+        "range" => Ok(list::range(a)),
+        "~" => Ok(list::tilde(a)),
+        "_self" => Ok(a.first().cloned()),
 
         // --- math ---
         "ceil" => math::unary(a, f64::ceil, math::UnitRule::Keep),
@@ -74,35 +84,35 @@ pub fn dispatch(name: &str, args: &[Node], np: u8) -> Result<Option<Node>, LessE
 
         // --- number ---
         "percentage" => number::percentage(a),
-        "min" => number::min_max(a, true, np),
-        "max" => number::min_max(a, false, np),
+        "min" => Ok(number::min_max(a, true, np)),
+        "max" => Ok(number::min_max(a, false, np)),
         "convert" => number::convert(a),
-        "pi" => Some(Node::Dimension(Dimension::number(std::f64::consts::PI))),
+        "pi" => Ok(Some(Node::Dimension(Dimension::number(std::f64::consts::PI)))),
         "mod" => number::modulo(a),
         "pow" => number::pow(a),
 
         // --- type checks / units (plan §2.6) ---
-        "isruleset" => Some(types::bool_keyword(matches!(
+        "isruleset" => Ok(Some(types::bool_keyword(matches!(
             a.first(),
             Some(Node::DetachedRuleset { .. })
-        ))),
-        "iscolor" => Some(types::bool_keyword(matches!(a.first(), Some(Node::Color(_))))),
-        "isnumber" => Some(types::bool_keyword(matches!(a.first(), Some(Node::Dimension(_))))),
-        "isstring" => Some(types::bool_keyword(matches!(a.first(), Some(Node::Quoted { .. })))),
-        "iskeyword" => Some(types::bool_keyword(matches!(a.first(), Some(Node::Keyword(_))))),
-        "isurl" => Some(types::bool_keyword(matches!(a.first(), Some(Node::Url(_))))),
-        "ispixel" => Some(types::bool_keyword(types::is_unit(a.first(), "px"))),
-        "isem" => Some(types::bool_keyword(types::is_unit(a.first(), "em"))),
-        "ispercentage" => Some(types::bool_keyword(types::is_unit(a.first(), "%"))),
-        "isunit" => Some(types::bool_keyword(types::isunit(a))),
-        "unit" => types::unit(a, np),
-        "get-unit" => types::get_unit(a),
+        )))),
+        "iscolor" => Ok(Some(types::bool_keyword(matches!(a.first(), Some(Node::Color(_)))))),
+        "isnumber" => Ok(Some(types::bool_keyword(matches!(a.first(), Some(Node::Dimension(_)))))),
+        "isstring" => Ok(Some(types::bool_keyword(matches!(a.first(), Some(Node::Quoted { .. }))))),
+        "iskeyword" => Ok(Some(types::bool_keyword(matches!(a.first(), Some(Node::Keyword(_)))))),
+        "isurl" => Ok(Some(types::bool_keyword(matches!(a.first(), Some(Node::Url(_)))))),
+        "ispixel" => Ok(Some(types::bool_keyword(types::is_unit(a.first(), "px")))),
+        "isem" => Ok(Some(types::bool_keyword(types::is_unit(a.first(), "em")))),
+        "ispercentage" => Ok(Some(types::bool_keyword(types::is_unit(a.first(), "%")))),
+        "isunit" => Ok(Some(types::bool_keyword(types::isunit(a)))),
+        "unit" => types::unit(a),
+        "get-unit" => Ok(types::get_unit(a)),
 
         // --- color definition ---
-        "rgb" => color_def::rgb(a),
-        "rgba" => color_def::rgba(a),
-        "hsl" => color_def::hsl(a),
-        "hsla" => color_def::hsla(a),
+        "rgb" => Ok(color_def::rgb(a)),
+        "rgba" => Ok(color_def::rgba(a)),
+        "hsl" => Ok(color_def::hsl(a)),
+        "hsla" => Ok(color_def::hsla(a)),
         "hsv" => color_def::hsv(a),
         "hsva" => color_def::hsva(a),
         "argb" => color_def::argb(a),
@@ -149,11 +159,80 @@ pub fn dispatch(name: &str, args: &[Node], np: u8) -> Result<Option<Node>, LessE
         "negation" => color_blend::blend(a, color_blend::Mode::Negation),
 
         // --- misc/resource ---
-        "svg-gradient" => svg::svg_gradient(a, np),
+        "svg-gradient" => Ok(svg::svg_gradient(a, np)),
 
         _ => return Ok(None),
     };
-    Ok(out)
+    // less.js `Call.eval` wraps anything a function throws:
+    // ``Error evaluating function `name`: <message>`` (the caught-and-rethrown
+    // form; `e.type || 'Runtime'` keeps an Argument throw's kind).
+    out.map_err(|e| {
+        LessError::new(
+            e.kind,
+            format!("Error evaluating function `{name}`: {}", e.message),
+        )
+    })
+}
+
+/// Build a `Dimension` node, mirroring the less.js constructor's NaN throw
+/// (`Dimension is not a number.` — how `sqrt(-1)`, `mod(7, 0)`, `pow(-1, 0.5)`
+/// become compile errors; Infinity is allowed).
+pub(crate) fn dim_node(value: f64, unit: Unit) -> Result<Node, LessError> {
+    if value.is_nan() {
+        return Err(LessError::new(ErrorKind::Runtime, "Dimension is not a number."));
+    }
+    Ok(Node::Dimension(Dimension { value, unit }))
+}
+
+/// JS's arithmetic coercion of a node's `.value` (`amount.value / 100`,
+/// `a.value % b.value`): a Dimension gives its number, a string-ish node's text
+/// goes through `Number()` (`"20"` → 20, `"banana"` → NaN), anything else is
+/// NaN — which then propagates per less.js (`#NaNNaNNaN` channels, NaN-throwing
+/// Dimension constructions).
+pub(crate) fn js_arg_num(n: &Node) -> f64 {
+    match n {
+        Node::Dimension(d) => d.value,
+        Node::Quoted { value, .. } => js_parse_number(value),
+        Node::Keyword(k) => js_parse_number(k),
+        Node::Anonymous(s) => js_parse_number(s),
+        Node::Color(c) => match &c.original {
+            Some(o) => js_parse_number(o),
+            None => f64::NAN,
+        },
+        _ => f64::NAN,
+    }
+}
+
+/// JS `Number(string)`: trimmed; empty → 0; else parse or NaN.
+fn js_parse_number(s: &str) -> f64 {
+    let t = s.trim();
+    if t.is_empty() {
+        return 0.0;
+    }
+    t.parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// The JS `Cannot read properties of undefined (reading '<prop>')` TypeError —
+/// what less.js hits when a required argument is missing.
+pub(crate) fn undef_err(prop: &str) -> LessError {
+    LessError::new(
+        ErrorKind::Runtime,
+        format!("Cannot read properties of undefined (reading '{prop}')"),
+    )
+}
+
+/// The node as a `Color`, or less.js's `toHSL`/`toHSV` throw
+/// (`Argument cannot be evaluated to a color`; a MISSING argument is the
+/// `undefined.toHSL` TypeError instead).
+pub(crate) fn to_color_err<'a>(n: Option<&'a Node>) -> Result<&'a Color, LessError> {
+    match n {
+        Some(Node::Color(c)) => Ok(c),
+        Some(_) => Err(LessError::new(
+            ErrorKind::Runtime,
+            "Argument cannot be evaluated to a color",
+        )),
+        None => Err(undef_err("toHSL")),
+    }
 }
 
 /// A named-color keyword → `Color` (less.js does this at parse time).
@@ -166,24 +245,28 @@ pub(crate) fn coerce_keyword_color(node: Node) -> Node {
     node
 }
 
-/// less.js color.js `number()` — a `%` dimension scales to `0..1`, else value.
-pub(crate) fn number(n: &Node) -> Option<f64> {
-    if let Node::Dimension(d) = n {
-        Some(if d.unit.is("%") {
+/// less.js color.js `number()` — a `%` dimension scales to `0..1`, else value;
+/// anything else throws (`color functions take numbers as parameters`).
+pub(crate) fn number(n: Option<&Node>) -> Result<f64, LessError> {
+    if let Some(Node::Dimension(d)) = n {
+        Ok(if d.unit.is("%") {
             d.value / 100.0
         } else {
             d.value
         })
     } else {
-        None
+        Err(LessError::new(
+            ErrorKind::Argument,
+            "color functions take numbers as parameters",
+        ))
     }
 }
 
 /// less.js color.js `scaled(n, size)` — a `%` dimension scales to `0..size`.
-pub(crate) fn scaled(n: &Node, size: f64) -> Option<f64> {
-    if let Node::Dimension(d) = n {
+pub(crate) fn scaled(n: Option<&Node>, size: f64) -> Result<f64, LessError> {
+    if let Some(Node::Dimension(d)) = n {
         if d.unit.is("%") {
-            return Some(d.value * size / 100.0);
+            return Ok(d.value * size / 100.0);
         }
     }
     number(n)
@@ -205,7 +288,9 @@ pub(crate) fn as_color(n: &Node) -> Option<&Color> {
     }
 }
 
-/// Clamp to `0..=1` (less.js color.js `clamp`).
+/// Clamp to `0..=1` (less.js color.js `clamp`). JS `Math.min`/`Math.max`
+/// propagate NaN (Rust's `f64::max` would swallow it) — NaN must survive to
+/// print `#NaNNaNNaN` like less.js.
 pub(crate) fn clamp01(v: f64) -> f64 {
-    v.max(0.0).min(1.0)
+    if v.is_nan() { v } else { v.max(0.0).min(1.0) }
 }

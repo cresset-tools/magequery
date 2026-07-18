@@ -158,7 +158,15 @@ pub fn eval(
     // implementation is deferred; the default harness passes none.
     let mut outs: Vec<Out> = Vec::new();
     ctx.push_frame(frame_of(rules.clone()));
-    let (_own, children) = ctx.process_body(&rules, None)?;
+    let (own, children) = ctx.process_body(&rules, None)?;
+    // less.js to-css-visitor `checkValidNodes` (firstRoot): a declaration at
+    // the stylesheet root is a hard error, never silently dropped (F11).
+    if own.iter().any(|n| matches!(n, Node::Declaration(_))) {
+        return Err(LessError::new(
+            ErrorKind::Syntax,
+            "Properties must be inside selector blocks. They cannot be in the root",
+        ));
+    }
     outs.extend(children);
     ctx.pop_frame();
 
@@ -500,9 +508,11 @@ impl<'a> Ctx<'a> {
     // ------------------------------------------------------------------
 
     fn eval_declaration(&mut self, d: &Declaration) -> Result<Node, LessError> {
-        // Resolve interpolation in the property name.
+        // Resolve interpolation in the property name. less.js's `evalName`
+        // genCSSes each piece — a quoted variable KEEPS its quotes
+        // (`@{prop}: red` with `@prop: "color"` → `"color": red`, F18).
         let name = if d.name.contains("@{") || d.name.contains("${") {
-            self.interpolate(&d.name)?
+            self.interpolate_css(&d.name)?
         } else {
             d.name.clone()
         };
@@ -530,8 +540,17 @@ impl<'a> Ctx<'a> {
         }
 
         self.important_scope.push(None);
-        let value = self.eval_value(&d.value)?;
+        let value = self.eval_value(&d.value);
         let popped = self.important_scope.pop().flatten();
+        let value = value?;
+        // less.js `Declaration.eval`: a detached ruleset landing on a real
+        // property (e.g. `d: if(true, {…}, {…})`) is a hard error (F16).
+        if matches!(value, Node::DetachedRuleset { .. }) {
+            return Err(self.err(
+                ErrorKind::Syntax,
+                "Rulesets cannot be evaluated on a property.",
+            ));
+        }
         let important = if !d.important.is_empty() {
             d.important.clone()
         } else if let Some(imp) = popped {
@@ -744,6 +763,11 @@ impl<'a> Ctx<'a> {
         let b = coerce_color(b);
         match (&a, &b) {
             (Node::Dimension(da), Node::Dimension(db)) => match da.operate(op, db, self.opts.strict_units) {
+                // less.js's Dimension constructor throws on NaN (`(0 / 0)`,
+                // `(Infinity - Infinity)`) — Infinity itself is fine (F2/C20).
+                Ok(r) if r.value.is_nan() => {
+                    Err(self.err(ErrorKind::Runtime, "Dimension is not a number."))
+                }
                 Ok(r) => Ok(Node::Dimension(r)),
                 Err(bad) => Err(self.err(
                     ErrorKind::Operation,
@@ -944,11 +968,21 @@ impl<'a> Ctx<'a> {
         let key_name = pname(1, "key");
         let index_name = pname(2, "index");
 
-        let list = self.eval_value(list_arg)?;
-        let iterator: Vec<Node> = match &list {
-            Node::Value(v) | Node::Expression(v) => v.clone(),
-            Node::DetachedRuleset { rules, .. } => rules.clone(),
-            other => vec![other.clone()],
+        // `each(.mixin(), …)` — less.js routes the arg through `mixinLookup`,
+        // whose eval yields the mixin's ruleset; iterate its emitted
+        // declarations (Phase 3 review F3-residual).
+        let iterator: Vec<Node> = if let Node::MixinCall(call) = list_arg {
+            let mut ex_own = Vec::new();
+            let mut ex_children = Vec::new();
+            self.expand_mixin_call(call, self_paths, &mut ex_own, &mut ex_children)?;
+            ex_own
+        } else {
+            let list = self.eval_value(list_arg)?;
+            match &list {
+                Node::Value(v) | Node::Expression(v) => v.clone(),
+                Node::DetachedRuleset { rules, .. } => rules.clone(),
+                other => vec![other.clone()],
+            }
         };
 
         for (i, item) in iterator.iter().enumerate() {
@@ -1586,7 +1620,10 @@ impl<'a> Ctx<'a> {
         for el in &sel.elements {
             s.push_str(&combinator_css(&el.combinator));
             if el.value.contains("@{") || el.value.contains("$}") {
-                s.push_str(&self.interpolate(&el.value)?);
+                // Selector elements genCSS their evaluated value — a quoted
+                // variable keeps its quotes (`.@{v}` with `@v: "sel"` →
+                // `."sel"`, F18); escaped `~"…"` still renders raw.
+                s.push_str(&self.interpolate_css(&el.value)?);
             } else {
                 s.push_str(&el.value);
             }
@@ -1649,6 +1686,17 @@ impl<'a> Ctx<'a> {
     /// resolves first — and passes repeat to a fixpoint, which is what makes
     /// iterated interpolation (`@{box-large}` produced by a pass) resolve too.
     fn interpolate(&mut self, input: &str) -> Result<String, LessError> {
+        self.interpolate_with(input, false)
+    }
+
+    /// Selector / property-name interpolation: like [`Self::interpolate`] but a
+    /// non-escaped Quoted value renders WITH its quotes (less.js genCSSes the
+    /// evaluated node there instead of taking `.value` — plan §2.14 boundary).
+    fn interpolate_css(&mut self, input: &str) -> Result<String, LessError> {
+        self.interpolate_with(input, true)
+    }
+
+    fn interpolate_with(&mut self, input: &str, css: bool) -> Result<String, LessError> {
         let mut s = input.to_string();
         for _ in 0..100 {
             let mut out = String::with_capacity(s.len());
@@ -1663,7 +1711,11 @@ impl<'a> Ctx<'a> {
                         let name = &after[..e];
                         let val = self.eval_variable(name, Default::default())?;
                         out.push_str(&rest[..start]);
-                        out.push_str(&value_to_plain_string(&val));
+                        if css {
+                            out.push_str(&render_value(&val, 0));
+                        } else {
+                            out.push_str(&value_to_plain_string(&val));
+                        }
                         rest = &after[e + 1..];
                         replaced = true;
                     }
@@ -2398,10 +2450,165 @@ mod tests {
             .to_string()
     }
 
+    fn errs(src: &str) -> String {
+        let opts = LessOptions::default();
+        crate::compile(src, &opts, &NoopResolver)
+            .unwrap_err()
+            .to_string()
+    }
+
     #[test]
     fn lazy_last_wins_and_forward_reference() {
         // Forward reference (@var reads @a defined later) + last-declaration-wins.
         assert_eq!(css("@var: @a;\n@a: 1;\n@a: 2;\n.x { y: @var; }"), ".x {\n  y: 2;\n}");
+    }
+
+    #[test]
+    fn phase3_review_number_formatting() {
+        // C13/F1: decimal (toFixed) fround — never the *1e8 multiply round.
+        assert_eq!(css("a { b: 179.999999995; }"), "a {\n  b: 179.99999999;\n}");
+        assert_eq!(
+            css("a { b: 28.397783365px; c: -12.532202605em; }"),
+            "a {\n  b: 28.39778336px;\n  c: -12.53220261em;\n}"
+        );
+        // C21/F3: JS String() spellings — Infinity and the ≥1e21 exponent form.
+        assert_eq!(
+            css("a { b: (1 / 0); c: (-1 / 0); d: pow(10, 21); }"),
+            "a {\n  b: Infinity;\n  c: -Infinity;\n  d: 1e+21;\n}"
+        );
+        // C7: tiny rgba alpha joins as String(number) → exponent notation.
+        assert_eq!(
+            css("a { c: rgba(0, 0, 0, 0.0000001); }"),
+            "a {\n  c: rgba(0, 0, 0, 1e-7);\n}"
+        );
+    }
+
+    #[test]
+    fn phase3_review_error_parity() {
+        // F2/C20: NaN Dimension construction is a hard error.
+        assert!(errs("a { b: (0 / 0); }").contains("Dimension is not a number."));
+        assert!(errs("a { b: sqrt(-1); }").contains("Error evaluating function `sqrt`"));
+        // F4: wrong-arg-type math errors instead of passthrough.
+        assert!(errs("a { b: round(10 / 3); }").contains("argument must be a number"));
+        // C9: non-color args to color functions error…
+        assert!(errs("a { c: desaturate(3.2); }")
+            .contains("Argument cannot be evaluated to a color"));
+        // …except the saturate/contrast filter carve-outs.
+        assert_eq!(css("a { c: saturate(3.2); }"), "a {\n  c: saturate(3.2);\n}");
+        assert_eq!(css("a { c: contrast(30%); }"), "a {\n  c: contrast(30%);\n}");
+        // C11: NaN amounts poison channels → #NaNNaNNaN, like less.js.
+        assert_eq!(
+            css("a { c: lighten(#880000, banana); d: (#000000 / #000000); }"),
+            "a {\n  c: #NaNNaNNaN;\n  d: #NaNNaNNaN;\n}"
+        );
+        // F16: a detached ruleset on a real property is an error.
+        assert!(errs("a { d: if(true, {x: 1}, {y: 2}); }")
+            .contains("Rulesets cannot be evaluated on a property."));
+        // F11: root-level declarations error (also each() bodies at root).
+        assert!(errs(".x { color: red; } color: blue;")
+            .contains("Properties must be inside selector blocks"));
+    }
+
+    #[test]
+    fn phase3_review_constructors_and_strings() {
+        // C1: missing alpha re-emits; C2: rgb(color); C12: 4th space item drops.
+        assert_eq!(
+            css("a { c: rgba(1, 2, 3); d: hsla(90, 50%, 50%); }"),
+            "a {\n  c: rgba(1, 2, 3);\n  d: hsla(90, 50%, 50%);\n}"
+        );
+        assert_eq!(
+            css("a { c: rgb(#123456); d: rgb(0 128 255 96); }"),
+            "a {\n  c: #123456;\n  d: #0080ff;\n}"
+        );
+        // C4: color() quoted-keyword fallback.
+        assert_eq!(
+            css("a { c: color('red'); d: color('transparent'); }"),
+            "a {\n  c: #ff0000;\n  d: rgba(0, 0, 0, 0);\n}"
+        );
+        // C6: quoted 'relative' method.
+        assert_eq!(
+            css("a { c: lighten(#880000, 20%, 'relative'); }"),
+            "a {\n  c: #a30000;\n}"
+        );
+        // C16/C17: e()/escape() read the Color's internal value marker.
+        assert_eq!(
+            css("a { c: e(hsl(90, 50%, 50%)); d: escape(#fff); e: escape(mix(#f00, #00f)); }"),
+            "a {\n  c: hsl;\n  d: %23fff;\n  e: undefined;\n}"
+        );
+        // F8: no fround inside unit()'s unit-arg / %() args / replace() repl.
+        assert_eq!(
+            css("a { u: unit(5, 1.234567891px); w: %(\"%a\", 9.876543219px); }"),
+            "a {\n  u: 51.234567891px;\n  w: \"9.876543219px\";\n}"
+        );
+    }
+
+    #[test]
+    fn phase3_review_ie_alpha_and_url() {
+        // C14: case-normalized ieAlpha; F9-math: @var form interpolates.
+        assert_eq!(
+            css("a { filter: alpha(Opacity=87); }"),
+            "a {\n  filter: alpha(opacity=87);\n}"
+        );
+        assert_eq!(
+            css("@o: 30;\na { filter: alpha(opacity=@o); }"),
+            "a {\n  filter: alpha(opacity=30);\n}"
+        );
+        // C15: rejected forms are parse/eval errors, never corrupted output.
+        assert!(errs("a { filter: alpha(opacity=87.5); }").contains("expected ')'"));
+        assert!(errs("a { filter: alpha(opacity=); }").contains("Could not parse alpha"));
+        assert!(errs("@o: 30;\na { filter: alpha(opacity=@{o}); }")
+            .contains("Could not parse alpha"));
+        // F6-url: a bare variable inside url() resolves (quotes kept).
+        assert_eq!(
+            css("@a: 'Trebuchet';\nb { url: url(@a); }"),
+            "b {\n  url: url('Trebuchet');\n}"
+        );
+        // F7-url: trailing whitespace inside an unquoted url is KEPT.
+        assert_eq!(
+            css("a { b: url(  spaced.png  ); }"),
+            "a {\n  b: url(spaced.png  );\n}"
+        );
+        // F8-url: url(fn(x)) is a parse error like less.js.
+        assert!(errs("a { b: url(unknownfn(x)); }").contains("expected ')'"));
+    }
+
+    #[test]
+    fn phase3_review_dedup_interp_each() {
+        // C22/F1-residual: duplicate declarations — earlier identical drops.
+        assert_eq!(
+            css("html { color: red; b: x; color: red; }"),
+            "html {\n  b: x;\n  color: red;\n}"
+        );
+        // `!important` differs in CSS text → both stay.
+        assert_eq!(
+            css("html { color: red !important; b: x; color: red; }"),
+            "html {\n  color: red !important;\n  b: x;\n  color: red;\n}"
+        );
+        // F18: quoted-variable interpolation keeps quotes in selectors + names.
+        assert_eq!(
+            css("@v: \"sel\";\n.@{v} { a: b; }"),
+            ".\"sel\" {\n  a: b;\n}"
+        );
+        assert_eq!(
+            css("@prop: \"color\";\nb { @{prop}: red; }"),
+            "b {\n  \"color\": red;\n}"
+        );
+        // …while escaped values still render raw.
+        assert_eq!(css("@v: ~\"esc\";\n.@{v} { a: b; }"), ".esc {\n  a: b;\n}");
+        // F3-residual: each() over a mixin call iterates its declarations.
+        assert_eq!(
+            css(".set-2() {\n  one: blue;\n  two: green;\n}\n.s {\n  each(.set-2(), .(@v, @k, @i) {\n    @{k}-@{i}: @v;\n  });\n}"),
+            ".s {\n  one-1: blue;\n  two-2: green;\n}"
+        );
+        // F5/F6-residual: permissive backslash-escaped quote + kept comment.
+        assert_eq!(
+            css(".r { --value: a/* { ; } */; }"),
+            ".r {\n  --value: a /* { ; } */;\n}"
+        );
+        assert_eq!(
+            css(".c {\n  --v: ( x; // i\\'m serious;\n  );\n}"),
+            ".c {\n  --v: ( x; // i\\'m serious;\n  );\n}"
+        );
     }
 
     #[test]
@@ -2700,8 +2907,40 @@ fn merge_rules(decls: &[Node]) -> Vec<Node> {
     out
 }
 
+/// less.js to-css-visitor `_removeDuplicateRules` (Phase 3 review C22/F1):
+/// walking BACKWARDS through a ruleset's rules, an earlier declaration whose
+/// name AND generated CSS both match a later one is dropped (the LAST wins its
+/// position; `!important` variants differ in CSS so both stay). Non-declaration
+/// rules (comments, at-rules) neither participate nor break the name cache.
+fn remove_duplicate_decls(decls: Vec<Node>, np: u8) -> Vec<Node> {
+    use std::collections::HashMap;
+    let mut cache: HashMap<String, Vec<String>> = HashMap::new();
+    let mut keep = vec![true; decls.len()];
+    for (i, d) in decls.iter().enumerate().rev() {
+        let Node::Declaration(decl) = d else { continue };
+        let css = format!(
+            "{}: {}{};",
+            decl.name,
+            render_value(&decl.value, np),
+            decl.important
+        );
+        let seen = cache.entry(decl.name.clone()).or_default();
+        if seen.contains(&css) {
+            keep[i] = false;
+        } else {
+            seen.push(css);
+        }
+    }
+    let mut keep_iter = keep.into_iter();
+    decls
+        .into_iter()
+        .filter(|_| keep_iter.next().unwrap_or(true))
+        .collect()
+}
+
 fn render_decls(decls: &[Node], dind: &str, np: u8) -> String {
     let decls = merge_rules(decls);
+    let decls = remove_duplicate_decls(decls, np);
     let mut lines = Vec::new();
     for d in &decls {
         match d {

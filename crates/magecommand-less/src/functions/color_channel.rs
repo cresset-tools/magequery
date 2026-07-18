@@ -2,10 +2,16 @@
 //! hsvvalue, red, green, blue, alpha, luma, luminance` (plan §2.7). Mirrors
 //! less.js `functions/color.js` — channel values are NOT pre-rounded (fround at
 //! genCSS time handles display rounding).
+//!
+//! Error parity: none of these are caught in less.js — a non-color argument is
+//! a compile error (`toHSL`/`toHSV` throw `Argument cannot be evaluated to a
+//! color`; `red`/`green`/`blue`/`luminance` hit the `.rgb[…]` TypeError; `luma`
+//! the `.luma is not a function` one).
 
-use super::as_color;
+use super::{dim_node, to_color_err, undef_err, FnResult};
 use crate::ast::Node;
-use crate::value::Dimension;
+use crate::error::{ErrorKind, LessError};
+use crate::unit::Unit;
 
 /// HSL channel selector.
 pub(super) enum Hsl {
@@ -21,50 +27,53 @@ pub(super) enum Hsv {
     Value,
 }
 
-pub(super) fn hsl_channel(args: &[Node], ch: Hsl) -> Option<Node> {
-    let (h, s, l, _a) = as_color(args.first()?)?.to_hsl();
-    Some(Node::Dimension(match ch {
-        Hsl::Hue => Dimension::number(h),
-        Hsl::Saturation => Dimension::with_unit(s * 100.0, "%"),
-        Hsl::Lightness => Dimension::with_unit(l * 100.0, "%"),
+pub(super) fn hsl_channel(args: &[Node], ch: Hsl) -> FnResult {
+    let (h, s, l, _a) = to_color_err(args.first())?.to_hsl();
+    Ok(Some(match ch {
+        Hsl::Hue => dim_node(h, Unit::none())?,
+        Hsl::Saturation => dim_node(s * 100.0, Unit::single("%"))?,
+        Hsl::Lightness => dim_node(l * 100.0, Unit::single("%"))?,
     }))
 }
 
-pub(super) fn hsv_channel(args: &[Node], ch: Hsv) -> Option<Node> {
-    let (h, s, v, _a) = as_color(args.first()?)?.to_hsv();
-    Some(Node::Dimension(match ch {
-        Hsv::Hue => Dimension::number(h),
-        Hsv::Saturation => Dimension::with_unit(s * 100.0, "%"),
-        Hsv::Value => Dimension::with_unit(v * 100.0, "%"),
+pub(super) fn hsv_channel(args: &[Node], ch: Hsv) -> FnResult {
+    let (h, s, v, _a) = to_color_err(args.first())?.to_hsv();
+    Ok(Some(match ch {
+        Hsv::Hue => dim_node(h, Unit::none())?,
+        Hsv::Saturation => dim_node(s * 100.0, Unit::single("%"))?,
+        Hsv::Value => dim_node(v * 100.0, Unit::single("%"))?,
     }))
 }
 
-pub(super) fn rgb_channel(args: &[Node], idx: usize) -> Option<Node> {
-    let c = as_color(args.first()?)?;
-    Some(Node::Dimension(Dimension::number(c.rgb[idx])))
+pub(super) fn rgb_channel(args: &[Node], idx: usize) -> FnResult {
+    let Some(Node::Color(c)) = args.first() else {
+        return Err(undef_err("0")); // less.js `color.rgb[0]` TypeError
+    };
+    Ok(Some(dim_node(c.rgb[idx], Unit::none())?))
 }
 
 /// less.js `alpha(color)` — `toHSL().a`, a unitless dimension.
-pub(super) fn alpha(args: &[Node]) -> Option<Node> {
-    let c = as_color(args.first()?)?;
-    Some(Node::Dimension(Dimension::number(c.alpha)))
+pub(super) fn alpha(args: &[Node]) -> FnResult {
+    let c = to_color_err(args.first())?;
+    Ok(Some(dim_node(c.alpha, Unit::none())?))
 }
 
 /// less.js `luma(color)` — gamma-corrected, alpha-scaled, in `%`.
-pub(super) fn luma(args: &[Node]) -> Option<Node> {
-    let c = as_color(args.first()?)?;
-    Some(Node::Dimension(Dimension::with_unit(
-        c.luma() * c.alpha * 100.0,
-        "%",
-    )))
+pub(super) fn luma(args: &[Node]) -> FnResult {
+    let Some(Node::Color(c)) = args.first() else {
+        return Err(LessError::new(
+            ErrorKind::Runtime,
+            "color.luma is not a function",
+        ));
+    };
+    Ok(Some(dim_node(c.luma() * c.alpha * 100.0, Unit::single("%"))?))
 }
 
 /// less.js `luminance(color)` — the linear (non-gamma) variant, in `%`.
-pub(super) fn luminance(args: &[Node]) -> Option<Node> {
-    let c = as_color(args.first()?)?;
+pub(super) fn luminance(args: &[Node]) -> FnResult {
+    let Some(Node::Color(c)) = args.first() else {
+        return Err(undef_err("0"));
+    };
     let l = 0.2126 * c.rgb[0] / 255.0 + 0.7152 * c.rgb[1] / 255.0 + 0.0722 * c.rgb[2] / 255.0;
-    Some(Node::Dimension(Dimension::with_unit(
-        l * c.alpha * 100.0,
-        "%",
-    )))
+    Ok(Some(dim_node(l * c.alpha * 100.0, Unit::single("%"))?))
 }

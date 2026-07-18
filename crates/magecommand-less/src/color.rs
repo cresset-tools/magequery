@@ -115,8 +115,12 @@ impl Color {
         }
     }
 
-    /// less.js `toHSL` → `(h in 0..360, s, l, a)`.
+    /// less.js `toHSL` → `(h in 0..360, s, l, a)`. A NaN channel poisons all
+    /// three components (JS `Math.max` propagates NaN; Rust's would swallow it).
     pub fn to_hsl(&self) -> (f64, f64, f64, f64) {
+        if self.rgb.iter().any(|c| c.is_nan()) {
+            return (f64::NAN, f64::NAN, f64::NAN, self.alpha);
+        }
         let r = self.rgb[0] / 255.0;
         let g = self.rgb[1] / 255.0;
         let b = self.rgb[2] / 255.0;
@@ -194,17 +198,26 @@ impl Color {
     }
 
     /// less.js `toRGB` — the 6-digit lowercase hex form, channels clamped/rounded.
+    /// A NaN channel prints the literal `NaN` (JS `NaN.toString(16)`), so color
+    /// math over non-numbers yields `#NaNNaNNaN` exactly like less.js.
     pub fn to_rgb_hex(&self) -> String {
         let mut s = String::from("#");
         for c in &self.rgb {
+            if c.is_nan() {
+                s.push_str("NaN");
+                continue;
+            }
             let v = clamp(js_round(*c), 255.0) as u32;
             s.push_str(&format!("{v:02x}"));
         }
         s
     }
 
-    /// less.js `toHSV` → `(h in 0..360, s, v, a)`.
+    /// less.js `toHSV` → `(h in 0..360, s, v, a)` (NaN poisons, as in `to_hsl`).
     pub fn to_hsv(&self) -> (f64, f64, f64, f64) {
+        if self.rgb.iter().any(|c| c.is_nan()) {
+            return (f64::NAN, f64::NAN, f64::NAN, self.alpha);
+        }
         let r = self.rgb[0] / 255.0;
         let g = self.rgb[1] / 255.0;
         let b = self.rgb[2] / 255.0;
@@ -241,10 +254,15 @@ impl Color {
         0.2126 * f(self.rgb[0]) + 0.7152 * f(self.rgb[1]) + 0.0722 * f(self.rgb[2])
     }
 
-    /// less.js `toARGB` — `#AARRGGBB`, each channel rounded and clamped.
+    /// less.js `toARGB` — `#AARRGGBB`, each channel rounded and clamped (NaN
+    /// prints literally, as in `to_rgb_hex`).
     pub fn to_argb(&self) -> String {
         let mut s = String::from("#");
         for c in [self.alpha * 255.0, self.rgb[0], self.rgb[1], self.rgb[2]] {
+            if c.is_nan() {
+                s.push_str("NaN");
+                continue;
+            }
             let v = clamp(js_round(c), 255.0) as u32;
             s.push_str(&format!("{v:02x}"));
         }
@@ -272,8 +290,9 @@ fn parse_singles(hex: &str, n: usize) -> Option<[f64; 4]> {
     Some(out)
 }
 
+/// JS `Math.min(max, Math.max(0, v))` — NaN propagates (Rust `max` would eat it).
 fn clamp(v: f64, max: f64) -> f64 {
-    v.max(0.0).min(max)
+    if v.is_nan() { v } else { v.max(0.0).min(max) }
 }
 
 /// JS `Math.round` — half toward +∞.
@@ -281,22 +300,20 @@ fn js_round(x: f64) -> f64 {
     (x + 0.5).floor()
 }
 
+/// less.js `Node.fround`: `Number((v + 2e-16).toFixed(p))` — decimal rounding,
+/// shared with the dimension formatter (never a `*10^p` float multiply).
 fn fround(v: f64, num_precision: u8) -> f64 {
     if num_precision == 0 {
         return v;
     }
-    let factor = 10f64.powi(num_precision as i32);
-    js_round((v + 2e-16) * factor) / factor
+    crate::value::to_fixed(v + 2e-16, num_precision as i32)
 }
 
 /// Format a rounded scalar (alpha / hsl component) the way less.js joins them:
-/// integers unadorned, else shortest decimal.
+/// JS `String(number)` — integers unadorned, exponent form for tiny values
+/// (`rgba(0, 0, 0, 1e-7)`), `NaN` literal.
 fn format_alpha(v: f64) -> String {
-    if v == v.trunc() && v.abs() < 1e15 {
-        format!("{}", v as i64)
-    } else {
-        format!("{v}")
-    }
+    crate::value::js_number_string(v)
 }
 
 /// Helper: get the `[f64;3]` at 8-bit integer resolution (for hsl rounding parity

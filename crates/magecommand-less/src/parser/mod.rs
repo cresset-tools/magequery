@@ -600,10 +600,27 @@ impl<'a> Parser<'a> {
     }
 
     /// The `permissiveValue` entity loop: `entity ([,] entity)*` reaching `;`/`}`.
+    /// Block comments between entities are KEPT as `Comment` nodes (less.js
+    /// preserves them in the value with a joining space — `--value: a/* c */;`
+    /// renders `a /* c */`, review F6).
     fn try_custom_entities(&mut self) -> Option<Node> {
         let mut items: Vec<Node> = Vec::new();
         loop {
-            self.skip_value_trivia();
+            self.cur.skip_whitespace();
+            if self.cur.at_block_comment() {
+                let s = self.here();
+                self.cur.scan_comment();
+                items.push(Node::Comment {
+                    text: self.cur.src()[s..self.here()].to_string(),
+                    line: false,
+                    span: self.span(s),
+                });
+                continue;
+            }
+            if self.cur.at_line_comment() {
+                self.cur.scan_comment();
+                continue;
+            }
             match self.cur.cur() {
                 None | Some(b';') | Some(b'}') => break,
                 Some(b',') => {
@@ -639,13 +656,19 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Raw custom-property capture up to `;`/`}` (balanced).
+    /// Raw custom-property capture up to `;`/`}` (balanced). A backslash
+    /// escapes the next byte — `\'` inside the value must NOT open a string
+    /// (less.js's permissive scanner honors escapes; review F5).
     fn parse_custom_property_raw(&mut self) -> Node {
         let start = self.here();
         let mut depth = 0i32;
         while let Some(b) = self.cur.cur() {
             match b {
                 b';' | b'}' if depth == 0 => break,
+                b'\\' if self.cur.peek(1).is_some() => {
+                    self.cur.bump();
+                    self.cur.bump();
+                }
                 b'{' | b'(' | b'[' => {
                     depth += 1;
                     self.cur.bump();
@@ -955,36 +978,80 @@ impl<'a> Parser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_url(&mut self) -> Result<Node, LessError> {
-        // consume `url` `(` … `)`
+        // consume `url` `(` … `)` — less.js `entities.url`: the content is a
+        // quoted string, a bare `@variable` (evaluated! F7-review), or the raw
+        // run `/^(?:(?:\\[()'"])|[^()'"])+/` — whitespace INSIDE is kept (only
+        // the post-`url(` skip trims leading spaces), and a `(` in the raw run
+        // (e.g. `url(fn(x))`) leaves the required `)` unmatched → parse error,
+        // exactly like less.js.
         self.cur.eat_str("url");
         self.cur.skip_whitespace();
         if !self.cur.eat(b'(') {
             return Err(self.err("expected '(' after url"));
         }
         self.cur.skip_whitespace();
-        let inner = if matches!(self.cur.cur(), Some(b'"') | Some(b'\'')) {
+        let inner = if matches!(self.cur.cur(), Some(b'"') | Some(b'\'') | Some(b'~')) {
             self.parse_quoted()
+        } else if self.cur.cur() == Some(b'@') && self.cur.peek(1) != Some(b'{') {
+            // entities.variable: `@@?[\w-]+` — resolved at eval time. (The
+            // interpolated `@{a}` form stays a raw Anonymous, like less.js.)
+            let start = self.here();
+            self.cur.bump();
+            if self.cur.cur() == Some(b'@') {
+                self.cur.bump();
+            }
+            let nstart = self.here();
+            while matches!(self.cur.cur(), Some(b) if b == b'-' || b == b'_'
+                || b.is_ascii_alphanumeric())
+            {
+                self.cur.bump();
+            }
+            if self.here() == nstart {
+                self.cur.i = start;
+                Node::Anonymous(String::new())
+            } else if self.cur.src()[start..].starts_with("@@") {
+                Node::VariableVariable {
+                    name: self.cur.src()[start + 2..self.here()].to_string(),
+                    span: self.span(start),
+                }
+            } else {
+                Node::Variable {
+                    name: self.cur.src()[start + 1..self.here()].to_string(),
+                    span: self.span(start),
+                }
+            }
         } else {
             let s = self.here();
-            let mut depth = 0i32;
             while let Some(b) = self.cur.cur() {
                 match b {
-                    b')' if depth == 0 => break,
-                    b'(' => {
-                        depth += 1;
+                    b'\\' if matches!(
+                        self.cur.peek(1),
+                        Some(b'(') | Some(b')') | Some(b'\'') | Some(b'"')
+                    ) =>
+                    {
+                        self.cur.bump();
                         self.cur.bump();
                     }
-                    b')' => {
-                        depth -= 1;
-                        self.cur.bump();
-                    }
+                    b'(' | b')' | b'\'' | b'"' => break,
                     _ => self.cur.bump(),
                 }
             }
-            Node::Anonymous(self.cur.src()[s..self.here()].trim().to_string())
+            Node::Anonymous(self.cur.src()[s..self.here()].to_string())
         };
-        self.cur.skip_whitespace();
-        self.cur.eat(b')');
+        if !matches!(inner, Node::Anonymous(_)) {
+            // Token parsers skip trailing whitespace in less.js; the raw run
+            // consumed it into the value instead (`url(spaced.png  )` keeps it).
+            self.cur.skip_whitespace();
+        }
+        match self.cur.cur() {
+            Some(b')') => {
+                self.cur.bump();
+            }
+            Some(c) => {
+                return Err(self.err(format!("expected ')' got '{}'", c as char)));
+            }
+            None => return Err(self.err("expected ')' got end of input")),
+        }
         Ok(Node::Url(Box::new(inner)))
     }
 
@@ -1327,6 +1394,15 @@ impl<'a> Parser<'a> {
                 if self.cur.cur() == Some(b'(') {
                     // Function call.
                     self.cur.bump();
+                    // less.js `customFuncCall`: an `alpha(` call first tries the
+                    // IE `ieAlpha` grammar (`opacity=<digits>` / `opacity=@var`,
+                    // case-normalized to lowercase); on a regex miss it falls
+                    // back to normal arguments (plan §2.17, review C14/C15/F9).
+                    if ident.eq_ignore_ascii_case("alpha") {
+                        if let Some(q) = self.try_ie_alpha()? {
+                            return Ok(q);
+                        }
+                    }
                     let args = self.parse_call_args()?;
                     self.skip_value_trivia();
                     self.cur.eat(b')');
@@ -1366,6 +1442,8 @@ impl<'a> Parser<'a> {
                 }
             } else if let Some(m) = self.try_anonymous_mixin()? {
                 m
+            } else if let Some(m) = self.try_mixin_call_arg()? {
+                m
             } else if let Some(a) = self.try_assignment()? {
                 a
             } else {
@@ -1397,6 +1475,120 @@ impl<'a> Parser<'a> {
             return Ok(semi_args);
         }
         Ok(comma_args)
+    }
+
+    /// A mixin CALL in function-argument position (`each(.set-2(), …)` — the
+    /// less.js `arguments()` chain routes these through `entities.mixinLookup`,
+    /// review F3-residual): `[.#]name` segments then `(args)`, NOT followed by
+    /// `{` (that form is an anonymous mixin, tried earlier). Backtracks on any
+    /// non-fit (`.5em` starts with `.` but has no parens).
+    fn try_mixin_call_arg(&mut self) -> Result<Option<Node>, LessError> {
+        if !matches!(self.cur.cur(), Some(b'.') | Some(b'#')) {
+            return Ok(None);
+        }
+        let start = self.here();
+        let mut path: Vec<Element> = Vec::new();
+        loop {
+            if !matches!(self.cur.cur(), Some(b'.') | Some(b'#')) {
+                break;
+            }
+            let seg_start = self.here();
+            self.cur.bump();
+            let nstart = self.here();
+            while matches!(self.cur.cur(), Some(b) if b == b'-' || b == b'_'
+                || b.is_ascii_alphanumeric())
+            {
+                self.cur.bump();
+            }
+            if self.here() == nstart {
+                self.cur.i = start;
+                return Ok(None);
+            }
+            path.push(Element {
+                combinator: if path.is_empty() { String::new() } else { " ".to_string() },
+                value: self.cur.src()[seg_start..self.here()].to_string(),
+                span: self.span(seg_start),
+            });
+        }
+        if path.is_empty() || self.cur.cur() != Some(b'(') {
+            self.cur.i = start;
+            return Ok(None);
+        }
+        let params_start = self.here();
+        self.skip_balanced(b'(', b')');
+        let args_src =
+            self.cur.src()[params_start + 1..self.here().saturating_sub(1)].to_string();
+        Ok(Some(Node::MixinCall(MixinCall {
+            path,
+            args: parse_mixin_args(&args_src),
+            important: false,
+            span: self.span(start),
+        })))
+    }
+
+    /// less.js `parsers.ieAlpha`, tried when an `alpha(` call opens (§2.17).
+    /// Cursor sits just after the `(`. A `/^opacity=/i` miss backtracks to a
+    /// normal argument parse (`alpha(0.5)`, `alpha(opacity = 87)` — the spaced
+    /// form is NOT ieAlpha and later hits the color function's toHSL error);
+    /// a hit commits: `<digits>` or `@var` (→ `@{var}` interpolation), then a
+    /// REQUIRED `)` — anything else is less.js's propagated parse error
+    /// (`alpha(opacity=87.5)` → `expected ')' got '.'`; `alpha(opacity=)` /
+    /// `alpha(opacity=@{v})` → `Could not parse alpha`). The result is the
+    /// lowercase-normalized escaped `alpha(opacity=…)` literal.
+    fn try_ie_alpha(&mut self) -> Result<Option<Node>, LessError> {
+        let save = self.here();
+        self.skip_value_trivia();
+        let at = self.here();
+        let rest = &self.cur.src()[at..];
+        if rest.len() < 8 || !rest[..8].eq_ignore_ascii_case("opacity=") {
+            self.cur.i = save;
+            return Ok(None);
+        }
+        self.cur.i = at + 8;
+        self.skip_value_trivia(); // less.js skips trivia after every token match
+        let dstart = self.here();
+        while matches!(self.cur.cur(), Some(b) if b.is_ascii_digit()) {
+            self.cur.bump();
+        }
+        let value = if self.here() > dstart {
+            self.cur.src()[dstart..self.here()].to_string()
+        } else if self.cur.cur() == Some(b'@') {
+            // `expect(entities.variable)`: `@@?[\w-]+`, then re-emitted as the
+            // interpolation form `@{name}` (name = the match minus one `@`).
+            let vstart = self.here();
+            self.cur.bump();
+            if self.cur.cur() == Some(b'@') {
+                self.cur.bump();
+            }
+            let nstart = self.here();
+            while matches!(self.cur.cur(), Some(b) if b == b'-' || b == b'_'
+                || b.is_ascii_alphanumeric())
+            {
+                self.cur.bump();
+            }
+            if self.here() == nstart {
+                return Err(self.err("Could not parse alpha"));
+            }
+            let full = &self.cur.src()[vstart..self.here()];
+            format!("@{{{}}}", &full[1..])
+        } else {
+            return Err(self.err("Could not parse alpha"));
+        };
+        self.skip_value_trivia();
+        match self.cur.cur() {
+            Some(b')') => {
+                self.cur.bump();
+            }
+            Some(c) => {
+                return Err(self.err(format!("expected ')' got '{}'", c as char)));
+            }
+            None => return Err(self.err("expected ')' got end of input")),
+        }
+        Ok(Some(Node::Quoted {
+            escaped: true,
+            quote: '"',
+            value: format!("alpha(opacity={value})"),
+        }))
     }
 
     /// An anonymous mixin argument `.(@v; @k) { … }` / `#(@v) { … }` (the

@@ -53,7 +53,11 @@ const SKIP_SUITES: &[&str] = &["javascript", "plugin", "plugin-module", "plugin-
 /// to hide a regression). 48/87 after Phase 3 (function library + strings: the
 /// full §2.7 registry with min/max dual behavior, calc `_SELF` folding + paren
 /// semantics, iterated interpolation, IE filters/`progid`, `anonymousValue`
-/// raw declarations, value comments, merge `+:`/`+_:`, and `each()`).
+/// raw declarations, value comments, merge `+:`/`+_:`, and `each()`) and the
+/// Phase 3 adversarial review fixes (toFixed fround, JS number spellings,
+/// less.js-exact error-vs-passthrough, ieAlpha/url grammar, duplicate-decl
+/// removal — see NOTES.md "Phase 3 review fixes"; the still-red fixtures wait
+/// on Phase 4 subsystems, so the floor holds at 48).
 const EXPECTED_PASS: &[&str] = &[
     "at-rules-declarations/at-rules-declarations",
     "at-rules-empty-block/at-rules-empty-block",

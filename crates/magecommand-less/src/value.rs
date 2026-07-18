@@ -220,12 +220,14 @@ fn raw_op(op: char, a: f64, b: f64) -> f64 {
 }
 
 /// Format a dimension's numeric value like less.js `Dimension.genCSS`/`fround`
-/// (plan §2.18): `Math.round((v + 2e-16) * 10^p) / 10^p`, then `String(value)`,
-/// with the tiny-value `toFixed(20)` guard and `-0`→`0` normalization.
+/// (plan §2.18): `Number((v + 2e-16).toFixed(p))`, then `String(value)`, with
+/// the tiny-value `toFixed(20)` guard and `-0`→`0` normalization. The fround is
+/// **decimal** (JS `toFixed`) rounding, NOT a `*10^p` float multiply — the
+/// multiply crosses half boundaries the exact decimal expansion sits below
+/// (`179.999999995` must print `179.99999999`, not `180`).
 pub fn format_number(v: f64, num_precision: u8) -> String {
     let value = if num_precision > 0 {
-        let factor = 10f64.powi(num_precision as i32);
-        js_round((v + 2e-16) * factor) / factor
+        to_fixed(v + 2e-16, num_precision as i32)
     } else {
         v
     };
@@ -233,23 +235,85 @@ pub fn format_number(v: f64, num_precision: u8) -> String {
     if value == 0.0 {
         return "0".to_string(); // also normalizes -0
     }
-    if value.abs() < 0.000001 {
-        // would print in exponential form — emit fixed then strip trailing zeros.
+    if value.is_finite() && value.abs() < 0.000001 {
+        // String() would print exponential form — less.js emits toFixed(20)
+        // with trailing zeros stripped instead.
         let s = format!("{value:.20}");
         return s.trim_end_matches('0').trim_end_matches('.').to_string();
     }
-    js_number_to_string(value)
+    js_number_string(value)
 }
 
-/// JS `Math.round` — half rounds toward +∞ (not away from zero).
-fn js_round(x: f64) -> f64 {
-    (x + 0.5).floor()
+/// JS `Number.prototype.toFixed` numerically: round to `places` decimal digits,
+/// ties away from zero (the spec's "pick the larger n" on the absolute value).
+/// Works on the *exact* decimal expansion of the double (with 40 guard digits),
+/// not a `v * 10^p` float multiply — `(0.615).toFixed(2)` is `"0.61"` because
+/// the exact value sits below the tie, which the multiply would round across.
+pub(crate) fn to_fixed(v: f64, places: i32) -> f64 {
+    if !v.is_finite() {
+        return v;
+    }
+    let places = places.max(0) as usize;
+    let neg = v < 0.0;
+    let s = format!("{:.*}", places + 40, v.abs());
+    let (int_part, frac) = s.split_once('.').unwrap_or((s.as_str(), ""));
+    let cut = places.min(frac.len());
+    let mut digits: Vec<u8> = int_part
+        .bytes()
+        .chain(frac[..cut].bytes())
+        .map(|b| b - b'0')
+        .collect();
+    if frac[cut..].bytes().next().is_some_and(|d| d >= b'5') {
+        // Round up (away from zero), propagating the carry.
+        let mut i = digits.len();
+        loop {
+            if i == 0 {
+                digits.insert(0, 1);
+                break;
+            }
+            i -= 1;
+            if digits[i] == 9 {
+                digits[i] = 0;
+            } else {
+                digits[i] += 1;
+                break;
+            }
+        }
+    }
+    let int_len = digits.len() - cut;
+    let mut out = String::with_capacity(digits.len() + 2);
+    for (i, d) in digits.iter().enumerate() {
+        if i == int_len {
+            out.push('.');
+        }
+        out.push((b'0' + d) as char);
+    }
+    let val: f64 = out.parse().unwrap_or(0.0);
+    if neg { -val } else { val }
 }
 
-/// Emit a float like JavaScript's `String(number)` for the normal-magnitude
-/// values LESS produces. Rust's shortest round-trip `{}` matches JS here, and
-/// integer-valued floats print without a decimal point.
-fn js_number_to_string(v: f64) -> String {
+/// Emit a float like JavaScript's `String(number)`: `NaN`/`Infinity` spellings,
+/// exponential form for |v| ≥ 1e21 (`1e+21`) and 0 < |v| < 1e-6 (`1e-7` — the
+/// rgba/hsla alpha join case; dimension genCSS masks this branch with its own
+/// `toFixed(20)` guard above), Rust's shortest round-trip `{}` otherwise (which
+/// matches JS for the normal range), and integer-valued floats without a
+/// decimal point.
+pub(crate) fn js_number_string(v: f64) -> String {
+    if v.is_nan() {
+        return "NaN".to_string();
+    }
+    if v.is_infinite() {
+        return if v > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    if v != 0.0 && (v.abs() >= 1e21 || v.abs() < 1e-6) {
+        // JS switches to exponential: String(1e21) === "1e+21",
+        // String(0.0000001) === "1e-7".
+        let s = format!("{v:e}"); // shortest mantissa, e.g. "1e21" / "-1.5e22"
+        return match s.split_once('e') {
+            Some((m, exp)) if !exp.starts_with('-') => format!("{m}e+{exp}"),
+            _ => s,
+        };
+    }
     if v == v.trunc() && v.abs() < 1e15 {
         format!("{}", v as i64)
     } else {

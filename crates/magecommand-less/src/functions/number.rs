@@ -4,51 +4,71 @@
 //! dimension, flatten list args, and on any incompatible/non-dimension arg give
 //! up (→ the caller re-emits a literal CSS `min()`/`max()` with evaluated args).
 
-use super::as_dimension;
+use super::{dim_node, js_arg_num, undef_err, FnResult};
 use crate::ast::Node;
 use crate::css::render_value;
+use crate::error::{ErrorKind, LessError};
+use crate::unit::Unit;
 use crate::value::Dimension;
 
 /// less.js `percentage(n)` — `mathHelper(num => num * 100, '%', n)`: the
-/// non-null unit means the argument is `unify()`d first.
-pub(super) fn percentage(args: &[Node]) -> Option<Node> {
-    let d = as_dimension(args.first()?)?;
-    Some(Node::Dimension(Dimension::with_unit(
-        d.unify().value * 100.0,
-        "%",
-    )))
-}
-
-/// less.js `convert(val, unit)`.
-pub(super) fn convert(args: &[Node]) -> Option<Node> {
-    let d = as_dimension(args.first()?)?;
-    let unit = match args.get(1) {
-        Some(Node::Keyword(k)) => k.clone(),
-        Some(Node::Quoted { value, .. }) => value.clone(),
-        Some(Node::Anonymous(s)) => s.clone(),
-        _ => return None,
+/// non-null unit means the argument is `unify()`d first; a non-Dimension is
+/// MathHelper's propagated `argument must be a number` throw.
+pub(super) fn percentage(args: &[Node]) -> FnResult {
+    let Some(Node::Dimension(d)) = args.first() else {
+        return Err(LessError::new(ErrorKind::Argument, "argument must be a number"));
     };
-    Some(Node::Dimension(d.convert_to_unit(&unit)))
+    Ok(Some(dim_node(d.unify().value * 100.0, Unit::single("%"))?))
 }
 
-/// less.js `mod(a, b)` — JS `%` (truncated remainder), first operand's unit.
-pub(super) fn modulo(args: &[Node]) -> Option<Node> {
-    let a = as_dimension(args.first()?)?;
-    let b = as_dimension(args.get(1)?)?;
-    Some(Node::Dimension(Dimension {
-        value: a.value % b.value,
-        unit: a.unit.clone(),
+/// less.js `convert(val, unit)` — `val.convertTo(unit.value)`: the unit is ANY
+/// node's `.value` (a Dimension unit-arg gives a number → `convertTo` no-ops,
+/// F7); a missing unit is the `undefined.value` TypeError; a non-Dimension val
+/// the `val.convertTo is not a function` one.
+pub(super) fn convert(args: &[Node]) -> FnResult {
+    let d = match args.first() {
+        Some(Node::Dimension(d)) => d,
+        Some(_) => {
+            return Err(LessError::new(
+                ErrorKind::Runtime,
+                "val.convertTo is not a function",
+            ))
+        }
+        None => return Err(undef_err("convertTo")),
+    };
+    let unit = match args.get(1) {
+        Some(Node::Keyword(k)) => Some(k.clone()),
+        Some(Node::Quoted { value, .. }) => Some(value.clone()),
+        Some(Node::Anonymous(s)) => Some(s.clone()),
+        Some(_) => None, // non-string `.value` → convertTo no-ops
+        None => return Err(undef_err("value")),
+    };
+    Ok(Some(match unit {
+        Some(u) => Node::Dimension(d.convert_to_unit(&u)),
+        None => Node::Dimension(d.clone()),
     }))
 }
 
-/// less.js `pow(x, y)` — `x^y` in x's unit.
-pub(super) fn pow(args: &[Node]) -> Option<Node> {
-    let x = as_dimension(args.first()?)?;
-    let y = as_dimension(args.get(1)?)?;
-    Some(Node::Dimension(Dimension {
-        value: x.value.powf(y.value),
-        unit: x.unit.clone(),
-    }))
+/// less.js `mod(a, b)` — JS `%` (truncated remainder) over `.value` coercion
+/// (`mod("3", 2)` → 1), first operand's unit; a NaN result is the Dimension
+/// constructor's `Dimension is not a number.` throw (`mod(7, 0)`, `mod(foo, 2)`).
+pub(super) fn modulo(args: &[Node]) -> FnResult {
+    let a = args.first().ok_or_else(|| undef_err("value"))?;
+    let b = args.get(1).ok_or_else(|| undef_err("value"))?;
+    let unit = match a {
+        Node::Dimension(d) => d.unit.clone(),
+        _ => Unit::none(),
+    };
+    Ok(Some(dim_node(js_arg_num(a) % js_arg_num(b), unit)?))
+}
+
+/// less.js `pow(x, y)` — `x^y` in x's unit; non-Dimension args throw
+/// `arguments must be numbers`; a NaN result (`pow(-1, 0.5)`) throws too.
+pub(super) fn pow(args: &[Node]) -> FnResult {
+    let (Some(Node::Dimension(x)), Some(Node::Dimension(y))) = (args.first(), args.get(1)) else {
+        return Err(LessError::new(ErrorKind::Argument, "arguments must be numbers"));
+    };
+    Ok(Some(dim_node(x.value.powf(y.value), x.unit.clone())?))
 }
 
 /// less.js `minMax(isMin, args)` — a faithful port including the `values['']`

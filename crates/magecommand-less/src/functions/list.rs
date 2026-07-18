@@ -6,6 +6,7 @@
 //! a ruleset *call* (anonymous-mixin params, `&` re-eval) — the machinery
 //! `@dr()` calls introduce (see NOTES.md).
 
+use super::{js_arg_num, undef_err, FnResult};
 use crate::ast::Node;
 use crate::value::Dimension;
 
@@ -17,25 +18,24 @@ fn items_of(node: &Node) -> Vec<Node> {
     }
 }
 
-/// less.js `length(values)`.
-pub(super) fn length(args: &[Node]) -> Option<Node> {
-    let n = items_of(args.first()?).len();
-    Some(Node::Dimension(Dimension::number(n as f64)))
+/// less.js `length(values)` — a missing argument is the `undefined.value`
+/// TypeError (compile error), never passthrough.
+pub(super) fn length(args: &[Node]) -> FnResult {
+    let n = items_of(args.first().ok_or_else(|| undef_err("value"))?).len();
+    Ok(Some(Node::Dimension(Dimension::number(n as f64))))
 }
 
-/// less.js `extract(values, index)` — 1-based; out of range → `None`
-/// (→ passthrough, like the JS `undefined` return).
-pub(super) fn extract(args: &[Node]) -> Option<Node> {
-    let values = items_of(args.first()?);
-    let index = match args.get(1)? {
-        Node::Dimension(d) => d.value,
-        _ => return None,
-    };
-    let idx = index as i64 - 1;
-    if idx < 0 {
-        return None;
+/// less.js `extract(values, index)` — 1-based via `index.value - 1` under JS
+/// coercion (`extract(@l, "2")` works). A missing index is the
+/// `undefined.value` TypeError; a fractional/NaN/out-of-range one indexes
+/// `values[…]` as `undefined` → passthrough with evaluated args (F5).
+pub(super) fn extract(args: &[Node]) -> FnResult {
+    let values = items_of(args.first().ok_or_else(|| undef_err("value"))?);
+    let index = js_arg_num(args.get(1).ok_or_else(|| undef_err("value"))?) - 1.0;
+    if index.is_nan() || index.fract() != 0.0 || index < 0.0 {
+        return Ok(None); // JS arrays have no such key → undefined
     }
-    values.get(idx as usize).cloned()
+    Ok(values.get(index as usize).cloned())
 }
 
 /// less.js `range(start?, end, step?)` — inclusive, end's unit on every item.
@@ -84,12 +84,16 @@ mod tests {
         ]);
         let idx = Node::Dimension(Dimension::number(2.0));
         assert!(matches!(
-            extract(&[list.clone(), idx]).unwrap(),
+            extract(&[list.clone(), idx]).unwrap().unwrap(),
             Node::Keyword(k) if k == "b"
         ));
         // A non-list value is a 1-item list.
         let one = Node::Keyword("solo".into());
-        assert!(matches!(length(&[one]).unwrap(), Node::Dimension(d) if d.value == 1.0));
+        assert!(matches!(length(&[one]).unwrap().unwrap(), Node::Dimension(d) if d.value == 1.0));
+        // Fractional index → undefined → passthrough (F5); missing index errors.
+        let frac = Node::Dimension(Dimension::number(1.5));
+        assert!(matches!(extract(&[list.clone(), frac]), Ok(None)));
+        assert!(extract(&[list]).is_err());
     }
 
     #[test]

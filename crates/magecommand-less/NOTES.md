@@ -410,8 +410,10 @@ against `less.render` on the vendored `data/` assets.
 - **Registry** (`src/functions/`, one module per group, `dispatch` in `mod.rs`):
   - string: `e` (escaped-Quoted result, quote kept for later `replace`/`%`),
     `escape` (JS `encodeURI` + `=:#;()`), `%` (sequential `/%[sda]/i`, uppercase
-    → `encodeURIComponent`, `%%`→`%`), `replace` (JS-regex via the `regex` crate,
-    `g`/`i`/`m`/`s` flags, subject quote+escaped preserved).
+    → `encodeURIComponent`, `%%`→`%`), `replace` (JS-regex via `fancy-regex` —
+    lookaround/backrefs work — with hand-implemented JS replacement-pattern
+    semantics, `g`/`i`/`m`/`s` flags, subject quote+escaped preserved; see the
+    review-fixes section below).
   - list: `length`/`extract` (1-based, non-list = singleton)/`range`/the `~(…)`
     paren-escape; `each()` — see below.
   - math: `ceil/floor/sqrt/abs` keep the unit; `sin/cos/tan` unify→unitless;
@@ -472,7 +474,8 @@ against `less.render` on the vendored `data/` assets.
   `permissiveValue` capture), so no stray space.
 - **IE filters** (§2.17): call names extend over `progid:[\w.]+(`; `key=value`
   args are a new `Node::Assignment` (evaluated value, `key=value` genCSS);
-  `alpha(opacity=…)` falls through the alpha() color function to passthrough.
+  `alpha(opacity=…)` is a PARSER special case (less.js `ieAlpha` via
+  `customFuncCall` — see the review-fixes section below).
 - **anonymousValue** (the less.js declaration fast path): a value with none of
   ``.#@$+/'"*`(;{}-`` up to `;` is captured VERBATIM (raw whitespace/newlines,
   inline `!important`) — this is what `whitespace` byte-parity needed.
@@ -506,12 +509,129 @@ against `less.render` on the vendored `data/` assets.
   test-runner's registered custom functions (`_color`/`increment`/`add` — the
   harness would have to mirror `test/index.js`'s registry); revisit with Phase 4.
 - `functions-each` — the remaining reds are maps/lookups (`@schemes[@@name]`,
-  `@one[@two]`) and mixin-calls-as-list-args (`each(.set-2(), …)`) — §2.12.
+  `@one[@two]`) — §2.12. (Mixin-calls-as-list-args, `each(.set-2(), …)`, landed
+  with the review fixes below.)
 - `urls` — `data-uri`/`svg-gradient`/`image-size` themselves are done and
   byte-verified, but the fixture needs `@import` inlining + rootpath-relative
   URL rewriting (§2.9, Phase 4).
 - `each()` over rulesets with variable declarations skips them (less.js iterates
   them as Declarations); no in-scope fixture observes the difference.
+
+### Phase 3 review fixes (adversarial audit vs less.js 4.6.7)
+
+Four review lenses audited the Phase 3 implementation against a locally
+installed `less@4.6.7`; every confirmed in-phase finding below was reproduced,
+fixed, and re-verified against the real compiler (pass rate stays 48/87 — the
+fixes close probe divergences; the still-red fixtures wait on Phase 4 subsystems).
+
+- **fround is now decimal `toFixed`, never a float multiply** (C13/F1, systemic):
+  `Node.fround` is `Number((v + 2e-16).toFixed(8))`; the previous
+  `round((v+2e-16)*1e8)/1e8` crossed half boundaries the exact decimal expansion
+  sits below (`179.999999995` → `180` instead of `179.99999999`; ~8.5% of random
+  9-decimal literals diverged) and corrupted ≥1e21 values. `value::to_fixed`
+  (the exact-decimal-expansion rounder, moved from `functions::math`) now backs
+  `format_number` AND `Color`'s fround. Verified with a 4000-value random fuzz
+  (byte-identical) plus the three color fuzz corpora.
+- **JS `String(number)` spellings** (C21/F3/C7): `Infinity`/`-Infinity`, the
+  ≥1e21 exponent form (`pow(10, 21)` → `1e+21`), and the <1e-6 exponent form for
+  rgba/hsl argument joins (`rgba(0, 0, 0, 1e-7)`) — one `value::js_number_string`
+  shared by dimensions and color components. (Dimension genCSS still masks the
+  tiny branch with its own `toFixed(20)` guard, as less.js does.)
+- **Error parity — the passthrough rule is now exactly less.js's caught set**
+  (C9/F2/F4/F5/F16, systemic): `dispatch` arms return `Result<Option<Node>>`;
+  an `Err` is wrapped ``Error evaluating function `name`: …`` like `Call.eval`.
+  `Ok(None)` (→ passthrough) remains ONLY where less.js itself catches or
+  null-returns: `min`/`max`, `rgb[a]`/`hsl[a]` bodies, the `saturate`/`contrast`
+  non-color filter carve-outs, out-of-range `extract`. Everything else now
+  hard-errors with less.js's messages: MathHelper's `argument must be a number`
+  (incl. the very reachable `round(10 / 3)` under default math), `pow`'s
+  `arguments must be numbers`, the Dimension constructor's
+  `Dimension is not a number.` on NaN (`sqrt(-1)`, `mod(7, 0)`, `(0 / 0)` — also
+  guarded in `Operation` eval; Infinity stays legal), `round`'s `toFixed()`
+  RangeError outside 0..=100, `unit`'s first-arg throw (+ the
+  forgotten-parenthesis hint), `convert`'s TypeErrors, the color functions'
+  `Argument cannot be evaluated to a color` / `color functions take numbers as
+  parameters` / missing-argument `Cannot read properties of undefined` family,
+  `color()`'s keyword/hex Argument throw, `hsv(-60, …)`'s `perm[-1]` TypeError,
+  and the string/list functions' missing-arg TypeErrors.
+- **NaN propagation prints like JS** (C11): `.value` arithmetic coercion
+  (`js_arg_num`: Dimension → number, string-ish → `Number()` — so
+  `lighten(#800, "20")` WORKS and `banana` is NaN), NaN-preserving clamps (Rust
+  `f64::max` swallows NaN; JS `Math.max` doesn't), NaN-poisoning `toHSL`/`toHSV`,
+  and `NaN`-literal hex channels → `lighten(#800, banana)`, `mix(…, banana)`,
+  `(#000000 / #000000)` all print `#NaNNaNNaN`.
+- **Constructor forms** (C1/C2/C12/C19/C10): `rgba(1, 2, 3)`/`hsla(90, 50%, 50%)`
+  with missing alpha re-emit the call (no invented `a = 1`, no `hsla`→`hsl`
+  rename); `rgb(<color>)` reuses channels; the space form unpacks `val[0..2]`
+  with NO length check (a slash-less 4th item silently drops); `hsv`/`hsva`
+  errors propagate (missing args, negative hue).
+- **`color('<keyword>')` fallback** (C4/F2-residual): quoted keywords go through
+  `Color.fromKeyword` with the keyword cleared (`color("plum")` → `#dda0dd`,
+  `color('transparent')` → `rgba(0, 0, 0, 0)`); invalid input throws.
+- **Quoted `'relative'`** (C6): the adjusters' method check is
+  `method.value === 'relative'` — true for Quoted/Anonymous too.
+- **`e()`/`escape()` read the raw JS `.value`** (C16/C17/F1-str/F10/F21):
+  a Color contributes its internal `rgb`/`hsl`/keyword/hex marker (`e(hsl(…))` →
+  `hsl`; an operated color is undefined → `e` prints empty, `escape` prints
+  `undefined`); a Dimension its bare full-precision number (unit dropped;
+  `e(0px)` is empty via the Quoted ctor's `content || ''`); Expression/URL args
+  JS-stringify to `[object Object]`.
+- **`replace()` is a real JS replace** (F2/F3/F15/F20): `fancy-regex` compiles
+  lookahead/lookbehind/backreferences; replacement patterns follow ES
+  `GetSubstitution` (`$$` `$&` ``$` `` `$'` `$N`/`$NN` with out-of-range staying
+  LITERAL, `$<name>` only when the regex has named groups); flags validate
+  against `[dgimsuvy]` (invalid → error); numeric patterns coerce, numeric
+  subjects error (`result.replace is not a function`).
+- **fround application boundary** (F8): `unit()`'s unit-arg, `%()` args and
+  `replace()` replacements render via context-less `toCSS()` — FULL float
+  digits, no `numPrecision` (`unit(5, 1.234567891px)` → `51.234567891px`).
+- **ieAlpha is a parser special case** (C14/C15/F9-math, §2.17): `alpha(` tries
+  `/^opacity=/i` — a hit commits to `<digits>` or `@var` (→ `@{var}`
+  interpolation) + `)` and emits the lowercase-normalized escaped literal
+  (`alpha(Opacity=87)` → `alpha(opacity=87)`); `opacity=87.5` / `opacity=` /
+  `opacity=@{v}` are parse errors (the old path emitted corrupted output for
+  `alpha(opacity=)`); a miss falls back to normal args (`alpha(opacity = 87)`
+  then errors in the color function, like less.js).
+- **`url()` follows the less.js grammar** (F6-url/F7-residual/F7/F8-url): the
+  content is a quoted string, a bare `@variable` (**resolved at eval** —
+  `url(@a)` with `@a: 'Trebuchet'` → `url('Trebuchet')`; `url(@{a})` stays
+  verbatim in both), or the raw run `(?:\\[()'"]|[^()'"])+` — whitespace inside
+  is kept (`url(spaced.png  )`, leading trimmed only) and `url(fn(x))` is the
+  same `expected ')' got '('` parse error as less.js.
+- **Interpolation quote boundary** (F18): selector and property-NAME
+  interpolation genCSS the value (quoted variables keep quotes: `."sel" {`,
+  `"color": red`); string/permissive interpolation still strips them.
+- **Duplicate-declaration removal** (C22/F1-residual — unspecced in the plan,
+  found in less.js `toCSSVisitor._removeDuplicateRules`): per ruleset, walking
+  backwards, an earlier declaration whose name AND rendered CSS match a later
+  one is dropped; `!important` variants differ and both stay.
+- **Root-level guards** (F11/F16): declarations at the stylesheet root error
+  (`Properties must be inside selector blocks. They cannot be in the root` —
+  also covers `each()` bodies at root), and a detached ruleset evaluated on a
+  real property errors (`Rulesets cannot be evaluated on a property.`).
+- **Permissive values** (F5/F6-residual): a backslash escapes the next byte in
+  the raw capture (`--v: ( x; // i\'m serious; )` no longer swallows braces to
+  EOF), and block comments between permissive entities are kept
+  (`--value: a/* { ; } */` renders `a /* { ; } */`).
+- **`each()` over a mixin call** (F3-residual): `each(.set-2(), …)` parses the
+  arg as a mixin call (the less.js `mixinLookup` route) and iterates its emitted
+  declarations.
+
+Known deviations kept (deliberate): error MESSAGE kinds render with the
+provisional `Kind: ` prefix (§F3 renderer is a later phase) and a few TypeError
+texts differ in wording only (`color(5)`, fancy-regex's invalid-pattern detail);
+both sides still fail compilation identically. Out-of-phase findings collected
+for Phase 4/parser follow-ups: scientific-notation lexing (`1e-7` must lex as
+`1e` minus `7` — C8/F6/F12), invalid hex literals accepted (C18), `//` in a
+same-line declaration value swallowing the rest of the line (F9-str), quoted
+`+` operations tolerated (F13), comments inside mixin-DEFINITION parameter
+lists (F4-residual), `@var` permissive brace values evaluated as rulesets
+(F9-residual), `@media` feature fround (F11-math), parse tolerance for
+`b: img.png` / `unknown(1, , 2)` / parenthesized args like
+`lighten(#800, 20%, ('relative'))` (F10-info), detached-ruleset calls (F17),
+and the harness's missing less.js test-runner custom functions
+(`_color`/`add`/`increment`, F8-residual — moot until Phase 4 makes
+`functions/functions` otherwise reachable).
 
 ## What milestone 1 implemented (Steps 1–5 consolidated)
 
