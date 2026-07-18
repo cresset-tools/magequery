@@ -94,17 +94,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn passthrough_returns_input() {
+    fn plain_css_ruleset_serializes() {
         let opts = LessOptions::default();
         let out = compile("a { color: red; }", &opts, &NoopResolver).unwrap();
-        assert_eq!(out.code, "a { color: red; }");
+        assert_eq!(out.code.trim_end(), "a {\n  color: red;\n}");
     }
 
     #[test]
-    fn passthrough_normalizes_bom_and_crlf() {
+    fn bom_and_crlf_are_normalized_before_parsing() {
         let opts = LessOptions::default();
         let out = compile("\u{feff}a {\r\n color: red;\r\n}", &opts, &NoopResolver).unwrap();
-        assert_eq!(out.code, "a {\n color: red;\n}");
+        assert_eq!(out.code.trim_end(), "a {\n  color: red;\n}");
+    }
+
+    #[test]
+    fn line_comments_are_stripped_block_kept() {
+        let opts = LessOptions::default();
+        let out = compile("// gone\n/* kept */\na { b: c; }", &opts, &NoopResolver).unwrap();
+        assert_eq!(out.code.trim_end(), "/* kept */\na {\n  b: c;\n}");
+    }
+
+    #[test]
+    fn multiple_selectors_and_values() {
+        let opts = LessOptions::default();
+        let out = compile(".a, .b > i { m: 1px 2px, 3px; }", &opts, &NoopResolver).unwrap();
+        assert_eq!(out.code.trim_end(), ".a,\n.b > i {\n  m: 1px 2px, 3px;\n}");
     }
 
     #[test]

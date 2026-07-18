@@ -116,6 +116,70 @@ phase that implements it:
   the "out-set == the classified 36" meta-test) — arrives with the manifest.
 - **The §G2 compatibility-proof blocker task** — Phase 0 written finding.
 
+## Step 3 — TOKENIZER + PARSER + AST + plain-CSS genCSS (done)
+
+Hand-written tokenizer, recursive-descent parser producing the **complete
+parse-side AST** for the core subset, and a genCSS serializer wired so **plain
+CSS round-trips**. `cargo build --workspace` stays green; the crate is additive.
+
+- **Pass-rate delta: 2/87 → 9/87** default-option compile fixtures. The newly
+  passing genuinely-flat-CSS fixtures are `at-rules-declarations`,
+  `at-rules-empty`, `at-rules-empty-block` (plus the pre-existing `empty`,
+  `tailwind`, `no-output`, `impor`, `plugi`, `color-functions/modern` identity
+  cases). Everything else in the corpus needs **evaluation** — nesting/`&` join,
+  variable/mixin/operation resolution, `@import` inlining — which is the next
+  step, so those fixtures stay red by design.
+
+- **Tokenizer (`lex/mod.rs`):** a `Cursor` scanning layer (the primitives the
+  parser drives — `scan_ident`/`scan_number`/`scan_string`/`scan_comment`,
+  peek/bump, whitespace/trivia skipping, char-boundary-safe) plus a coarse
+  `tokenize()` → `Vec<Token>` for the standalone tokenizer deliverable/tests. LESS
+  is context-sensitive (the same `-` is a sign, subtraction, or part of an ident,
+  §2.4), so the parser uses the cursor directly, exactly as less.js's own
+  `parser-input.js` does. `normalize_source` + `LineMap` unchanged.
+
+- **AST (`ast.rs`):** the full node set — `Ruleset`/`Selector`/`Element`/
+  `Combinator`, `Declaration` (`!important`, merge `+`/`+_`, custom props),
+  `AtRule` (+ `Import` node), `Comment`, `VariableDecl`, `DetachedRuleset`,
+  `MixinDefinition`/`MixinParam`, `MixinCall`/`MixinArg`, `MagentoImport` (§7.1),
+  and value leaves `Value`/`Expression`/`Anonymous`/`Dimension`/`Color`/`Quoted`/
+  `Keyword`/`Call`/`Url`/`Paren`/`Operation`/`Negative`/`Variable`/
+  `VariableVariable`/`Interpolation`/`PropertyAccessor`. Each carries a `Span`.
+  `is_output_visible()` prunes non-output nodes + empty blocks like less.js's
+  `ToCSSVisitor`.
+
+- **Parser (`parser/mod.rs`):** recursive descent with backtracking (cheap cursor
+  index save/restore) mirroring less.js's `primary`/`declaration`/`ruleset`/
+  `atrule`/`element`/`combinator`/`multiplication`/`addition`/`operand` order.
+  Declarations are tried before selector statements but bail on a `.`/`#`/`&`/`:`
+  head (so rulesets/mixin calls aren't swallowed); `@x:` is tried as a variable
+  decl with backtrack so `@page :left { … }` still parses as an at-rule.
+  Whitespace/sign ambiguity (§2.4) handled: `+`/`-` are operators only with
+  whitespace on **both** sides, else a leading `-` is a signed number (a separate
+  list item). The `parser/{selector,expr,entities,atrule}.rs` files keep the plan's
+  documented ownership doc-comments; the impl is co-located for shared cursor state.
+
+- **genCSS (`css.rs`):** `render_root` + `gen` reproduce less.js's expanded-output
+  spacing **exactly** — ruleset/at-rule 2-space indentation (`tabRule`/`tabSet`,
+  §4.7), selector paths joined `,\n<tabSet>`, combinator spacing (`>`/`+`/`~`
+  spaced, descendant/`|` not), `prop: value;` declarations, `Value` `, `-join,
+  `Expression` ` `-join (skipping the pre-`,`-Anonymous space), and
+  `Dimension.fround` number formatting (add `2e-16`, `numPrecision=8`, tiny-value
+  `toFixed(20)` guard, `-0`→`0`). Verified against the less.js `tree/*.js` sources
+  in `/tmp/lessjs`. `eval` now does structural lowering (parse→serialize); true
+  evaluation is next.
+
+### KNOWN SCOPE LIMITS (deferred to the eval step, by design)
+
+- No nesting / `&` join, no variable/mixin/operation *evaluation*, no `:extend`,
+  no `@import` inlining, no `@media` bubbling/merging, no `@charset`/`@import`
+  reordering in genCSS (source order kept). Colors/dimensions round-trip
+  verbatim (no color math). Custom-property values and `@{}` interpolation are
+  kept raw. These are exactly why the non-flat fixtures remain red.
+- Mixin/guard/detached-ruleset internals are parsed structurally (params/args
+  split on `;`/`,`; guards + literal params retained as raw `Anonymous`) — enough
+  to build the AST and not error, refined when eval needs them.
+
 ## Not yet started (later steps / phases)
 
 - `README` pinning the §0 success definition verbatim (Gate T0 200/200 + Gate T2

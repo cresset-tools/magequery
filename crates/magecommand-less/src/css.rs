@@ -4,7 +4,16 @@
 //! byte-exact `compress` output (the latter gated by the less.js
 //! `compress`/`compression` fixtures, §C4) — neither is delegated to
 //! lightningcss, which is confined to `.min.css` (plan §9.4).
+//!
+//! This step (STEP 3) implements the **expanded, plain-CSS serializer**: it walks
+//! the parsed [`crate::ast::Node`] tree and reproduces less.js's `genCSS` spacing
+//! exactly (ruleset/at-rule indentation §4.7, selector/combinator spacing,
+//! declaration `prop: value;`, value expression/list joins). LESS-feature
+//! *evaluation* (variables, mixins, operations, `&` join, `:extend`, `@import`
+//! inlining) is the next step; the serializer emits the tree as-parsed, which is
+//! correct for plain CSS and is the basis the evaluator will feed.
 
+use crate::ast::{AtRuleBlock, Node};
 use crate::error::LessError;
 
 /// A non-fatal problem collected during compile (plan §4.6): `extend '…' has no
@@ -43,16 +52,317 @@ impl Css {
     }
 }
 
+/// genCSS context (plan §4.7): the current indentation depth and compress flag.
+#[derive(Debug, Clone, Default)]
+pub struct GenContext {
+    /// Whether to emit the compressed serializer (gated by the `compress`
+    /// fixtures, §C4). This step wires the expanded path; `compress` remains a
+    /// later refinement.
+    pub compress: bool,
+    /// Current nesting depth (`tabLevel` in less.js).
+    pub tab_level: usize,
+    /// less.js `numPrecision` (default 8) for dimension `fround`.
+    pub num_precision: u8,
+}
+
+/// Render a parsed [`Node::Root`] to expanded CSS (the `firstRoot`/`root=true`
+/// entry point of less.js's `Ruleset.genCSS`, plan §4.7).
+pub fn render_root(root: &Node) -> String {
+    let mut out = String::new();
+    let mut ctx = GenContext {
+        compress: false,
+        tab_level: 0,
+        num_precision: 8,
+    };
+    if let Node::Root(rules) = root {
+        gen_root_rules(rules, &mut ctx, &mut out);
+    } else {
+        gen(root, &mut ctx, &mut out);
+    }
+    out
+}
+
+/// The `root=true, firstRoot=true` rule list (no selector/braces; §4.7).
+fn gen_root_rules(rules: &[Node], ctx: &mut GenContext, out: &mut String) {
+    let visible: Vec<&Node> = rules.iter().filter(|r| r.is_output_visible()).collect();
+    for (i, rule) in visible.iter().enumerate() {
+        if i > 0 {
+            out.push('\n'); // tabRuleStr == "" at root
+        }
+        gen(rule, ctx, out);
+    }
+    if !visible.is_empty() {
+        out.push('\n'); // firstRoot trailing newline
+    }
+}
+
+/// Serialize one node (dispatch mirroring each `tree/*.js` `genCSS`).
+fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
+    match node {
+        Node::Root(rules) => gen_root_rules(rules, ctx, out),
+        Node::Ruleset(r) => gen_ruleset(&r.selectors, &r.rules, ctx, out),
+        Node::Declaration(d) => {
+            out.push_str(&d.name);
+            out.push_str(": ");
+            gen(&d.value, ctx, out);
+            out.push_str(&d.important);
+            out.push(';');
+        }
+        Node::AtRule(a) => {
+            out.push_str(&a.name);
+            if let Some(p) = &a.prelude {
+                out.push(' ');
+                gen(p, ctx, out);
+            }
+            match &a.block {
+                AtRuleBlock::None => out.push(';'),
+                AtRuleBlock::Rules(rules) => gen_at_block(rules, ctx, out),
+            }
+        }
+        Node::Import {
+            path, features, ..
+        } => {
+            out.push_str("@import ");
+            gen(path, ctx, out);
+            if let Some(f) = features {
+                out.push(' ');
+                gen(f, ctx, out);
+            }
+            out.push(';');
+        }
+        Node::Comment { text, line, .. } => {
+            if !line {
+                out.push_str(text);
+            }
+        }
+
+        // --- value nodes ---
+        Node::Value(items) => {
+            for (i, it) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                gen(it, ctx, out);
+            }
+        }
+        Node::Expression(items) => {
+            for (i, it) in items.iter().enumerate() {
+                if i > 0 {
+                    // less.js skips the space before an Anonymous ",".
+                    let next_is_comma = matches!(it, Node::Anonymous(s) if s == ",");
+                    if !next_is_comma {
+                        out.push(' ');
+                    }
+                }
+                gen(it, ctx, out);
+            }
+        }
+        Node::Anonymous(s) => out.push_str(s),
+        Node::Dimension { value, unit } => {
+            out.push_str(&format_number(*value, ctx.num_precision));
+            out.push_str(unit);
+        }
+        Node::Color { original } => out.push_str(original),
+        Node::Quoted {
+            escaped,
+            quote,
+            value,
+        } => {
+            if *escaped {
+                out.push_str(value);
+            } else {
+                out.push(*quote);
+                out.push_str(value);
+                out.push(*quote);
+            }
+        }
+        Node::Keyword(k) => out.push_str(k),
+        Node::Call { name, args } => {
+            out.push_str(name);
+            out.push('(');
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                gen(a, ctx, out);
+            }
+            out.push(')');
+        }
+        Node::Url(inner) => {
+            out.push_str("url(");
+            gen(inner, ctx, out);
+            out.push(')');
+        }
+        Node::Paren(inner) => {
+            out.push('(');
+            gen(inner, ctx, out);
+            out.push(')');
+        }
+        Node::Operation {
+            op,
+            left,
+            right,
+            spaced,
+        } => {
+            gen(left, ctx, out);
+            if *spaced {
+                out.push(' ');
+            }
+            out.push_str(op);
+            if *spaced {
+                out.push(' ');
+            }
+            gen(right, ctx, out);
+        }
+        Node::Negative(inner) => {
+            out.push('-');
+            gen(inner, ctx, out);
+        }
+        Node::Variable { name, .. } => {
+            out.push('@');
+            out.push_str(name);
+        }
+        Node::VariableVariable { name, .. } => {
+            out.push_str("@@");
+            out.push_str(name);
+        }
+        Node::Interpolation { name, .. } => {
+            out.push_str("@{");
+            out.push_str(name);
+            out.push('}');
+        }
+        Node::PropertyAccessor { name, .. } => {
+            out.push('$');
+            out.push_str(name);
+        }
+
+        // Non-output nodes (variable/mixin definitions, detached rulesets, bare
+        // mixin calls, the magento directive) emit nothing in the plain-CSS path.
+        Node::VariableDecl { .. }
+        | Node::DetachedRuleset { .. }
+        | Node::MixinDefinition(_)
+        | Node::MixinCall(_)
+        | Node::MagentoImport { .. } => {}
+    }
+}
+
+/// A nested ruleset (`root=false`; §4.7). `selectors` render as paths joined by
+/// `,\n<tabSet>`, then the braced body indented by `<tabRule>`.
+fn gen_ruleset(
+    selectors: &[crate::ast::Selector],
+    rules: &[Node],
+    ctx: &mut GenContext,
+    out: &mut String,
+) {
+    ctx.tab_level += 1;
+    let tab_rule = "  ".repeat(ctx.tab_level);
+    let tab_set = "  ".repeat(ctx.tab_level.saturating_sub(1));
+
+    for (i, sel) in selectors.iter().enumerate() {
+        if i > 0 {
+            out.push_str(",\n");
+            out.push_str(&tab_set);
+        }
+        gen_selector(sel, out);
+    }
+    out.push_str(" {\n");
+    out.push_str(&tab_rule);
+
+    let visible: Vec<&Node> = rules.iter().filter(|r| r.is_output_visible()).collect();
+    for (i, rule) in visible.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+            out.push_str(&tab_rule);
+        }
+        gen(rule, ctx, out);
+    }
+
+    out.push('\n');
+    out.push_str(&tab_set);
+    out.push('}');
+    ctx.tab_level -= 1;
+}
+
+/// An at-rule braced body (`AtRule.outputRuleset`, §4.7). Non-compress spacing:
+/// `tabSet = "\n" + 2·(tabLevel-1) spaces`, `tabRule = tabSet + "  "`.
+fn gen_at_block(rules: &[Node], ctx: &mut GenContext, out: &mut String) {
+    ctx.tab_level += 1;
+    let tab_set = format!("\n{}", "  ".repeat(ctx.tab_level.saturating_sub(1)));
+    let tab_rule = format!("{tab_set}  ");
+
+    let visible: Vec<&Node> = rules.iter().filter(|r| r.is_output_visible()).collect();
+    if visible.is_empty() {
+        out.push_str(&format!(" {{{tab_set}}}"));
+    } else {
+        out.push_str(&format!(" {{{tab_rule}"));
+        for (i, rule) in visible.iter().enumerate() {
+            if i > 0 {
+                out.push_str(&tab_rule);
+            }
+            gen(rule, ctx, out);
+        }
+        out.push_str(&format!("{tab_set}}}"));
+    }
+    ctx.tab_level -= 1;
+}
+
+/// Serialize a selector: firstSelector=true (no leading descendant space), each
+/// element = combinator + value (less.js `Selector`/`Element`/`Combinator`).
+fn gen_selector(sel: &crate::ast::Selector, out: &mut String) {
+    for el in &sel.elements {
+        out.push_str(&combinator_css(&el.combinator));
+        out.push_str(&el.value);
+    }
+}
+
+/// Combinator spacing (less.js `Combinator.genCSS`): `>`/`+`/`~`/`^`/`^^` get a
+/// space on each side in expanded output; ``/` `/`|` do not (§4.7).
+fn combinator_css(c: &str) -> String {
+    let no_space = matches!(c, "" | " " | "|");
+    if no_space {
+        c.to_string()
+    } else {
+        format!(" {c} ")
+    }
+}
+
+/// Format a dimension's numeric value like less.js `Dimension.genCSS`:
+/// `fround` (add `2e-16`, round to `numPrecision`), then `String(value)`, with
+/// the tiny-value `toFixed(20)` guard and `-0`→`0` normalization (plan §2.18).
+fn format_number(v: f64, num_precision: u8) -> String {
+    let value = if num_precision > 0 {
+        format!("{:.*}", num_precision as usize, v + 2e-16)
+            .parse::<f64>()
+            .unwrap_or(v)
+    } else {
+        v
+    };
+
+    if value == 0.0 {
+        return "0".to_string(); // also normalizes -0
+    }
+    if value.abs() < 1e-6 {
+        // Would print in exponential form — emit fixed then strip trailing zeros.
+        let s = format!("{value:.20}");
+        return s.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
+    // Rust's `{}` for f64 is the shortest round-trip form, matching JS `String`
+    // for the normal-magnitude values LESS produces (integers print unadorned).
+    format!("{value}")
+}
+
 /// Serialize a CSS identifier with proper escaping, via cssparser (plan §9:
 /// cssparser is used only for CSS-side serialization helpers, never to tokenize
 /// LESS). A thin wrapper so the rest of genCSS stays cssparser-agnostic.
-// Not yet called by a non-test genCSS path (the serializer lands in later
-// phases); the unit test below already exercises it.
 #[allow(dead_code)]
 pub(crate) fn serialize_ident(name: &str) -> Result<String, LessError> {
     let mut out = String::with_capacity(name.len());
-    cssparser::serialize_identifier(name, &mut out)
-        .map_err(|_| LessError::new(crate::error::ErrorKind::Runtime, "identifier serialization failed"))?;
+    cssparser::serialize_identifier(name, &mut out).map_err(|_| {
+        LessError::new(
+            crate::error::ErrorKind::Runtime,
+            "identifier serialization failed",
+        )
+    })?;
     Ok(out)
 }
 
@@ -65,5 +375,23 @@ mod tests {
         // cssparser escapes a leading digit so the identifier round-trips.
         assert_eq!(serialize_ident("1a").unwrap(), "\\31 a");
         assert_eq!(serialize_ident("foo-bar").unwrap(), "foo-bar");
+    }
+
+    #[test]
+    fn number_formatting_matches_less_js() {
+        assert_eq!(format_number(2.0, 8), "2");
+        assert_eq!(format_number(0.4, 8), "0.4");
+        assert_eq!(format_number(-1.0, 8), "-1");
+        assert_eq!(format_number(3.5, 8), "3.5");
+        assert_eq!(format_number(-0.0000000001, 8), "0"); // frounds to 0
+        assert_eq!(format_number(400.0, 8), "400");
+    }
+
+    #[test]
+    fn combinator_spacing() {
+        assert_eq!(combinator_css(""), "");
+        assert_eq!(combinator_css(" "), " ");
+        assert_eq!(combinator_css(">"), " > ");
+        assert_eq!(combinator_css("+"), " + ");
     }
 }

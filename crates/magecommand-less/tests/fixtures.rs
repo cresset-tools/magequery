@@ -275,7 +275,7 @@ fn main() {
 
     let p = passed.load(Ordering::Relaxed);
     println!(
-        "\nless.js {TAG} default-option compile fixtures (Step 2, passthrough): {p}/{total} passing"
+        "\nless.js {TAG} default-option compile fixtures (Step 3, parser + plain-CSS genCSS): {p}/{total} passing"
     );
 
     conclusion.exit();

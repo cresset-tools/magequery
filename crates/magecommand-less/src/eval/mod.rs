@@ -23,7 +23,13 @@ use crate::error::LessError;
 use crate::options::LessOptions;
 use crate::resolver::ImportResolver;
 
-/// Evaluate a parsed AST to [`Css`] (plan §9.5). Scaffold passthrough.
+/// Evaluate a parsed AST to [`Css`] (plan §9.5).
+///
+/// **STEP 3 state:** structural lowering only — the parsed tree is serialized
+/// straight to CSS via [`crate::css::render_root`]. This is correct for plain
+/// CSS (no LESS features); variable/mixin/operation *evaluation*, `&` join,
+/// `:extend`, and `@import` inlining are the next step. `opts`/`resolver` are
+/// threaded now for that work.
 pub fn eval(
     root: &Arc<Node>,
     opts: &LessOptions,
@@ -32,7 +38,7 @@ pub fn eval(
     let _ = (opts, resolver);
     let code = match root.as_ref() {
         Node::Anonymous(text) => text.clone(),
-        Node::Root(_) => String::new(),
+        other => crate::css::render_root(other),
     };
     Ok(Css::from_code(code))
 }
