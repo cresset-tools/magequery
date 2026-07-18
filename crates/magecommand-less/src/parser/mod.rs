@@ -584,19 +584,15 @@ impl<'a> Parser<'a> {
         let mut elements = Vec::new();
         let mut first = true;
         loop {
-            // A `when (...)` guard ends the selector.
-            if self.cur.rest().starts_with("when")
-                && !first
+            let ws = self.cur.skip_trivia();
+            // A `when (...)` guard ends the selector (may follow whitespace).
+            if !first
+                && self.cur.rest().starts_with("when")
                 && matches!(self.cur.peek(4), Some(b) if b.is_ascii_whitespace() || b == b'(')
             {
                 break;
             }
-            let ws = if first {
-                self.cur.skip_trivia();
-                false
-            } else {
-                self.cur.skip_trivia()
-            };
+            let ws = if first { false } else { ws };
             match self.cur.cur() {
                 None => break,
                 Some(b'{') | Some(b',') | Some(b';') | Some(b'}') => break,
@@ -714,40 +710,48 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse an optional `when (guard)` clause, retaining it as raw text.
+    /// Parse an optional `when (guard)` clause, retaining the full boolean
+    /// expression as raw text (comma-OR, `and`/`or`, `not`, nested parens — the
+    /// evaluator parses it, plan §2.6).
     fn try_parse_guard(&mut self) -> Result<Option<Box<Node>>, LessError> {
         let save = self.here();
         self.cur.skip_trivia();
-        if !self.cur.rest().starts_with("when") {
+        if !self.cur.rest().starts_with("when")
+            || !matches!(self.cur.peek(4), Some(b) if b.is_ascii_whitespace() || b == b'(')
+        {
             self.cur.i = save;
             return Ok(None);
         }
         self.cur.eat_str("when");
         self.cur.skip_trivia();
         let gs = self.here();
-        if self.cur.cur() == Some(b'(') {
-            self.skip_balanced(b'(', b')');
-        }
-        // Allow `when (a), (b)` chains.
-        loop {
-            let inner = self.here();
-            self.cur.skip_trivia();
-            if self.cur.cur() == Some(b',') {
-                self.cur.bump();
-                self.cur.skip_trivia();
-                if self.cur.cur() == Some(b'(') {
-                    self.skip_balanced(b'(', b')');
-                    continue;
+        // The guard runs up to the block/terminator, balancing parens + strings.
+        let mut depth = 0i32;
+        while let Some(b) = self.cur.cur() {
+            match b {
+                b'{' | b';' if depth == 0 => break,
+                b'}' if depth == 0 => break,
+                b'(' | b'[' => {
+                    depth += 1;
+                    self.cur.bump();
                 }
+                b')' | b']' => {
+                    depth -= 1;
+                    self.cur.bump();
+                }
+                b'"' | b'\'' => {
+                    self.cur.scan_string();
+                }
+                _ => self.cur.bump(),
             }
-            self.cur.i = inner;
-            break;
         }
         let raw = self.cur.src()[gs..self.here()].trim().to_string();
         Ok(Some(Box::new(Node::Anonymous(raw))))
     }
 
     /// Recognize a parametric mixin definition from a parsed selector group.
+    /// The parameter parens may be attached (`.m(@a)`) or a separate element after
+    /// whitespace (`.m (@a)`) — both split to `(name, params)` here.
     fn as_mixin_definition(
         &self,
         selectors: &[Selector],
@@ -758,18 +762,17 @@ impl<'a> Parser<'a> {
             return None;
         }
         let sel = &selectors[0];
-        // The head element must be `.name(...)` / `#name(...)`.
-        let head = sel.elements.first()?;
-        let paren = head.value.find('(')?;
-        if !head.value.ends_with(')') {
+        let (path_els, args_src) = split_mixin_parens(&sel.elements);
+        let args_src = args_src?;
+        // A definition is a single `.name`/`#name` head + the parameter parens.
+        if path_els.len() != 1 {
             return None;
         }
-        let name = head.value[..paren].to_string();
+        let name = path_els[0].value.clone();
         if !(name.starts_with('.') || name.starts_with('#')) {
             return None;
         }
-        let params_src = &head.value[paren + 1..head.value.len() - 1];
-        let params = parse_mixin_params(params_src);
+        let params = parse_mixin_params(&args_src);
         Some(MixinDefinition {
             name,
             params,
@@ -781,22 +784,15 @@ impl<'a> Parser<'a> {
 
     /// Build a mixin call from a parsed selector group ending in `;`.
     fn as_mixin_call(&self, selectors: Vec<Selector>, important: bool, start: usize) -> Node {
-        let mut path: Vec<Element> = selectors
+        let elements = selectors
             .into_iter()
             .next()
             .map(|s| s.elements)
             .unwrap_or_default();
-        let mut args = Vec::new();
-        // Split a trailing `(...)` on the last path element into arguments.
-        if let Some(last) = path.last_mut() {
-            if let Some(paren) = last.value.find('(') {
-                if last.value.ends_with(')') {
-                    let arg_src = last.value[paren + 1..last.value.len() - 1].to_string();
-                    last.value.truncate(paren);
-                    args = parse_mixin_args(&arg_src);
-                }
-            }
-        }
+        let (path, args_src) = split_mixin_parens(&elements);
+        let args = args_src
+            .map(|s| parse_mixin_args(&s))
+            .unwrap_or_default();
         Node::MixinCall(MixinCall {
             path,
             args,
@@ -1171,6 +1167,32 @@ fn parse_magento_import(comment: &str, span: Span) -> Option<Node> {
         reference,
         span,
     })
+}
+
+/// Split a selector's elements into `(path_elements, Some(args_src))` when the
+/// last element carries the mixin parentheses, else `(elements, None)`. Handles
+/// both attached (`.m(@a)` — one element) and detached (`.m (@a)` — a trailing
+/// `(@a)` element) parameter parens.
+fn split_mixin_parens(elements: &[Element]) -> (Vec<Element>, Option<String>) {
+    let mut els: Vec<Element> = elements.to_vec();
+    if let Some(last) = els.last_mut() {
+        let v = &last.value;
+        // A standalone `( … )` element (space before the parens).
+        if v.starts_with('(') && v.ends_with(')') && v.len() >= 2 {
+            let args = v[1..v.len() - 1].to_string();
+            els.pop();
+            return (els, Some(args));
+        }
+        // A `.name( … )` element (parens attached to the name).
+        if let Some(p) = v.find('(') {
+            if v.ends_with(')') {
+                let args = v[p + 1..v.len() - 1].to_string();
+                last.value.truncate(p);
+                return (els, Some(args));
+            }
+        }
+    }
+    (els, None)
 }
 
 /// Parse a mixin-definition parameter list source (`@a; @b: 2; @rest...`).

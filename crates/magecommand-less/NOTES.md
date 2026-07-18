@@ -310,6 +310,66 @@ The crate stays **additive** — no existing crate/test was touched. Before Step
 the fixtures binary's `conclusion.exit()` hard-failed (67 red), and cargo's
 fail-fast then skipped every *later* crate's tests; the ratchet fixes that.
 
+## Phase 2 — MIXINS + GUARDS + PATTERN-MATCHING + NAMESPACES (done)
+
+Extended the evaluator (plan §2.5/§2.6, §4.4) to the full parametric-mixin +
+guard surface. `cargo build --workspace` + `cargo test --workspace` stay green;
+the crate is additive.
+
+- **Pass-rate delta: 20/87 → 30/87.** Ten newly-green fixtures (added to
+  `EXPECTED_PASS`): `mixins/mixins`, `mixins/mixins-advanced`, `mixins-closure`,
+  `mixins-nested`, `mixins-named-args`, `mixins-pattern`, `mixins-important`,
+  `css-guards`, `scope`, `mixins-guards-default-func`. Lib tests 31 → 38.
+
+- **Frame model change:** `Frame` is now `Rc<RefCell<Vec<Node>>>` so a mixin call
+  can **inject** its returned variables/mixins/rulesets back into the caller's
+  frame (scope-injection). `eval_rules` runs the less.js two-pass shape (plan
+  §4.2): pass 1 expands every mixin call — splicing injected scope in — so pass-2
+  declarations (even ones *earlier* in source, via lazy resolution) see them.
+
+- **Mixin resolution (`expand_mixin_call`):** candidate lookup by normalized
+  `mixinElements` names (`find_candidates`, recursing into namespaces `#ns > .m`,
+  `.a.b.c` via `&`-joined nested rulesets); **closure capture** — each candidate
+  carries the definition-scope frames (`def_scope = frames[k..]`), so `@var`
+  resolves in the mixin's definition scope, the caller's frames appended after
+  (the theming lever, §4.3). **matchArgs** (arity + literal-pattern by `toCSS`
+  equality), **emit-all-matching** in source order, `No matching definition` /
+  `X is undefined` errors. **Parametric binding** (`bind_params`): named →
+  positional → defaults (evaluated in def scope), `@rest...` variadic, call-site
+  spread `.m(@list...)`, `@arguments`. `.m() !important` propagation
+  (`make_important_*`). **On-stack recursion guard** by ruleset span
+  (MixinDefinitions exempt).
+
+- **Guards (`eval_guard_str`):** comma-OR of `and`-lists, `not`, nested parens,
+  comparisons (`= < > <= >= =<`) via a faithful `compare_values` port of less.js
+  `Node.compare` (Dimension unit-unify, Quoted quote-agnostic, Color channels,
+  Anonymous/toCSS, element-wise list compare with type-strict space-vs-comma),
+  type-check functions (`iscolor` incl. named-color keywords, `isnumber`,
+  `isstring`, `iskeyword`, `isurl`, `ispixel`/`isem`/`ispercentage`, `isunit`),
+  `isdefined`, and the **`default()` two-subpass** classification with
+  `Ambiguous use of default()`. CSS guards on selectors + `& when (…)` bare-`&`
+  folding (`is_just_parent`).
+
+- **New functions** (guard/Luma subset): `lightness`/`hue`/`saturation`,
+  `red`/`green`/`blue`, `e()`, the `is*` set. `default()` passes through verbatim
+  outside a guard.
+
+- **Parser fixes:** `when` guard detected after whitespace (`.m () when (…)`);
+  full boolean guard text captured (`and`/`or`/`not`/comma); space-before-parens
+  mixin defs/calls (`.m (@a)`) split via `split_mixin_parens`.
+
+### DEFERRED from Phase 2 (needs later-phase subsystems)
+
+- `mixins/maps`, `namespace-targeted` — **property accessors / maps** `@p[key]`,
+  `#ns[prop]`, `$@var` property interpolation (plan §2.12, Phase 4).
+- `mixins-interpolated` — **interpolated mixin names** (`.@{a1}()` matching a
+  ruleset whose selector is `.@{a1}`) — interpolation-as-lookup-key.
+- `mixins-guards` (14 residual lines) — two advanced sub-features: **mixin
+  definitions injected as closures** (an injected `.inner-locked-mixin` must carry
+  the calling mixin's bound params as frozen frames — needs frame-carrying AST
+  nodes) and **guarded namespaces** (`#ns when (…) { … }` guard checked during
+  path recursion). Everything else in the fixture matches.
+
 ## What milestone 1 implemented (Steps 1–5 consolidated)
 
 - **Public API (§9.5):** `parse`/`eval`/`compile`; `LessOptions` (+ `MathMode`,
@@ -348,17 +408,12 @@ fail-fast then skipped every *later* crate's tests; the ratchet fixes that.
 
 ## DEFERRED roadmap (what's left, cross-referenced to the plan)
 
-Nothing below is started; each is gated by its own fixture slice.
+Each is gated by its own fixture slice. **Phase 2 (mixins + guards +
+pattern-matching + namespaces) is DONE** — see the Phase-2 section above; the
+residual mixin fixtures it couldn't green (`maps`, `namespace-targeted`,
+`mixins-interpolated`, the 14 residual `mixins-guards` lines) are documented there
+and fold into Phase 4's map/property-accessor work.
 
-- **Phase 2 — mixins + guards + pattern-matching** (plan §2.5/§2.6, Phase 2):
-  parametric mixins (defaults, `;`-arg-separator, named args, `@arguments`, `...`
-  variadic), overloading, **pattern matching** (literal/keyword params by
-  evaluated `toCSS` equality, `@_`, "No matching definition"), **guards** (`and`/
-  comma-OR/`not`, comparisons `> >= = =< <`, the type-check fns `is*`/`isunit`/
-  `isdefined`, **`default()` two-subpass + `Ambiguous use of default()`**), CSS
-  guards + `& when`, **namespaces** (`#ns.m()`, `#ns > .m()`), `!important`
-  propagation via `.m() !important`, recursion + depth cap, scope-injection.
-  Unlocks: `mixins*`, `css-guards`, `namespace-targeted`.
 - **Phase 3 — full function library** (plan §2.7, Phase 3): the complete registry
   — string (`e`/`escape`/`%`/`replace`), list (`length`/`extract`/`range`/
   `each`), math (`sin`…`atan`), number (`convert`/`pi`/`mod`/`pow` + **min/max

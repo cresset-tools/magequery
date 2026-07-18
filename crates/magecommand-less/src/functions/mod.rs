@@ -48,9 +48,89 @@ pub fn dispatch(name: &str, args: &[Node], _np: u8) -> Result<Option<Node>, Less
         "percentage" => func_percentage(args),
         "min" => func_minmax(args, true),
         "max" => func_minmax(args, false),
+        // Color channels (guard/Luma subset).
+        "hue" => color_channel(args, Channel::Hue),
+        "saturation" => color_channel(args, Channel::Saturation),
+        "lightness" => color_channel(args, Channel::Lightness),
+        "red" => rgb_channel(args, 0),
+        "green" => rgb_channel(args, 1),
+        "blue" => rgb_channel(args, 2),
+        // Type-check functions (plan §2.6).
+        "iscolor" => Some(bool_keyword(is_color(args.first()))),
+        "isnumber" => Some(bool_keyword(matches!(args.first(), Some(Node::Dimension(_))))),
+        "isstring" => Some(bool_keyword(matches!(args.first(), Some(Node::Quoted { .. })))),
+        "iskeyword" => Some(bool_keyword(matches!(args.first(), Some(Node::Keyword(_))))),
+        "isurl" => Some(bool_keyword(matches!(args.first(), Some(Node::Url(_))))),
+        "ispixel" => Some(bool_keyword(is_unit(args.first(), "px"))),
+        "isem" => Some(bool_keyword(is_unit(args.first(), "em"))),
+        "ispercentage" => Some(bool_keyword(is_unit(args.first(), "%"))),
+        "isunit" => Some(bool_keyword(func_isunit(args))),
+        // String: `e()` / `escape()` unquote (subset).
+        "e" => func_e(args),
         _ => return Ok(None),
     };
     Ok(out)
+}
+
+/// A color-channel selector for [`color_channel`].
+enum Channel {
+    Hue,
+    Saturation,
+    Lightness,
+}
+
+/// less.js color-channel functions `hue`/`saturation`/`lightness` (HSL space).
+fn color_channel(args: &[Node], ch: Channel) -> Option<Node> {
+    let Node::Color(c) = args.first()? else { return None };
+    let (h, s, l, _a) = c.to_hsl();
+    Some(match ch {
+        Channel::Hue => Node::Dimension(Dimension::number(h.round())),
+        Channel::Saturation => Node::Dimension(Dimension::with_unit((s * 100.0).round(), "%")),
+        Channel::Lightness => Node::Dimension(Dimension::with_unit((l * 100.0).round(), "%")),
+    })
+}
+
+fn rgb_channel(args: &[Node], idx: usize) -> Option<Node> {
+    let Node::Color(c) = args.first()? else { return None };
+    Some(Node::Dimension(Dimension::number(c.rgb[idx].round())))
+}
+
+fn bool_keyword(b: bool) -> Node {
+    Node::Keyword(if b { "true" } else { "false" }.to_string())
+}
+
+fn is_unit(n: Option<&Node>, unit: &str) -> bool {
+    matches!(n, Some(Node::Dimension(d)) if d.unit.is(unit))
+}
+
+/// `iscolor` — a `Color`, or a keyword that names one (`green`, `red`, …), since
+/// named colors may still be carried as keywords until an operation coerces them.
+fn is_color(n: Option<&Node>) -> bool {
+    match n {
+        Some(Node::Color(_)) => true,
+        Some(Node::Keyword(k)) => Color::from_keyword(k).is_some(),
+        _ => false,
+    }
+}
+
+/// `isunit(value, unit)` — the value is a dimension with the given unit keyword.
+fn func_isunit(args: &[Node]) -> bool {
+    let unit = match args.get(1) {
+        Some(Node::Keyword(k)) => k.clone(),
+        Some(Node::Quoted { value, .. }) => value.clone(),
+        Some(Node::Anonymous(s)) => s.clone(),
+        _ => return false,
+    };
+    matches!(args.first(), Some(Node::Dimension(d)) if d.unit.is(&unit))
+}
+
+/// `e(str)` / `escape` unquote — return the string contents raw (escaped).
+fn func_e(args: &[Node]) -> Option<Node> {
+    match args.first()? {
+        Node::Quoted { value, .. } => Some(Node::Anonymous(value.clone())),
+        Node::Anonymous(s) => Some(Node::Anonymous(s.clone())),
+        other => Some(Node::Anonymous(crate::css::render_value(other, 8))),
+    }
 }
 
 /// less.js color `number()` — a `%` dimension scales to `0..1`, else the value.

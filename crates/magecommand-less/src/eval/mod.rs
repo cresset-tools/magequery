@@ -23,10 +23,11 @@ pub mod mixin;
 pub mod operation;
 pub mod scope;
 
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::ast::{AtRuleBlock, Declaration, Element, MixinParam, Node, Selector};
+use crate::ast::{AtRuleBlock, Declaration, Element, MixinArg, MixinParam, Node, Selector, Span};
 use crate::color::Color;
 use crate::css::{render_value, Css, Warning};
 use crate::error::{ErrorKind, LessError};
@@ -37,8 +38,15 @@ use crate::value::Dimension;
 
 /// A scope frame: the (unevaluated) rule list of an entered ruleset. Variable and
 /// mixin lookup scan it directly (last-declaration-wins), so lazy eval + forward
-/// references fall out (plan §4.1).
-type Frame = Rc<Vec<Node>>;
+/// references fall out (plan §4.1). Wrapped in a `RefCell` so a mixin call can
+/// **inject** its returned variables/mixins/rulesets back into the caller's frame
+/// (scope-injection, plan §2.5) — mirroring less.js's in-place `rsRules` splice.
+type Frame = Rc<RefCell<Vec<Node>>>;
+
+/// Build a frame from an owned rule list.
+fn frame_of(rules: Vec<Node>) -> Frame {
+    Rc::new(RefCell::new(rules))
+}
 
 /// The evaluator context (plan §4.1/§4.2): innermost-first frame stack, math
 /// state, the parens stack for `isMathOn`, and the `importantScope` stack.
@@ -54,7 +62,33 @@ pub struct Ctx<'a> {
     important_scope: Vec<Option<String>>,
     evaluating: Vec<String>,
     mixin_depth: usize,
+    /// The `default()` guard-function value during the two-subpass mixin-guard
+    /// evaluation (plan §2.6). `None` outside a default-classification pass.
+    default_value: Option<bool>,
+    /// Spans of ruleset-as-mixin bodies currently on the eval stack — the on-stack
+    /// identity recursion guard (plan §2.5; MixinDefinitions are exempt).
+    active_rulesets: Vec<Span>,
     warnings: Vec<Warning>,
+}
+
+/// A resolved mixin candidate (a definition or ruleset reachable by the call path)
+/// together with the definition-scope frames captured for closure semantics.
+struct Candidate {
+    name: String,
+    params: Vec<MixinParam>,
+    guard: Option<Node>,
+    rules: Vec<Node>,
+    def_scope: Vec<Frame>,
+    /// `Some(span)` for a ruleset-as-mixin (subject to the recursion guard);
+    /// `None` for a `MixinDefinition` (exempt).
+    ruleset_span: Option<Span>,
+}
+
+/// An evaluated call argument: optional name (`@x:`) + its value.
+#[derive(Clone)]
+struct EvArg {
+    name: Option<String>,
+    value: Node,
 }
 
 const MAX_MIXIN_DEPTH: usize = 128;
@@ -105,13 +139,15 @@ pub fn eval(
         important_scope: Vec::new(),
         evaluating: Vec::new(),
         mixin_depth: 0,
+        default_value: None,
+        active_rulesets: Vec::new(),
         warnings: Vec::new(),
     };
 
     // globalVars / modifyVars are prepended/appended rulesets (plan §2.0). Their
     // implementation is deferred; the default harness passes none.
     let mut outs: Vec<Out> = Vec::new();
-    ctx.push_frame(Rc::new(rules.clone()));
+    ctx.push_frame(frame_of(rules.clone()));
     let (_own, children) = ctx.process_body(&rules, None)?;
     outs.extend(children);
     ctx.pop_frame();
@@ -146,6 +182,12 @@ impl<'a> Ctx<'a> {
         LessError::new(kind, msg)
     }
 
+    /// Whether a variable is defined in any live frame (for `isdefined`).
+    fn lookup_defined(&self, name: &str) -> bool {
+        let key = name.trim_start_matches('@');
+        self.frames.iter().any(|f| frame_has_var(f, key))
+    }
+
     // ------------------------------------------------------------------
     // Body processing: split a rule list into (own declarations, child output)
     // ------------------------------------------------------------------
@@ -167,6 +209,13 @@ impl<'a> Ctx<'a> {
 
     /// Evaluate `rules`, appending declarations to `own` and nested output blocks
     /// to `children`. Shared by rulesets and mixin-injected bodies.
+    ///
+    /// Two passes, mirroring less.js `Ruleset.eval` (plan §4.2): **pass 1**
+    /// evaluates every mixin call, splicing its returned variables/mixins/rulesets
+    /// into the current frame (scope-injection, §2.5) so later declarations — even
+    /// ones *earlier* in source, via lazy resolution — can see them; **pass 2**
+    /// emits declarations, rulesets and at-rules in source order, replaying each
+    /// mixin call's pre-computed output at its position.
     fn eval_rules(
         &mut self,
         rules: &[Node],
@@ -174,8 +223,40 @@ impl<'a> Ctx<'a> {
         own: &mut Vec<Node>,
         children: &mut Vec<Out>,
     ) -> Result<(), LessError> {
+        // Pass 1: expand mixin calls, inject scope, memoize output per position.
+        let mut expansions: Vec<Option<(Vec<Node>, Vec<Out>)>> = Vec::with_capacity(rules.len());
         for rule in rules {
+            if let Node::MixinCall(call) = rule {
+                let mut ex_own = Vec::new();
+                let mut ex_children = Vec::new();
+                let injected =
+                    self.expand_mixin_call(call, self_paths, &mut ex_own, &mut ex_children)?;
+                if let Some(frame) = self.frames.first().cloned() {
+                    for node in injected {
+                        let keep = match &node {
+                            Node::VariableDecl { name, .. } => !frame_has_var(&frame, name),
+                            _ => true,
+                        };
+                        if keep {
+                            frame.borrow_mut().push(node);
+                        }
+                    }
+                }
+                expansions.push(Some((ex_own, ex_children)));
+            } else {
+                expansions.push(None);
+            }
+        }
+
+        // Pass 2: source-order output.
+        for (idx, rule) in rules.iter().enumerate() {
             match rule {
+                Node::MixinCall(_) => {
+                    if let Some((ex_own, ex_children)) = expansions[idx].take() {
+                        own.extend(ex_own);
+                        children.extend(ex_children);
+                    }
+                }
                 Node::VariableDecl { .. }
                 | Node::MixinDefinition(_)
                 | Node::Comment { line: true, .. }
@@ -224,13 +305,36 @@ impl<'a> Ctx<'a> {
                     let evaled = self.eval_declaration(d)?;
                     own.push(evaled);
                 }
-                Node::MixinCall(call) => {
-                    // Expand the mixin's rules into this body in place, evaluated
-                    // with the bound parameters in scope.
-                    self.eval_mixin_call(call, self_paths, own, children)?;
-                }
                 Node::Ruleset(rs) => {
-                    self.eval_nested_ruleset(&rs.selectors, &rs.rules, self_paths, children)?;
+                    // A single bare-`&` child ruleset (`& when (…)`, `& { … }`) is
+                    // **folded** into the parent: its own declarations join the
+                    // parent's block in source position (plan §2.2/§4.2).
+                    // Track this ruleset as on-stack so a mixin call inside it
+                    // resolving back to it is skipped (recursion guard, §2.5).
+                    self.active_rulesets.push(rs.span);
+                    let r = if rs.selectors.len() == 1 && is_just_parent(&rs.selectors[0]) {
+                        let guard_ok = match &rs.selectors[0].guard {
+                            Some(g) => self.eval_guard(g),
+                            None => Ok(true),
+                        };
+                        match guard_ok {
+                            Ok(true) => {
+                                self.push_frame(frame_of(rs.rules.clone()));
+                                let r = self.process_body(&rs.rules, self_paths);
+                                self.pop_frame();
+                                r.map(|(fold_own, fold_children)| {
+                                    own.extend(fold_own);
+                                    children.extend(fold_children);
+                                })
+                            }
+                            Ok(false) => Ok(()),
+                            Err(e) => Err(e),
+                        }
+                    } else {
+                        self.eval_nested_ruleset(&rs.selectors, &rs.rules, self_paths, children)
+                    };
+                    self.active_rulesets.pop();
+                    r?;
                 }
                 Node::AtRule(a) => {
                     if matches!(a.block, AtRuleBlock::None) && self_paths.is_some() {
@@ -280,7 +384,7 @@ impl<'a> Ctx<'a> {
         }
         let joined = join_selectors(parent_paths, &own_sel);
 
-        self.push_frame(Rc::new(rules.to_vec()));
+        self.push_frame(frame_of(rules.to_vec()));
         let (decls, children) = self.process_body(rules, Some(&joined))?;
         self.pop_frame();
 
@@ -322,7 +426,7 @@ impl<'a> Ctx<'a> {
                         | "@container"
                 );
                 let inner_parent = if is_container { parent_paths } else { None };
-                self.push_frame(Rc::new(rules.to_vec()));
+                self.push_frame(frame_of(rules.to_vec()));
                 let (own, children) = self.process_body(rules, inner_parent)?;
                 self.pop_frame();
 
@@ -631,6 +735,22 @@ impl<'a> Ctx<'a> {
             });
         }
 
+        // `default()` — the guard-only function (plan §2.6). Inside a guard it
+        // returns the current two-subpass value; outside a guard it is not the
+        // guard function and passes through verbatim (re-emitted `default()`).
+        if lname == "default" {
+            if let Some(v) = self.default_value {
+                return Ok(Node::Keyword(if v { "true" } else { "false" }.to_string()));
+            }
+        }
+
+        // `isdefined(@v)` — lazy: must not error on an undefined variable.
+        if lname == "isdefined" {
+            let defined = matches!(args.first(), Some(Node::Variable { name, .. })
+                if self.lookup_defined(name));
+            return Ok(Node::Keyword(if defined { "true" } else { "false" }.to_string()));
+        }
+
         // Evaluate arguments first (the common path).
         let mut evaled = Vec::with_capacity(args.len());
         for a in args {
@@ -649,112 +769,426 @@ impl<'a> Ctx<'a> {
     }
 
     // ------------------------------------------------------------------
-    // Mixins (basic — no guards/patterns/overloading beyond simple filtering)
+    // Mixins (plan §2.5): definition + ruleset-as-mixin lookup with namespaces,
+    // pattern-matching + overloading (emit-all), parametric binding (defaults,
+    // named args, `@arguments`, `@rest...`), guards + `default()`, closures
+    // (definition-scope capture), `!important` propagation, scope-injection.
     // ------------------------------------------------------------------
 
-    fn eval_mixin_call(
+    /// Expand a mixin call: resolve candidates, match args + guards, and emit
+    /// **every** surviving definition's body (plan §2.5). Returns the nodes to
+    /// **inject** into the caller's frame (the mixin's top-level variables /
+    /// mixins / rulesets — scope-injection, §2.5); the CSS output is appended to
+    /// `own`/`children`.
+    fn expand_mixin_call(
         &mut self,
         call: &crate::ast::MixinCall,
         self_paths: Option<&[String]>,
         own: &mut Vec<Node>,
         children: &mut Vec<Out>,
-    ) -> Result<(), LessError> {
+    ) -> Result<Vec<Node>, LessError> {
         if self.mixin_depth > MAX_MIXIN_DEPTH {
             return Err(self.err(ErrorKind::Runtime, "mixin recursion limit exceeded"));
         }
-        let path = mixin_path_names(&call.path);
+        let path = mixin_names(&call.path);
         if path.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
-        // Search frames innermost-first for a matching definition.
+        // Evaluate call arguments once (values against the caller's frames).
+        let args = self.eval_call_args(&call.args)?;
+
+        // Collect candidates: the innermost frame that yields an arg-matching
+        // definition wins (less.js `MixinCall.eval`); all its name-matches whose
+        // arity/pattern match become candidates.
         let frames = self.frames.clone();
-        for frame in &frames {
-            if let Some((params, guard, rules, def_frame)) = find_mixin(frame, &path) {
-                let param_frame = self.bind_params(&params, &call.args)?;
-                self.mixin_depth += 1;
-                // Push param frame (then optional definition frame) atop the
-                // caller's stack: params resolve first, then the caller scope —
-                // the Magento theming lever (§4.3).
-                self.push_frame(Rc::new(param_frame));
-                if let Some(df) = &def_frame {
-                    self.push_frame(df.clone());
+        let mut is_one_found = false;
+        let mut chosen: Vec<Candidate> = Vec::new();
+        for k in 0..frames.len() {
+            let def_scope: Vec<Frame> = frames[k..].to_vec();
+            let mut found = find_candidates(&frames[k].borrow(), &path, &def_scope);
+            // Drop ruleset candidates already on the eval stack (recursion guard;
+            // MixinDefinitions are exempt — their `ruleset_span` is `None`).
+            found.retain(|c| match c.ruleset_span {
+                Some(span) => !self.active_rulesets.contains(&span),
+                None => true,
+            });
+            if found.is_empty() {
+                continue;
+            }
+            is_one_found = true;
+            let mut matched: Vec<Candidate> = Vec::new();
+            for cand in found {
+                if self.match_args(&cand, &args)? {
+                    matched.push(cand);
                 }
-                let guard_ok = match &guard {
-                    Some(g) => self.eval_guard(g)?,
-                    None => true,
-                };
-                if guard_ok {
-                    // The mixin's own body forms a frame for its local vars/mixins.
-                    self.push_frame(Rc::new(rules.clone()));
-                    let res = self.eval_rules(&rules, self_paths, own, children);
-                    self.pop_frame();
-                    if def_frame.is_some() {
-                        self.pop_frame();
-                    }
-                    self.pop_frame();
-                    self.mixin_depth -= 1;
-                    res?;
-                    return Ok(());
-                }
-                if def_frame.is_some() {
-                    self.pop_frame();
-                }
-                self.pop_frame();
-                self.mixin_depth -= 1;
+            }
+            if !matched.is_empty() {
+                chosen = matched;
+                break;
             }
         }
-        Err(self.err(
-            ErrorKind::Runtime,
-            format!(
-                "No matching definition was found for `{}(...)`",
-                path.join(" ")
-            ),
-        ))
+
+        if chosen.is_empty() {
+            if is_one_found {
+                return Err(self.err(
+                    ErrorKind::Runtime,
+                    format!("No matching definition was found for `{}`", format_call(&path, &args, self.opts.num_precision)),
+                ));
+            }
+            return Err(self.err(
+                ErrorKind::Name,
+                format!("{} is undefined", path.join(" ")),
+            ));
+        }
+
+        // Guard + default() classification (two-subpass, §2.6).
+        let mut groups: Vec<i32> = Vec::with_capacity(chosen.len());
+        for cand in &chosen {
+            groups.push(self.calc_def_group(cand, &args)?);
+        }
+        let mut count = [0usize; 3];
+        for g in &groups {
+            if *g >= 0 {
+                count[*g as usize] += 1;
+            }
+        }
+        let default_result: i32 = if count[0] > 0 {
+            2 // defFalse
+        } else {
+            if count[1] + count[2] > 1 {
+                return Err(self.err(
+                    ErrorKind::Runtime,
+                    format!(
+                        "Ambiguous use of `default()` found when matching for `{}`",
+                        format_call(&path, &args, self.opts.num_precision)
+                    ),
+                ));
+            }
+            1 // defTrue
+        };
+
+        // Emit every candidate whose group is defNone or the chosen default.
+        let mut injected: Vec<Node> = Vec::new();
+        for (idx, cand) in chosen.iter().enumerate() {
+            let g = groups[idx];
+            if g == 0 || g == default_result {
+                let inj = self.emit_candidate(cand, &args, call.important, self_paths, own, children)?;
+                injected.extend(inj);
+            }
+        }
+        Ok(injected)
     }
 
-    fn bind_params(
-        &mut self,
-        params: &[MixinParam],
-        args: &[crate::ast::MixinArg],
-    ) -> Result<Vec<Node>, LessError> {
-        let mut frame: Vec<Node> = Vec::new();
-        // Positional binding + defaults + named. Minimal (no variadic/pattern).
-        let mut pos = 0usize;
-        // First, apply named args.
-        let mut named: Vec<(&str, &Node)> = Vec::new();
-        let mut positional: Vec<&Node> = Vec::new();
+    /// Evaluate the call's arguments to `(name?, value)` pairs (§2.5). A trailing
+    /// `...` on a positional argument (`.m(@list...)`) **spreads** the list value
+    /// into individual arguments (less.js `arg.expand`).
+    fn eval_call_args(&mut self, args: &[MixinArg]) -> Result<Vec<EvArg>, LessError> {
+        let mut out = Vec::with_capacity(args.len());
         for a in args {
-            match &a.name {
-                Some(n) => named.push((n.trim_start_matches('@'), a.value.as_ref())),
-                None => positional.push(a.value.as_ref()),
+            let name = a.name.as_ref().map(|n| n.trim_start_matches('@').to_string());
+            // Detect the spread form on an unnamed argument.
+            if name.is_none() {
+                if let Node::Anonymous(s) = a.value.as_ref() {
+                    if let Some(inner) = s.trim().strip_suffix("...") {
+                        let value = self.reparse_and_eval(inner.trim())?;
+                        match &value {
+                            Node::Value(items) | Node::Expression(items) => {
+                                for it in items {
+                                    out.push(EvArg { name: None, value: it.clone() });
+                                }
+                            }
+                            other => out.push(EvArg { name: None, value: other.clone() }),
+                        }
+                        continue;
+                    }
+                }
+            }
+            let value = self.reparse_arg(a.value.as_ref())?;
+            out.push(EvArg { name, value });
+        }
+        Ok(out)
+    }
+
+    /// less.js `MixinDefinition.matchArgs` — arity + literal-pattern match (§2.5).
+    fn match_args(&mut self, cand: &Candidate, args: &[EvArg]) -> Result<bool, LessError> {
+        let params = &cand.params;
+        let variadic = params.last().map(|p| p.variadic).unwrap_or(false);
+        let arity = params.len();
+        let optional: Vec<String> = params
+            .iter()
+            .filter(|p| p.name.is_some() && p.default.is_some() && !p.variadic)
+            .filter_map(|p| p.name.as_ref().map(|n| n.trim_start_matches('@').to_string()))
+            .collect();
+        let required = params
+            .iter()
+            .filter(|p| p.name.is_none() || p.default.is_none())
+            .count();
+        let all_args = args.len();
+        let required_args = args
+            .iter()
+            .filter(|a| match &a.name {
+                Some(n) => !optional.contains(n),
+                None => true,
+            })
+            .count();
+        if !variadic {
+            if required_args < required {
+                return Ok(false);
+            }
+            if all_args > arity {
+                return Ok(false);
+            }
+        } else if required_args + 1 < required {
+            return Ok(false);
+        }
+        // Literal-pattern check: positional literal params compare by toCSS.
+        let len = required_args.min(arity);
+        for (i, p) in params.iter().enumerate().take(len) {
+            if p.name.is_none() && !p.variadic {
+                let Some(def) = &p.default else { continue };
+                let pv = self.reparse_arg(def)?;
+                if i >= args.len() {
+                    return Ok(false);
+                }
+                if render_value(&args[i].value, self.opts.num_precision)
+                    != render_value(&pv, self.opts.num_precision)
+                {
+                    return Ok(false);
+                }
             }
         }
-        for p in params {
-            let Some(pname) = &p.name else {
-                pos += 1;
-                continue;
-            };
-            let key = pname.trim_start_matches('@').to_string();
-            let value_node: Node = if let Some((_, v)) = named.iter().find(|(n, _)| *n == key) {
-                self.reparse_arg(v)?
-            } else if pos < positional.len() {
-                let v = positional[pos];
-                pos += 1;
-                self.reparse_arg(v)?
-            } else if let Some(def) = &p.default {
-                self.reparse_arg(def)?
-            } else {
-                Node::Anonymous(String::new())
-            };
-            frame.push(Node::VariableDecl {
-                name: key,
-                value: Box::new(value_node),
-                important: String::new(),
-                span: Default::default(),
-            });
+        Ok(true)
+    }
+
+    /// Classify a candidate for `default()` resolution (§2.6): evaluate its guard
+    /// under `default()==false` then `==true`. Returns defNone(0)/defTrue(1)/
+    /// defFalse(2), or -1 when the guard fails either way (not a candidate).
+    fn calc_def_group(&mut self, cand: &Candidate, args: &[EvArg]) -> Result<i32, LessError> {
+        let Some(guard) = &cand.guard else {
+            return Ok(0); // no guard → always matches (defNone)
+        };
+        let raw = guard_text(guard);
+        let param_frame = self.bind_params(cand, args)?;
+        let mut cond = [true, true];
+        for (f, slot) in cond.iter_mut().enumerate() {
+            self.default_value = Some(f == 1);
+            *slot = self.with_mixin_frames(cand, &param_frame, |s| s.eval_guard_str(&raw))?;
         }
+        self.default_value = None;
+        if cond[0] || cond[1] {
+            if cond[0] != cond[1] {
+                return Ok(if cond[1] { 1 } else { 2 });
+            }
+            return Ok(0);
+        }
+        Ok(-1)
+    }
+
+    /// Evaluate the mixin body of one matched candidate; append CSS to `own`/
+    /// `children`. Returns nodes to inject into the caller's scope (§2.5).
+    fn emit_candidate(
+        &mut self,
+        cand: &Candidate,
+        args: &[EvArg],
+        important: bool,
+        self_paths: Option<&[String]>,
+        own: &mut Vec<Node>,
+        children: &mut Vec<Out>,
+    ) -> Result<Vec<Node>, LessError> {
+        // On-stack recursion guard for ruleset-as-mixin (MixinDefinitions exempt).
+        if let Some(span) = cand.ruleset_span {
+            if self.active_rulesets.contains(&span) {
+                return Ok(Vec::new());
+            }
+        }
+        let param_frame = self.bind_params(cand, args)?;
+        let body_frame = frame_of(cand.rules.clone());
+        let mut new_frames: Vec<Frame> = Vec::with_capacity(self.frames.len() + 3);
+        new_frames.push(body_frame);
+        new_frames.push(frame_of(param_frame.clone()));
+        new_frames.extend(cand.def_scope.iter().cloned());
+        new_frames.extend(self.frames.iter().cloned());
+        let saved = std::mem::replace(&mut self.frames, new_frames);
+        if let Some(span) = cand.ruleset_span {
+            self.active_rulesets.push(span);
+        }
+        self.mixin_depth += 1;
+
+        let mut sub_own = Vec::new();
+        let mut sub_children = Vec::new();
+        let res = self.eval_rules(&cand.rules, self_paths, &mut sub_own, &mut sub_children);
+
+        // Collect scope-injection nodes from the body's top level.
+        let injected = if res.is_ok() {
+            self.collect_injected(&cand.rules)
+        } else {
+            Vec::new()
+        };
+
+        self.mixin_depth -= 1;
+        if cand.ruleset_span.is_some() {
+            self.active_rulesets.pop();
+        }
+        self.frames = saved;
+        res?;
+
+        if important {
+            for d in sub_own.iter_mut() {
+                make_important_node(d);
+            }
+            for c in sub_children.iter_mut() {
+                make_important_out(c);
+            }
+        }
+        own.extend(sub_own);
+        children.extend(sub_children);
+        Ok(injected)
+    }
+
+    /// Gather the mixin body's top-level variables (evaluated) + mixins/rulesets
+    /// for scope-injection into the caller (§2.5). Called with the mixin frames on
+    /// the stack, so variable values resolve in the mixin's context.
+    fn collect_injected(&mut self, rules: &[Node]) -> Vec<Node> {
+        let mut out = Vec::new();
+        for r in rules {
+            match r {
+                Node::VariableDecl { name, value, important, .. } => {
+                    let val = self.eval_value(value).unwrap_or_else(|_| (**value).clone());
+                    out.push(Node::VariableDecl {
+                        name: name.clone(),
+                        value: Box::new(val),
+                        important: important.clone(),
+                        span: Default::default(),
+                    });
+                }
+                Node::MixinDefinition(_) | Node::Ruleset(_) => out.push(r.clone()),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Bind a call's arguments to a candidate's parameters (less.js `evalParams`):
+    /// named → positional → defaults, `@rest...` variadic, `@arguments` (§2.5).
+    fn bind_params(&mut self, cand: &Candidate, args: &[EvArg]) -> Result<Vec<Node>, LessError> {
+        let params = &cand.params;
+        let mut frame: Vec<Node> = Vec::new();
+        let mut evald: Vec<Option<Node>> = vec![None; params.len()];
+
+        // Named args first.
+        let mut remaining: Vec<EvArg> = Vec::new();
+        for a in args {
+            if let Some(name) = &a.name {
+                let mut found = false;
+                for (j, p) in params.iter().enumerate() {
+                    if evald[j].is_none() {
+                        if let Some(pn) = &p.name {
+                            if pn.trim_start_matches('@') == name {
+                                evald[j] = Some(a.value.clone());
+                                frame.push(var_decl(name, a.value.clone()));
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !found {
+                    return Err(self.err(
+                        ErrorKind::Runtime,
+                        format!("Named argument for {} @{name} not found", cand.name),
+                    ));
+                }
+            } else {
+                remaining.push(a.clone());
+            }
+        }
+
+        let pos: Vec<Node> = remaining.into_iter().map(|a| a.value).collect();
+        let mut arg_index = 0usize;
+        for (i, p) in params.iter().enumerate() {
+            if evald[i].is_some() {
+                continue;
+            }
+            if let Some(pn) = &p.name {
+                let key = pn.trim_start_matches('@');
+                if p.variadic {
+                    let rest: Vec<Node> = pos[arg_index.min(pos.len())..].to_vec();
+                    let expr = if rest.len() == 1 {
+                        rest[0].clone()
+                    } else {
+                        Node::Expression(rest.clone())
+                    };
+                    frame.push(var_decl(key, expr));
+                    for (k, v) in pos.iter().enumerate().skip(arg_index) {
+                        if k < evald.len() {
+                            evald[k] = Some(v.clone());
+                        }
+                    }
+                } else if arg_index < pos.len() {
+                    let v = pos[arg_index].clone();
+                    frame.push(var_decl(key, v.clone()));
+                    evald[i] = Some(v);
+                } else if let Some(def) = &p.default {
+                    let v = self.eval_default(def, &frame, cand)?;
+                    frame.push(var_decl(key, v.clone()));
+                    evald[i] = Some(v);
+                } else {
+                    return Err(self.err(
+                        ErrorKind::Runtime,
+                        format!("wrong number of arguments for {}", cand.name),
+                    ));
+                }
+            }
+            arg_index += 1;
+        }
+
+        // `@arguments` — the bound values in parameter order, space-joined.
+        let arg_values: Vec<Node> = evald.iter().flatten().cloned().collect();
+        let arguments = if arg_values.len() == 1 {
+            arg_values[0].clone()
+        } else {
+            Node::Expression(arg_values)
+        };
+        frame.push(var_decl("arguments", arguments));
         Ok(frame)
+    }
+
+    /// Evaluate a parameter default against the mixin's definition scope + the
+    /// partially-bound param frame (the theming lever, §4.3 — a default resolves
+    /// in the definition's scope, not the caller's).
+    fn eval_default(
+        &mut self,
+        def: &Node,
+        partial: &[Node],
+        cand: &Candidate,
+    ) -> Result<Node, LessError> {
+        let mut frames: Vec<Frame> = Vec::with_capacity(self.frames.len() + 2);
+        frames.push(frame_of(partial.to_vec()));
+        frames.extend(cand.def_scope.iter().cloned());
+        frames.extend(self.frames.iter().cloned());
+        let saved = std::mem::replace(&mut self.frames, frames);
+        let res = self.reparse_arg(def);
+        self.frames = saved;
+        res
+    }
+
+    /// Run `f` with the mixin frame stack (param frame + definition scope + caller)
+    /// installed — used for guard evaluation (less.js `matchCondition`).
+    fn with_mixin_frames<R>(
+        &mut self,
+        cand: &Candidate,
+        param_frame: &[Node],
+        f: impl FnOnce(&mut Self) -> Result<R, LessError>,
+    ) -> Result<R, LessError> {
+        let mut frames: Vec<Frame> = Vec::with_capacity(self.frames.len() + 2);
+        frames.push(frame_of(param_frame.to_vec()));
+        frames.extend(cand.def_scope.iter().cloned());
+        frames.extend(self.frames.iter().cloned());
+        let saved = std::mem::replace(&mut self.frames, frames);
+        let res = f(self);
+        self.frames = saved;
+        res
     }
 
     /// Mixin args/defaults are parsed as raw `Anonymous` text (the structural
@@ -775,24 +1209,22 @@ impl<'a> Ctx<'a> {
     }
 
     // ------------------------------------------------------------------
-    // Guards
+    // Guards (plan §2.6): comma-OR, `and`, `not`, comparisons, type-check
+    // functions, `default()`.
     // ------------------------------------------------------------------
 
+    /// Evaluate a CSS/selector guard (`sel when (…)`) in the current scope.
     fn eval_guard(&mut self, guard: &Node) -> Result<bool, LessError> {
-        // Guards are retained as raw Anonymous text by the structural parser.
-        let raw = match guard {
-            Node::Anonymous(s) => s.clone(),
-            other => render_value(other, self.opts.num_precision),
-        };
+        let raw = guard_text(guard);
         self.eval_guard_str(&raw)
     }
 
-    /// Evaluate a `when (...)` guard string (minimal: `and`, comma-OR, simple
-    /// comparisons + `true`). Enough for the milestone gate; the full guard
-    /// algebra + `default()` is Phase 2.
+    /// Evaluate a `when (...)` guard string: top-level commas = OR of `and`-lists.
     fn eval_guard_str(&mut self, raw: &str) -> Result<bool, LessError> {
         let s = raw.trim();
-        // Split top-level commas = OR.
+        if s.is_empty() {
+            return Ok(true);
+        }
         for clause in split_top(s, ',') {
             if self.eval_guard_and(&clause)? {
                 return Ok(true);
@@ -802,36 +1234,46 @@ impl<'a> Ctx<'a> {
     }
 
     fn eval_guard_and(&mut self, clause: &str) -> Result<bool, LessError> {
-        let mut all = true;
         for part in split_word(clause, "and") {
             if !self.eval_guard_atom(part.trim())? {
-                all = false;
-                break;
+                return Ok(false);
             }
         }
-        Ok(all)
+        Ok(true)
     }
 
+    /// One guard atom: optional `not`, then a parenthesized condition.
     fn eval_guard_atom(&mut self, atom: &str) -> Result<bool, LessError> {
-        let a = atom.trim().trim_start_matches('(').trim_end_matches(')').trim();
-        if a.eq_ignore_ascii_case("true") {
-            return Ok(true);
+        let mut a = atom.trim();
+        let mut negate = false;
+        if let Some(rest) = strip_not(a) {
+            negate = true;
+            a = rest.trim();
         }
-        // comparison ops
-        for (sym, _) in [("<=", 0), (">=", 0), ("=<", 0), ("=", 0), ("<", 0), (">", 0)] {
-            if let Some(idx) = a.find(sym) {
-                // avoid matching `<` inside `<=`
-                if (sym == "<" || sym == ">") && a[idx..].starts_with(&format!("{sym}=")) {
-                    continue;
-                }
-                let (l, r) = a.split_at(idx);
-                let r = &r[sym.len()..];
-                return self.compare_guard(l.trim(), sym, r.trim());
-            }
+        let inner = strip_outer_parens(a);
+        let result = self.eval_condition(inner)?;
+        Ok(negate ^ result)
+    }
+
+    /// A condition inside a guard: `L op R`, or a bare truthy value.
+    fn eval_condition(&mut self, inner: &str) -> Result<bool, LessError> {
+        let inner = inner.trim();
+        if let Some((l, op, r)) = split_comparison(inner) {
+            let lv = self.reparse_and_eval(l.trim())?;
+            let rv = self.reparse_and_eval(r.trim())?;
+            let cmp = compare_values(&lv, &rv);
+            return Ok(match op {
+                "=" | "==" => cmp == Some(0),
+                "<" => cmp == Some(-1),
+                ">" => cmp == Some(1),
+                "<=" | "=<" => matches!(cmp, Some(-1) | Some(0)),
+                ">=" => matches!(cmp, Some(1) | Some(0)),
+                _ => false,
+            });
         }
-        // bare value: true iff it evaluates to keyword `true`.
-        let v = self.reparse_and_eval(a)?;
-        Ok(value_to_plain_string(&v) == "true")
+        // Bare value: true iff it evaluates to the keyword `true`.
+        let v = self.reparse_and_eval(inner)?;
+        Ok(matches!(&v, Node::Keyword(k) if k == "true"))
     }
 
     fn reparse_and_eval(&mut self, src: &str) -> Result<Node, LessError> {
@@ -840,20 +1282,6 @@ impl<'a> Ctx<'a> {
         } else {
             Ok(Node::Anonymous(src.to_string()))
         }
-    }
-
-    fn compare_guard(&mut self, l: &str, op: &str, r: &str) -> Result<bool, LessError> {
-        let lv = self.reparse_and_eval(l)?;
-        let rv = self.reparse_and_eval(r)?;
-        let cmp = compare_values(&lv, &rv);
-        Ok(match op {
-            "=" => cmp == Some(0),
-            "<" => cmp == Some(-1),
-            ">" => cmp == Some(1),
-            "<=" | "=<" => matches!(cmp, Some(-1) | Some(0)),
-            ">=" => matches!(cmp, Some(1) | Some(0)),
-            _ => false,
-        })
     }
 
     // ------------------------------------------------------------------
@@ -946,7 +1374,7 @@ impl<'a> Ctx<'a> {
 /// its unevaluated value + whether it was `!important`.
 fn frame_variable(frame: &Frame, name: &str) -> Option<(Node, bool)> {
     let mut result = None;
-    for r in frame.iter() {
+    for r in frame.borrow().iter() {
         if let Node::VariableDecl {
             name: n,
             value,
@@ -962,78 +1390,287 @@ fn frame_variable(frame: &Frame, name: &str) -> Option<(Node, bool)> {
     result
 }
 
-/// Find a mixin definition matching `path` in a frame (recursing into namespaces).
-/// Returns `(params, guard, body_rules, optional-def-frame)`.
-#[allow(clippy::type_complexity)]
-fn find_mixin(
-    frame: &Frame,
-    path: &[String],
-) -> Option<(Vec<MixinParam>, Option<Node>, Vec<Node>, Option<Frame>)> {
-    find_mixin_in(frame.as_ref(), path)
+/// Whether a frame already declares `@name` (for scope-injection filtering).
+fn frame_has_var(frame: &Frame, name: &str) -> bool {
+    frame
+        .borrow()
+        .iter()
+        .any(|r| matches!(r, Node::VariableDecl { name: n, .. } if n == name))
 }
 
-fn find_mixin_in(
-    rules: &[Node],
-    path: &[String],
-) -> Option<(Vec<MixinParam>, Option<Node>, Vec<Node>, Option<Frame>)> {
-    let head = &path[0];
+/// Normalize a run of selector elements into the mixin lookup names (less.js
+/// `Selector.mixinElements`): join `combinator+value`, extract each
+/// `[&#*.\w-]([\w-]|\.)*` token, dropping a leading bare `&` (plan §2.5).
+fn mixin_names(elements: &[Element]) -> Vec<String> {
+    let mut joined = String::new();
+    for e in elements {
+        joined.push_str(&e.combinator);
+        joined.push_str(&e.value);
+    }
+    let mut names = extract_mixin_tokens(&joined);
+    if names.first().map(|s| s == "&").unwrap_or(false) {
+        names.remove(0);
+    }
+    names
+}
+
+/// Extract the `[,&#*.\w-]([\w-]|(\\.))*` tokens from a joined selector string.
+fn extract_mixin_tokens(s: &str) -> Vec<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let is_start = |b: u8| matches!(b, b',' | b'&' | b'#' | b'*' | b'.' | b'-' | b'_')
+        || b.is_ascii_alphanumeric();
+    let is_cont = |b: u8| matches!(b, b'-' | b'_') || b.is_ascii_alphanumeric();
+    while i < bytes.len() {
+        if is_start(bytes[i]) {
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 2;
+                } else if is_cont(bytes[i]) {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            out.push(s[start..i].to_string());
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Collect mixin candidates matching `path` in a rule list, recursing into
+/// namespaces (less.js `Ruleset.find`). Each recursion prepends the namespace's
+/// body as a definition-scope frame (closure capture, plan §4.3).
+fn find_candidates(rules: &[Node], path: &[String], def_scope: &[Frame]) -> Vec<Candidate> {
+    let mut out = Vec::new();
     for r in rules {
         match r {
-            Node::MixinDefinition(def) if &def.name == head => {
-                if path.len() == 1 {
-                    return Some((
-                        def.params.clone(),
-                        def.guard.as_deref().cloned(),
-                        def.rules.clone(),
-                        None,
-                    ));
-                }
-                if let Some(found) = find_mixin_in(&def.rules, &path[1..]) {
-                    return Some(found);
+            Node::MixinDefinition(def) => {
+                let names = extract_names_dropamp(&def.name);
+                if let Some(m) = match_prefix(path, &names) {
+                    if m == path.len() {
+                        out.push(Candidate {
+                            name: def.name.clone(),
+                            params: def.params.clone(),
+                            guard: def.guard.as_deref().cloned(),
+                            rules: def.rules.clone(),
+                            def_scope: def_scope.to_vec(),
+                            ruleset_span: None,
+                        });
+                    } else {
+                        let mut inner_scope = vec![frame_of(def.rules.clone())];
+                        inner_scope.extend(def_scope.iter().cloned());
+                        out.extend(find_candidates(&def.rules, &path[m..], &inner_scope));
+                    }
                 }
             }
             Node::Ruleset(rs) => {
-                // A ruleset usable as a mixin: a single simple class/id selector.
-                if let Some(sel_name) = simple_selector_name(rs) {
-                    if &sel_name == head {
-                        if path.len() == 1 {
-                            return Some((Vec::new(), None, rs.rules.clone(), None));
+                for sel in &rs.selectors {
+                    let names = mixin_names(&sel.elements);
+                    if let Some(m) = match_prefix(path, &names) {
+                        if m == path.len() {
+                            out.push(Candidate {
+                                name: rs.selectors[0]
+                                    .elements
+                                    .first()
+                                    .map(|e| e.value.clone())
+                                    .unwrap_or_default(),
+                                params: Vec::new(),
+                                guard: sel.guard.as_deref().cloned(),
+                                rules: rs.rules.clone(),
+                                def_scope: def_scope.to_vec(),
+                                ruleset_span: Some(rs.span),
+                            });
+                        } else {
+                            let mut inner_scope = vec![frame_of(rs.rules.clone())];
+                            inner_scope.extend(def_scope.iter().cloned());
+                            out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope));
                         }
-                        if let Some(found) = find_mixin_in(&rs.rules, &path[1..]) {
-                            return Some(found);
-                        }
+                        break; // one selector per ruleset matches the prefix
                     }
                 }
             }
             _ => {}
         }
     }
+    out
+}
+
+/// Normalize a mixin-definition name (`.m`, `#ns`) into lookup tokens.
+fn extract_names_dropamp(name: &str) -> Vec<String> {
+    let mut n = extract_mixin_tokens(name);
+    if n.first().map(|s| s == "&").unwrap_or(false) {
+        n.remove(0);
+    }
+    n
+}
+
+/// If `def_names` is a prefix of `path`, return its length (elements matched).
+fn match_prefix(path: &[String], def_names: &[String]) -> Option<usize> {
+    if def_names.is_empty() || def_names.len() > path.len() {
+        return None;
+    }
+    for (a, b) in path.iter().zip(def_names.iter()) {
+        if a != b {
+            return None;
+        }
+    }
+    Some(def_names.len())
+}
+
+/// Build a `@name: value` variable declaration node (for a param/injection frame).
+fn var_decl(name: &str, value: Node) -> Node {
+    Node::VariableDecl {
+        name: name.to_string(),
+        value: Box::new(value),
+        important: String::new(),
+        span: Span::default(),
+    }
+}
+
+/// The raw guard text of a stored guard node.
+fn guard_text(guard: &Node) -> String {
+    match guard {
+        Node::Anonymous(s) => s.clone(),
+        other => render_value(other, 8),
+    }
+}
+
+/// Format a mixin call for a "no matching definition" error message.
+fn format_call(path: &[String], args: &[EvArg], np: u8) -> String {
+    let mut s = path.join("");
+    s.push('(');
+    let parts: Vec<String> = args
+        .iter()
+        .map(|a| {
+            let v = render_value(&a.value, np);
+            match &a.name {
+                Some(n) => format!("@{n}:{v}"),
+                None => v,
+            }
+        })
+        .collect();
+    s.push_str(&parts.join(", "));
+    s.push(')');
+    s
+}
+
+/// Force `!important` onto every declaration in an output node (`.m() !important`).
+fn make_important_node(node: &mut Node) {
+    if let Node::Declaration(d) = node {
+        if d.important.is_empty() {
+            d.important = " !important".to_string();
+        }
+    }
+}
+
+/// Force `!important` through an output block (recursing into rulesets/at-rules).
+fn make_important_out(out: &mut Out) {
+    match out {
+        Out::Rule { decls, .. } => {
+            for d in decls.iter_mut() {
+                make_important_node(d);
+            }
+        }
+        Out::Decls(decls) => {
+            for d in decls.iter_mut() {
+                make_important_node(d);
+            }
+        }
+        Out::At { body, .. } => {
+            if let AtBody::Rules(inner) = body {
+                for o in inner.iter_mut() {
+                    make_important_out(o);
+                }
+            }
+        }
+        Out::Comment(_) => {}
+    }
+}
+
+/// Strip a leading `not` (keyword) from a guard atom, returning the remainder.
+fn strip_not(a: &str) -> Option<&str> {
+    let a = a.trim_start();
+    let rest = a.strip_prefix("not")?;
+    // `not` must be a whole word (followed by whitespace or `(`).
+    match rest.chars().next() {
+        Some(c) if c.is_whitespace() || c == '(' => Some(rest),
+        _ => None,
+    }
+}
+
+/// Strip one balanced outer `( … )` pair from a string.
+fn strip_outer_parens(s: &str) -> &str {
+    let s = s.trim();
+    if s.starts_with('(') && s.ends_with(')') {
+        // Verify the first `(` matches the last `)`.
+        let bytes = s.as_bytes();
+        let mut depth = 0i32;
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return if i == bytes.len() - 1 {
+                            s[1..s.len() - 1].trim()
+                        } else {
+                            s
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    s
+}
+
+/// Split a condition on a top-level comparison operator (`=<`/`<=`/`>=`/`=`/`<`/
+/// `>`), returning `(lhs, op, rhs)` if one is present.
+fn split_comparison(s: &str) -> Option<(&str, &'static str, &str)> {
+    let bytes = s.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'"' | b'\'' => {
+                let q = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    i += 1;
+                }
+            }
+            _ if depth == 0 => {
+                // Two-char operators first.
+                if s[i..].starts_with("=<") || s[i..].starts_with("<=") {
+                    return Some((&s[..i], if s[i..].starts_with("=<") { "=<" } else { "<=" }, &s[i + 2..]));
+                }
+                if s[i..].starts_with(">=") {
+                    return Some((&s[..i], ">=", &s[i + 2..]));
+                }
+                if bytes[i] == b'=' {
+                    return Some((&s[..i], "=", &s[i + 1..]));
+                }
+                if bytes[i] == b'<' {
+                    return Some((&s[..i], "<", &s[i + 1..]));
+                }
+                if bytes[i] == b'>' {
+                    return Some((&s[..i], ">", &s[i + 1..]));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
     None
-}
-
-/// The callable name of a ruleset used as a mixin (`.foo`/`#bar`), if it is one.
-fn simple_selector_name(rs: &crate::ast::Ruleset) -> Option<String> {
-    if rs.selectors.len() != 1 {
-        return None;
-    }
-    let sel = &rs.selectors[0];
-    if sel.elements.len() != 1 {
-        return None;
-    }
-    let v = &sel.elements[0].value;
-    if v.starts_with('.') || v.starts_with('#') {
-        Some(v.clone())
-    } else {
-        None
-    }
-}
-
-/// Build the mixin-call lookup path (`#ns`, `.m`) from its path elements.
-fn mixin_path_names(path: &[Element]) -> Vec<String> {
-    path.iter()
-        .map(|e| e.value.clone())
-        .filter(|v| !v.is_empty())
-        .collect()
 }
 
 // ----------------------------------------------------------------------
@@ -1062,36 +1699,128 @@ fn value_to_plain_string(node: &Node) -> String {
     }
 }
 
-/// Compare two evaluated values (guard comparisons): dimensions numerically
-/// (unit-unified), else string equality (plan §2.6). Returns -1/0/1 or None.
+/// Compare two evaluated values for a guard (less.js `Node.compare`, plan §2.6).
+/// Returns -1/0/1, or `None` for "not comparable / not equal". Named colors are
+/// coerced first so `@c = red` compares as colors.
 fn compare_values(a: &Node, b: &Node) -> Option<i32> {
-    if let (Node::Dimension(da), Node::Dimension(db)) = (a, b) {
-        let (ua, ub) = if da.unit.is_empty() || db.unit.is_empty() {
-            (da.clone(), db.clone())
-        } else {
-            (da.unify(), db.unify())
-        };
-        if !ua.unit.is_empty() && !ub.unit.is_empty() && ua.unit.to_unit_string() != ub.unit.to_unit_string() {
+    let a = coerce_color(a.clone());
+    let b = coerce_color(b.clone());
+    // Array-like values (space `Expression` / comma `Value`) compare element-wise,
+    // but only within the SAME list kind (a space list never equals a comma list).
+    if let (Some(av), Some(bv)) = (as_list(&a), as_list(&b)) {
+        if std::mem::discriminant(&a) != std::mem::discriminant(&b) || av.len() != bv.len() {
             return None;
         }
-        return Some(match ua.value.partial_cmp(&ub.value) {
-            Some(std::cmp::Ordering::Less) => -1,
-            Some(std::cmp::Ordering::Greater) => 1,
-            _ => 0,
-        });
+        for (x, y) in av.iter().zip(bv.iter()) {
+            if compare_values(x, y) != Some(0) {
+                return None;
+            }
+        }
+        return Some(0);
     }
-    let sa = value_to_plain_string(a);
-    let sb = value_to_plain_string(b);
-    if sa == sb {
+    if has_compare(&a) && !is_quoted_or_anon(&b) {
+        node_compare(&a, &b)
+    } else if has_compare(&b) {
+        node_compare(&b, &a).map(|c| -c)
+    } else if std::mem::discriminant(&a) != std::mem::discriminant(&b) {
+        None
+    } else if value_to_plain_string(&a) == value_to_plain_string(&b) {
         Some(0)
     } else {
         None
     }
 }
 
+/// A space/comma list's items, if `n` is an `Expression`/`Value` of ≥2 items.
+fn as_list(n: &Node) -> Option<&[Node]> {
+    match n {
+        Node::Expression(v) | Node::Value(v) if v.len() >= 2 => Some(v),
+        _ => None,
+    }
+}
+
+/// Nodes with a less.js `compare` method (Dimension/Quoted/Color/Anonymous).
+fn has_compare(n: &Node) -> bool {
+    matches!(
+        n,
+        Node::Dimension(_) | Node::Quoted { .. } | Node::Color(_) | Node::Anonymous(_)
+    )
+}
+
+fn is_quoted_or_anon(n: &Node) -> bool {
+    matches!(n, Node::Quoted { .. } | Node::Anonymous(_))
+}
+
+/// `a.compare(b)` where `a` is a Dimension/Quoted/Color.
+fn node_compare(a: &Node, b: &Node) -> Option<i32> {
+    match a {
+        Node::Dimension(da) => {
+            let Node::Dimension(db) = b else { return None };
+            let (ua, ub) = if da.unit.is_empty() || db.unit.is_empty() {
+                (da.clone(), db.clone())
+            } else {
+                let (ua, ub) = (da.unify(), db.unify());
+                if ua.unit.to_unit_string() != ub.unit.to_unit_string() {
+                    return None;
+                }
+                (ua, ub)
+            };
+            Some(match ua.value.partial_cmp(&ub.value) {
+                Some(std::cmp::Ordering::Less) => -1,
+                Some(std::cmp::Ordering::Greater) => 1,
+                _ => 0,
+            })
+        }
+        Node::Quoted { escaped: ea, value: va, .. } => {
+            if let Node::Quoted { escaped: eb, value: vb, .. } = b {
+                if !ea && !eb {
+                    return Some(if va == vb {
+                        0
+                    } else if va < vb {
+                        -1
+                    } else {
+                        1
+                    });
+                }
+            }
+            // Mixed / escaped → toCSS equality.
+            if render_value(a, 8) == render_value(b, 8) {
+                Some(0)
+            } else {
+                None
+            }
+        }
+        Node::Color(ca) => {
+            let Node::Color(cb) = b else { return None };
+            if ca.rgb == cb.rgb && ca.alpha == cb.alpha {
+                Some(0)
+            } else {
+                None
+            }
+        }
+        Node::Anonymous(_) => {
+            // less.js `Anonymous.compare` — toCSS equality only.
+            if render_value(a, 8) == render_value(b, 8) {
+                Some(0)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 // ----------------------------------------------------------------------
 // Selector joining (JoinSelector, string-level)
 // ----------------------------------------------------------------------
+
+/// less.js `Selector.isJustParentSelector`: a lone `&` element (descendant/empty
+/// combinator) — the marker for a foldable bare-`&` child ruleset (§2.2).
+fn is_just_parent(sel: &Selector) -> bool {
+    sel.elements.len() == 1
+        && sel.elements[0].value == "&"
+        && matches!(sel.elements[0].combinator.as_str(), "" | " ")
+}
 
 /// Combine parent paths with a ruleset's own selectors, resolving `&` (§2.2/§4).
 fn join_selectors(parent: Option<&[String]>, own: &[String]) -> Vec<String> {
@@ -1341,6 +2070,59 @@ mod tests {
             css("@var: hello;\n@name: var;\n.x { y: @@name; }"),
             ".x {\n  y: hello;\n}"
         );
+    }
+
+    #[test]
+    fn parametric_mixin_with_default_and_named_args() {
+        // Space-before-parens definition, default value, named argument (§2.5).
+        let out = css(".m (@a: 1px, @b: 2px) { p: @a @b; }\n.x { .m(@b: 9px); }");
+        assert_eq!(out, ".x {\n  p: 1px 9px;\n}");
+    }
+
+    #[test]
+    fn pattern_matching_emits_all_matches() {
+        // Overloaded definitions; a literal-pattern param + a catch-all (§2.5).
+        let out = css(
+            ".m(@x) { one: @x; }\n.m(left) { side: left; }\n.y { .m(left); }",
+        );
+        assert_eq!(out, ".y {\n  one: left;\n  side: left;\n}");
+    }
+
+    #[test]
+    fn mixin_guard_selects_definition() {
+        let out = css(
+            ".m(@x) when (@x > 5) { big: @x; }\n.m(@x) when (@x <= 5) { small: @x; }\n\
+             .a { .m(9); }\n.b { .m(2); }",
+        );
+        assert_eq!(out, ".a {\n  big: 9;\n}\n.b {\n  small: 2;\n}");
+    }
+
+    #[test]
+    fn mixin_closure_captures_definition_scope() {
+        // The mixin resolves `@var` in its definition scope, not the caller's.
+        let out = css(
+            ".scope { @var: 99px; .m() { w: @var; } }\n.x { @var: 0px; .scope > .m(); }",
+        );
+        assert_eq!(out, ".x {\n  w: 99px;\n}");
+    }
+
+    #[test]
+    fn mixin_scope_injection_returns_variables() {
+        // A called mixin injects its top-level variable into the caller (§2.5).
+        let out = css(".m() { @c: red; }\n.x { color: @c; .m(); }");
+        assert_eq!(out, ".x {\n  color: red;\n}");
+    }
+
+    #[test]
+    fn mixin_important_forces_important() {
+        let out = css(".m() { a: 1; }\n.x { .m() !important; }");
+        assert_eq!(out, ".x {\n  a: 1 !important;\n}");
+    }
+
+    #[test]
+    fn css_guard_and_bare_ampersand_fold() {
+        let out = css("@c: 3;\n.x { w: 1; & when (@c = 3) { h: 2; } }");
+        assert_eq!(out, ".x {\n  w: 1;\n  h: 2;\n}");
     }
 }
 

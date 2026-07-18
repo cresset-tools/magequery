@@ -50,7 +50,7 @@ const SKIP_SUITES: &[&str] = &["javascript", "plugin", "plugin-module", "plugin-
 /// Invariant enforced by the harness: a fixture on this list that regresses, or
 /// an off-list fixture that starts passing, fails the suite. Keep it sorted; when
 /// a phase lands new coverage, ADD the newly-green fixtures here (never remove one
-/// to hide a regression). 20/87 at milestone 1 (Step 4 evaluator).
+/// to hide a regression). 30/87 after Phase 2 (mixins + guards + pattern-matching).
 const EXPECTED_PASS: &[&str] = &[
     "at-rules-declarations/at-rules-declarations",
     "at-rules-empty-block/at-rules-empty-block",
@@ -60,15 +60,25 @@ const EXPECTED_PASS: &[&str] = &[
     "color-functions/operations",
     "css-3/css-3",
     "css-grid/css-grid",
+    "css-guards/css-guards",
     "empty/empty",
     "impor/impor",
     "lazy-eval/lazy-eval",
     "mixin-noparens/mixin-noparens",
+    "mixins-closure/mixins-closure",
+    "mixins-guards-default-func/mixins-guards-default-func",
+    "mixins-important/mixins-important",
+    "mixins-named-args/mixins-named-args",
+    "mixins-nested/mixins-nested",
+    "mixins-pattern/mixins-pattern",
+    "mixins/mixins",
+    "mixins/mixins-advanced",
     "no-output/no-output",
     "operations/operations",
     "operations/operations-advanced",
     "plugi/plugi",
     "rulesets/rulesets",
+    "scope/scope",
     "tailwind/tailwind",
     "variables-in-at-rules/variables-in-at-rules",
     "variables/variables",
@@ -345,7 +355,7 @@ fn main() {
 
     let p = passed.load(Ordering::Relaxed);
     println!(
-        "\nless.js {TAG} default-option compile corpus (milestone 1 — Step 4 evaluator): \
+        "\nless.js {TAG} default-option compile corpus (Phase 2 — mixins + guards): \
          {p}/{total} passing (ratchet floor {floor}; {} xfail).",
         total - floor
     );
