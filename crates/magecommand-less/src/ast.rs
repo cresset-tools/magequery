@@ -228,8 +228,13 @@ pub enum Node {
     Call { name: String, args: Vec<Node> },
     /// A `url(...)` value (plan §2.9/§2.18).
     Url(Box<Node>),
-    /// A parenthesized value (plan §2.4).
-    Paren(Box<Node>),
+    /// A parenthesized value (plan §2.4). `in_op` mirrors less.js `parensInOp`:
+    /// set when the paren is an operand of an operation (or a `-` negation) — the
+    /// only case genCSS keeps literal parens for a non-folded result (§2.4/calc).
+    Paren { inner: Box<Node>, in_op: bool },
+    /// An IE-filter style `key=value` function argument (less.js `Assignment`,
+    /// plan §2.17): `alpha(opacity=20)`, `progid:…(startColorstr="#333333")`.
+    Assignment { key: String, value: Box<Node> },
     /// A binary operation `left op right` (plan §2.4). Emitted literally when
     /// math is off for the operator; `spaced` records source whitespace around
     /// the operator (less.js `Operation.isSpaced`), which drives genCSS spacing.

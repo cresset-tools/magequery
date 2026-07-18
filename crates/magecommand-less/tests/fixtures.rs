@@ -50,22 +50,35 @@ const SKIP_SUITES: &[&str] = &["javascript", "plugin", "plugin-module", "plugin-
 /// Invariant enforced by the harness: a fixture on this list that regresses, or
 /// an off-list fixture that starts passing, fails the suite. Keep it sorted; when
 /// a phase lands new coverage, ADD the newly-green fixtures here (never remove one
-/// to hide a regression). 31/87 after Phase 2 (mixins + guards + pattern-matching;
-/// closure param capture, `@arguments` variadic, recursive guard grammar +
-/// namespace-path guards).
+/// to hide a regression). 48/87 after Phase 3 (function library + strings: the
+/// full §2.7 registry with min/max dual behavior, calc `_SELF` folding + paren
+/// semantics, iterated interpolation, IE filters/`progid`, `anonymousValue`
+/// raw declarations, value comments, merge `+:`/`+_:`, and `each()`).
 const EXPECTED_PASS: &[&str] = &[
     "at-rules-declarations/at-rules-declarations",
     "at-rules-empty-block/at-rules-empty-block",
     "at-rules-empty/at-rules-empty",
+    "calc/calc",
     "charsets/charsets",
+    "color-functions/alpha",
+    "color-functions/basic",
+    "color-functions/comprehensive",
+    "color-functions/formats",
     "color-functions/modern",
+    "color-functions/modern-syntax",
     "color-functions/operations",
+    "color-functions/rgba",
+    "comments/comments2",
     "css-3/css-3",
+    "css-escapes/css-escapes",
     "css-grid/css-grid",
     "css-guards/css-guards",
     "empty/empty",
+    "extract-and-length/extract-and-length",
+    "ie-filters/ie-filters",
     "impor/impor",
     "lazy-eval/lazy-eval",
+    "merge/merge",
     "mixin-noparens/mixin-noparens",
     "mixins-closure/mixins-closure",
     "mixins-guards-default-func/mixins-guards-default-func",
@@ -79,12 +92,17 @@ const EXPECTED_PASS: &[&str] = &[
     "no-output/no-output",
     "operations/operations",
     "operations/operations-advanced",
+    "parser-slashed-combinator/parser-slashed-combinator",
     "plugi/plugi",
+    "property-name-interp/property-name-interp",
     "rulesets/rulesets",
     "scope/scope",
+    "strings/strings",
     "tailwind/tailwind",
     "variables-in-at-rules/variables-in-at-rules",
+    "variables/variable-advanced",
     "variables/variables",
+    "whitespace/whitespace",
 ];
 
 /// Absolute path of the vendored fixture root (`…/tests/fixtures/less-testdata`).
@@ -140,6 +158,17 @@ impl ImportResolver for FsResolver {
         };
 
         Ok(ResolvedImport { file, payload })
+    }
+
+    /// Asset reads for `data-uri`/`image-size` (plan §C-assets): resolve
+    /// relative to the requesting file's directory (fixture-relative).
+    fn load_binary(&self, path: &str, current_directory: &str) -> Option<Vec<u8>> {
+        let base = if current_directory.is_empty() {
+            self.root.clone()
+        } else {
+            PathBuf::from(current_directory)
+        };
+        fs::read(base.join(path)).ok()
     }
 }
 
@@ -358,7 +387,7 @@ fn main() {
 
     let p = passed.load(Ordering::Relaxed);
     println!(
-        "\nless.js {TAG} default-option compile corpus (Phase 2 — mixins + guards): \
+        "\nless.js {TAG} default-option compile corpus (Phase 3 — functions + strings): \
          {p}/{total} passing (ratchet floor {floor}; {} xfail).",
         total - floor
     );

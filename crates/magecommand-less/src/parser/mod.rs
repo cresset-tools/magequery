@@ -193,8 +193,46 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // A bare function-call statement (`e('…');` at any level — less.js
+        // `primary` tries `entities.call()` after `ruleset`); only when the call
+        // is immediately terminated, so `input:not(.x) { }` stays a selector.
+        if let Some(node) = self.try_call_statement()? {
+            return Ok(node);
+        }
+
         // Otherwise a ruleset, mixin definition, or mixin call.
         self.parse_selector_statement()
+    }
+
+    /// Try `ident(args);` as a statement-level function call (css-escapes'
+    /// root-level `e('…');`). Backtracks unless the balanced call is followed by
+    /// `;`/`}`/EOF.
+    fn try_call_statement(&mut self) -> Result<Option<Node>, LessError> {
+        let save = self.here();
+        let c = self.cur.cur().unwrap_or(b' ');
+        if !(c.is_ascii_alphabetic() || c == b'_' || c == b'%' || c == b'~') {
+            return Ok(None);
+        }
+        // Cheap shape probe first: ident + balanced parens + terminator.
+        let ident = self.cur.scan_ident().to_string();
+        if ident.is_empty() || self.cur.cur() != Some(b'(') {
+            self.cur.i = save;
+            return Ok(None);
+        }
+        self.skip_balanced(b'(', b')');
+        self.cur.skip_whitespace();
+        // `each(...)` may be followed directly by the next statement (less.js
+        // parses any primary-level call; we only need the rule-producing one).
+        let terminated = matches!(self.cur.cur(), None | Some(b';') | Some(b'}'))
+            || ident.eq_ignore_ascii_case("each");
+        self.cur.i = save;
+        if !terminated {
+            return Ok(None);
+        }
+        let node = self.parse_entity()?;
+        self.cur.skip_trivia();
+        self.cur.eat(b';');
+        Ok(Some(node))
     }
 
     // -----------------------------------------------------------------------
@@ -270,7 +308,12 @@ impl<'a> Parser<'a> {
         self.cur.skip_trivia();
         let prelude_start = self.here();
         self.scan_prelude();
-        let prelude_raw = self.cur.src()[prelude_start..self.here()].trim();
+        let prelude_all = self.cur.src()[prelude_start..self.here()].trim();
+        // Block comments in the prelude relocate into the block (less.js's
+        // commentStore attaches them to the body's rules — `@-webkit-keyframes
+        // hover /* c */{}` renders the comment inside the braces).
+        let (prelude_raw, prelude_comments) = split_prelude_comments(prelude_all);
+        let prelude_raw = prelude_raw.trim();
         let prelude = if prelude_raw.is_empty() {
             None
         } else {
@@ -279,7 +322,18 @@ impl<'a> Parser<'a> {
 
         self.cur.skip_trivia();
         let block = if self.cur.cur() == Some(b'{') {
-            AtRuleBlock::Rules(self.parse_block()?)
+            let mut rules = self.parse_block()?;
+            for (i, text) in prelude_comments.into_iter().enumerate() {
+                rules.insert(
+                    i,
+                    Node::Comment {
+                        text,
+                        line: false,
+                        span: self.span(start),
+                    },
+                );
+            }
+            AtRuleBlock::Rules(rules)
         } else {
             self.cur.eat(b';');
             AtRuleBlock::None
@@ -404,6 +458,8 @@ impl<'a> Parser<'a> {
 
         let value = if custom {
             self.parse_custom_property_value()
+        } else if let Some(v) = self.try_anonymous_value() {
+            v
         } else {
             self.parse_value()?
         };
@@ -432,6 +488,32 @@ impl<'a> Parser<'a> {
             custom,
             span: self.span(start),
         })))
+    }
+
+    /// less.js `anonymousValue` — the declaration fast path: a value containing
+    /// none of `.#@$+/'"*`(;{}-` up to a `;` is captured VERBATIM (whitespace,
+    /// newlines and a trailing `!important` included), which is what preserves
+    /// source formatting in simple values (`background: the,\n great,\n wall`).
+    /// The `;` is left for the caller's terminator handling.
+    fn try_anonymous_value(&mut self) -> Option<Node> {
+        let start = self.here();
+        loop {
+            match self.cur.cur() {
+                Some(b';') => break,
+                Some(
+                    b'.' | b'#' | b'@' | b'$' | b'+' | b'/' | b'\'' | b'"' | b'*' | b'`'
+                    | b'(' | b'{' | b'}' | b'-',
+                )
+                | None => {
+                    self.cur.i = start;
+                    return None;
+                }
+                _ => self.cur.bump(),
+            }
+        }
+        Some(Node::Anonymous(
+            self.cur.src()[start..self.here()].to_string(),
+        ))
     }
 
     /// Parse a property name (ident, `@{interp}` pieces, `--custom`), plus an
@@ -470,7 +552,9 @@ impl<'a> Parser<'a> {
             return None;
         }
         let name = self.cur.src()[start..self.here()].to_string();
-        // Merge flag: `+` (comma) or `+_` (space) directly before `:`.
+        // Merge flag: `+` (comma) or `+_` (space) before the `:` — whitespace
+        // tolerated around it (`prop +  :`), like less.js's token auto-skip.
+        self.cur.skip_whitespace();
         let merge = if self.cur.cur() == Some(b'+') {
             if self.cur.peek(1) == Some(b'_') {
                 self.cur.bump();
@@ -501,9 +585,62 @@ impl<'a> Parser<'a> {
         String::new()
     }
 
-    /// Custom-property (`--foo`) value: raw up to `;`/`}` (NOT LESS-evaluated,
-    /// plan §2.16). `@{}` interpolation would run in the eval step.
+    /// Custom-property (`--foo`) value (plan §2.16, less.js `permissiveValue`):
+    /// a run of plain *entities* (no operations/parens) parses structured — so
+    /// `--x: rgba(0, 30, 0, 238);` IS evaluated, matching less.js — while
+    /// anything the entity chain can't fully consume falls back to the raw
+    /// capture (where `@{}` interpolation still runs in the eval step).
     fn parse_custom_property_value(&mut self) -> Node {
+        let save = self.here();
+        if let Some(v) = self.try_custom_entities() {
+            return v;
+        }
+        self.cur.i = save;
+        self.parse_custom_property_raw()
+    }
+
+    /// The `permissiveValue` entity loop: `entity ([,] entity)*` reaching `;`/`}`.
+    fn try_custom_entities(&mut self) -> Option<Node> {
+        let mut items: Vec<Node> = Vec::new();
+        loop {
+            self.skip_value_trivia();
+            match self.cur.cur() {
+                None | Some(b';') | Some(b'}') => break,
+                Some(b',') => {
+                    // less.js pushes a literal `,` Anonymous between entities.
+                    self.cur.bump();
+                    items.push(Node::Anonymous(",".to_string()));
+                    continue;
+                }
+                _ => {}
+            }
+            let before = self.here();
+            let e = self.parse_entity().ok()?;
+            if self.here() == before {
+                return None; // stalled — not entity-parseable
+            }
+            // The raw-capture fallback owns `@{…}` interpolation and anything
+            // the stray-punctuation arm swallowed byte-by-byte.
+            match &e {
+                Node::Anonymous(s) if s.len() <= 1 => return None,
+                // Not in less.js's `entity()` chain — those go the raw path.
+                Node::Interpolation { .. } | Node::Paren { .. } => return None,
+                _ => {}
+            }
+            items.push(e);
+        }
+        if items.is_empty() {
+            return Some(Node::Anonymous(String::new()));
+        }
+        Some(if items.len() == 1 {
+            items.pop().unwrap()
+        } else {
+            Node::Expression(items)
+        })
+    }
+
+    /// Raw custom-property capture up to `;`/`}` (balanced).
+    fn parse_custom_property_raw(&mut self) -> Node {
         let start = self.here();
         let mut depth = 0i32;
         while let Some(b) = self.cur.cur() {
@@ -626,6 +763,18 @@ impl<'a> Parser<'a> {
 
     /// A combinator preceding an element (plan §4.7 / less.js `combinator`).
     fn scan_combinator(&mut self, first: bool, ws_before: bool) -> String {
+        // A slashed combinator `/deep/`, `/shadow/` (less.js `Combinator`).
+        if self.cur.cur() == Some(b'/') {
+            let save = self.here();
+            self.cur.bump();
+            let word = self.cur.scan_ident().to_string();
+            if !word.is_empty() && self.cur.cur() == Some(b'/') {
+                self.cur.bump();
+                self.cur.skip_whitespace();
+                return format!("/{word}/");
+            }
+            self.cur.i = save;
+        }
         match self.cur.cur() {
             Some(c @ (b'>' | b'+' | b'~' | b'|' | b'^')) => {
                 self.cur.bump();
@@ -879,11 +1028,27 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// A space-separated expression of entities/operations (plan §2.4).
+    /// A space-separated expression of entities/operations (plan §2.4). Block
+    /// comments between items are KEPT as `Comment` nodes (less.js `expression`
+    /// pushes them; function callers filter them, plain values render them).
     fn parse_expression(&mut self) -> Result<Node, LessError> {
         let mut items = Vec::new();
         loop {
-            self.skip_value_trivia();
+            self.cur.skip_whitespace();
+            if self.cur.at_block_comment() {
+                let s = self.here();
+                self.cur.scan_comment();
+                items.push(Node::Comment {
+                    text: self.cur.src()[s..self.here()].to_string(),
+                    line: false,
+                    span: self.span(s),
+                });
+                continue;
+            }
+            if self.cur.at_line_comment() {
+                self.cur.scan_comment();
+                continue;
+            }
             if self.at_value_end() || self.cur.cur() == Some(b',') {
                 break;
             }
@@ -931,6 +1096,9 @@ impl<'a> Parser<'a> {
                 self.cur.i = save; // no right operand
                 break;
             }
+            let mut right = right;
+            mark_in_op(&mut left);
+            mark_in_op(&mut right);
             left = Node::Operation {
                 op: (opc as char).to_string(),
                 left: Box::new(left),
@@ -960,6 +1128,9 @@ impl<'a> Parser<'a> {
                     self.cur.i = save; // no right operand — leave the operator alone
                     break;
                 }
+                let mut right = right;
+                mark_in_op(&mut left);
+                mark_in_op(&mut right);
                 left = Node::Operation {
                     op: (opc as char).to_string(),
                     left: Box::new(left),
@@ -979,7 +1150,9 @@ impl<'a> Parser<'a> {
         self.skip_value_trivia();
         if self.cur.cur() == Some(b'-') && matches!(self.cur.peek(1), Some(b'@') | Some(b'(')) {
             self.cur.bump();
-            let inner = self.parse_entity()?;
+            let mut inner = self.parse_entity()?;
+            // less.js `operand`: a negated sub is marked `parensInOp`.
+            mark_in_op(&mut inner);
             return Ok(Node::Negative(Box::new(inner)));
         }
         self.parse_entity()
@@ -993,12 +1166,23 @@ impl<'a> Parser<'a> {
             Some(b'~') if matches!(self.cur.peek(1), Some(b'"') | Some(b'\'')) => {
                 Ok(self.parse_quoted())
             }
+            // `%(fmt, …)` and the `~(…)` list escape are calls whose names are
+            // punctuation (less.js call-name regex `[\w-]+|%|~|progid:[\w.]+`).
+            Some(b'%') | Some(b'~') if self.cur.peek(1) == Some(b'(') => {
+                let name = (self.cur.cur().unwrap() as char).to_string();
+                self.cur.bump();
+                self.cur.bump();
+                let args = self.parse_call_args()?;
+                self.skip_value_trivia();
+                self.cur.eat(b')');
+                Ok(Node::Call { name, args })
+            }
             Some(b'(') => {
                 self.cur.bump();
                 let inner = self.parse_value()?;
                 self.skip_value_trivia();
                 self.cur.eat(b')');
-                Ok(Node::Paren(Box::new(inner)))
+                Ok(Node::Paren { inner: Box::new(inner), in_op: false })
             }
             Some(b'[') => {
                 // A bracketed value token (`[line-name]` in grid, an attribute-ish
@@ -1022,6 +1206,15 @@ impl<'a> Parser<'a> {
                 let start = self.here();
                 self.cur.bump();
                 self.skip_balanced(b'{', b'}');
+                // `@{a}_checked` / `@{a}@{b}px` — an interpolation glued to more
+                // word chars is ONE token: less.js's permissiveValue captures it
+                // as an escaped Quoted whose `@{}`s interpolate on eval.
+                if matches!(self.cur.cur(), Some(c) if c == b'-' || c == b'_'
+                    || c.is_ascii_alphanumeric() || c >= 0x80)
+                    || (self.cur.cur() == Some(b'@') && self.cur.peek(1) == Some(b'{'))
+                {
+                    return Ok(self.scan_interp_word(start));
+                }
                 let raw = &self.cur.src()[start..self.here()];
                 let name = raw
                     .trim_start_matches("@{")
@@ -1060,6 +1253,39 @@ impl<'a> Parser<'a> {
                     span: self.span(start),
                 })
             }
+            Some(b'\\') => {
+                // A CSS-escaped identifier token in a value (`#000 \9`,
+                // `\5FAE\8F6F`): less.js's keyword regex accepts `\` escapes —
+                // 1-6 hex digits (+ one optional trailing space) or any single
+                // char — interleaved with ident chars, as ONE keyword.
+                let s = self.here();
+                loop {
+                    match self.cur.cur() {
+                        Some(b'\\') => {
+                            self.cur.bump();
+                            let mut n = 0;
+                            while n < 6
+                                && matches!(self.cur.cur(), Some(c) if c.is_ascii_hexdigit())
+                            {
+                                self.cur.bump();
+                                n += 1;
+                            }
+                            if n > 0 {
+                                if self.cur.cur() == Some(b' ') {
+                                    self.cur.bump();
+                                }
+                            } else if self.cur.cur().is_some() {
+                                self.cur.bump();
+                            }
+                        }
+                        Some(b'-') | Some(b'_') => self.cur.bump(),
+                        Some(c) if c.is_ascii_alphanumeric() => self.cur.bump(),
+                        Some(c) if c >= 0x80 => self.cur.bump(),
+                        _ => break,
+                    }
+                }
+                Ok(Node::Keyword(self.cur.src()[s..self.here()].trim_end().to_string()))
+            }
             _ if self.cur.at_number() => {
                 let (n, u) = self.cur.scan_number();
                 let value: f64 = n.parse().unwrap_or(0.0);
@@ -1077,10 +1303,26 @@ impl<'a> Parser<'a> {
             }
             Some(b) if b.is_ascii_alphabetic() || b == b'-' || b == b'_' || b >= 0x80 => {
                 let start = self.here();
-                let ident = self.cur.scan_ident().to_string();
+                let mut ident = self.cur.scan_ident().to_string();
                 if ident.eq_ignore_ascii_case("url") && self.cur.cur() == Some(b'(') {
                     self.cur.i = start;
                     return self.parse_url();
+                }
+                // IE-filter call names: `progid:[\w.]+(` (less.js call-name
+                // regex; plan §2.17). Extends the name past `:` and `.`.
+                if ident.eq_ignore_ascii_case("progid") && self.cur.cur() == Some(b':') {
+                    let save = self.here();
+                    self.cur.bump();
+                    while matches!(self.cur.cur(), Some(c) if c == b'.' || c == b'_'
+                        || c.is_ascii_alphanumeric())
+                    {
+                        self.cur.bump();
+                    }
+                    if self.cur.cur() == Some(b'(') {
+                        ident = self.cur.src()[start..self.here()].to_string();
+                    } else {
+                        self.cur.i = save;
+                    }
                 }
                 if self.cur.cur() == Some(b'(') {
                     // Function call.
@@ -1101,24 +1343,131 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse a function call's comma-separated arguments, stopping at `)`.
+    /// Parse a function call's arguments, stopping at `)`. Mirrors less.js
+    /// `arguments()`: comma-separated normally; when a top-level `;` occurs, the
+    /// semicolon groups win and each group's commas form one `Value` argument.
+    /// A `{ … }` argument is a detached ruleset; `.( … ) { … }`/`#( … ) { … }`
+    /// is an anonymous mixin (the `each()` callback forms).
     fn parse_call_args(&mut self) -> Result<Vec<Node>, LessError> {
-        let mut args = Vec::new();
+        let mut comma_args: Vec<Node> = Vec::new();
+        let mut semi_args: Vec<Node> = Vec::new();
+        let mut semi = false;
         self.skip_value_trivia();
         if self.cur.cur() == Some(b')') {
-            return Ok(args);
+            return Ok(comma_args);
         }
         loop {
-            args.push(self.parse_expression()?);
+            let arg = if self.cur.cur() == Some(b'{') {
+                let start = self.here();
+                let rules = self.parse_block()?;
+                Node::DetachedRuleset {
+                    rules,
+                    span: self.span(start),
+                }
+            } else if let Some(m) = self.try_anonymous_mixin()? {
+                m
+            } else if let Some(a) = self.try_assignment()? {
+                a
+            } else {
+                self.parse_expression()?
+            };
+            comma_args.push(arg);
             self.skip_value_trivia();
-            if self.cur.cur() == Some(b',') {
-                self.cur.bump();
-                self.skip_value_trivia();
-                continue;
+            match self.cur.cur() {
+                Some(b',') => {
+                    self.cur.bump();
+                    self.skip_value_trivia();
+                }
+                Some(b';') => {
+                    self.cur.bump();
+                    self.skip_value_trivia();
+                    semi = true;
+                    semi_args.push(group_args(std::mem::take(&mut comma_args)));
+                    if self.cur.cur() == Some(b')') {
+                        break;
+                    }
+                }
+                _ => break,
             }
-            break;
         }
-        Ok(args)
+        if semi {
+            if !comma_args.is_empty() {
+                semi_args.push(group_args(comma_args));
+            }
+            return Ok(semi_args);
+        }
+        Ok(comma_args)
+    }
+
+    /// An anonymous mixin argument `.(@v; @k) { … }` / `#(@v) { … }` (the
+    /// `each()` callback with named params).
+    fn try_anonymous_mixin(&mut self) -> Result<Option<Node>, LessError> {
+        if !matches!(self.cur.cur(), Some(b'.') | Some(b'#')) || self.cur.peek(1) != Some(b'(') {
+            return Ok(None);
+        }
+        let start = self.here();
+        self.cur.bump(); // . or #
+        let params_start = self.here();
+        self.skip_balanced(b'(', b')');
+        let params_src = self.cur.src()[params_start + 1..self.here().saturating_sub(1)].to_string();
+        self.cur.skip_trivia();
+        if self.cur.cur() != Some(b'{') {
+            self.cur.i = start;
+            return Ok(None);
+        }
+        let rules = self.parse_block()?;
+        Ok(Some(Node::MixinDefinition(crate::ast::MixinDefinition {
+            name: String::new(),
+            params: parse_mixin_params(&params_src),
+            guard: None,
+            rules,
+            span: self.span(start),
+        })))
+    }
+
+    /// Continue scanning a word interleaving ident chars and `@{…}` pieces from
+    /// `start`; the whole run becomes an escaped Quoted (interpolates on eval,
+    /// renders raw — the `@{a}_checked` gluing case).
+    fn scan_interp_word(&mut self, start: usize) -> Node {
+        loop {
+            match self.cur.cur() {
+                Some(b'@') if self.cur.peek(1) == Some(b'{') => {
+                    self.cur.bump();
+                    self.skip_balanced(b'{', b'}');
+                }
+                Some(c) if c == b'-' || c == b'_' || c.is_ascii_alphanumeric() || c >= 0x80 => {
+                    self.cur.bump();
+                }
+                _ => break,
+            }
+        }
+        Node::Quoted {
+            escaped: true,
+            quote: '\'',
+            value: self.cur.src()[start..self.here()].to_string(),
+        }
+    }
+
+    /// An IE-filter `key=value` argument (less.js `entities.assignment`, §2.17):
+    /// `\w+ =` then an entity. Backtracks if the shape doesn't match.
+    fn try_assignment(&mut self) -> Result<Option<Node>, LessError> {
+        let save = self.here();
+        let key = self.cur.scan_ident().to_string();
+        if key.is_empty() || key.contains('-') {
+            self.cur.i = save;
+            return Ok(None);
+        }
+        self.cur.skip_whitespace();
+        if !self.cur.eat(b'=') {
+            self.cur.i = save;
+            return Ok(None);
+        }
+        self.cur.skip_whitespace();
+        let value = self.parse_entity()?;
+        Ok(Some(Node::Assignment {
+            key,
+            value: Box::new(value),
+        }))
     }
 
     /// Skip whitespace and block comments within a value (line comments too).
@@ -1139,6 +1488,74 @@ impl<'a> Parser<'a> {
             self.cur.cur(),
             None | Some(b';') | Some(b'}') | Some(b')') | Some(b'!') | Some(b'{')
         )
+    }
+}
+
+/// Collapse one semicolon-group of call arguments (less.js `arguments()`):
+/// a single expression stays itself, several comma pieces form one `Value`.
+fn group_args(v: Vec<Node>) -> Node {
+    if v.len() == 1 {
+        v.into_iter().next().unwrap()
+    } else {
+        Node::Value(v)
+    }
+}
+
+/// Split `/* … */` comments out of an at-rule prelude (they relocate into the
+/// block; see `parse_at_rule`). Quotes are respected.
+fn split_prelude_comments(s: &str) -> (String, Vec<String>) {
+    let mut clean = String::with_capacity(s.len());
+    let mut comments = Vec::new();
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
+                let end = s[i + 2..].find("*/").map(|e| i + 2 + e + 2).unwrap_or(b.len());
+                comments.push(s[i..end].to_string());
+                i = end;
+            }
+            q @ (b'"' | b'\'') => {
+                let start = i;
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i = (i + 1).min(b.len());
+                clean.push_str(&s[start..i]);
+            }
+            _ => {
+                let ch_len = utf8_char_len(b[i]);
+                clean.push_str(&s[i..i + ch_len]);
+                i += ch_len;
+            }
+        }
+    }
+    (clean, comments)
+}
+
+/// The byte length of the UTF-8 char whose lead byte is `b`.
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 {
+        1
+    } else if b >> 5 == 0b110 {
+        2
+    } else if b >> 4 == 0b1110 {
+        3
+    } else {
+        4
+    }
+}
+
+/// Mark a parenthesized operand as participating in an operation (less.js sets
+/// `parensInOp` on both operands in `addition`/`multiplication`; only parens
+/// carry the flag for us — see `Node::Paren`).
+fn mark_in_op(node: &mut Node) {
+    if let Node::Paren { in_op, .. } = node {
+        *in_op = true;
     }
 }
 

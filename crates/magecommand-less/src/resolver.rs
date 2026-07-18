@@ -127,6 +127,16 @@ pub trait ImportResolver: Sync {
         let _ = (path, reference, from);
         Ok(Vec::new())
     }
+
+    /// Read an asset file's raw bytes for the resource functions (`data-uri`,
+    /// `image-size` — plan §2.7/§C-assets). `path` is as written in the LESS
+    /// source (possibly relative), `current_directory` the requesting file's
+    /// directory. The default `None` makes those functions fall back to plain
+    /// `url(path)` output, keeping non-filesystem callers pure.
+    fn load_binary(&self, path: &str, current_directory: &str) -> Option<Vec<u8>> {
+        let _ = (path, current_directory);
+        None
+    }
 }
 
 /// A resolver that fails every `resolve` — for pure passthrough / no-import

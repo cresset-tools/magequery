@@ -111,12 +111,17 @@ impl Unit {
         }
     }
 
-    /// Cancel matching numerator/denominator units (less.js `Unit.cancel`),
-    /// leaving `backup` untouched.
+    /// Cancel matching numerator/denominator units (less.js `Unit.cancel`).
+    /// A missing `backup` adopts the first numerator — less.js sets
+    /// `backupUnit` inside `cancel()`, which is what makes `(1 * 10px) * 14cm`
+    /// print `140px` (the multi-unit result falls back to px).
     pub fn cancel(&mut self) {
         use std::collections::BTreeMap;
         let mut counter: BTreeMap<Box<str>, i32> = BTreeMap::new();
         for u in &self.numerator {
+            if self.backup.is_none() {
+                self.backup = Some(u.clone());
+            }
             *counter.entry(u.clone()).or_insert(0) += 1;
         }
         for u in &self.denominator {

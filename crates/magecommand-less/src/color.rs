@@ -202,6 +202,54 @@ impl Color {
         }
         s
     }
+
+    /// less.js `toHSV` → `(h in 0..360, s, v, a)`.
+    pub fn to_hsv(&self) -> (f64, f64, f64, f64) {
+        let r = self.rgb[0] / 255.0;
+        let g = self.rgb[1] / 255.0;
+        let b = self.rgb[2] / 255.0;
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let v = max;
+        let d = max - min;
+        let s = if max == 0.0 { 0.0 } else { d / max };
+        let h = if max == min {
+            0.0
+        } else {
+            let hh = if max == r {
+                (g - b) / d + if g < b { 6.0 } else { 0.0 }
+            } else if max == g {
+                (b - r) / d + 2.0
+            } else {
+                (r - g) / d + 4.0
+            };
+            hh / 6.0
+        };
+        (h * 360.0, s, v, self.alpha)
+    }
+
+    /// less.js `Color.luma()` — gamma-corrected rec709 relative luminance.
+    pub fn luma(&self) -> f64 {
+        let f = |c: f64| {
+            let c = c / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * f(self.rgb[0]) + 0.7152 * f(self.rgb[1]) + 0.0722 * f(self.rgb[2])
+    }
+
+    /// less.js `toARGB` — `#AARRGGBB`, each channel rounded and clamped.
+    pub fn to_argb(&self) -> String {
+        let mut s = String::from("#");
+        for c in [self.alpha * 255.0, self.rgb[0], self.rgb[1], self.rgb[2]] {
+            let v = clamp(js_round(c), 255.0) as u32;
+            s.push_str(&format!("{v:02x}"));
+        }
+        s
+    }
 }
 
 fn parse_pairs(hex: &str, n: usize) -> Option<[f64; 4]> {

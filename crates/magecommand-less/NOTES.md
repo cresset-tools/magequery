@@ -393,6 +393,126 @@ the crate is additive.
   ruleset whose selector is `.@{a1}`) — interpolation-as-lookup-key.
 - `mixins-guards` — **done** (see the closure/guarded-namespace follow-up above).
 
+## Phase 3 — FUNCTION LIBRARY + STRINGS (done)
+
+The full §2.7 built-in registry plus the string/paren/comment parse semantics the
+function fixtures exposed. Every non-obvious semantic was verified against real
+less.js 4.6.7 (`node` probes over the vendored `lib/less/functions/*` sources,
+never remembered formulas); `data-uri`/`image-size` outputs were byte-diffed
+against `less.render` on the vendored `data/` assets.
+
+- **Pass-rate delta: 31/87 → 48/87** (floor raised to 48). Newly green:
+  `calc`, `color-functions/{alpha,basic,comprehensive,formats,modern-syntax,rgba}`,
+  `comments/comments2`, `css-escapes`, `extract-and-length`, `ie-filters`,
+  `merge`, `parser-slashed-combinator`, `property-name-interp`, `strings`,
+  `variables/variable-advanced`, `whitespace`.
+
+- **Registry** (`src/functions/`, one module per group, `dispatch` in `mod.rs`):
+  - string: `e` (escaped-Quoted result, quote kept for later `replace`/`%`),
+    `escape` (JS `encodeURI` + `=:#;()`), `%` (sequential `/%[sda]/i`, uppercase
+    → `encodeURIComponent`, `%%`→`%`), `replace` (JS-regex via the `regex` crate,
+    `g`/`i`/`m`/`s` flags, subject quote+escaped preserved).
+  - list: `length`/`extract` (1-based, non-list = singleton)/`range`/the `~(…)`
+    paren-escape; `each()` — see below.
+  - math: `ceil/floor/sqrt/abs` keep the unit; `sin/cos/tan` unify→unitless;
+    `asin/acos/atan` unify→`rad`; `round` = JS `toFixed` (ties AWAY from zero,
+    computed on the exact decimal expansion, not a float multiply —
+    `(0.615).toFixed(2) == "0.61"`).
+  - number: `percentage` (unifies first), `convert`, `pi`, `mod` (truncated, JS
+    `%`), `pow`, and **`min`/`max` as a faithful `minMax` port** (§4.8): unit
+    groups reduce, list args flatten, incompatible/non-dimension args abort to
+    the literal-CSS passthrough (`min(1, 4ex, 2pt)`, `min(calc(1 + 1), 1)`).
+  - types: all `is*` (incl. `isruleset`, `isunit(v, '')` = unitless), `unit`
+    (keyword unit → name, anything else → its `toCSS`, so a quoted unit keeps
+    quotes — faithful), `get-unit`.
+  - color def: `rgb`/`hsl` (incl. the space-separated `rgb(0 128 255 / 50%)`
+    form riding the deferred `/` Operation), `rgba`/`hsla` (color first arg
+    reuses channels; alpha NOT clamped — `rgba(0,30,0,238)` → `#001e00`),
+    `hsv`/`hsva` (the perm-table port), `argb` (`#AARRGGBB`), `color()` (quoted
+    hex keeps its spelling; keyword/color clears the original → hex out).
+  - channels: `hue/saturation/lightness`, `hsv*` (new `Color::to_hsv`),
+    `red/green/blue/alpha` (unrounded — fround happens at genCSS),
+    `luma` (gamma, new `Color::luma`)/`luminance` (linear).
+  - ops: `saturate/desaturate/lighten/darken/fadein/fadeout` (+`relative`),
+    `fade`, `spin`, `mix` (SASS formula), `tint`/`shade`, `greyscale` (British
+    only), `contrast` (dark/light auto-swap by luma, threshold 0.43,
+    given nodes returned verbatim). All rebuild through the shared
+    `hsla(origColor, …)` so an `rgb`/`hsl`-written input keeps its output form
+    and everything else prints as `rgb` (hex when opaque).
+  - blending: the compositing-1 port incl. the alpha correction (`softlight`'s
+    `(d - cb)` sign verified from source).
+  - resource: `data-uri` (mime table in `data/mime.rs`; text vs base64 via the
+    `text/*` charset rule; svg never base64; `#fragment` kept; missing file →
+    `url(path)` fallback; **no size cap — 4.6.7 dropped the IE-32KB check**,
+    verified in the vendored source), `image-size/-width/-height`
+    (PNG/GIF/JPEG/SVG header sniffing) — both read real bytes through the new
+    `ImportResolver::load_binary` hook (default `None` keeps pure callers pure;
+    the harness + `lessc` example resolve fixture-relative), `svg-gradient`
+    (encodeURIComponent parity, stop-position/opacity rules).
+  - `if`/`boolean` (lazy, condition arg rendered back to text and run through
+    the Phase-2 guard grammar — less.js routes them to `parsers.condition`),
+    `isdefined` — evaluator-dispatched (`evalArgs: false`).
+  - Named-color keywords coerce to `Color` at the function boundary (less.js
+    converts at parse time), so `lighten(blue, 10%)` works and `iskeyword(red)`
+    is false, both faithful.
+- **Unknown-function passthrough** (§2.7): unregistered names — and registered
+  ones whose args don't fit (`saturate(5%)`, `contrast(30%)`) — re-emit
+  `name(evaluated-args)`. Math turns ON inside any call's arguments (less.js
+  `Call.eval` sets `mathOn = !calc`): `foo(1 + 2)` → `foo(3)`, `foo(10/2)` stays.
+- **calc** (§2.4): math suppressed, `inCalc` flagged; variables dereferenced
+  inside calc fold their own operations (the `_SELF` wrap); paren output follows
+  `Expression.eval` exactly — `Node::Paren` grew an `in_op` flag (`parensInOp`)
+  and literal parens survive only for in-operation parens whose math didn't run
+  and whose result isn't a folded number, with the `doubleParen` collapse.
+- **Strings** (§2.14): iterated interpolation is now regex-faithful
+  (`/@\{([\w-]+)\}/` per pass, to a fixpoint — `@{box-@{suffix}}` resolves
+  inner-first); interpolation replacements render UNROUNDED (less.js calls
+  `toCSS()` with no context — `pi()` interpolates as `3.141592653589793`);
+  a `@{a}_checked` glued word parses as one escaped Quoted (the
+  `permissiveValue` capture), so no stray space.
+- **IE filters** (§2.17): call names extend over `progid:[\w.]+(`; `key=value`
+  args are a new `Node::Assignment` (evaluated value, `key=value` genCSS);
+  `alpha(opacity=…)` falls through the alpha() color function to passthrough.
+- **anonymousValue** (the less.js declaration fast path): a value with none of
+  ``.#@$+/'"*`(;{}-`` up to `;` is captured VERBATIM (raw whitespace/newlines,
+  inline `!important`) — this is what `whitespace` byte-parity needed.
+- **Custom properties** (§2.16): values now try less.js's `permissiveValue`
+  entity chain first — a fully-entity-parseable value IS structured and
+  evaluated (`--x: rgba(0, 30, 0, 238)` → `#001e00`) while anything else keeps
+  the raw capture with `@{}` interpolation only.
+- **Value comments**: block comments between expression items are kept as
+  `Comment` nodes (rendered in values, filtered out of registered-function args
+  like `functionCaller`, kept in passthrough re-emits).
+- **merge `+:`/`+_:`** (§2.10, pulled forward from Phase 4): a
+  `ToCSSVisitor._mergeRules` port at output time (`merge/merge` green).
+- **`each()`** (§2.7): statement-level expansion binding `@value`/`@key`/
+  `@index` (or anonymous-mixin `.(@v, @k, @i) { }` params — call args now parse
+  `{ … }` detached rulesets, anonymous mixins, and less.js's semicolon-group
+  argument rule); detached-ruleset lists iterate their declarations by name.
+- **Misc fixes that fell out**: `@arguments` now includes unnamed-variadic and
+  pattern-param positions; `\9`/`\5FAE` escape tokens in values; `/deep/`
+  slashed combinators; `@namespace` no longer hoisted (verified: less.js leaves
+  it in source position); prelude comments relocate into the at-rule block and
+  comment-only `@media` blocks prune (comment-only `@keyframes` don't);
+  `Unit::cancel` adopts a missing `backupUnit` from the first numerator
+  (`(1 * 10px) * 14cm` → `140px`); whitespace tolerated around the merge flag
+  (`prop + :`); statement-level function calls (`e('…');` at root) evaluate and
+  emit verbatim.
+
+### DEFERRED from Phase 3 (needs later-phase subsystems)
+
+- `functions/functions` — needs detached-ruleset CALLS (`@dr()`), `$prop`
+  property accessors, `{…}` branches inside `if()` args, AND the less.js
+  test-runner's registered custom functions (`_color`/`increment`/`add` — the
+  harness would have to mirror `test/index.js`'s registry); revisit with Phase 4.
+- `functions-each` — the remaining reds are maps/lookups (`@schemes[@@name]`,
+  `@one[@two]`) and mixin-calls-as-list-args (`each(.set-2(), …)`) — §2.12.
+- `urls` — `data-uri`/`svg-gradient`/`image-size` themselves are done and
+  byte-verified, but the fixture needs `@import` inlining + rootpath-relative
+  URL rewriting (§2.9, Phase 4).
+- `each()` over rulesets with variable declarations skips them (less.js iterates
+  them as Declarations); no in-scope fixture observes the difference.
+
 ## What milestone 1 implemented (Steps 1–5 consolidated)
 
 - **Public API (§9.5):** `parse`/`eval`/`compile`; `LessOptions` (+ `MathMode`,
@@ -437,16 +557,11 @@ residual mixin fixtures it couldn't green (`maps`, `namespace-targeted`,
 `mixins-interpolated`, the 14 residual `mixins-guards` lines) are documented there
 and fold into Phase 4's map/property-accessor work.
 
-- **Phase 3 — full function library** (plan §2.7, Phase 3): the complete registry
-  — string (`e`/`escape`/`%`/`replace`), list (`length`/`extract`/`range`/
-  `each`), math (`sin`…`atan`), number (`convert`/`pi`/`mod`/`pow` + **min/max
-  dual behavior**, §4.8), all `is*`/`get-unit`, color def (`argb`/`hsv`/
-  `color()`), color channels, color ops (`saturate`/`lighten`/`mix`/`contrast`/…),
-  color blending (`multiply`/`screen`/…), `data-uri` (mime table + IE-32KB
-  threshold) + `image-size` **real file reads** (§C-assets), `svg-gradient`
-  (URL-encoding parity §3-G); `~"…"`/`e()`/`%()` escaping; **IE-filter/`progid`
-  output** (§2.17). Unlocks: `functions*`, `extract-and-length`, the 6 red
-  `color-functions/*`, `ie-filters`, `strings`, `css-escapes`.
+- **Phase 3 — full function library** (plan §2.7, Phase 3): **done** — see the
+  Phase 3 section above (48/87). Residue folded into Phase 4: `functions/
+  functions` (DR calls + `$prop` + harness custom-function registry),
+  `functions-each` (maps/lookups + mixin-as-list), `urls` (import inlining +
+  URL rewriting; the resource functions themselves are byte-verified).
 - **Phase 4 — imports, extend, detached rulesets, merge, at-rule bubbling, maps**
   (plan §2.8–§2.13, Phase 4):
   - **`@import` two-stage + all options** (§2.9): `once`/`reference`/`optional`/

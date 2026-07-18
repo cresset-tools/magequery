@@ -207,10 +207,15 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
             gen(inner, ctx, out);
             out.push(')');
         }
-        Node::Paren(inner) => {
+        Node::Paren { inner, .. } => {
             out.push('(');
             gen(inner, ctx, out);
             out.push(')');
+        }
+        Node::Assignment { key, value } => {
+            out.push_str(key);
+            out.push('=');
+            gen(value, ctx, out);
         }
         Node::Operation {
             op,

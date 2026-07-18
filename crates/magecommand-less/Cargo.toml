@@ -15,6 +15,10 @@ smallvec = "1"
 rustc-hash = "2"
 thiserror.workspace = true
 
+# The `replace()` built-in is specified as a JS-regex replace (plan §2.7); the
+# in-scope fixture patterns are plain ERE, which `regex` covers.
+regex = "1"
+
 # .min.css production minification ONLY, behind the `minify` feature — never
 # part of any diff gate (plan §9.4/§9.7). Pinned exactly per plan.
 lightningcss = { version = "=1.0.0-alpha.71", optional = true }

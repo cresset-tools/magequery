@@ -162,13 +162,13 @@ pub fn eval(
     outs.extend(children);
     ctx.pop_frame();
 
-    // Output ordering (plan §2.13/§C): `@charset`, then `@import`, then
-    // `@namespace`, hoisted to the top of the stylesheet (stable within each).
+    // Output ordering (plan §2.13/§C): `@charset` then `@import` hoist to the
+    // top of the stylesheet (stable within each). `@namespace` does NOT hoist —
+    // less.js leaves it in source position (verified against 4.6.7).
     outs.sort_by_key(|o| match o {
         Out::At { header, .. } if header.starts_with("@charset") => 0,
         Out::At { header, .. } if header.starts_with("@import") => 1,
-        Out::At { header, .. } if header.starts_with("@namespace") => 2,
-        _ => 3,
+        _ => 2,
     });
 
     let code = render_all(&outs, opts.num_precision);
@@ -190,6 +190,15 @@ impl<'a> Ctx<'a> {
 
     fn err(&self, kind: ErrorKind, msg: impl Into<String>) -> LessError {
         LessError::new(kind, msg)
+    }
+
+    /// The entry file's directory (for the resource functions' relative reads).
+    fn current_dir(&self) -> String {
+        let f = self.opts.filename.as_deref().unwrap_or("");
+        match f.rfind('/') {
+            Some(i) => f[..=i].to_string(),
+            None => String::new(),
+        }
     }
 
     /// Whether a variable is defined in any live frame (for `isdefined`).
@@ -365,6 +374,27 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 Node::DetachedRuleset { .. } => {}
+                Node::Call { name, args } if name.eq_ignore_ascii_case("each") => {
+                    self.expand_each(args, self_paths, own, children)?;
+                }
+                Node::Call { name, args } => {
+                    // A statement-level function call (less.js `primary` →
+                    // `entities.call()`, e.g. css-escapes' root `e('…');`): the
+                    // evaluated result is emitted verbatim at this position.
+                    let v = self.eval_call(name, args)?;
+                    let text = render_value(&v, self.opts.num_precision);
+                    if !text.is_empty() {
+                        if self_paths.is_none() {
+                            children.push(Out::Comment(text));
+                        } else {
+                            own.push(Node::Comment {
+                                text,
+                                line: false,
+                                span: Default::default(),
+                            });
+                        }
+                    }
+                }
                 // Value nodes never appear as statements.
                 _ => {}
             }
@@ -448,7 +478,13 @@ impl<'a> Ctx<'a> {
                 body_outs.extend(children);
 
                 // An at-rule with an empty block emits nothing (plan §2.13).
-                if body_outs.is_empty() {
+                // A bubbling container (@media/…) is empty even when only
+                // comments remain; a declaration at-rule (@keyframes) keeps a
+                // comment-only body (verified against less.js 4.6.7).
+                if body_outs.is_empty()
+                    || (is_container
+                        && body_outs.iter().all(|o| matches!(o, Out::Comment(_))))
+                {
                     return Ok(None);
                 }
                 Ok(Some(Out::At {
@@ -472,11 +508,16 @@ impl<'a> Ctx<'a> {
         };
 
         if d.custom {
-            // Custom properties: NOT evaluated as LESS, but @{} interpolation runs
-            // inside the raw value (plan §2.16).
+            // Custom properties (plan §2.16, less.js `permissiveValue`): a value
+            // the entity chain parsed IS structured and evaluates normally
+            // (`--x: rgba(0, 30, 0, 238)` folds); the raw capture stays
+            // unevaluated with only `@{}` interpolation run inside it.
             let raw = match d.value.as_ref() {
                 Node::Anonymous(s) => self.interpolate(s)?,
-                other => render_value(other, self.opts.num_precision),
+                other => {
+                    let v = self.eval_value(other)?;
+                    render_value(&v, self.opts.num_precision)
+                }
             };
             return Ok(Node::Declaration(Declaration {
                 name,
@@ -552,8 +593,12 @@ impl<'a> Ctx<'a> {
                 right,
                 spaced,
             } => self.eval_operation(op, left, right, *spaced),
-            Node::Paren(inner) => self.eval_paren(inner),
+            Node::Paren { inner, in_op } => self.eval_paren(inner, *in_op),
             Node::Call { name, args } => self.eval_call(name, args),
+            Node::Assignment { key, value } => Ok(Node::Assignment {
+                key: key.clone(),
+                value: Box::new(self.eval_value(value)?),
+            }),
             Node::Url(inner) => {
                 let v = self.eval_value(inner)?;
                 Ok(Node::Url(Box::new(v)))
@@ -619,7 +664,18 @@ impl<'a> Ctx<'a> {
         }
 
         self.evaluating.push(key.clone());
-        let result = self.eval_value(&val);
+        // Inside `calc()`, less.js wraps the variable's value in a `_SELF` call
+        // (`Variable.eval`), whose `Call.eval` switches math back ON — so the
+        // variable's own operations fold even though calc suppresses math.
+        let result = if self.in_calc {
+            let prev = self.math_on;
+            self.math_on = true;
+            let r = self.eval_value(&val);
+            self.math_on = prev;
+            r
+        } else {
+            self.eval_value(&val)
+        };
         self.evaluating.pop();
         result
     }
@@ -633,16 +689,21 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn eval_paren(&mut self, inner: &Node) -> Result<Node, LessError> {
+    fn eval_paren(&mut self, inner: &Node, in_op: bool) -> Result<Node, LessError> {
+        // less.js `Expression.eval` for a `parens` sub (§2.4/calc): the literal
+        // paren survives ONLY for an operand paren whose math didn't run and
+        // whose result is not a folded number — everything else unwraps.
+        let math_on_entry = self.is_math_on_plain();
+        let double_paren =
+            matches!(inner, Node::Paren { in_op: false, .. }) && !self.in_calc;
         self.parens += 1;
         let v = self.eval_value(inner);
         self.parens -= 1;
         let v = v?;
-        // A math result collapses the paren; a deferred/non-final value keeps it
-        // so it emits literally (e.g. inside calc()).
-        match v {
-            Node::Dimension(_) | Node::Color(_) => Ok(v),
-            other => Ok(Node::Paren(Box::new(other))),
+        if in_op && !math_on_entry && !double_paren && !matches!(v, Node::Dimension(_)) {
+            Ok(Node::Paren { inner: Box::new(v), in_op: true })
+        } else {
+            Ok(v)
         }
     }
 
@@ -706,6 +767,17 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// less.js `context.isMathOn()` with no operator (Expression.eval's check).
+    fn is_math_on_plain(&self) -> bool {
+        if !self.math_on {
+            return false;
+        }
+        if self.math == MathMode::Parens {
+            return self.parens > 0;
+        }
+        true
+    }
+
     /// less.js `context.isMathOn(op)` (plan §1/§2.4).
     fn is_math_on(&self, op: char) -> bool {
         if !self.math_on {
@@ -726,24 +798,7 @@ impl<'a> Ctx<'a> {
 
     fn eval_call(&mut self, name: &str, args: &[Node]) -> Result<Node, LessError> {
         let lname = name.to_ascii_lowercase();
-
-        // calc() — evaluate variables inside, but suppress math (plan §2.4).
-        if lname == "calc" {
-            let prev = self.math_on;
-            let prev_calc = self.in_calc;
-            self.math_on = false;
-            self.in_calc = true;
-            let mut evaled = Vec::with_capacity(args.len());
-            for a in args {
-                evaled.push(self.eval_value(a)?);
-            }
-            self.math_on = prev;
-            self.in_calc = prev_calc;
-            return Ok(Node::Call {
-                name: name.to_string(),
-                args: evaled,
-            });
-        }
+        let is_calc = lname == "calc";
 
         // `default()` — the guard-only function (plan §2.6). Inside a guard it
         // returns the current two-subpass value; outside a guard it is not the
@@ -754,28 +809,191 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        // `isdefined(@v)` — lazy: must not error on an undefined variable.
-        if lname == "isdefined" {
-            let defined = matches!(args.first(), Some(Node::Variable { name, .. })
-                if self.lookup_defined(name));
-            return Ok(Node::Keyword(if defined { "true" } else { "false" }.to_string()));
+        // The `evalArgs: false` functions (plan §2.7) — their arguments must NOT
+        // be pre-evaluated: `if`'s branches are lazy, `isdefined` must not error
+        // on an undefined variable, and both parse their condition arg through
+        // the guard grammar (less.js `customFuncCall` routes them to `condition`).
+        match lname.as_str() {
+            "isdefined" => {
+                let defined = matches!(args.first(), Some(Node::Variable { name, .. })
+                    if self.lookup_defined(name));
+                return Ok(Node::Keyword(if defined { "true" } else { "false" }.to_string()));
+            }
+            "boolean" => {
+                let cond = self.call_condition(args.first())?;
+                return Ok(Node::Keyword(if cond { "true" } else { "false" }.to_string()));
+            }
+            "if" => {
+                let branch = if self.call_condition(args.first())? {
+                    args.get(1)
+                } else {
+                    args.get(2)
+                };
+                return match branch {
+                    Some(b) => self.eval_value(b),
+                    None => Ok(Node::Anonymous(String::new())),
+                };
+            }
+            _ => {}
         }
 
-        // Evaluate arguments first (the common path).
+        // Evaluate arguments with less.js `Call.eval`'s math context: math turns
+        // back ON inside any function's arguments — EXCEPT calc(), which
+        // suppresses it (and flags `inCalc` for nested variables; plan §2.4).
+        let prev_math = self.math_on;
+        let prev_calc = self.in_calc;
+        self.math_on = !is_calc;
+        if is_calc {
+            self.in_calc = true;
+        }
         let mut evaled = Vec::with_capacity(args.len());
         for a in args {
-            evaled.push(self.eval_value(a)?);
+            let v = self.eval_value(a);
+            match v {
+                Ok(v) => evaled.push(v),
+                Err(e) => {
+                    self.math_on = prev_math;
+                    self.in_calc = prev_calc;
+                    return Err(e);
+                }
+            }
+        }
+        self.math_on = prev_math;
+        self.in_calc = prev_calc;
+
+        if !is_calc {
+            // Resource functions read files through the resolver boundary
+            // (plan §2.7/§C-assets) — dispatched here, where the resolver lives.
+            let axis = match lname.as_str() {
+                "data-uri" => {
+                    let dir = self.current_dir();
+                    if let Some(r) = functions::data_uri::data_uri(&evaled, self.resolver, &dir) {
+                        return Ok(r);
+                    }
+                    None
+                }
+                "image-size" => Some(functions::misc::SizeAxis::Both),
+                "image-width" => Some(functions::misc::SizeAxis::Width),
+                "image-height" => Some(functions::misc::SizeAxis::Height),
+                _ => None,
+            };
+            if let Some(axis) = axis {
+                let dir = self.current_dir();
+                if let Some(r) = functions::misc::image_size(&evaled, axis, self.resolver, &dir) {
+                    return Ok(r);
+                }
+            }
+            // less.js `functionCaller.call`: comments are filtered out of the
+            // args (top level + inside Expressions, re-collapsing singletons)
+            // BEFORE a registered function sees them — but the passthrough
+            // re-emit below keeps the unfiltered args.
+            let filtered = filter_call_args(&evaled);
+            if let Some(result) = functions::dispatch(&lname, &filtered, self.opts.num_precision)? {
+                return Ok(result);
+            }
         }
 
-        if let Some(result) = functions::dispatch(&lname, &evaled, self.opts.num_precision)? {
-            return Ok(result);
-        }
-
-        // Unknown / passthrough CSS function: re-emit name(evaluated-args) (§2.7).
+        // calc() and unknown / passthrough CSS functions: re-emit
+        // `name(evaluated-args)` (§2.7).
         Ok(Node::Call {
             name: name.to_string(),
             args: evaled,
         })
+    }
+
+    /// `each(list, ruleset)` (plan §2.7, less.js `functions/list.js`): iterate
+    /// the list (or a detached ruleset's rules), binding `@value`/`@key`/
+    /// `@index` — or the anonymous mixin's named params — and evaluate the
+    /// callback's rules at the current position like a `&`-ruleset body.
+    fn expand_each(
+        &mut self,
+        args: &[Node],
+        self_paths: Option<&[String]>,
+        own: &mut Vec<Node>,
+        children: &mut Vec<Out>,
+    ) -> Result<(), LessError> {
+        let (Some(list_arg), Some(rs_arg)) = (args.first(), args.get(1)) else {
+            return Ok(());
+        };
+        // The callback: a literal DR, an anonymous mixin, or a variable holding one.
+        let resolved;
+        let rs_arg = match rs_arg {
+            Node::Variable { name, span } => {
+                resolved = self.eval_variable(name, *span)?;
+                &resolved
+            }
+            other => other,
+        };
+        let (param_names, rules): (Vec<Option<String>>, Vec<Node>) = match rs_arg {
+            Node::DetachedRuleset { rules, .. } => (Vec::new(), rules.clone()),
+            Node::MixinDefinition(def) if def.name.is_empty() => (
+                def.params.iter().map(|p| p.name.clone()).collect(),
+                def.rules.clone(),
+            ),
+            _ => return Ok(()),
+        };
+        let pname = |i: usize, def: &str| -> Option<String> {
+            match param_names.get(i) {
+                Some(Some(n)) => Some(n.trim_start_matches('@').to_string()),
+                Some(None) => None,
+                None if param_names.is_empty() => Some(def.to_string()),
+                None => None,
+            }
+        };
+        let value_name = pname(0, "value");
+        let key_name = pname(1, "key");
+        let index_name = pname(2, "index");
+
+        let list = self.eval_value(list_arg)?;
+        let iterator: Vec<Node> = match &list {
+            Node::Value(v) | Node::Expression(v) => v.clone(),
+            Node::DetachedRuleset { rules, .. } => rules.clone(),
+            other => vec![other.clone()],
+        };
+
+        for (i, item) in iterator.iter().enumerate() {
+            if matches!(item, Node::Comment { .. }) {
+                continue;
+            }
+            let (key, value) = match item {
+                Node::Declaration(d) => (
+                    Node::Keyword(d.name.clone()),
+                    (*d.value).clone(),
+                ),
+                Node::VariableDecl { .. } => continue,
+                other => (
+                    Node::Dimension(Dimension::number((i + 1) as f64)),
+                    other.clone(),
+                ),
+            };
+            let mut body = rules.clone();
+            if let Some(n) = &value_name {
+                body.push(var_decl(n, value));
+            }
+            if let Some(n) = &index_name {
+                body.push(var_decl(
+                    n,
+                    Node::Dimension(Dimension::number((i + 1) as f64)),
+                ));
+            }
+            if let Some(n) = &key_name {
+                body.push(var_decl(n, key));
+            }
+            self.push_frame(frame_of(body.clone()));
+            let r = self.eval_rules(&body, self_paths, own, children);
+            self.pop_frame();
+            r?;
+        }
+        Ok(())
+    }
+
+    /// Evaluate a function-call condition argument (`if`/`boolean`) through the
+    /// guard grammar: the unevaluated arg is rendered back to source text and
+    /// fed to the same condition evaluator guards use (plan §2.6/§2.7).
+    fn call_condition(&mut self, arg: Option<&Node>) -> Result<bool, LessError> {
+        let Some(arg) = arg else { return Ok(false) };
+        let text = render_value(arg, self.opts.num_precision);
+        self.eval_guard_str(&text)
     }
 
     // ------------------------------------------------------------------
@@ -1178,6 +1396,18 @@ impl<'a> Ctx<'a> {
                         format!("wrong number of arguments for {}", cand.name),
                     ));
                 }
+            } else if p.variadic {
+                // Unnamed variadic `(...)` — no variable binds, but the args
+                // still populate `@arguments` (less.js `evaldArguments`).
+                for (k, v) in pos.iter().enumerate().skip(arg_index) {
+                    if k >= evald.len() {
+                        evald.resize(k + 1, None);
+                    }
+                    evald[k] = Some(v.clone());
+                }
+            } else if arg_index < pos.len() {
+                // A literal pattern param consumes its position into @arguments.
+                evald[i] = Some(pos[arg_index].clone());
             }
             arg_index += 1;
         }
@@ -1413,17 +1643,42 @@ impl<'a> Ctx<'a> {
 
     /// Resolve `@{name}` (and `${name}`) interpolation in a string, iteratively to
     /// a fixpoint (plan §2.1).
+    /// `@{name}` string interpolation, mirroring less.js `Quoted.eval`'s
+    /// `iterativeReplace` over `/@\{([\w-]+)\}/g` (plan §2.1/§2.14): only simple
+    /// `[\w-]+` names match — so in `@{box-@{suffix}}` the INNER interpolation
+    /// resolves first — and passes repeat to a fixpoint, which is what makes
+    /// iterated interpolation (`@{box-large}` produced by a pass) resolve too.
     fn interpolate(&mut self, input: &str) -> Result<String, LessError> {
         let mut s = input.to_string();
-        for _ in 0..32 {
-            let Some(start) = find_interp(&s) else { break };
-            let after = &s[start + 2..];
-            let Some(end_rel) = after.find('}') else { break };
-            let name = after[..end_rel].trim().to_string();
-            let val = self.eval_variable(&name, Default::default())?;
-            let replacement = value_to_plain_string(&val);
-            let end = start + 2 + end_rel + 1;
-            s.replace_range(start..end, &replacement);
+        for _ in 0..100 {
+            let mut out = String::with_capacity(s.len());
+            let mut rest = s.as_str();
+            let mut replaced = false;
+            while let Some(start) = find_interp(rest) {
+                let after = &rest[start + 2..];
+                // A match needs a `}` with only `[\w-]` name chars before it.
+                let end_rel = after.find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-'));
+                match end_rel {
+                    Some(e) if e > 0 && after[e..].starts_with('}') => {
+                        let name = &after[..e];
+                        let val = self.eval_variable(name, Default::default())?;
+                        out.push_str(&rest[..start]);
+                        out.push_str(&value_to_plain_string(&val));
+                        rest = &after[e + 1..];
+                        replaced = true;
+                    }
+                    _ => {
+                        // Not a simple name — emit `@{` literally and move on.
+                        out.push_str(&rest[..start + 2]);
+                        rest = after;
+                    }
+                }
+            }
+            out.push_str(rest);
+            s = out;
+            if !replaced {
+                break;
+            }
         }
         Ok(s)
     }
@@ -1813,13 +2068,16 @@ fn coerce_color(node: Node) -> Node {
 }
 
 /// The plain string form of an evaluated value (for interpolation / `@@` / guard
-/// equality) — no surrounding quotes for quoted strings (plan §2.1).
+/// equality) — no surrounding quotes for quoted strings (plan §2.1). Numbers
+/// render UNROUNDED (less.js `Quoted.eval` calls `v.toCSS()` with no context,
+/// so no `numPrecision` fround applies — `@{x}` with `@x: pi()` interpolates as
+/// `3.141592653589793`).
 fn value_to_plain_string(node: &Node) -> String {
     match node {
         Node::Quoted { value, .. } => value.clone(),
         Node::Keyword(k) => k.clone(),
         Node::Anonymous(s) => s.clone(),
-        other => render_value(other, 8),
+        other => render_value(other, 0),
     }
 }
 
@@ -2147,6 +2405,66 @@ mod tests {
     }
 
     #[test]
+    fn unknown_function_passthrough_evaluates_args() {
+        // §2.7: unknown calls re-emit with EVALUATED args — math is switched on
+        // inside function arguments (less.js `Call.eval`), but division still
+        // needs parens in the default mode.
+        assert_eq!(css(".x { a: foo(1 + 2); }"), ".x {\n  a: foo(3);\n}");
+        assert_eq!(css(".x { a: foo(10/2); }"), ".x {\n  a: foo(10/2);\n}");
+        assert_eq!(css(".x { a: foo((10/2)); }"), ".x {\n  a: foo(5);\n}");
+        assert_eq!(
+            css("@w: 5px;\n.x { a: translateX(@w + 5px); }"),
+            ".x {\n  a: translateX(10px);\n}"
+        );
+    }
+
+    #[test]
+    fn if_is_lazy_and_boolean_uses_guard_grammar() {
+        // The false branch would error (unknown var) if evaluated eagerly.
+        assert_eq!(css(".x { a: if(1 = 1, ok, @nope); }"), ".x {\n  a: ok;\n}");
+        // Missing false branch → empty Anonymous.
+        assert_eq!(css(".x { --a: if(not(true), 5); }"), ".x {\n  --a: ;\n}");
+        assert_eq!(
+            css(".x { a: boolean(not(2 > 1) and (true)); b: boolean(not false); }"),
+            ".x {\n  a: false;\n  b: true;\n}"
+        );
+    }
+
+    #[test]
+    fn calc_folds_variables_but_not_literal_math() {
+        // §2.4: calc suppresses math, but a variable's own value folds (_SELF).
+        assert_eq!(
+            css("@c: 10px + 20px;\n.x { a: calc(100% - @c); }"),
+            ".x {\n  a: calc(100% - 30px);\n}"
+        );
+        assert_eq!(
+            css(".x { a: calc(100% - 30px); }"),
+            ".x {\n  a: calc(100% - 30px);\n}"
+        );
+    }
+
+    #[test]
+    fn ie_filter_assignment_args_survive() {
+        // §2.17: progid call names + `key=value` assignment args.
+        assert_eq!(
+            css("@o: 0;\n.x { filter: progid:DXImageTransform.Microsoft.Alpha(opacity=@o); }"),
+            ".x {\n  filter: progid:DXImageTransform.Microsoft.Alpha(opacity=0);\n}"
+        );
+    }
+
+    #[test]
+    fn each_binds_value_key_index() {
+        assert_eq!(
+            css(".x { each(a b, { i-@{index}: @value; }) }"),
+            ".x {\n  i-1: a;\n  i-2: b;\n}"
+        );
+        assert_eq!(
+            css("@set: { one: blue; two: green; };\n.x { each(@set, { @{key}: @value; }) }"),
+            ".x {\n  one: blue;\n  two: green;\n}"
+        );
+    }
+
+    #[test]
     fn child_scope_overrides_parent() {
         let out = css("@v: outer;\n.a { @v: inner; v: @v; }\n.b { v: @v; }");
         assert_eq!(out, ".a {\n  v: inner;\n}\n.b {\n  v: outer;\n}");
@@ -2294,9 +2612,98 @@ mod tests {
     }
 }
 
-fn render_decls(decls: &[Node], dind: &str, np: u8) -> String {
-    let mut lines = Vec::new();
+/// less.js `functionCaller.call`'s argument normalization: drop `Comment` args,
+/// drop comments inside `Expression` args, and re-collapse a now-single-item
+/// Expression to its item (plan §2.7).
+fn filter_call_args(args: &[Node]) -> Vec<Node> {
+    let mut out = Vec::with_capacity(args.len());
+    for a in args {
+        match a {
+            Node::Comment { .. } => {}
+            Node::Expression(items) => {
+                let kept: Vec<Node> = items
+                    .iter()
+                    .filter(|i| !matches!(i, Node::Comment { .. }))
+                    .cloned()
+                    .collect();
+                out.push(match kept.len() {
+                    1 => kept.into_iter().next().unwrap(),
+                    _ => Node::Expression(kept),
+                });
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
+/// less.js `ToCSSVisitor._mergeRules` (plan §2.10): declarations carrying a
+/// merge flag group by property name — `+` starts a new comma group, `+_`
+/// space-appends to the current one; later contributors collapse into the
+/// first's position. Unflagged declarations (even same-named) never join.
+fn merge_rules(decls: &[Node]) -> Vec<Node> {
+    if !decls
+        .iter()
+        .any(|d| matches!(d, Node::Declaration(dd) if dd.merge.is_some()))
+    {
+        return decls.to_vec();
+    }
+    let mut out: Vec<Node> = Vec::new();
+    // name → (index in `out`, comma groups of space parts, important).
+    let mut groups: Vec<(String, usize, Vec<Vec<Node>>, String)> = Vec::new();
     for d in decls {
+        match d {
+            Node::Declaration(dd) if dd.merge.is_some() => {
+                let existing = groups.iter_mut().find(|(n, ..)| *n == dd.name);
+                match existing {
+                    Some((_, _, comma, important)) => {
+                        if dd.merge == Some(crate::ast::MergeKind::Comma) {
+                            comma.push(Vec::new());
+                        }
+                        comma.last_mut().unwrap().push((*dd.value).clone());
+                        if important.is_empty() {
+                            *important = dd.important.clone();
+                        }
+                    }
+                    None => {
+                        groups.push((
+                            dd.name.clone(),
+                            out.len(),
+                            vec![vec![(*dd.value).clone()]],
+                            dd.important.clone(),
+                        ));
+                        out.push(d.clone());
+                    }
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    for (_, idx, comma, important) in groups {
+        let value = Node::Value(
+            comma
+                .into_iter()
+                .map(|space| {
+                    if space.len() == 1 {
+                        space.into_iter().next().unwrap()
+                    } else {
+                        Node::Expression(space)
+                    }
+                })
+                .collect(),
+        );
+        if let Node::Declaration(dd) = &mut out[idx] {
+            dd.value = Box::new(value);
+            dd.important = important;
+        }
+    }
+    out
+}
+
+fn render_decls(decls: &[Node], dind: &str, np: u8) -> String {
+    let decls = merge_rules(decls);
+    let mut lines = Vec::new();
+    for d in &decls {
         match d {
             Node::Declaration(decl) => {
                 let val = render_value(&decl.value, np);

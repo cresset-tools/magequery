@@ -1277,6 +1277,7 @@ dependencies = [
  "cssparser 0.37.0",
  "libtest-mimic",
  "lightningcss",
+ "regex",
  "rustc-hash",
  "smallvec",
  "thiserror 2.0.18",
