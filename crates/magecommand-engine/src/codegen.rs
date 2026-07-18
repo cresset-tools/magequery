@@ -1042,11 +1042,14 @@ pub fn generate_code(
     // reused here — the plan needs the same map, never a fresh one.
     let plan = crate::interceptor::plan(magento, defs, has_plugins);
     ilap!(_it, "interceptor plan");
-    // Fused mode (`di compile --fused`): global-only classes render as inlined
-    // plugin chains (creatuity's technique); multi-area classes fall back to
-    // stock until the per-area switch lands. The global chains are computed once.
-    let fused_chains =
-        fused.then(|| crate::pluginlist::global_plugin_chains(magento, defs));
+    // Fused mode (`di compile --fused`): interceptors render as inlined plugin
+    // chains (creatuity's technique) — a flat body for global-only classes, a
+    // per-area `switch (getCurrentScope())` otherwise. The per-scope chains are
+    // computed once (global + each real area).
+    let fused_chains = fused.then(|| {
+        let intercepted: Vec<String> = plan.methods.keys().cloned().collect();
+        crate::pluginlist::scope_chains(magento, defs, &intercepted)
+    });
     // Each interceptor's bytes are an independent pure function of the (already
     // fully-populated) definitions, and the final `files.sort_by` makes push
     // order irrelevant — so generate them in parallel (2489 on the oracle).

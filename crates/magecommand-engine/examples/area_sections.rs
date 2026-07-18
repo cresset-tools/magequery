@@ -50,7 +50,7 @@ fn main() {
         }
         let archive_path = root.join(format!("generated/_metadata/{code}.php"));
         let archive = fs::read_to_string(&archive_path).expect("read archive area file");
-        let file = build_area_file(&magento, &defs, area, &root);
+        let file = build_area_file(&magento, &defs, area, &root, false);
         if !file.findings.is_empty() {
             eprintln!("{code}: {} findings, first 5:", file.findings.len());
             for f in file.findings.iter().take(5) {

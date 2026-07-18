@@ -41,7 +41,7 @@ fn main() {
     // are op-5 artifacts accounted for separately.
     let t = std::time::Instant::now();
     for (area, _) in magecommand_engine::areaconfig::AREA_CODES {
-        let file = magecommand_engine::areaconfig::build_area_file(&magento, &defs, area, &root);
+        let file = magecommand_engine::areaconfig::build_area_file(&magento, &defs, area, &root, false);
         let names: Vec<String> = file
             .arguments
             .keys()

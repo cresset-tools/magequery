@@ -15,25 +15,15 @@
 
 use std::collections::HashSet;
 
-use magequery_core::{Area, Magento};
+use magequery_core::Magento;
 
 use crate::definitions::Definitions;
 use crate::laminas::render_type;
-use crate::pluginlist::GlobalChains;
+use crate::pluginlist::{GlobalChains, ScopeChains};
 use crate::reflect::{self, RMethod, RParam};
 
 const OM_TYPE: &str = "\\Magento\\Framework\\ObjectManagerInterface";
 const SCOPE_TYPE: &str = "\\Magento\\Framework\\Config\\ScopeInterface";
-
-/// Non-global areas whose overlays could add a per-area plugin.
-const AREAS: [Area; 6] = [
-    Area::Frontend,
-    Area::Adminhtml,
-    Area::Crontab,
-    Area::WebapiRest,
-    Area::WebapiSoap,
-    Area::Graphql,
-];
 
 /// di.xml plugin name → the property/accessor suffix: `[^A-Za-z0-9_] → _`.
 fn clean(name: &str) -> String {
@@ -48,36 +38,8 @@ fn ucfirst(s: &str) -> String {
     }
 }
 
-/// A class is "global-only" (renderable without a scope switch) when no
-/// non-global area overlay declares a plugin targeting it or any ancestor.
-fn is_global_only(magento: &Magento, defs: &Definitions, source: &str) -> bool {
-    let mut anc: HashSet<String> = HashSet::new();
-    let mut stack = vec![source.trim_start_matches('\\').to_owned()];
-    while let Some(c) = stack.pop() {
-        if !anc.insert(c.clone()) {
-            continue;
-        }
-        for r in defs.relations_of(&c) {
-            stack.push(r.trim_start_matches('\\').to_owned());
-        }
-        if let Some(rels) = crate::interception::internal_relations(&c) {
-            for r in rels {
-                stack.push(r.trim_start_matches('\\').to_owned());
-            }
-        }
-    }
-    for area in AREAS {
-        let overlay = magento.di_export_overlay(area);
-        for p in &overlay.plugins {
-            if anc.contains(p.target.as_str().trim_start_matches('\\')) {
-                return false;
-            }
-        }
-    }
-    true
-}
-
 /// One resolved listener layer for a method (a `{type}_{method}_{prev}` node).
+#[derive(Clone, PartialEq)]
 struct Node {
     before: Vec<PluginRef>,
     around: Option<PluginRef>,
@@ -86,7 +48,7 @@ struct Node {
     child: Option<Box<Node>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct PluginRef {
     /// The property/accessor suffix (cleaned di.xml name).
     clean: String,
@@ -152,9 +114,11 @@ fn emit(node: &Node, method: &str, tabs: usize, out: &mut Vec<String>) {
         out.push(format!("{ti}{assign}parent::{method}(...\\array_values($arguments));"));
     }
     if has_after {
-        out.push(ti.clone());
+        // Each after is its own result-chain piece; creatuity separates pieces
+        // with a blank line (getResultChainLines), so emit one before each.
         let n = node.after.len();
         for (i, p) in node.after.iter().enumerate() {
+            out.push(ti.clone());
             let kw = if i == n - 1 { "return " } else { "$result = " };
             out.push(format!(
                 "{ti}{kw}$this->____plugin_{}()->after{m}($this, $result, ...\\array_values($arguments));",
@@ -209,25 +173,121 @@ fn render_param(p: &RParam) -> String {
     s
 }
 
-/// Render the fused interceptor for `source` if it is global-only; `None`
-/// means "not handled here" (multi-area — the caller falls back to stock).
+/// Accumulate a method's plugins in first-appearance order (before → around →
+/// nested child → after), deduped by cleaned name — the property/accessor order.
+fn collect(node: &Node, plugins: &mut Vec<PluginRef>, seen: &mut HashSet<String>) {
+    for p in &node.before {
+        if seen.insert(p.clean.clone()) {
+            plugins.push(p.clone());
+        }
+    }
+    if let Some(a) = &node.around {
+        if seen.insert(a.clean.clone()) {
+            plugins.push(a.clone());
+        }
+    }
+    if let Some(c) = &node.child {
+        collect(c, plugins, seen);
+    }
+    for p in &node.after {
+        if seen.insert(p.clean.clone()) {
+            plugins.push(p.clone());
+        }
+    }
+}
+
+/// Render one method's body: a flat unrolled chain when every scope resolves to
+/// the same chain as `global`, else a `switch (getCurrentScope())` whose
+/// `default` carries the global chain (the #28 guard) and which emits a `case`
+/// only for scopes whose chain differs (equal scopes stack their labels, scopes
+/// equal to global collapse into `default`). Matches creatuity's
+/// `getScopeCasesFromConfig`. A scope with no chain renders as a parent-direct
+/// body.
+fn render_method_body(
+    scope_names: &[&str],
+    per_scope: &[Option<Node>],
+    default_idx: usize,
+    method: &str,
+) -> Vec<String> {
+    let parent = Node { before: Vec::new(), around: None, after: Vec::new(), child: None };
+    let node_of = |o: &Option<Node>| o.clone().unwrap_or_else(|| parent.clone());
+    let default = &per_scope[default_idx];
+
+    // Non-default scopes grouped by chain, in enumeration order.
+    let mut groups: Vec<(Vec<&str>, &Option<Node>)> = Vec::new();
+    for (i, name) in scope_names.iter().enumerate() {
+        let conf = &per_scope[i];
+        if conf == default {
+            continue;
+        }
+        if let Some(g) = groups.iter_mut().find(|(_, c)| *c == conf) {
+            g.0.push(name);
+        } else {
+            groups.push((vec![name], conf));
+        }
+    }
+
+    let mut lines = Vec::new();
+    if groups.is_empty() {
+        emit(&node_of(default), method, 0, &mut lines);
+    } else {
+        lines.push("switch ($this->____scope->getCurrentScope()) {".to_owned());
+        for (names, conf) in &groups {
+            for n in names {
+                lines.push(format!("\tcase '{n}':"));
+            }
+            emit(&node_of(conf), method, 2, &mut lines);
+        }
+        lines.push("\tdefault:".to_owned());
+        emit(&node_of(default), method, 2, &mut lines);
+        lines.push("}".to_owned());
+    }
+    lines
+}
+
+/// Render the fused interceptor for `source` (global-only → flat bodies,
+/// multi-area → per-method `switch`). `None` only when the subject class is
+/// unresolvable, in which case the caller falls back to the stock interceptor.
 pub fn fused_interceptor_bytes(
     magento: &Magento,
     defs: &Definitions,
-    chains: &GlobalChains,
+    scopes: &ScopeChains,
     source: &str,
     intercepted: &HashSet<String>,
 ) -> Option<String> {
-    if !is_global_only(magento, defs, source) {
-        return None;
-    }
+    let _ = magento;
     let record = defs.get(source)?;
     let source_fqcn = record.meta.fqcn.clone();
-    let empty = Vec::new();
-    let insts = chains.instances.get(&source_fqcn).unwrap_or(&empty);
 
-    // Intercepted methods, in reflection order, with their chain trees.
-    let mut method_bodies: Vec<(RMethod, Node)> = Vec::new();
+    // Ordered scopes, matching creatuity's `['primary','global'] + getAllScopes()`:
+    // `primary` and `global` both resolve to the global (base) chains; each real
+    // area is global overlaid by that area. The `switch` default is 'global'.
+    let mut scope_list: Vec<(&str, &GlobalChains)> =
+        vec![("primary", &scopes.global), ("global", &scopes.global)];
+    for (name, ch) in &scopes.areas {
+        scope_list.push((name, ch));
+    }
+    let scope_names: Vec<&str> = scope_list.iter().map(|(n, _)| *n).collect();
+    let default_idx = 1;
+
+    // name -> instance, unioned across scopes (a plugin class is scope-independent).
+    let mut insts: Vec<(String, String)> = Vec::new();
+    let mut inst_seen: HashSet<String> = HashSet::new();
+    for (_, ch) in &scope_list {
+        if let Some(list) = ch.instances.get(&source_fqcn) {
+            for (n, i) in list {
+                if inst_seen.insert(n.clone()) {
+                    insts.push((n.clone(), i.clone()));
+                }
+            }
+        }
+    }
+
+    // Intercepted methods, reflection order: per-scope chains → a flat or switched
+    // body, plus the plugins each uses (first-appearance order across scopes).
+    let mut method_bodies: Vec<(RMethod, Vec<String>)> = Vec::new();
+    let mut plugins: Vec<PluginRef> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
     for rm in reflect::public_methods(defs, &source_fqcn) {
         let name = rm.name.as_str();
         if rm.is_static
@@ -241,36 +301,18 @@ pub fn fused_interceptor_bytes(
         if !intercepted.contains(&rm.name) {
             continue;
         }
-        if let Some(node) = build(chains, &source_fqcn, &rm.name, "__self", insts) {
-            method_bodies.push((rm, node));
+        let per_scope: Vec<Option<Node>> = scope_list
+            .iter()
+            .map(|(_, ch)| build(ch, &source_fqcn, &rm.name, "__self", &insts))
+            .collect();
+        if per_scope.iter().all(Option::is_none) {
+            continue;
         }
-    }
-
-    // Plugins used, in first-appearance order across all method bodies.
-    let mut plugins: Vec<PluginRef> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    fn collect(node: &Node, plugins: &mut Vec<PluginRef>, seen: &mut HashSet<String>) {
-        for p in &node.before {
-            if seen.insert(p.clean.clone()) {
-                plugins.push(p.clone());
-            }
+        for node in per_scope.iter().flatten() {
+            collect(node, &mut plugins, &mut seen);
         }
-        if let Some(a) = &node.around {
-            if seen.insert(a.clean.clone()) {
-                plugins.push(a.clone());
-            }
-        }
-        if let Some(c) = &node.child {
-            collect(c, plugins, seen);
-        }
-        for p in &node.after {
-            if seen.insert(p.clean.clone()) {
-                plugins.push(p.clone());
-            }
-        }
-    }
-    for (_, node) in &method_bodies {
-        collect(node, &mut plugins, &mut seen);
+        let body = render_method_body(&scope_names, &per_scope, default_idx, &rm.name);
+        method_bodies.push((rm, body));
     }
 
     // ---- assemble ----
@@ -313,14 +355,12 @@ pub fn fused_interceptor_bytes(
     ));
 
     // intercepted methods
-    for (rm, node) in &method_bodies {
-        let mut body_lines = Vec::new();
-        emit(node, &rm.name, 0, &mut body_lines);
+    for (rm, body_lines) in &method_bodies {
         members.push(format!(
             "{}\n    public function {}\n    {{\n{}\n    }}",
             docblock(&["{@inheritdoc}".into()]),
             method_signature(rm),
-            indent8(&body_lines),
+            indent8(body_lines),
         ));
     }
 
@@ -423,6 +463,59 @@ return $this->____plugin_low()->afterProcess($this, $result, ...\\array_values($
              \n\
              return $this->____plugin_g()->afterGreet($this, $result, ...\\array_values($arguments));"
         );
+    }
+
+    /// Two afters at one layer (e.g. an adminhtml case with global + area after
+    /// plugins) get a blank separator before EACH — creatuity's result-chain
+    /// pieces are blank-separated.
+    #[test]
+    fn emit_separates_multiple_afters() {
+        let node =
+            Node { before: vec![], around: None, after: vec![pref("g"), pref("a")], child: None };
+        let mut out = Vec::new();
+        emit(&node, "greet", 0, &mut out);
+        assert_eq!(
+            out.join("\n"),
+            "$arguments = \\func_get_args();\n\
+             $result = parent::greet(...\\array_values($arguments));\n\
+             \n\
+             $result = $this->____plugin_g()->afterGreet($this, $result, ...\\array_values($arguments));\n\
+             \n\
+             return $this->____plugin_a()->afterGreet($this, $result, ...\\array_values($arguments));"
+        );
+    }
+
+    /// The multi-area switch: `default` carries the GLOBAL chain (the #28 guard),
+    /// a `case` is emitted only for a scope whose chain differs, and a scope equal
+    /// to global (here `primary`) collapses into `default` — no `case 'primary'`.
+    #[test]
+    fn switch_default_is_global_with_case_per_differing_scope() {
+        let g = Node { before: vec![], around: None, after: vec![pref("g")], child: None };
+        let ga =
+            Node { before: vec![], around: None, after: vec![pref("g"), pref("a")], child: None };
+        let names = ["primary", "global", "adminhtml"];
+        let per_scope = vec![Some(g.clone()), Some(g), Some(ga)];
+        let lines = render_method_body(&names, &per_scope, 1, "greet");
+
+        assert_eq!(lines[0], "switch ($this->____scope->getCurrentScope()) {");
+        assert_eq!(lines[1], "\tcase 'adminhtml':");
+        assert!(lines.iter().any(|l| l == "\tdefault:"), "default branch present");
+        assert!(!lines.iter().any(|l| l.contains("'primary'")), "primary collapses into default");
+        assert_eq!(lines.last().unwrap(), "}");
+        // default carries the global (single-after) chain
+        let default_pos = lines.iter().position(|l| l == "\tdefault:").unwrap();
+        assert!(lines[default_pos..].iter().any(|l| l.contains("____plugin_g()->afterGreet")));
+    }
+
+    /// All scopes equal to global ⇒ a flat, switch-free body.
+    #[test]
+    fn global_only_renders_flat_no_switch() {
+        let g = Node { before: vec![], around: None, after: vec![pref("g")], child: None };
+        let names = ["primary", "global", "adminhtml"];
+        let per_scope = vec![Some(g.clone()), Some(g.clone()), Some(g)];
+        let lines = render_method_body(&names, &per_scope, 1, "greet");
+        assert!(!lines.iter().any(|l| l.contains("switch (")), "no switch when all == global");
+        assert_eq!(lines[0], "$arguments = \\func_get_args();");
     }
 
     #[test]

@@ -472,10 +472,53 @@ pub struct GlobalChains {
     pub instances: HashMap<String, Vec<(String, String)>>,
 }
 
+/// Per-scope resolved chains for the fused renderer. `global` drives the `switch`
+/// `default` branch (and the CLI/`primary` scope, which merges to the same set);
+/// `areas` are the six real areas, each merged over global — a `case` is emitted
+/// only where an area's chain differs from `global`.
+pub struct ScopeChains {
+    pub global: GlobalChains,
+    pub areas: Vec<(&'static str, GlobalChains)>,
+}
+
+/// Compute the per-scope chains fused needs: the global (base) chains plus each
+/// real area's merged chains. `intercepted` are the plan's intercepted classes —
+/// they must be inherited so a class that only INHERITS plugins (e.g. a console
+/// command inheriting a plugin on the Symfony `run` base) still has a resolved
+/// per-method chain.
+pub fn scope_chains(magento: &Magento, defs: &Definitions, intercepted: &[String]) -> ScopeChains {
+    let global = plugin_chains(magento, defs, Area::Global, intercepted);
+    let areas = [
+        ("frontend", Area::Frontend),
+        ("adminhtml", Area::Adminhtml),
+        ("crontab", Area::Crontab),
+        ("webapi_rest", Area::WebapiRest),
+        ("webapi_soap", Area::WebapiSoap),
+        ("graphql", Area::Graphql),
+    ]
+    .into_iter()
+    .map(|(name, area)| (name, plugin_chains(magento, defs, area, intercepted)))
+    .collect();
+    ScopeChains { global, areas }
+}
+
 /// Run the global-scope inherit/process pass (mirroring `generate`'s Global
 /// iteration) and expose the resolved per-method chains for the fused renderer.
 pub fn global_plugin_chains(magento: &Magento, defs: &Definitions) -> GlobalChains {
-    let global_export = magento.di_export(Area::Global);
+    plugin_chains(magento, defs, Area::Global, &[])
+}
+
+/// Like [`global_plugin_chains`] but for an arbitrary scope: runs the inherit/
+/// process pass over that area's merged DI export (global overlaid by the area).
+/// `extra` classes are inherited after the declared-plugin types so
+/// inherit-only intercepted classes get a chain.
+pub fn plugin_chains(
+    magento: &Magento,
+    defs: &Definitions,
+    area: Area,
+    extra: &[String],
+) -> GlobalChains {
+    let global_export = magento.di_export(area);
     let global_vtypes: HashMap<String, String> = global_export
         .virtual_types
         .iter()
@@ -514,6 +557,13 @@ pub fn global_plugin_chains(magento: &Magento, defs: &Definitions) -> GlobalChai
     let type_names: Vec<String> = plugin_data.iter().map(|(t, _)| t.clone()).collect();
     for name in &type_names {
         state.inherit(name);
+    }
+    // Inherit-only intercepted classes (sorted for determinism): a class with no
+    // OWN plugins but a plugin on an ancestor still needs its resolved chain.
+    let mut extra_sorted: Vec<&String> = extra.iter().collect();
+    extra_sorted.sort();
+    for name in extra_sorted {
+        state.inherit(name.trim_start_matches('\\'));
     }
 
     let mut nodes = HashMap::new();

@@ -84,7 +84,7 @@ pub fn compute_outputs_opts(
 
     // The seven (plus any custom) area config files — the compile's most
     // expensive computation, built once and shared with codegen below.
-    let area_files = areaconfig::build_all_area_files(magento, defs, root);
+    let area_files = areaconfig::build_all_area_files(magento, defs, root, fused);
     for ca in &area_files {
         findings.extend(ca.file.findings.iter().cloned());
         files.push((format!("metadata/{}.php", ca.code), ca.rendered.clone()));
