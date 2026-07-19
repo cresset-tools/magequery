@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "magecommand"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "magecommand-engine"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "blake3",
  "magecommand-php",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "magecommand-php"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "memchr",
  "rayon",
@@ -972,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "magequery"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "magequery-core"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "magequery-lsp"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "crossbeam-channel",
  "lsp-server",
