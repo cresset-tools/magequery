@@ -301,18 +301,9 @@ impl<'a> Cursor<'a> {
                 self.i += 1;
             }
         }
-        // Scientific notation (e.g. 1e-10).
-        if matches!(self.cur(), Some(b'e') | Some(b'E'))
-            && matches!(self.peek(1), Some(b) if b.is_ascii_digit() || b == b'+' || b == b'-')
-        {
-            self.i += 1;
-            if matches!(self.cur(), Some(b'+') | Some(b'-')) {
-                self.i += 1;
-            }
-            while matches!(self.cur(), Some(b) if b.is_ascii_digit()) {
-                self.i += 1;
-            }
-        }
+        // NO scientific notation: less.js's dimension regex is
+        // `([+-]?\d*\.?\d+)(%|[a-z_]+)?` — `1e-2` is the dimension `1e`
+        // minus `2` (→ `-1e`), never 0.01 (NOTES C8/F6/F12, probed vs 4.6.7).
         let num = &self.src[start..self.i];
         let unit_start = self.i;
         if self.cur() == Some(b'%') {

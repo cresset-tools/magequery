@@ -1745,8 +1745,15 @@ impl<'a> Ctx<'a> {
             if let Some(n) = &key_name {
                 body.push(var_decl(n, key));
             }
+            // The source list's own declarations stay visible below the
+            // iteration frame, so a value referencing a sibling entry
+            // (`contrast($background-color, …)` in a map) resolves
+            // (namespacing-8 / less.js #3368).
+            let src_frame = frame_of(iterator.clone());
+            self.push_frame(src_frame);
             self.push_frame(frame_of(body.clone()));
             let r = self.eval_rules(&body, self_paths, own, children);
+            self.pop_frame();
             self.pop_frame();
             r?;
         }
@@ -2439,7 +2446,19 @@ impl<'a> Ctx<'a> {
                     important,
                     ..
                 } => {
-                    let val = self.eval_value(value)?;
+                    // A permissively-captured raw value resolves its `@refs`
+                    // TEXTUALLY (less.js keeps such values as raw sequences
+                    // with embedded variables — parens/colons survive:
+                    // `@min: (min-width: @val)`, namespacing-media).
+                    let val = match value.as_ref() {
+                        Node::Anonymous(t) if t.contains('@') && !t.contains('[') => {
+                            Node::Anonymous(self.resolve_prelude_vars(t)?)
+                        }
+                        other => {
+                            let v = self.eval_value(other)?;
+                            self.resolve_anon_refs(v)?
+                        }
+                    };
                     out.push(Node::VariableDecl {
                         name: name.clone(),
                         value: Box::new(val),
@@ -2456,6 +2475,17 @@ impl<'a> Ctx<'a> {
                     });
                 }
                 Node::Ruleset(_) => out.push(r.clone()),
+                // A nested mixin call contributes its returned scope to the
+                // map (`.alias() { #ns.mixin(1); }` + `.alias[@a]` —
+                // namespacing-4).
+                Node::MixinCall(call) => {
+                    let mut ex_own = Vec::new();
+                    let mut ex_children = Vec::new();
+                    let injected =
+                        self.expand_mixin_call(call, None, &mut ex_own, &mut ex_children)?;
+                    out.extend(injected);
+                    out.extend(ex_own);
+                }
                 _ => {}
             }
         }
@@ -2551,8 +2581,14 @@ impl<'a> Ctx<'a> {
                 }
             };
             // Map-rule values are already evaluated; re-evaluate defensively for
-            // raw nested content (idempotent on finished values).
-            let val = self.eval_value(&val)?;
+            // raw nested content (idempotent on finished values). A raw-captured
+            // Anonymous value re-parses so the result is OPERABLE
+            // (`(@margins[ten]/2)` must divide — namespacing-3).
+            let val = match &val {
+                Node::Anonymous(text) if !text.contains(':') => self.reparse_and_eval(text)?,
+                Node::Anonymous(_) => val.clone(),
+                _ => self.eval_value(&val)?,
+            };
             current = Some(val);
         }
         // A final ruleset value materializes as its evaluated rules.
@@ -2883,9 +2919,10 @@ impl<'a> Ctx<'a> {
                 _ => false,
             });
         }
-        // Bare value: true iff it evaluates to the keyword `true`.
+        // Bare value: true iff it evaluates to the keyword `true` (raw-captured
+        // declaration values may surface as Anonymous — same keyword).
         let v = self.reparse_and_eval(inner)?;
-        Ok(matches!(&v, Node::Keyword(k) if k == "true"))
+        Ok(matches!(&v, Node::Keyword(k) | Node::Anonymous(k) if k.trim() == "true"))
     }
 
     fn reparse_and_eval(&mut self, src: &str) -> Result<Node, LessError> {
@@ -2934,11 +2971,23 @@ impl<'a> Ctx<'a> {
         let raw = self.resolve_prelude_vars(&raw)?;
         let mut queries = Vec::new();
         for q in split_top(&raw, ',') {
-            let q = q.trim();
+            let mut q = q.trim().to_string();
             if q.is_empty() {
                 continue;
             }
-            queries.push(self.normalize_media_query(q)?);
+            // A namespaced mixin-call lookup as the whole query
+            // (`@media #ns.breakpoint(.valToGet[])[@max]`, namespacing-media):
+            // evaluate it through the value machinery first.
+            if (q.starts_with('#') || q.starts_with('.')) && q.contains('[') {
+                if let Ok(v) = crate::parser::parse_value_fragment(&q, self.opts) {
+                    if matches!(v, Node::Lookup { .. }) {
+                        if let Ok(ev) = self.eval_value(&v) {
+                            q = render_value(&ev, self.opts.num_precision);
+                        }
+                    }
+                }
+            }
+            queries.push(self.normalize_media_query(&q)?);
         }
         Ok(queries)
     }
@@ -3112,7 +3161,45 @@ impl<'a> Ctx<'a> {
 
     /// Substitute bare `@name` variable references in a prelude string with their
     /// CSS values (leaving undefined `@…` — e.g. an `@media` keyword — untouched).
+    /// Textually resolve `@refs` inside verbatim-captured runs of an evaluated
+    /// value (recursing through lists) — map entries referencing sibling
+    /// permissive captures (`@max: not all and @min`, namespacing-media).
+    fn resolve_anon_refs(&mut self, v: Node) -> Result<Node, LessError> {
+        Ok(match v {
+            Node::Anonymous(t) if t.contains('@') && !t.contains('[') => {
+                Node::Anonymous(self.resolve_prelude_vars(&t)?)
+            }
+            Node::Expression(items) => Node::Expression(
+                items
+                    .into_iter()
+                    .map(|i| self.resolve_anon_refs(i))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Node::Value(items) => Node::Value(
+                items
+                    .into_iter()
+                    .map(|i| self.resolve_anon_refs(i))
+                    .collect::<Result<_, _>>()?,
+            ),
+            other => other,
+        })
+    }
+
     fn resolve_prelude_vars(&mut self, s: &str) -> Result<String, LessError> {
+        // Fixpoint: a resolved variable's text may itself contain `@refs`
+        // (permissively-captured media features, namespacing-media).
+        let mut cur = s.to_string();
+        for _ in 0..8 {
+            let next = self.resolve_prelude_vars_once(&cur)?;
+            if next == cur {
+                break;
+            }
+            cur = next;
+        }
+        Ok(cur)
+    }
+
+    fn resolve_prelude_vars_once(&mut self, s: &str) -> Result<String, LessError> {
         let bytes = s.as_bytes();
         let mut out = String::with_capacity(s.len());
         let mut i = 0;
@@ -3126,6 +3213,31 @@ impl<'a> Ctx<'a> {
                 }
                 let name = &s[i + 1..j];
                 if !name.is_empty() {
+                    // A lookup chain on the variable (`@breakpoints[mobile]`,
+                    // namespacing-3): route through the Lookup machinery.
+                    if bytes.get(j) == Some(&b'[') {
+                        let mut k = j;
+                        let mut keys: Vec<String> = Vec::new();
+                        while bytes.get(k) == Some(&b'[') {
+                            let close = match s[k..].find(']') {
+                                Some(c) => k + c,
+                                None => break,
+                            };
+                            keys.push(s[k + 1..close].to_string());
+                            k = close + 1;
+                        }
+                        if !keys.is_empty() {
+                            let target = Node::VariableCall {
+                                name: name.to_string(),
+                                span: Default::default(),
+                            };
+                            if let Ok(v) = self.eval_lookup(&target, &keys) {
+                                out.push_str(&value_to_plain_string(&v));
+                                i = k;
+                                continue;
+                            }
+                        }
+                    }
                     if let Ok(v) = self.eval_variable(name, Default::default()) {
                         out.push_str(&value_to_plain_string(&v));
                         i = j;

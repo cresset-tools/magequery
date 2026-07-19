@@ -543,7 +543,9 @@ impl<'a> Parser<'a> {
             self.cur.i = save;
             return Ok(None);
         };
-        self.cur.skip_whitespace();
+        // Comments may sit between the name and the `:` (dropped, like
+        // less.js's commentStore: `color/* survive */: grey`).
+        self.cur.skip_trivia();
         if !self.cur.eat(b':') {
             self.cur.i = save;
             return Ok(None);
@@ -1261,7 +1263,9 @@ impl<'a> Parser<'a> {
             self.skip_value_trivia();
             if self.cur.cur() == Some(b',') {
                 self.cur.bump();
-                self.skip_value_trivia();
+                // Only whitespace — a block comment after the comma belongs to
+                // the NEXT expression and renders (`grey, /* blue */ orange`).
+                self.cur.skip_whitespace();
                 if self.at_value_end() {
                     break;
                 }
@@ -1304,6 +1308,17 @@ impl<'a> Parser<'a> {
             let before = self.here();
             items.push(self.parse_addition()?);
             if self.here() == before {
+                // An arithmetic operator stranded after a quoted string is
+                // less.js's hard `Unrecognised input` ParseError (F13:
+                // `b: "x" + "y"` — quoted literals are not operands).
+                if matches!(self.cur.cur(), Some(b'+') | Some(b'*'))
+                    && matches!(
+                        items.iter().rev().find(|n| !matches!(n, Node::Comment { .. })),
+                        Some(Node::Quoted { escaped: false, .. })
+                    )
+                {
+                    return Err(self.err("Unrecognised input"));
+                }
                 // Never stall on an unrecognized byte — capture it raw.
                 let s = self.here();
                 self.cur.bump();
@@ -1442,10 +1457,21 @@ impl<'a> Parser<'a> {
                 Ok(Node::Call { name, args })
             }
             Some(b'(') => {
+                let psave = self.here();
                 self.cur.bump();
                 let inner = self.parse_value()?;
                 self.skip_value_trivia();
                 self.cur.eat(b')');
+                // A declaration-shaped paren (`(min-width: @val)`) is not an
+                // expression — keep it VERBATIM like less.js's permissive
+                // capture, so the parens and `:` survive re-rendering
+                // (namespacing-media).
+                if contains_colon_stall(&inner) {
+                    self.cur.i = psave;
+                    let vs = self.here();
+                    self.skip_balanced(b'(', b')');
+                    return Ok(Node::Anonymous(self.cur.src()[vs..self.here()].to_string()));
+                }
                 Ok(Node::Paren { inner: Box::new(inner), in_op: false })
             }
             Some(b'[') => {
@@ -1461,14 +1487,15 @@ impl<'a> Parser<'a> {
                 if let Some(m) = self.try_mixin_call_arg()? {
                     return Ok(m);
                 }
-                // …else a hex color (or, rarely, an id-ish token), verbatim.
+                // …else a hex color. An invalid hex literal (`#ggg`, wrong
+                // length) is less.js's `Unrecognised input` ParseError (C18).
                 let s = self.here();
                 self.cur.bump();
                 self.cur.scan_ident();
                 let text = self.cur.src()[s..self.here()].to_string();
                 match crate::color::Color::from_hex(&text) {
                     Some(color) => Ok(Node::Color(color)),
-                    None => Ok(Node::Anonymous(text)),
+                    None => Err(self.err("Unrecognised input")),
                 }
             }
             Some(b'.') if matches!(self.cur.peek(1), Some(b) if b == b'-' || b == b'_'
@@ -2030,6 +2057,63 @@ fn utf8_char_len(b: u8) -> usize {
 /// Mark a parenthesized operand as participating in an operation (less.js sets
 /// `parensInOp` on both operands in `addition`/`multiplication`; only parens
 /// carry the flag for us — see `Node::Paren`).
+/// Whether a parsed value contains a stalled `:` item — the signature of a
+/// declaration-shaped parenthesized capture (`(min-width: 480px)`).
+fn contains_colon_stall(n: &Node) -> bool {
+    match n {
+        Node::Anonymous(t) => t == ":",
+        Node::Expression(items) | Node::Value(items) => items.iter().any(contains_colon_stall),
+        _ => false,
+    }
+}
+
+/// Remove `/* … */` and `// …` comments from a raw mixin param/argument list
+/// (less.js throws its `commentStore` away between args — the comments/comments
+/// `.mixin_def_with_colors(@a: white, // in` case). String-aware; a `//`
+/// directly after `:` is a URL protocol, not a comment.
+fn strip_param_comments(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' => {
+                let q = b[i];
+                let start = i;
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i = (i + 1).min(b.len());
+                out.push_str(&src[start..i]);
+            }
+            b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(b.len());
+            }
+            b'/' if i + 1 < b.len()
+                && b[i + 1] == b'/'
+                && out.trim_end().as_bytes().last() != Some(&b':') =>
+            {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            c => {
+                out.push(c as char);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Whether a parsed node is a valid less.js `operand()` for `*`/`/` (plan
 /// §2.4): dimension, color (hex or NAMED keyword), variable/property accessor,
 /// call, parenthesized sub, negation, lookup — a plain keyword (`small`) or
@@ -2115,6 +2199,7 @@ fn split_mixin_parens(elements: &[Element]) -> (Vec<Element>, Option<String>) {
 
 /// Parse a mixin-definition parameter list source (`@a; @b: 2; @rest...`).
 fn parse_mixin_params(src: &str) -> Vec<MixinParam> {
+    let src = &strip_param_comments(src);
     let parts = split_args(src);
     parts
         .into_iter()
@@ -2155,6 +2240,7 @@ fn parse_mixin_params(src: &str) -> Vec<MixinParam> {
 
 /// Parse a mixin-call argument list source into [`MixinArg`]s.
 fn parse_mixin_args(src: &str) -> Vec<MixinArg> {
+    let src = &strip_param_comments(src);
     split_args(src)
         .into_iter()
         .filter(|p| !p.trim().is_empty())
