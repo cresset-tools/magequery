@@ -49,9 +49,13 @@ use magecommand_less::{
     MagentoImportEntry, ResolvedImport,
 };
 
-/// The six standard theme entry points (blank/luma ship exactly these).
-pub const ENTRY_POINTS: [&str; 6] = [
-    "styles-m", "styles-l", "print", "email", "email-inline", "email-fonts",
+/// The standard theme entry points. The six LESS entries are blank/luma's
+/// compiled set; `critical` is Luma's SEVENTH entry (verified against real
+/// SCD output) — a pre-minified plain `css/critical.css` copied VERBATIM by
+/// the deploy (no compile). Themes lacking an entry skip it in the default
+/// run.
+pub const ENTRY_POINTS: [&str; 7] = [
+    "styles-m", "styles-l", "print", "email", "email-inline", "email-fonts", "critical",
 ];
 
 /// One theme in the fallback chain.
@@ -342,6 +346,26 @@ impl LessOrchestrator {
             format!("css/{name}.less")
         };
         let Some((entry_file, _)) = self.probe(&logical) else {
+            // A plain-CSS entry (Luma's `css/critical.css`): SCD copies it
+            // VERBATIM (pre-minified, no LESS pass — verified byte-identical
+            // source→deploy on the reference install). No compile, no
+            // variable-notation pass.
+            let css_logical = logical.trim_end_matches(".less").to_string() + ".css";
+            if let Some((css_file, _)) = self.probe(&css_logical) {
+                let css = std::fs::read_to_string(&css_file).map_err(|e| LessDeployError {
+                    entry: Some(css_logical.clone()),
+                    module: None,
+                    file: Some(css_file.clone()),
+                    message: format!("read failed: {e}"),
+                })?;
+                return Ok(CompiledEntry {
+                    entry: css_logical,
+                    entry_file: css_file,
+                    css,
+                    warnings: Vec::new(),
+                    skipped_modules: Vec::new(),
+                });
+            }
             return Err(LessDeployError {
                 entry: Some(logical.clone()),
                 module: None,
@@ -376,7 +400,7 @@ impl LessOrchestrator {
                     return Ok(CompiledEntry {
                         entry: logical,
                         entry_file,
-                        css: css.code,
+                        css: self.apply_variable_notation(css.code),
                         warnings: css.warnings.iter().map(|w| w.message.clone()).collect(),
                         skipped_modules: skipped,
                     });
@@ -395,6 +419,38 @@ impl LessOrchestrator {
                 }
             }
         }
+    }
+
+    /// Magento's `View\Asset\PreProcessor\VariableNotation` post-compile
+    /// pass (verified against the framework source + real SCD output): every
+    /// `{{base_url_path}}` placeholder in the compiled CSS is expanded to
+    /// `{{base_url_path}}<area>/<theme-path>/{{locale}}` for the DEPLOYED
+    /// theme context — the email `@baseUrl` idiom
+    /// (`url("@{baseUrl}css/email-fonts.css")` in `_email-extend.less`)
+    /// becomes `url("{{base_url_path}}frontend/Magento/luma/{{locale}}/css/…")`
+    /// in the real email-inline.css. (Magento routes this through
+    /// `CssResolver::replaceRelativeUrls`, i.e. url()/@import references;
+    /// the placeholder only ever occurs there, so a direct replace matches.)
+    fn apply_variable_notation(&self, css: String) -> String {
+        const VAR: &str = "{{base_url_path}}";
+        if !css.contains(VAR) {
+            return css;
+        }
+        let theme_path = self
+            .chain
+            .first()
+            .map(|t| {
+                t.id.strip_prefix(&format!("{}/", self.area))
+                    .unwrap_or(&t.id)
+                    .to_string()
+            })
+            .unwrap_or_default();
+        let replacement = if theme_path.is_empty() {
+            format!("{VAR}{}/{{{{locale}}}}", self.area)
+        } else {
+            format!("{VAR}{}/{}/{{{{locale}}}}", self.area, theme_path)
+        };
+        css.replace(VAR, &replacement)
     }
 
     /// Turn a compiler error into the §7.5 fault report: name the owning
@@ -646,12 +702,22 @@ impl ImportResolver for OrchestratorResolver<'_> {
         reference: bool,
         from: &FileInfo,
     ) -> Result<Vec<MagentoImportEntry>, ImportError> {
-        Ok(self.orch.magento_import_entries(
+        let entries = self.orch.magento_import_entries(
             path,
             reference,
             &from.current_directory,
             &self.banned,
-        ))
+        );
+        // Diagnostic: `MAGECOMMAND_LESS_TRACE_IMPORTS=1` dumps every
+        // `//@magento_import` expansion (the §7.3 splice list) to stderr for
+        // textual comparison against a real install's var/view_preprocessed.
+        if std::env::var_os("MAGECOMMAND_LESS_TRACE_IMPORTS").is_some() {
+            eprintln!("//@magento_import '{path}' @ {}:", from.filename);
+            for e in &entries {
+                eprintln!("  {}", e.import_path);
+            }
+        }
+        Ok(entries)
     }
 
     fn load_binary(&self, path: &str, current_directory: &str) -> Option<Vec<u8>> {

@@ -307,17 +307,65 @@ fn normalize_value(text: &str) -> String {
                 }
                 prev = Some('#');
             }
-            '.' => {
-                // Leading zero: `.5` → `0.5` when the dot starts a number
-                // (previous char is not digit/alphanumeric — i.e. not `1.5`
-                // and not an identifier like `a.b`).
-                let starts_number = chars.peek().is_some_and(|d| d.is_ascii_digit())
-                    && !prev.is_some_and(|p| p.is_ascii_alphanumeric() || p == '.');
-                if starts_number {
-                    out.push('0');
+            c if (c.is_ascii_digit() || c == '.')
+                && !prev.is_some_and(|p| p.is_ascii_alphanumeric() || p == '.')
+                && (c != '.' || chars.peek().is_some_and(|d| d.is_ascii_digit())) =>
+            {
+                // Numeric token: parse and re-print canonically. Both engines'
+                // semantic value is round-to-8-decimals (numPrecision=8,
+                // probed); PHP leaks float-print artifacts (`71.42857143000001`,
+                // `1.0E-6`) that less.js never emits — canonicalizing the PRINT
+                // (never the value beyond the pinned 8-decimal rounding) makes
+                // the two spellings of the same number compare equal while a
+                // genuine 8th-decimal difference still reports.
+                let mut tok = String::new();
+                tok.push(c);
+                let mut seen_dot = c == '.';
+                while let Some(&d) = chars.peek() {
+                    if d.is_ascii_digit() {
+                        tok.push(chars.next().unwrap());
+                    } else if d == '.' && !seen_dot {
+                        // Only consume the dot if a digit follows (guards
+                        // `url(a-300.woff)` and version-ish `1.5.2` tails).
+                        let mut ahead = chars.clone();
+                        ahead.next();
+                        if ahead.peek().is_some_and(|e| e.is_ascii_digit()) {
+                            seen_dot = true;
+                            tok.push(chars.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    } else if d == 'e' || d == 'E' {
+                        // Exponent (`1.0E-6`): only if sign?+digits follow.
+                        let mut ahead = chars.clone();
+                        ahead.next();
+                        let signed = matches!(ahead.peek(), Some('+') | Some('-'));
+                        if signed {
+                            ahead.next();
+                        }
+                        if !ahead.peek().is_some_and(|e| e.is_ascii_digit()) {
+                            break;
+                        }
+                        tok.push(chars.next().unwrap());
+                        if signed {
+                            tok.push(chars.next().unwrap());
+                        }
+                        while chars.peek().is_some_and(|e| e.is_ascii_digit()) {
+                            tok.push(chars.next().unwrap());
+                        }
+                        break;
+                    } else {
+                        break;
+                    }
                 }
-                out.push('.');
-                prev = Some('.');
+                match tok.parse::<f64>() {
+                    Ok(v) if v.is_finite() => {
+                        let r = (v * 1e8).round() / 1e8;
+                        out.push_str(&format!("{r}"));
+                    }
+                    _ => out.push_str(&tok),
+                }
+                prev = Some('0');
             }
             _ => {
                 out.push(c);
@@ -630,6 +678,20 @@ mod tests {
                 actual:   "1px".into(),
             }
         );
+    }
+
+    #[test]
+    fn number_print_artifacts_normalize() {
+        // less.php leaks PHP float-print artifacts for the same pinned
+        // 8-decimal value; the canonicalizer makes the spellings equal…
+        let d = diff(
+            ".a { font-size: 71.42857143000001%; top: 1.0E-6px; }",
+            ".a { font-size: 71.42857143%; top: 0.000001px; }",
+        );
+        assert!(d.is_clean(), "{:?}", d.findings);
+        // …while a genuine 8th-decimal difference still reports.
+        let d = diff(".a { width: 33.33333333%; }", ".a { width: 33.33333334%; }");
+        assert_eq!(d.findings.len(), 1);
     }
 
     #[test]
