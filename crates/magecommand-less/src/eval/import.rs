@@ -390,6 +390,82 @@ impl<'a> ImportPass<'a> {
         trail: &mut Loc,
     ) -> Result<(), LessError> {
         for (idx, node) in rules.iter_mut().enumerate() {
+            // `//@magento_import` (plan §7.1): only ever parsed under
+            // `magento_mode`; the resolver expands it to the concrete,
+            // load-order-sorted `@import` list, spliced IN PLACE (a synthetic
+            // container at the directive's position — position-preserving,
+            // §7.3), each entry then fetched like a hand-written import.
+            if let Node::MagentoImport { path, reference, span } = node {
+                let raw = import_path_string(path).unwrap_or_default();
+                let from = FileInfo {
+                    filename: scope.filename.clone(),
+                    current_directory: scope.current_directory.clone(),
+                    rootpath: scope.rootpath.clone(),
+                    ..Default::default()
+                };
+                let entries = self
+                    .resolver
+                    .magento_import(&raw, *reference, &from)
+                    .map_err(|e| {
+                        LessError::at(
+                            ErrorKind::Import,
+                            format!("//@magento_import '{raw}': {e}"),
+                            scope.filename.clone(),
+                            span.start,
+                        )
+                        .located(&scope.source)
+                    })?;
+                let span = *span;
+                let inner: Vec<Node> = entries
+                    .iter()
+                    .map(|en| Node::Import {
+                        path: Box::new(Node::Quoted {
+                            escaped: false,
+                            quote: '\'',
+                            value: en.import_path.clone(),
+                        }),
+                        options: if en.reference {
+                            vec!["reference".to_string()]
+                        } else {
+                            Vec::new()
+                        },
+                        features: None,
+                        error: None,
+                        span,
+                    })
+                    .collect();
+                *node = Node::ImportResolved(Box::new(ImportResolved {
+                    rules: inner,
+                    // The container "is" the declaring file: errors while
+                    // fetching the entries anchor at the directive's span in
+                    // the declaring source.
+                    source: scope.source.clone(),
+                    inline: None,
+                    full_path: scope.filename.clone(),
+                    skip: false,
+                    // Exempt the synthetic container from once-dedup (its
+                    // path is the declaring file's, which is already in the
+                    // fetched/once sets); the ENTRIES dedup normally.
+                    multiple: true,
+                    reference: false,
+                    features: None,
+                    current_directory: scope.current_directory.clone(),
+                    rootpath: scope.rootpath.clone(),
+                    layer_css: false,
+                    path: None,
+                    span,
+                }));
+                if let Node::ImportResolved(ir) = node {
+                    if !ir.rules.is_empty() {
+                        let mut loc = trail.clone();
+                        loc.push((idx, 0));
+                        // in_multiple stays FALSE: the entries' own imports
+                        // dedup normally.
+                        self.queue.push_back((loc, false, depth + 1));
+                    }
+                }
+                continue;
+            }
             if let Node::Import { path, options, .. } = node {
                 if import_is_css(path, options) || is_variable_import(path) {
                     continue;

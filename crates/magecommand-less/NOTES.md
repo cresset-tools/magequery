@@ -1374,3 +1374,23 @@ error corpus, which can only catch reject-what-should-compile):
   gated to featureless imports; `@import "x" screen` + `@fv` use is now the
   4.6.7 NameError). Feature/inline/`layer(...)`/strict-imports cases keep
   the pre-flatten pass-1 expand path unchanged.
+
+## Phase 5 — `//@magento_import` eval wiring (§7.1, done)
+
+The parser half existed (directive node only under `magento_mode`, plain
+stripped comment otherwise — both quote forms, optional `(reference)`).
+Phase 5 wired the EVAL half: stage 1 (`resolve_imports`) expands each
+`MagentoImport` node via `ImportResolver::magento_import(path, reference,
+from)` into a synthetic featureless `ImportResolved` container holding one
+plain `@import '<entry>';` per returned `MagentoImportEntry` (its
+`(reference)` flag mapped to the `(reference)` option), queued so each
+entry fetches like a hand-written import. The container "is" the declaring
+file (`full_path`/`source` = declaring file, `multiple: true` so the
+synthetic path never once-dedups) — entry-fetch errors anchor at the
+directive's span in the declaring source, and the X1 flatten then splices
+the whole expansion flat at the directive's position (position-preserving,
+§7.3; whole-scope visibility across all entries). Unit tests: in-place
+in-order splice + cross-entry variable resolution, `(reference)` entries
+contributing scope but no bare output, the unset-mode plain-comment
+contract (resolver asserts the callback never fires), and a missing entry
+surfacing as a located Import error naming the path (§7.5).

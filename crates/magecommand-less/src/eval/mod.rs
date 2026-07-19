@@ -5989,6 +5989,166 @@ mod tests {
         assert_eq!(out, ".c {\n  r: 1;\n  color: teal;\n}");
     }
 
+    // ------------------------------------------------------------------
+    // §7.1 — the `//@magento_import` directive (magento_mode only).
+    // ------------------------------------------------------------------
+
+    /// A `MapResolver` that also answers `magento_import` with a fixed entry
+    /// list (the orchestration-provided, load-order-sorted expansion).
+    struct MagentoResolver {
+        files: MapResolver,
+        entries: Vec<crate::resolver::MagentoImportEntry>,
+        /// Set when the callback must NOT fire (magento_mode unset).
+        forbid: bool,
+    }
+
+    impl crate::resolver::ImportResolver for MagentoResolver {
+        fn resolve(
+            &self,
+            req: &crate::resolver::ImportRequest,
+        ) -> Result<crate::resolver::ResolvedImport, crate::resolver::ImportError> {
+            self.files.resolve(req)
+        }
+        fn magento_import(
+            &self,
+            _path: &str,
+            _reference: bool,
+            _from: &crate::resolver::FileInfo,
+        ) -> Result<Vec<crate::resolver::MagentoImportEntry>, crate::resolver::ImportError>
+        {
+            assert!(!self.forbid, "magento_import fired without magento_mode");
+            Ok(self.entries.clone())
+        }
+    }
+
+    /// §7.1/§7.3: the directive expands to the resolver's entry list, spliced
+    /// IN PLACE — output order is `.before`, then the entries in the given
+    /// (load) order, then `.after`; and the splice is whole-scope (a variable
+    /// from the SECOND module partial resolves in the first — X1 semantics
+    /// apply across the expansion).
+    #[test]
+    fn magento_import_splices_entries_in_place_in_order() {
+        let resolver = MagentoResolver {
+            files: MapResolver(vec![
+                (
+                    "Vendor_A::css/source/_module.less",
+                    ".mod-a { color: @accent; }\n",
+                ),
+                (
+                    "Vendor_B::css/source/_module.less",
+                    "@accent: teal;\n.mod-b { b: 1; }\n",
+                ),
+            ]),
+            entries: vec![
+                crate::resolver::MagentoImportEntry {
+                    import_path: "Vendor_A::css/source/_module.less".to_string(),
+                    reference: false,
+                },
+                crate::resolver::MagentoImportEntry {
+                    import_path: "Vendor_B::css/source/_module.less".to_string(),
+                    reference: false,
+                },
+            ],
+            forbid: false,
+        };
+        let mut opts = LessOptions::default();
+        opts.magento_mode = true;
+        let out = crate::compile(
+            ".before { x: 1; }\n//@magento_import 'source/_module.less';\n.after { y: 2; }\n",
+            &opts,
+            &resolver,
+        )
+        .unwrap()
+        .code
+        .trim_end()
+        .to_string();
+        assert_eq!(
+            out,
+            ".before {\n  x: 1;\n}\n.mod-a {\n  color: teal;\n}\n.mod-b {\n  b: 1;\n}\n.after {\n  y: 2;\n}"
+        );
+    }
+
+    /// `(reference)` entries contribute scope but no bare output (§7.1's
+    /// `//@magento_import (reference)` form — how `_extends.less`-style
+    /// libraries are pulled in per module).
+    #[test]
+    fn magento_import_reference_entries_hide_output() {
+        let resolver = MagentoResolver {
+            files: MapResolver(vec![(
+                "Vendor_A::css/source/_extends.less",
+                "@lib-var: 7px;\n.abs-thing { pad: @lib-var; }\n",
+            )]),
+            entries: vec![crate::resolver::MagentoImportEntry {
+                import_path: "Vendor_A::css/source/_extends.less".to_string(),
+                reference: true,
+            }],
+            forbid: false,
+        };
+        let mut opts = LessOptions::default();
+        opts.magento_mode = true;
+        let out = crate::compile(
+            "//@magento_import (reference) 'source/_extends.less';\n.own { pad: @lib-var; }\n",
+            &opts,
+            &resolver,
+        )
+        .unwrap()
+        .code
+        .trim_end()
+        .to_string();
+        // `.abs-thing` is hidden; the reference file's variable still lands.
+        assert_eq!(out, ".own {\n  pad: 7px;\n}");
+    }
+
+    /// With `magento_mode` UNSET the exact same source treats the line as a
+    /// plain stripped comment: the callback never fires (the resolver asserts)
+    /// and the directive contributes nothing.
+    #[test]
+    fn magento_import_is_plain_comment_without_magento_mode() {
+        let resolver = MagentoResolver {
+            files: MapResolver(Vec::new()),
+            entries: Vec::new(),
+            forbid: true,
+        };
+        let out = crate::compile(
+            ".before { x: 1; }\n//@magento_import 'source/_module.less';\n.after { y: 2; }\n",
+            &LessOptions::default(),
+            &resolver,
+        )
+        .unwrap()
+        .code
+        .trim_end()
+        .to_string();
+        assert_eq!(out, ".before {\n  x: 1;\n}\n.after {\n  y: 2;\n}");
+    }
+
+    /// A directive entry that fails to resolve is an Import error anchored at
+    /// the directive line, naming the missing path (§7.5 fault surfacing).
+    #[test]
+    fn magento_import_missing_entry_is_located_import_error() {
+        let resolver = MagentoResolver {
+            files: MapResolver(Vec::new()),
+            entries: vec![crate::resolver::MagentoImportEntry {
+                import_path: "Vendor_Gone::css/source/_module.less".to_string(),
+                reference: false,
+            }],
+            forbid: false,
+        };
+        let mut opts = LessOptions::default();
+        opts.magento_mode = true;
+        opts.filename = Some("styles.less".to_string());
+        let e = crate::compile(
+            "//@magento_import 'source/_module.less';\n",
+            &opts,
+            &resolver,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("Vendor_Gone::css/source/_module.less") && e.contains("wasn't found"),
+            "got: {e}"
+        );
+    }
+
     /// §C4 compress serializer — every assertion pinned against a live
     /// `less@4.6.7` probe (see NOTES.md "Gate T0 compress").
     #[test]
