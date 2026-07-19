@@ -88,6 +88,11 @@ const EXPECTED_PASS: &[&str] = &[
     "functions-each/functions-each",
     "ie-filters/ie-filters",
     "impor/impor",
+    "import/import-inline",
+    "import/import-interpolation",
+    "import/import-module",
+    "import/import-once",
+    "import/import-remote",
     "layer/layer",
     "lazy-eval/lazy-eval",
     "media/media",
@@ -119,6 +124,7 @@ const EXPECTED_PASS: &[&str] = &[
     "starting-style/starting-style",
     "strings/strings",
     "tailwind/tailwind",
+    "urls/urls",
     "variables-in-at-rules/variables-in-at-rules",
     "variables/variable-advanced",
     "variables/variables",
@@ -136,23 +142,54 @@ fn testdata_root() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// Resolves `@import`s against a directory tree, applying less.js's extension
-/// rule (`.css` stays CSS; no extension ⇒ append `.less`, plan §2.9).
+/// rule (`.css` stays CSS; no extension ⇒ append `.less`, plan §2.9) and its
+/// file-manager search order: the importing file's directory first, then the
+/// fixture root, then the vendored `node_modules` (the `@less/test-import-module`
+/// package). Remote `https://cdn.jsdelivr.net/npm/@less/test-data/…` URLs map
+/// onto the identical vendored tree (`import-remote` — same bytes, no network).
 struct FsResolver {
-    /// Directory the importing file lives in (imports are relative to it).
+    /// The fixture's directory (fallback for imports with no current file).
     root: PathBuf,
+}
+
+impl FsResolver {
+    fn candidates(&self, req: &ImportRequest) -> Vec<PathBuf> {
+        let raw = req.path.as_str();
+        // Strip a `?query` suffix (the remote fixture imports `empty.less?arg`).
+        let raw = raw.split('?').next().unwrap_or(raw);
+        if let Some(rest) = raw.strip_prefix("https://cdn.jsdelivr.net/npm/@less/test-data/") {
+            return vec![testdata_root().join(rest)];
+        }
+        let mut out = Vec::new();
+        let from_dir = req.from.current_directory.trim_end_matches('/');
+        if !from_dir.is_empty() {
+            out.push(PathBuf::from(from_dir).join(raw));
+        }
+        out.push(self.root.join(raw));
+        out.push(testdata_root().join("node_modules").join(raw));
+        out
+    }
 }
 
 impl ImportResolver for FsResolver {
     fn resolve(&self, req: &ImportRequest) -> Result<ResolvedImport, ImportError> {
-        let raw = req.path.as_str();
         let force_css = req.options.css == Some(true);
         let force_less = req.options.css == Some(false);
-        let is_css = force_css || (!force_less && raw.ends_with(".css"));
+        let is_css = force_css || (!force_less && req.path.split('?').next().unwrap_or("").ends_with(".css"));
 
-        let mut candidate = self.root.join(raw);
-        if candidate.extension().is_none() && !is_css {
-            candidate.set_extension("less");
+        let mut tried = Vec::new();
+        let mut found: Option<PathBuf> = None;
+        for mut candidate in self.candidates(req) {
+            if candidate.extension().is_none() && !is_css {
+                candidate.set_extension("less");
+            }
+            if candidate.is_file() {
+                found = Some(candidate);
+                break;
+            }
+            tried.push(candidate.display().to_string());
         }
+        let candidate = found.ok_or_else(|| ImportError::NotFound(tried.join(", ")))?;
 
         let bytes = fs::read_to_string(&candidate).map_err(|e| ImportError::Io {
             path: candidate.display().to_string(),
@@ -169,10 +206,10 @@ impl ImportResolver for FsResolver {
             ..FileInfo::default()
         };
 
-        let payload = if is_css {
-            ImportPayload::Css(Arc::from(bytes.as_str()))
-        } else if req.options.inline {
+        let payload = if req.options.inline {
             ImportPayload::Inline(Arc::from(bytes.as_str()))
+        } else if is_css {
+            ImportPayload::Css(Arc::from(bytes.as_str()))
         } else {
             ImportPayload::Less(Arc::from(bytes.as_str()))
         };

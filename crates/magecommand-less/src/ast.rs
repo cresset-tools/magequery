@@ -167,6 +167,34 @@ pub struct MixinArg {
     pub value: Box<Node>,
 }
 
+/// An `@import` resolved by the pre-eval import pass (plan §2.9 stage 1, never
+/// parsed): the fetched + parsed payload attached at the import's source
+/// position. Stage 2 (eval) splices/emits it position-preservingly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportResolved {
+    /// The imported LESS file's parsed rules (empty for `skip`/`(inline)`).
+    pub rules: Vec<Node>,
+    /// The verbatim payload of an `(inline)` import.
+    pub inline: Option<String>,
+    /// The resolver's canonical path — the once-dedup key at eval.
+    pub full_path: String,
+    /// Hard skip decided at fetch: a duplicate/cyclic once-import, or a missing
+    /// `(optional)` file.
+    pub skip: bool,
+    /// `(multiple)` — exempt from once-dedup.
+    pub multiple: bool,
+    /// `(reference)` — rules are visibility-blocked (§2.8) until referenced.
+    pub reference: bool,
+    /// Media features to wrap the payload in at eval (`@import "x" screen`).
+    pub features: Option<Box<Node>>,
+    /// The imported file's directory (base for its own relative imports/urls).
+    pub current_directory: String,
+    /// The `rootpath` in effect for urls generated from this file (§2.18).
+    pub rootpath: String,
+    /// The original import statement's span.
+    pub span: Span,
+}
+
 /// The AST / runtime-value node (plan §9.2). `#[non_exhaustive]` so the set can
 /// grow (the eval step adds a few runtime-only kinds) without a major bump.
 #[derive(Debug, Clone, PartialEq)]
@@ -201,6 +229,8 @@ pub enum Node {
     Closure { inner: Box<Node>, scope: u64 },
     /// An `@import` (plan §2.9). `options`/`features` retained as source text.
     Import { path: Box<Node>, options: Vec<String>, features: Option<Box<Node>>, span: Span },
+    /// An `@import` resolved by the pre-eval import pass (eval-only, plan §2.9).
+    ImportResolved(Box<ImportResolved>),
     /// A comment. `line` = a `//` comment (stripped from output; plan §2.3).
     Comment { text: String, line: bool, span: Span },
     /// The `//@magento_import` directive (only in `magento_mode`; plan §7.1).
@@ -282,6 +312,9 @@ impl Node {
                 AtRuleBlock::Rules(rules) => rules.iter().any(Node::is_output_visible),
             },
             Node::Anonymous(s) => !s.is_empty(),
+            Node::ImportResolved(ir) => {
+                !ir.skip && (ir.inline.is_some() || ir.rules.iter().any(Node::is_output_visible))
+            }
             _ => true,
         }
     }

@@ -22,7 +22,57 @@ impl ImportResolver for FsResolver {
         let force_less = req.options.css == Some(false);
         let is_css = force_css || (!force_less && raw.ends_with(".css"));
 
-        let mut candidate = self.root.join(raw);
+        // Remote test-data URLs map onto the local fixture tree when it is
+        // present (mirrors the harness's `import-remote` mapping).
+        let raw = raw.split('?').next().unwrap_or(raw);
+        if let Some(rest) = raw.strip_prefix("https://cdn.jsdelivr.net/npm/@less/test-data/") {
+            let mut up = self.root.clone();
+            for anc in self.root.ancestors() {
+                if anc.ends_with("less-testdata") {
+                    up = anc.to_path_buf();
+                    break;
+                }
+            }
+            let candidate = up.join(rest);
+            let bytes = std::fs::read_to_string(&candidate).map_err(|e| ImportError::Io {
+                path: candidate.display().to_string(),
+                message: e.to_string(),
+            })?;
+            let dir = candidate
+                .parent()
+                .map(|p| format!("{}/", p.display()))
+                .unwrap_or_default();
+            let file = FileInfo {
+                filename: candidate.display().to_string(),
+                current_directory: dir,
+                ..FileInfo::default()
+            };
+            let payload = if req.options.inline {
+                ImportPayload::Inline(Arc::from(bytes.as_str()))
+            } else if is_css {
+                ImportPayload::Css(Arc::from(bytes.as_str()))
+            } else {
+                ImportPayload::Less(Arc::from(bytes.as_str()))
+            };
+            return Ok(ResolvedImport { file, payload });
+        }
+        // The importing file's directory first (relative imports), then the
+        // entry root — matching the less.js file-manager search order.
+        let from_dir = req.from.current_directory.trim_end_matches('/');
+        let mut candidate = if from_dir.is_empty() {
+            self.root.join(raw)
+        } else {
+            let c = PathBuf::from(from_dir).join(raw);
+            let mut with_ext = c.clone();
+            if with_ext.extension().is_none() && !is_css {
+                with_ext.set_extension("less");
+            }
+            if with_ext.is_file() {
+                c
+            } else {
+                self.root.join(raw)
+            }
+        };
         if candidate.extension().is_none() && !is_css {
             candidate.set_extension("less");
         }

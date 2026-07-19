@@ -275,6 +275,7 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
         | Node::MixinDefinition(_)
         | Node::Closure { .. }
         | Node::MixinCall(_)
+        | Node::ImportResolved(_)
         | Node::MagentoImport { .. } => {}
     }
 }

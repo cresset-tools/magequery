@@ -115,6 +115,12 @@ pub struct LessOptions {
     pub php_float_shim: bool,
     /// Profile-gated PHP-encoding shim (off by default) — diagnostic only (§3-G).
     pub php_encoding_shim: bool,
+    /// Eval-depth cap for mixin/detached-ruleset/import recursion (plan §2.5)
+    /// — the runaway-input guard. `None` = the engine default (128). less.js
+    /// has no explicit cap (a runaway dies on the JS call stack); we error
+    /// cleanly ("mixin recursion limit exceeded") instead of recursing until
+    /// the native stack or memory is exhausted.
+    pub max_eval_depth: Option<usize>,
 }
 
 impl Default for LessOptions {
@@ -145,6 +151,7 @@ impl Default for LessOptions {
             magento_mode: false,
             php_float_shim: false,
             php_encoding_shim: false,
+            max_eval_depth: None,
         }
     }
 }
