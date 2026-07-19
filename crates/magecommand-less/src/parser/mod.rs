@@ -272,6 +272,10 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         let name = name.to_string();
+        // Colon GLUED to the name = definitely a variable declaration; with
+        // whitespace between (`@page :left`) it may be an at-rule + pseudo,
+        // so the permissive fallback below must not fire.
+        let glued_colon = self.cur.cur() == Some(b':');
         self.cur.skip_whitespace();
         if !self.cur.eat(b':') {
             self.cur.i = save;
@@ -293,7 +297,17 @@ impl<'a> Parser<'a> {
                 span: self.span(start),
             }));
         }
-        let value = self.parse_value()?;
+        // Structured value first; a variable declaration whose value the
+        // entity chain rejects (`@list: #selector, .bar;`) falls back to the
+        // PERMISSIVE raw capture, like less.js (permissive-parse).
+        let vsave = self.here();
+        let value = match self.parse_value() {
+            Ok(v) => v,
+            Err(_) => {
+                self.cur.i = vsave;
+                self.parse_custom_property_raw()
+            }
+        };
         self.cur.skip_whitespace();
         let important = self.parse_important();
         self.cur.skip_trivia();
@@ -306,7 +320,29 @@ impl<'a> Parser<'a> {
                 span: self.span(start),
             }))
         } else {
-            // Not a clean declaration — back off to at-rule handling.
+            // Not a clean structured value — retry with the PERMISSIVE raw
+            // capture (brace-balanced), which owns arrow-function-ish values
+            // (`@this: () => { …; };`, permissive-parse) — before backing off
+            // to at-rule handling. Only for a glued `@name:` head — a spaced
+            // colon (`@page :left`) is an at-rule + pseudo-class.
+            if !glued_colon {
+                self.cur.i = save;
+                return Ok(None);
+            }
+            self.cur.i = vsave;
+            let value = self.parse_custom_property_raw();
+            self.cur.skip_whitespace();
+            let important = self.parse_important();
+            self.cur.skip_trivia();
+            if self.cur.cur() == Some(b';') || self.cur.cur() == Some(b'}') || self.cur.eof() {
+                self.cur.eat(b';');
+                return Ok(Some(Node::VariableDecl {
+                    name,
+                    value: Box::new(value),
+                    important,
+                    span: self.span(start),
+                }));
+            }
             self.cur.i = save;
             Ok(None)
         }
@@ -1040,7 +1076,9 @@ impl<'a> Parser<'a> {
         self.cur.src()[start..self.here()].to_string()
     }
 
-    /// Consume a balanced `open … close` region (handles nesting + strings).
+    /// Consume a balanced `open … close` region (handles nesting, strings, and
+    /// comments — an apostrophe inside `// isn't possible` must not start a
+    /// string scan that swallows a closing bracket).
     fn skip_balanced(&mut self, open: u8, close: u8) {
         if self.cur.cur() != Some(open) {
             return;
@@ -1050,6 +1088,10 @@ impl<'a> Parser<'a> {
         while let Some(b) = self.cur.cur() {
             if b == b'"' || b == b'\'' {
                 self.cur.scan_string();
+                continue;
+            }
+            if self.cur.at_line_comment() || self.cur.at_block_comment() {
+                self.cur.scan_comment();
                 continue;
             }
             if b == open {
@@ -1307,6 +1349,20 @@ impl<'a> Parser<'a> {
             }
             let before = self.here();
             items.push(self.parse_addition()?);
+            // A bracket run GLUED to the item (`input[type=text]`) joins it
+            // verbatim — less.js keeps such attribute-ish tails attached, so
+            // value rendering and selector re-parse stay unspaced
+            // (parse-interpolation).
+            while self.here() > before && self.cur.cur() == Some(b'[') {
+                let bs = self.here();
+                self.skip_balanced(b'[', b']');
+                let txt = self.cur.src()[bs..self.here()].to_string();
+                match items.last_mut() {
+                    Some(Node::Keyword(k)) => k.push_str(&txt),
+                    Some(Node::Anonymous(a)) => a.push_str(&txt),
+                    _ => items.push(Node::Anonymous(txt)),
+                }
+            }
             if self.here() == before {
                 // An arithmetic operator stranded after a quoted string is
                 // less.js's hard `Unrecognised input` ParseError (F13:
@@ -1507,8 +1563,11 @@ impl<'a> Parser<'a> {
                 match self.try_mixin_call_arg()? {
                     Some(m) => Ok(m),
                     None => {
+                        // The whole `.ident` run is one token (`@classes: .a,
+                        // .b` interpolates as class selectors — never `. a`).
                         let s = self.here();
                         self.cur.bump();
+                        self.cur.scan_ident();
                         Ok(Node::Anonymous(self.cur.src()[s..self.here()].to_string()))
                     }
                 }
@@ -2185,9 +2244,11 @@ fn split_mixin_parens(elements: &[Element]) -> (Vec<Element>, Option<String>) {
             els.pop();
             return (els, Some(args));
         }
-        // A `.name( … )` element (parens attached to the name).
+        // A `.name( … )` element (parens attached to the name). A `:` in the
+        // head is a pseudo-class (`.foo:not(…)`), never a mixin name — less.js
+        // mixin names are `[#.][\w-]+` runs (selectors fixture).
         if let Some(p) = v.find('(') {
-            if v.ends_with(')') {
+            if v.ends_with(')') && !v[..p].contains(':') {
                 let args = v[p + 1..v.len() - 1].to_string();
                 last.value.truncate(p);
                 return (els, Some(args));

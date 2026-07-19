@@ -76,6 +76,21 @@ impl ImportResolver for FsResolver {
         if candidate.extension().is_none() && !is_css {
             candidate.set_extension("less");
         }
+        // npm-style fallback: the vendored less-testdata/node_modules tree.
+        if !candidate.is_file() {
+            for anc in self.root.ancestors() {
+                if anc.ends_with("less-testdata") {
+                    let mut alt = anc.join("node_modules").join(raw);
+                    if alt.extension().is_none() && !is_css {
+                        alt.set_extension("less");
+                    }
+                    if alt.is_file() {
+                        candidate = alt;
+                    }
+                    break;
+                }
+            }
+        }
 
         let bytes = std::fs::read_to_string(&candidate).map_err(|e| ImportError::Io {
             path: candidate.display().to_string(),

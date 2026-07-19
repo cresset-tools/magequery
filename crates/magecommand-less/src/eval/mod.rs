@@ -843,8 +843,27 @@ impl<'a> Ctx<'a> {
                     return Ok(()); // guard failed → ruleset emits nothing
                 }
             }
-            own_sel.push(self.render_selector(sel)?);
-            sel_extends.push(sel.extend_list.clone());
+            let interpolated = sel
+                .elements
+                .iter()
+                .any(|e| e.value.contains("@{") || e.value.contains("${"));
+            let rendered = self.render_selector(sel)?;
+            if interpolated && rendered.contains(',') {
+                // less.js RE-PARSES interpolated selectors — a comma list in
+                // the variable expands to a selector GROUP
+                // (`@{inputs} { … }`, parse-interpolation).
+                for part in split_top(&rendered, ',') {
+                    let part = part.trim();
+                    if part.is_empty() {
+                        continue;
+                    }
+                    own_sel.push(part.to_string());
+                    sel_extends.push(sel.extend_list.clone());
+                }
+            } else {
+                own_sel.push(rendered);
+                sel_extends.push(sel.extend_list.clone());
+            }
         }
         let joined = join_selectors(parent_paths, &own_sel);
 
@@ -1154,7 +1173,13 @@ impl<'a> Ctx<'a> {
             // (`--x: rgba(0, 30, 0, 238)` folds); the raw capture stays
             // unevaluated with only `@{}` interpolation run inside it.
             let raw = match d.value.as_ref() {
-                Node::Anonymous(s) => self.interpolate(s)?,
+                // Interpolation AND bare `@ref` substitution — less.js's
+                // permissiveValue keeps Variable entities in raw captures
+                // (`--fortran: read (*, iostat=@iostat)`, permissive-parse).
+                Node::Anonymous(s) => {
+                    let t = self.interpolate(s)?;
+                    if t.contains('@') { self.resolve_prelude_vars(&t)? } else { t }
+                }
                 other => {
                     let v = self.eval_value(other)?;
                     render_value(&v, self.opts.num_precision)
