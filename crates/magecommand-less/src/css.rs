@@ -116,6 +116,8 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
         Node::Root(rules) => gen_root_rules(rules, ctx, out),
         // Transparent for serialization — the file tag only matters at eval.
         Node::WithFile { inner, .. } => gen(inner, ctx, out),
+        // Inline JS never renders — eval always errors on it first (§C-jserr).
+        Node::JavaScript { .. } => {}
         Node::Ruleset(r) => gen_ruleset(&r.selectors, &r.rules, ctx, out),
         Node::Declaration(d) => {
             out.push_str(&d.name);
@@ -193,7 +195,7 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
             }
         }
         Node::Keyword(k) => out.push_str(k),
-        Node::Call { name, args } => {
+        Node::Call { name, args, .. } => {
             out.push_str(name);
             out.push('(');
             for (i, a) in args.iter().enumerate() {

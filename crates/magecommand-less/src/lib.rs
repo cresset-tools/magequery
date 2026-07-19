@@ -110,7 +110,12 @@ pub fn compile(
         &augmented
     };
     let root = parse(source, file, opts)?;
-    eval(&root, opts, resolver)
+    // The NORMALIZED entry source backs error locations/excerpts for errors
+    // raised in the entry file (§5.5) — same normalization the parser applied,
+    // so byte indexes line up.
+    let entry_source: std::sync::Arc<str> =
+        std::sync::Arc::from(lex::normalize_source(source).as_ref());
+    eval::eval_with_source(&root, opts, resolver, entry_source)
 }
 
 /// less.js `Parser.serializeVars`: `@name: value;` runs (the `@` prefix and

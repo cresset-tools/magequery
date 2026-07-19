@@ -1,0 +1,2 @@
+NameError: Error evaluating function `darken`: Recursive variable definition for @bodyColor in {path}recursive-variable.less on line 1, column 13:
+1 @bodyColor: darken(@bodyColor, 30%);

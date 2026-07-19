@@ -187,6 +187,10 @@ pub struct MixinArg {
 pub struct ImportResolved {
     /// The imported LESS file's parsed rules (empty for `skip`/`(inline)`).
     pub rules: Vec<Node>,
+    /// The imported file's normalized source text — the base for error
+    /// locations/excerpts of errors raised while evaluating its rules (§5.5).
+    /// Empty for `skip`/`(inline)`/pre-parsed payloads.
+    pub source: std::sync::Arc<str>,
     /// The verbatim payload of an `(inline)` import.
     pub inline: Option<String>,
     /// The resolver's canonical path — the once-dedup key at eval.
@@ -292,9 +296,17 @@ pub enum Node {
     /// A CSS keyword / bare identifier (incl. named colors, emitted verbatim).
     Keyword(String),
     /// A function call `name(args)` (plan §2.7). Unknown names pass through.
-    Call { name: String, args: Vec<Node> },
+    /// `span` = the call's source position — less.js `Call.eval` re-anchors any
+    /// error thrown while evaluating the call (args included) at this index
+    /// (§5.5 error provenance).
+    Call { name: String, args: Vec<Node>, span: Span },
     /// A `url(...)` value (plan §2.9/§2.18).
     Url(Box<Node>),
+    /// An inline-JavaScript backtick expression `` `…` `` (plan §8/§C-jserr).
+    /// Never EXECUTED — evaluation raises less.js's disabled-JS error
+    /// byte-exactly (`Inline JavaScript is not enabled. Is it set in your
+    /// options?`); the feature itself stays unimplemented.
+    JavaScript { expr: String, escaped: bool, span: Span },
     /// A parenthesized value (plan §2.4). `in_op` mirrors less.js `parensInOp`:
     /// set when the paren is an operand of an operation (or a `-` negation) — the
     /// only case genCSS keeps literal parens for a non-folded result (§2.4/calc).

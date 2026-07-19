@@ -39,14 +39,34 @@ less-testdata/node_modules/bootstrap-less-port/
                               The npm package (0.3.0, MIT — LICENSE included)
                               the 3rd-party/bootstrap4 fixture imports.
 
+ALSO VENDORED (Gate T0 error half — the error-message corpus, plan §5.2/§5.5)
+------------------------------------------------------------------------------
+less-testdata/tests-error/  The byte-exact error-message fixtures: each
+                            <name>.less with a sibling <name>.txt (the expected
+                            `err.toString()` output, placeholder-substituted);
+                            `imports/` subdirs hold import helpers. 74 in-scope
+                            entries (47 eval + 27 parse). The 19 OUT fixtures
+                            (plan §5.2: @plugin-error x15 = functions-* +
+                            root-func-undefined-2, plugin-config x3 =
+                            plugin-1/2/3 + the eval/plugin/ helper dir,
+                            inline-JS x1 = javascript-undefined-var) are
+                            EXCLUDED at vendor time — they assert JS-plugin /
+                            inline-JS execution behavior a pure headless
+                            compiler never reproduces. The exclusion list lives
+                            in scripts/vendor-less-testdata.sh and is pinned by
+                            the CLASSIFIED_OUT meta-test in tests/fixtures.rs.
+                            The suites' cosmiconfig options (strictMath: true →
+                            math parens, strictUnits: true, javascriptEnabled:
+                            true) are transcribed into the harness.
+
 STILL NOT VENDORED (see NOTES.md, plan §5.2/§5.4/§8)
 ----------------------------------------------------
-- tests-error/   the error-message fixtures (byte-exact err.toString()) — a
-                 later increment.
 - tests-config plugin dirs (filemanagerPlugin, postProcessorPlugin,
   preProcessorPlugin, visitorPlugin), debug/ (dumpLineNumbers), sourcemaps*,
   js-type-errors/no-js-errors — JS/plugin/source-map surface, out of scope
-  for a pure headless compiler (plan §5.2/§8).
+  for a pure headless compiler (plan §5.2/§8). (The disabled-JS error message
+  `Inline JavaScript is not enabled. Is it set in your options?` is pinned by
+  a unit test instead — §C-jserr; js-type-errors needs real JS execution.)
 
 Within tests-unit, the harness additionally SKIPS the `javascript/`, `plugin/`,
 `plugin-module/`, `plugin-preeval/` sub-suites (JS/plugin — plan §5.2). The

@@ -908,10 +908,13 @@ option-driven `tests-config/` suites). The subsystems:
   namespace names during candidate lookup; injected rulesets freeze frames as
   closures so `.@{param}` names resolve later).
 
-Remaining red (5): `at-rules-compressed`, `at-rules-compressed-evaluation`,
-`compression` — the §C4 compress serializer (deliberately not forced this
-phase); `import/import` + `config/3rd-party/bootstrap4` — need JS `@plugin`
-execution (out of scope, §8).
+Remaining red (4 after the Gate T0 reclassification below):
+`at-rules-compressed`, `at-rules-compressed-evaluation`, `compression` — the
+§C4 compress serializer (deliberately not forced this phase); and
+`config/3rd-party/bootstrap4` — needs JS `@plugin` execution (out of scope,
+§8; the plan's classification keeps it in-scope, so it stays a permanent
+xfail). `import/import` (the other JS-plugin fixture) is reclassified OUT per
+plan §5.2 — see the Gate T0 error-half section.
 
 Known deviations kept (noted while porting): ~~URL rewriting uses the current
 eval file's rootpath~~ (FIXED in the Phase 4 review — urls and resource calls
@@ -1053,3 +1056,132 @@ regression smoke. Corpus stays 122/127 (floor 122, 5 xfail), 138 unit tests.
 - **P4DR-11 (selector join):** `&`-only selectors at root (`& + & {}`)
   emit garbage instead of being pruned (less.js drops rules whose joined
   selector is empty) — milestone-1 JoinSelector/genCSS empty-path pruning.
+
+## Gate T0 error half — the 7-kind error renderer + the 74-fixture error corpus
+
+**200-fixture Gate T0 state: compile 122/126 · error 74/74 (floor 196; 4
+xfail).** The error corpus is FULLY green. Every semantic below was read from
+less.js 4.6.7 SOURCE (`less-error.js`, `parser.js`, `parser-input.js`, the
+tree nodes) and, where goldens looked surprising, probed against a locally
+installed `less@4.6.7`.
+
+### Corpus classification (plan §5.2 — the meta-test)
+
+- In-scope = **126 compile + 74 error = 200**; OUT = exactly the classified
+  **36**: compile 17 (plugin/`@plugin` x8 — now including `import/import`,
+  which loads plugin-simple and calls the plugin-defined `pi-anon()` —,
+  sourcemap x5, debug-linenumbers x3, inline-JS x1) + error 19 (`@plugin`-error
+  x15 = `functions-*` + `root-func-undefined-2`, plugin-config x3 =
+  `plugin-1/2/3`, inline-JS x1 = `javascript-undefined-var`, whose golden is
+  interpolation INSIDE an executed backtick under `javascriptEnabled: true`).
+- `CLASSIFIED_OUT` in tests/fixtures.rs pins all 36 names; the
+  `meta/corpus-classification` trial asserts the list is exactly 36 distinct
+  names, that the on-disk runnable set splits into exactly 126+74 in-scope
+  entries, and that the floor lists only name in-scope fixtures — a tag bump
+  adding a fixture fails loudly. The 19 OUT error fixtures are excluded at
+  VENDOR time (scripts/vendor-less-testdata.sh; VENDOR.txt documents it).
+- The disabled-JS error surface (§C-jserr) is IN-scope by unit test: backticks
+  parse to a `Node::JavaScript` and eval raises the byte-exact `Inline
+  JavaScript is not enabled. Is it set in your options?` (locked in
+  `eval::tests`; the `tests-config/no-js-errors` file itself is not vendored —
+  including it would break the plan's 200/36 arithmetic). With
+  `javascriptEnabled: true` the `@{…}` interpolation still runs first (its
+  NameErrors surface like less.js's); actual execution reports unsupported.
+
+### The renderer (`error.rs`, ported from `less-error.js` `toString()`)
+
+- Label = `${type}Error:` — the crate's `ErrorKind::Import` carries less.js's
+  `'File'` type, so it renders `FileError:` (import-missing).
+- ` in <file>` iff filename; ` on line L, column C:` iff located (column
+  stored 1-based = less.js's 0-based + 1).
+- Excerpt = `lines[line-2..=line]` of `split('\n')`: missing neighbours are
+  SKIPPED, but an empty-string line renders `N ` with a trailing space; the
+  gutter is the plain number (NOT right-aligned); the string ends `\n`.
+- No filename ⇒ `Kind: msg\n\n` — less.js's `undefined !== null` quirk
+  (namespace-*-not-found goldens).
+- The harness compares byte-exact up to TRAILING newlines: two vendored
+  goldens (property-undefined, recursive-property) carry a stale extra `\n`
+  that real lessc 4.6.7 verifiably does not emit (probed) — the plan's ground
+  truth is the binary.
+
+### Provenance plumbing (§5.5)
+
+- `LessError` carries `(kind, message, filename, index)` + located
+  `line/column/extract`; `locate()` fills from a normalized source.
+  `wrapped` ports less.js `Call.eval`'s `hasOwnProperty('line')` wrap guard.
+- Parser errors locate at construction. Eval errors locate via the FILE-SCOPE
+  stack: `FileScope`/`ImportResolved` now carry the file's normalized source
+  (`Arc<str>`); `compile()` threads the entry source (`eval_with_source`).
+- The less.js error-anchoring chain is ported: **Call.eval** re-anchors any
+  un-wrapped error at the call's index with the ``Error evaluating function
+  `name`: …`` wrap (arg-eval errors included; `Node::Call` gained a `span`);
+  **MixinCall.eval** rethrows `{...e, index: call, filename}` — everything a
+  mixin call raises (body errors included) re-anchors at the call;
+  **Declaration.eval** anchors index-less errors (operations' plain throws) at
+  the declaration. Variable/Property/NamespaceValue errors carry their own
+  index (`$prop` at the accessor, lookup `[k]` at the bracket — the
+  value-position `@dr[k]` span starts at `[`, matching less.js's post-name
+  `i`); the mixin-call lookup form (`#ns[k]`) has NO fileInfo upstream and
+  stays honestly location-less.
+- The root-properties error blames the DECLARATION's own site/file (recorded
+  during eval where the file scope is live — mixin-emitted and imported
+  declarations included), not the call/import position.
+- Variable declarations now EAGERLY evaluate their value in pass 2 (discarded)
+  — less.js's `Ruleset.eval` runs `Declaration.eval` on every rule, which is
+  how `@a: darken(@a, 30%)` errors while never referenced.
+
+### Error-site fidelity fixes (each verified against source/probe)
+
+- `Incompatible units` / the new strict-units `Multiple units in dimension`
+  check (post-eval walk) are plain `new Error` throws upstream ⇒ **Syntax**,
+  anchored at the declaration. `Could not evaluate variable call` ⇒ Syntax.
+- `Invalid % without number`: a bare `%` parses as a KEYWORD and errors only
+  when it would RENDER (post-eval walk incl. re-emitted call args) — so
+  `unit(100, %)` stays legal.
+- svg-gradient ports less.js's exact error ladder (shape check before
+  direction check; the 2-arg non-list defers to the direction error —
+  svg-gradient3/6).
+- The import machinery: resolver-miss ⇒ `FileError: '<path>' wasn't found.
+  Tried - <list>` at the `@import` in the importing file (the harness resolver
+  formats its candidate list npm-style to match the golden); `@import <word>`
+  ⇒ `malformed import statement`; a missing `;` ⇒ `missing semi-colon or
+  unrecognised media features on import` — both Syntax, reported at the
+  `@import` (less.js resets `i = index` before erroring).
+- Parser furthest-failure machinery (minimal port): value parens are `'('
+  addition ')'` parsed STRICT-FIRST (less.js `sub`) — a stop short of `)`
+  records a soft `Expected ')'` candidate and backtracks; if the whole
+  statement fails the candidate is reported (parens-error-1/2/3 positions
+  exact), if another alternative parses (`a:hover when (2 = true)`) it is
+  cleared. Root `}` / EOF-in-block / unmatched input surface as less.js's
+  `Unrecognised input` + `Possibly missing …` hints from the failure char.
+- `$parseUntil` pairing in permissive captures AND the paren verbatim
+  fallback: mismatched closers ⇒ `Expected ']'` at the offender; unclosed
+  same-line quotes ⇒ `Expected '"'` at the opener
+  (custom-property-unmatched-block-1/2/3).
+- Selector-grammar errors: guards on multiple selectors (both less.js check
+  sites, incl. the comma-lookahead `,\s*(not\s*)?\(` that keeps comma-OR
+  guards working), extend-on-its-own, extend-not-at-end (position after
+  whitespace), `@media`/`@container` `media definitions require block
+  statements after any features` (missing AND unclosed blocks), `expected
+  condition` after `when`, `expected ')' got ''` for `url(` in at-rule
+  preludes, the mixed `;`/`,` mixin-arg delimiter state machine (both error
+  positions exact), `@@x:` ⇒ `Unrecognised input` at the statement start, a
+  lone `*` is not a property name, a bare spaced `:` ends a selector element,
+  and invalid hex literals fail SOFT (the statement then dies at its furthest
+  point — invalid-color-with-comment's post-comment `;`).
+- CSS guards may not call `default()`: less.js primes `defaultFunc.error`
+  during selector eval — reproduced with the Call-wrapped Syntax message,
+  located by source search (guards are raw text without spans).
+- At-rule preludes resolve bare `@var`s STRICTLY (undefined ⇒ NameError at the
+  variable, located by token search; quoted strings in preludes are skipped —
+  `@impor "…@import.less"` stays literal). Lenient mode is kept for raw
+  permissive captures.
+
+### Known deviations (deliberate)
+
+- Two stale goldens tolerated via trailing-newline normalization (above).
+- The guard/prelude token-search locators are heuristics (first standalone
+  occurrence) — exact for the corpus, approximate in pathological inputs.
+- `javascript-undefined-var`'s exact golden needs interpolation inside an
+  EXECUTED backtick context; it is OUT (inline-JS x1) — our enabled-JS path
+  interpolates then reports execution unsupported.

@@ -160,19 +160,14 @@ pub fn dispatch(name: &str, args: &[Node], np: u8) -> Result<Option<Node>, LessE
         "negation" => color_blend::blend(a, color_blend::Mode::Negation),
 
         // --- misc/resource ---
-        "svg-gradient" => Ok(svg::svg_gradient(a, np)),
+        "svg-gradient" => svg::svg_gradient(a, np),
 
         _ => return Ok(None),
     };
-    // less.js `Call.eval` wraps anything a function throws:
-    // ``Error evaluating function `name`: <message>`` (the caught-and-rethrown
-    // form; `e.type || 'Runtime'` keeps an Argument throw's kind).
-    out.map_err(|e| {
-        LessError::new(
-            e.kind,
-            format!("Error evaluating function `{name}`: {}", e.message),
-        )
-    })
+    // The ``Error evaluating function `name`: …`` wrap now lives at the eval
+    // call site (`Ctx::eval_call`), mirroring less.js `Call.eval` — it must
+    // cover ARGUMENT-evaluation errors too and carries the call's index.
+    out
 }
 
 /// Build a `Dimension` node, mirroring the less.js constructor's NaN throw

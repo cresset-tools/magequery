@@ -121,6 +121,15 @@ pub struct Ctx<'a> {
     /// rewriting and resource reads use the file the token was WRITTEN in
     /// (§2.18, review F3/F8).
     decl_file: Vec<std::sync::Arc<crate::ast::FileTag>>,
+    /// Depth of enclosing at-rule bodies — 0 + no self_paths = stylesheet root
+    /// (where a surviving declaration is the root-properties error, §5.5).
+    at_rule_depth: usize,
+    /// The first root-level declaration seen during eval, pre-located at ITS
+    /// OWN span/file — the error the post-eval root check raises (less.js
+    /// `checkValidNodes` uses the node's fileInfo/index, so a declaration
+    /// reaching root through a mixin call or import blames the declaration
+    /// site, not the call).
+    root_decl_err: Option<LessError>,
     warnings: Vec<Warning>,
 }
 
@@ -227,11 +236,24 @@ enum AtBody {
     Verbatim(String),
 }
 
-/// Evaluate a parsed AST to [`Css`] (plan §9.5).
+/// Evaluate a parsed AST to [`Css`] (plan §9.5). Errors carry file/index
+/// provenance but no entry-file excerpt (the AST does not retain source text);
+/// [`eval_with_source`] — what `compile` uses — supplies it.
 pub fn eval(
     root: &Arc<Node>,
     opts: &LessOptions,
     resolver: &dyn ImportResolver,
+) -> Result<Css, LessError> {
+    eval_with_source(root, opts, resolver, std::sync::Arc::from(""))
+}
+
+/// [`eval`] with the entry file's NORMALIZED source, the base for error
+/// locations/excerpts in the entry file (§5.5).
+pub(crate) fn eval_with_source(
+    root: &Arc<Node>,
+    opts: &LessOptions,
+    resolver: &dyn ImportResolver,
+    entry_source: std::sync::Arc<str>,
 ) -> Result<Css, LessError> {
     let mut rules = match root.as_ref() {
         Node::Root(r) => r.clone(),
@@ -245,10 +267,10 @@ pub fn eval(
     // source position (`Node::ImportResolved`). Stage 2 (eval, below) splices
     // them position-preservingly.
     if opts.process_imports {
-        import::resolve_imports(&mut rules, opts, resolver)?;
+        import::resolve_imports(&mut rules, opts, resolver, entry_source.clone())?;
     }
 
-    let mut ctx = Ctx::new(opts, resolver);
+    let mut ctx = Ctx::new(opts, resolver, entry_source);
 
     // globalVars / modifyVars are prepended/appended rulesets (plan §2.0). Their
     // implementation is deferred; the default harness passes none.
@@ -267,10 +289,15 @@ pub fn eval(
         })
     }
     if own.iter().any(|n| matches!(n, Node::Declaration(_))) || has_root_decl(&children) {
-        return Err(LessError::new(
-            ErrorKind::Syntax,
-            "Properties must be inside selector blocks. They cannot be in the root",
-        ));
+        // Prefer the located error recorded at the declaration's own site
+        // during eval (mixin-emitted/imported declarations blame the
+        // declaration, less.js `checkValidNodes`).
+        return Err(ctx.root_decl_err.take().unwrap_or_else(|| {
+            LessError::new(
+                ErrorKind::Syntax,
+                "Properties must be inside selector blocks. They cannot be in the root",
+            )
+        }));
     }
     outs.extend(children);
     ctx.pop_frame();
@@ -332,8 +359,13 @@ pub fn eval(
 
 impl<'a> Ctx<'a> {
     /// A fresh evaluation context over `opts` + `resolver`.
-    fn new(opts: &'a LessOptions, resolver: &'a dyn ImportResolver) -> Ctx<'a> {
-        let entry = FileScope::entry(opts);
+    fn new(
+        opts: &'a LessOptions,
+        resolver: &'a dyn ImportResolver,
+        entry_source: std::sync::Arc<str>,
+    ) -> Ctx<'a> {
+        let mut entry = FileScope::entry(opts);
+        entry.source = entry_source;
         let mut once_imported = rustc_hash::FxHashSet::default();
         if !entry.filename.is_empty() {
             once_imported.insert(entry.filename.clone());
@@ -361,6 +393,8 @@ impl<'a> Ctx<'a> {
             complex_extend_warned: rustc_hash::FxHashSet::default(),
             decl_file: Vec::new(),
             warnings: Vec::new(),
+            at_rule_depth: 0,
+            root_decl_err: None,
         }
     }
 
@@ -373,6 +407,50 @@ impl<'a> Ctx<'a> {
 
     fn err(&self, kind: ErrorKind, msg: impl Into<String>) -> LessError {
         LessError::new(kind, msg)
+    }
+
+    /// A namespace-lookup error (less.js `NamespaceValue`): the golden output
+    /// is LOCATION-LESS — less.js's node carries an index (so
+    /// `Declaration.eval`'s re-anchor fallback skips it) but no fileInfo, and
+    /// `toString()` omits the whole location tail without a filename. `index:
+    /// Some(0)` with no filename reproduces exactly that.
+    fn lookup_err(&self, msg: impl Into<String>) -> LessError {
+        let mut e = LessError::new(ErrorKind::Name, msg);
+        e.index = Some(0);
+        e
+    }
+
+    /// Find a standalone occurrence of `tok` (e.g. `@name`) in the current
+    /// file's source — the fallback locator for errors raised from re-parsed
+    /// raw text that carries no span. Boundary-checked so `@name` never
+    /// matches inside `@name-longer`.
+    fn find_token_in_source(&self, tok: &str) -> Option<usize> {
+        let scope = self.file_stack.last()?;
+        let src: &str = &scope.source;
+        let mut from = 0;
+        while let Some(pos) = src[from..].find(tok) {
+            let at = from + pos;
+            let after = src.as_bytes().get(at + tok.len());
+            let ok_after = !matches!(after, Some(b) if b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_');
+            if ok_after {
+                return Some(at);
+            }
+            from = at + tok.len();
+        }
+        None
+    }
+
+    /// A located error at byte `index` of the CURRENT file scope (§5.5): the
+    /// innermost file being evaluated supplies filename + source for the
+    /// line/column/excerpt. Mirrors less.js nodes throwing
+    /// `{ type, message, index, filename: this.fileInfo().filename }`.
+    fn err_at(&self, kind: ErrorKind, msg: impl Into<String>, index: usize) -> LessError {
+        match self.file_stack.last() {
+            Some(scope) => {
+                LessError::at(kind, msg, scope.filename.clone(), index).located(&scope.source)
+            }
+            None => LessError::new(kind, msg),
+        }
     }
 
     /// The effective eval-depth cap (plan §2.5): the option when set, else
@@ -448,6 +526,51 @@ impl<'a> Ctx<'a> {
     /// emits declarations, rulesets and at-rules in source order, replaying each
     /// mixin call's pre-computed output at its position.
     fn eval_rules(
+        &mut self,
+        rules: &[Node],
+        self_paths: Option<&[String]>,
+        own: &mut Vec<Node>,
+        children: &mut Vec<Out>,
+    ) -> Result<(), LessError> {
+        let own_start = own.len();
+        let children_start = children.len();
+        let res = self.eval_rules_inner(rules, self_paths, own, children);
+        // Root-properties bookkeeping (§5.5): at the stylesheet root (no
+        // enclosing selector, no enclosing at-rule body) a surviving
+        // declaration is invalid — remember the FIRST one's own site so the
+        // post-eval check can raise a located error. Root declarations flow
+        // both into `own` and — for source-order preservation (review F9) —
+        // into the child stream as `Out::Decls` runs (possibly
+        // visibility-hidden, F15); scan only what THIS call appended.
+        if res.is_ok() && self_paths.is_none() && self.at_rule_depth == 0
+            && self.root_decl_err.is_none()
+        {
+            fn first_decl(outs: &[Out]) -> Option<&Declaration> {
+                outs.iter().find_map(|o| match o {
+                    Out::Decls(ds) => ds.iter().find_map(|n| match n {
+                        Node::Declaration(d) => Some(d),
+                        _ => None,
+                    }),
+                    Out::Hidden(inner) => first_decl(std::slice::from_ref(inner)),
+                    _ => None,
+                })
+            }
+            let own_hit = own[own_start..].iter().find_map(|n| match n {
+                Node::Declaration(d) => Some(d),
+                _ => None,
+            });
+            if let Some(d) = own_hit.or_else(|| first_decl(&children[children_start..])) {
+                self.root_decl_err = Some(self.err_at(
+                    ErrorKind::Syntax,
+                    "Properties must be inside selector blocks. They cannot be in the root",
+                    d.span.start,
+                ));
+            }
+        }
+        res
+    }
+
+    fn eval_rules_inner(
         &mut self,
         rules: &[Node],
         self_paths: Option<&[String]>,
@@ -606,8 +729,32 @@ impl<'a> Ctx<'a> {
                         self.absorb_expansion_outs(ex_children, children);
                     }
                 }
-                Node::VariableDecl { .. }
-                | Node::MixinDefinition(_)
+                Node::VariableDecl { value, span, .. } => {
+                    // No direct output — but less.js's `Ruleset.eval` runs
+                    // `Declaration.eval` on every rule, variable declarations
+                    // included, so an invalid VALUE errors even when the
+                    // variable is never referenced (`@a: darken(@a, 30%)` —
+                    // recursive-variable). Detached-ruleset literals are
+                    // exempt: pass 0 captured them as Closures.
+                    if !matches!(
+                        value.as_ref(),
+                        Node::DetachedRuleset { .. } | Node::Closure { .. } | Node::Anonymous(_)
+                    ) {
+                        self.important_scope.push(None);
+                        let r = self.eval_value(value);
+                        self.important_scope.pop();
+                        r.map_err(|e| {
+                            if e.index.is_none() && e.line.is_none() {
+                                let mut out = self.err_at(e.kind, e.message, span.start);
+                                out.wrapped = e.wrapped;
+                                out
+                            } else {
+                                e
+                            }
+                        })?;
+                    }
+                }
+                Node::MixinDefinition(_)
                 | Node::Comment { line: true, .. }
                 | Node::MagentoImport { .. } => {
                     // No direct output (declarations register in the frame; the
@@ -787,14 +934,35 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 Node::DetachedRuleset { .. } => {}
-                Node::Call { name, args } if name.eq_ignore_ascii_case("each") => {
+                Node::Call { name, args, .. } if name.eq_ignore_ascii_case("each") => {
                     self.expand_each(args, self_paths, own, children)?;
                 }
-                Node::Call { name, args } => {
+                Node::Call { name, args, span } => {
                     // A statement-level function call (less.js `primary` →
                     // `entities.call()`, e.g. css-escapes' root `e('…');`): the
                     // evaluated result is emitted verbatim at this position.
-                    let v = self.eval_call(name, args)?;
+                    let v = self.eval_call(name, args, *span)?;
+                    // less.js `ToCSSVisitor.checkValidNodes`: a result that is
+                    // still a Call (unknown function) or a non-`allowRoot`
+                    // value node (a Color) is invalid as a statement — plain
+                    // object throws (type undefined ⇒ Syntax) at the call.
+                    match &v {
+                        Node::Call { .. } => {
+                            return Err(self.err_at(
+                                ErrorKind::Syntax,
+                                format!("Function '{name}' did not return a root node"),
+                                span.start,
+                            ));
+                        }
+                        Node::Color(_) => {
+                            return Err(self.err_at(
+                                ErrorKind::Syntax,
+                                "Color node returned by a function is not valid here",
+                                span.start,
+                            ));
+                        }
+                        _ => {}
+                    }
                     let text = render_value(&v, self.opts.num_precision);
                     if !text.is_empty() {
                         if self_paths.is_none() {
@@ -1092,7 +1260,9 @@ impl<'a> Ctx<'a> {
                 let saved_path = std::mem::take(&mut self.media_path);
                 let saved_blocks = self.media_blocks.take();
                 self.push_frame(frame_of(rules.to_vec()));
+                self.at_rule_depth += 1;
                 let res = self.process_body(rules, inner_parent);
+                self.at_rule_depth -= 1;
                 self.pop_frame();
                 self.media_path = saved_path;
                 self.media_blocks = saved_blocks;
@@ -1208,7 +1378,9 @@ impl<'a> Ctx<'a> {
             features: features.clone(),
         });
         self.push_frame(frame_of(rules.to_vec()));
+        self.at_rule_depth += 1;
         let res = self.process_body(rules, parent_paths);
+        self.at_rule_depth -= 1;
         self.pop_frame();
         self.media_path.pop();
         let (own, children) = res?;
@@ -1284,13 +1456,26 @@ impl<'a> Ctx<'a> {
         // less.js `Declaration.eval` math bypass: under math=always, a `font`
         // declaration's value evaluates in parens-division mode (the font
         // shorthand `0/0` protection — units/no-strict).
-        if self.math == MathMode::Always && d.name == "font" {
+        let res = if self.math == MathMode::Always && d.name == "font" {
             self.math = MathMode::ParensDivision;
             let res = self.eval_declaration_inner(d);
             self.math = MathMode::Always;
-            return res;
-        }
-        self.eval_declaration_inner(d)
+            res
+        } else {
+            self.eval_declaration_inner(d)
+        };
+        // less.js `Declaration.eval` catch: an error carrying NO index (e.g.
+        // an operation's `Incompatible units` plain throw) is anchored at the
+        // declaration's own position/file (§5.5).
+        res.map_err(|e| {
+            if e.index.is_none() && e.line.is_none() {
+                let mut out = self.err_at(e.kind, e.message, d.span.start);
+                out.wrapped = e.wrapped;
+                out
+            } else {
+                e
+            }
+        })
     }
 
     fn eval_declaration_inner(&mut self, d: &Declaration) -> Result<Node, LessError> {
@@ -1298,7 +1483,18 @@ impl<'a> Ctx<'a> {
         // genCSSes each piece — a quoted variable KEEPS its quotes
         // (`@{prop}: red` with `@prop: "color"` → `"color": red`, F18).
         let name = if d.name.contains("@{") || d.name.contains("${") {
-            self.interpolate_css(&d.name)?
+            // An undefined variable in the property NAME locates at the
+            // interpolation token, not the declaration head (less.js keeps
+            // the name as [Keyword, Variable…] pieces, each with its index).
+            self.interpolate_css(&d.name).map_err(|mut e| {
+                if e.index.is_none() && e.line.is_none() {
+                    let off = d.name.find("@{").or_else(|| d.name.find("${")).unwrap_or(0);
+                    let relocated =
+                        self.err_at(e.kind, std::mem::take(&mut e.message), d.span.start + off);
+                    return relocated;
+                }
+                e
+            })?
         } else {
             d.name.clone()
         };
@@ -1327,7 +1523,9 @@ impl<'a> Ctx<'a> {
                 important: d.important.clone(),
                 merge: d.merge,
                 custom: true,
-                span: Default::default(),
+                // Keep the SOURCE span: the root-properties check blames the
+                // declaration's own site (§5.5).
+                span: d.span,
             }));
         }
 
@@ -1335,6 +1533,27 @@ impl<'a> Ctx<'a> {
         let value = self.eval_value(&d.value);
         let popped = self.important_scope.pop().flatten();
         let value = value?;
+        // strictUnits: a dimension whose unit did not fully cancel to a single
+        // numerator is invalid CSS — less.js throws from `Dimension.genCSS`
+        // (`Multiple units in dimension…`, a plain Error ⇒ Syntax, no index ⇒
+        // anchored at the declaration by the eval_declaration fallback).
+        // A bare `%` KEYWORD surviving into the value is less.js's
+        // `Keyword.genCSS` throw (`Invalid % without number`, Syntax, no index
+        // — anchored at the declaration). It must fire only when the keyword
+        // would RENDER: `unit(100, %)` consumes it and stays legal.
+        if let Some(()) = find_percent_keyword(&value) {
+            return Err(self.err(ErrorKind::Syntax, "Invalid % without number"));
+        }
+        if self.opts.strict_units {
+            if let Some(bad) = find_multi_unit(&value) {
+                return Err(self.err(
+                    ErrorKind::Syntax,
+                    format!(
+                        "Multiple units in dimension. Correct the units or use the unit function. Bad unit: {bad}"
+                    ),
+                ));
+            }
+        }
         // less.js `Declaration.eval`: a detached ruleset landing on a real
         // property (e.g. `d: if(true, {…}, {…})`) is a hard error (F16).
         if matches!(value, Node::DetachedRuleset { .. })
@@ -1360,7 +1579,9 @@ impl<'a> Ctx<'a> {
             important,
             merge: d.merge,
             custom: false,
-            span: Default::default(),
+            // Keep the SOURCE span: the root-properties check blames the
+            // declaration's own site (§5.5).
+            span: d.span,
         }))
     }
 
@@ -1408,7 +1629,7 @@ impl<'a> Ctx<'a> {
                 spaced,
             } => self.eval_operation(op, left, right, *spaced),
             Node::Paren { inner, in_op } => self.eval_paren(inner, *in_op),
-            Node::Call { name, args } => self.eval_call(name, args),
+            Node::Call { name, args, span } => self.eval_call(name, args, *span),
             Node::Assignment { key, value } => Ok(Node::Assignment {
                 key: key.clone(),
                 value: Box::new(self.eval_value(value)?),
@@ -1480,7 +1701,16 @@ impl<'a> Ctx<'a> {
                     value: v,
                 })
             }
-            Node::PropertyAccessor { name, .. } => self.eval_property(name),
+            Node::PropertyAccessor { name, span } => {
+                self.eval_property(name).map_err(|mut e| {
+                    // less.js `Property.eval` throws with the accessor's own
+                    // index (`Property '$x' is undefined` renders at the `$`).
+                    if e.index.is_none() && e.line.is_none() {
+                        return self.err_at(e.kind, std::mem::take(&mut e.message), span.start);
+                    }
+                    e
+                })
+            }
             // A detached-ruleset literal captures the frames live at its
             // evaluation site (less.js `DetachedRuleset.eval`, plan §2.11).
             Node::DetachedRuleset { .. } => {
@@ -1512,9 +1742,48 @@ impl<'a> Ctx<'a> {
                     span: Span::default(),
                 })
             }
-            Node::Lookup { target, keys, .. } => {
-                let (target, keys) = (target.clone(), keys.clone());
-                self.eval_lookup(&target, &keys)
+            Node::Lookup { target, keys, span } => {
+                let (target, keys, span) = (target.clone(), keys.clone(), *span);
+                self.eval_lookup(&target, &keys).map_err(|mut e| {
+                    // less.js `NamespaceValue` (value-position `@dr[k]` form)
+                    // carries the lookup's own index/fileInfo — its not-found
+                    // errors render located at the `[`. The mixin-call form
+                    // (`#ns[k]`) is built WITHOUT fileInfo (parser.js:998) and
+                    // stays location-less. Other errors passing through (e.g.
+                    // `Could not evaluate variable call`) keep their own
+                    // anchoring (the declaration fallback).
+                    let is_lookup_err = e.index == Some(0) && e.filename.is_none();
+                    if matches!(target.as_ref(), Node::VariableCall { .. })
+                        && is_lookup_err
+                        && e.line.is_none()
+                    {
+                        let relocated = self.err_at(e.kind, std::mem::take(&mut e.message), span.start);
+                        return relocated;
+                    }
+                    e
+                })
+            }
+            // Inline JavaScript (plan §8, §C-jserr): the JS feature is
+            // deliberately unimplemented — with `javascriptEnabled` off the
+            // eval raises less.js's exact disabled-JS message at the backtick
+            // (`jsEvalNode.evaluateJavaScript` checks the option FIRST, before
+            // any interpolation); with it on, the `@{…}` interpolation still
+            // runs (its NameErrors surface like less.js's) and the execution
+            // itself is reported unsupported.
+            Node::JavaScript { expr, span, .. } => {
+                if !self.opts.javascript_enabled {
+                    return Err(self.err_at(
+                        ErrorKind::Syntax,
+                        "Inline JavaScript is not enabled. Is it set in your options?",
+                        span.start,
+                    ));
+                }
+                let _ = self.interpolate(expr)?;
+                Err(self.err_at(
+                    ErrorKind::Syntax,
+                    "inline JavaScript is not supported by this compiler",
+                    span.start,
+                ))
             }
             // Self-evaluating leaves.
             Node::Dimension(_)
@@ -1656,8 +1925,10 @@ impl<'a> Ctx<'a> {
                     Err(self.err(ErrorKind::Runtime, "Dimension is not a number."))
                 }
                 Ok(r) => Ok(Node::Dimension(r)),
+                // A plain `new Error` in less.js — no type, so the final
+                // LessError defaults to 'Syntax' (NOT Operation).
                 Err(bad) => Err(self.err(
-                    ErrorKind::Operation,
+                    ErrorKind::Syntax,
                     format!(
                         "Incompatible units. Change the units or use the unit function. Bad units: {bad}."
                     ),
@@ -1707,7 +1978,28 @@ impl<'a> Ctx<'a> {
     // Functions
     // ------------------------------------------------------------------
 
-    fn eval_call(&mut self, name: &str, args: &[Node]) -> Result<Node, LessError> {
+    fn eval_call(&mut self, name: &str, args: &[Node], span: Span) -> Result<Node, LessError> {
+        // less.js `Call.eval`: ANY error escaping the call's evaluation (args
+        // included) that was not already call-wrapped is re-anchored at the
+        // call's own index and message-wrapped (§5.5; the `hasOwnProperty(
+        // 'line')` guard maps to `LessError::wrapped`).
+        match self.eval_call_inner(name, args, span) {
+            Ok(v) => Ok(v),
+            Err(e) if e.wrapped => Err(e),
+            Err(e) => {
+                let msg = if e.message.is_empty() {
+                    format!("Error evaluating function `{name}`")
+                } else {
+                    format!("Error evaluating function `{name}`: {}", e.message)
+                };
+                let mut out = self.err_at(e.kind, msg, span.start);
+                out.wrapped = true;
+                Err(out)
+            }
+        }
+    }
+
+    fn eval_call_inner(&mut self, name: &str, args: &[Node], span: Span) -> Result<Node, LessError> {
         let lname = name.to_ascii_lowercase();
         let is_calc = lname == "calc";
 
@@ -1828,6 +2120,7 @@ impl<'a> Ctx<'a> {
         Ok(Node::Call {
             name: name.to_string(),
             args: evaled,
+            span,
         })
     }
 
@@ -1965,6 +2258,28 @@ impl<'a> Ctx<'a> {
     /// mixins / rulesets — scope-injection, §2.5); the CSS output is appended to
     /// `own`/`children`.
     fn expand_mixin_call(
+        &mut self,
+        call: &crate::ast::MixinCall,
+        self_paths: Option<&[String]>,
+        own: &mut Vec<Node>,
+        children: &mut Vec<Out>,
+    ) -> Result<Vec<Node>, LessError> {
+        // less.js `MixinCall.eval` rethrows every error as
+        // `{ ...e, index: this.getIndex(), filename: this.fileInfo().filename }`
+        // — kind/message kept, location re-anchored at the CALL (§5.5; the
+        // `is undefined` / `No matching definition` / body errors all render
+        // at the call site).
+        match self.expand_mixin_call_inner(call, self_paths, own, children) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let mut out = self.err_at(e.kind, e.message, call.span.start);
+                out.wrapped = e.wrapped;
+                Err(out)
+            }
+        }
+    }
+
+    fn expand_mixin_call_inner(
         &mut self,
         call: &crate::ast::MixinCall,
         self_paths: Option<&[String]>,
@@ -2482,6 +2797,7 @@ impl<'a> Ctx<'a> {
             current_directory: ir.current_directory.clone(),
             rootpath: ir.rootpath.clone(),
             reference: ir.reference,
+            source: ir.source.clone(),
         });
         if ir.reference {
             self.visibility_blocks += 1;
@@ -2606,14 +2922,16 @@ impl<'a> Ctx<'a> {
         match v {
             Node::Closure { inner, scope } => match *inner {
                 Node::DetachedRuleset { rules, .. } => Ok((rules, Some(scope))),
+                // less.js: `new LessError({message})` — type undefined ⇒ Syntax,
+                // no index ⇒ the Declaration.eval fallback anchors it.
                 _ => Err(self.err(
-                    ErrorKind::Runtime,
+                    ErrorKind::Syntax,
                     format!("Could not evaluate variable call @{name}"),
                 )),
             },
             Node::DetachedRuleset { rules, .. } => Ok((rules, None)),
             _ => Err(self.err(
-                ErrorKind::Runtime,
+                ErrorKind::Syntax,
                 format!("Could not evaluate variable call @{name}"),
             )),
         }
@@ -2798,7 +3116,7 @@ impl<'a> Ctx<'a> {
                     Node::VariableDecl { value, .. } => Some((**value).clone()),
                     _ => None,
                 });
-                last.ok_or_else(|| self.err(ErrorKind::Name, "property \"\" not found"))?
+                last.ok_or_else(|| self.lookup_err("property \"\" not found"))?
             } else if key.starts_with('@') {
                 let name = if let Some(dynamic) = key.strip_prefix("@@") {
                     let inner = self.eval_variable(dynamic, Span::default())?;
@@ -2813,7 +3131,7 @@ impl<'a> Ctx<'a> {
                     _ => None,
                 });
                 found.ok_or_else(|| {
-                    self.err(ErrorKind::Name, format!("variable @{name} not found"))
+                    self.lookup_err(format!("variable @{name} not found"))
                 })?
             } else {
                 let name = if let Some(dynamic) = key.strip_prefix("$@") {
@@ -2838,7 +3156,7 @@ impl<'a> Ctx<'a> {
                     .collect();
                 if decls.is_empty() {
                     return Err(
-                        self.err(ErrorKind::Name, format!("property \"{name}\" not found"))
+                        self.lookup_err(format!("property \"{name}\" not found"))
                     );
                 }
                 // less.js `NamespaceValue.eval` takes `rules[rules.length - 1]`
@@ -3109,6 +3427,28 @@ impl<'a> Ctx<'a> {
     /// Evaluate a CSS/selector guard (`sel when (…)`) in the current scope.
     fn eval_guard(&mut self, guard: &Node) -> Result<bool, LessError> {
         let raw = guard_text(guard);
+        // A CSS guard (this entry point is only reached from selector guards;
+        // mixin matching goes through `eval_guard_str` with `default_value`
+        // set) may not call `default()` — less.js primes `defaultFunc.error`
+        // before evaluating a ruleset's selectors (ruleset.js:119), and the
+        // Call wrap renders it. Located by searching the current file's source
+        // for the call (guards are stored as raw text without a span).
+        if self.default_value.is_none() {
+            if let Some(off) = raw.find("default(") {
+                let index = self
+                    .file_stack
+                    .last()
+                    .and_then(|sc| sc.source.find(raw.trim()).map(|base| base + off));
+                let msg = "Error evaluating function `default`: it is currently only allowed in parametric mixin guards,";
+                let mut e = match index {
+                    Some(i) => self.err_at(ErrorKind::Syntax, msg, i),
+                    None => self.err(ErrorKind::Syntax, msg),
+                };
+                e.wrapped = true;
+                let _ = off;
+                return Err(e);
+            }
+        }
         self.eval_guard_str(&raw)
     }
 
@@ -3470,8 +3810,10 @@ impl<'a> Ctx<'a> {
                     s.clone()
                 };
                 // At-rule preludes reference bare `@var`s (`@namespace @ns "…"`,
-                // `@media (min-width: @w)`) — resolve those that are defined.
-                self.resolve_prelude_vars(&s)
+                // `@media (min-width: @w)`) — parsed as value nodes in
+                // less.js, so an undefined one is a hard NameError at the
+                // variable's position (at-rules-undefined-var).
+                self.resolve_prelude_vars_strict(&s)
             }
             other => Ok(render_value(&self.eval_value(other)?, self.opts.num_precision)),
         }
@@ -3504,11 +3846,24 @@ impl<'a> Ctx<'a> {
     }
 
     fn resolve_prelude_vars(&mut self, s: &str) -> Result<String, LessError> {
+        self.resolve_prelude_vars_mode(s, false)
+    }
+
+    /// [`Self::resolve_prelude_vars`] in STRICT mode: an unresolvable bare
+    /// `@name` is a hard NameError (less.js parses at-rule preludes as value
+    /// nodes, so `@keyframes @name` with `@name` undefined throws from
+    /// `Variable.eval` at the variable's own position). Lenient mode (raw
+    /// permissive captures) keeps unresolved refs verbatim.
+    fn resolve_prelude_vars_strict(&mut self, s: &str) -> Result<String, LessError> {
+        self.resolve_prelude_vars_mode(s, true)
+    }
+
+    fn resolve_prelude_vars_mode(&mut self, s: &str, strict: bool) -> Result<String, LessError> {
         // Fixpoint: a resolved variable's text may itself contain `@refs`
         // (permissively-captured media features, namespacing-media).
         let mut cur = s.to_string();
         for _ in 0..8 {
-            let next = self.resolve_prelude_vars_once(&cur)?;
+            let next = self.resolve_prelude_vars_once(&cur, strict)?;
             if next == cur {
                 break;
             }
@@ -3517,11 +3872,28 @@ impl<'a> Ctx<'a> {
         Ok(cur)
     }
 
-    fn resolve_prelude_vars_once(&mut self, s: &str) -> Result<String, LessError> {
+    fn resolve_prelude_vars_once(&mut self, s: &str, strict: bool) -> Result<String, LessError> {
         let bytes = s.as_bytes();
         let mut out = String::with_capacity(s.len());
         let mut i = 0;
         while i < bytes.len() {
+            // A quoted string in the prelude is a literal — `@impor
+            // "…-@import.less"` must not resolve (or strictly reject) the
+            // `@import` inside the quotes.
+            if bytes[i] == b'"' || bytes[i] == b'\'' {
+                let quote = bytes[i];
+                let start = i;
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i = (i + 1).min(bytes.len());
+                out.push_str(&s[start..i]);
+                continue;
+            }
             if bytes[i] == b'@' && bytes.get(i + 1) != Some(&b'{') {
                 let mut j = i + 1;
                 while j < bytes.len()
@@ -3556,10 +3928,28 @@ impl<'a> Ctx<'a> {
                             }
                         }
                     }
-                    if let Ok(v) = self.eval_variable(name, Default::default()) {
-                        out.push_str(&value_to_plain_string(&v));
-                        i = j;
-                        continue;
+                    match self.eval_variable(name, Default::default()) {
+                        Ok(v) => {
+                            out.push_str(&value_to_plain_string(&v));
+                            i = j;
+                            continue;
+                        }
+                        Err(mut e) if strict => {
+                            // Locate at the `@name` token in the current file
+                            // (the raw prelude has no span of its own).
+                            if e.index.is_none() && e.line.is_none() {
+                                if let Some(idx) = self.find_token_in_source(&s[i..j]) {
+                                    let relocated = self.err_at(
+                                        e.kind,
+                                        std::mem::take(&mut e.message),
+                                        idx,
+                                    );
+                                    return Err(relocated);
+                                }
+                            }
+                            return Err(e);
+                        }
+                        Err(_) => {}
                     }
                 }
             }
@@ -3988,6 +4378,34 @@ fn var_decl(name: &str, value: Node) -> Node {
 }
 
 /// The raw guard text of a stored guard node.
+/// strictUnits genCSS guard (less.js `Dimension.genCSS` throw): the first
+/// dimension in an evaluated value whose unit is not singular (more than one
+/// numerator, or any denominator). Returns less.js's `unit.toString()` form.
+fn find_multi_unit(v: &Node) -> Option<String> {
+    match v {
+        Node::Dimension(d) if !d.unit.is_singular() => Some(d.unit.to_unit_string()),
+        Node::Value(items) | Node::Expression(items) => items.iter().find_map(find_multi_unit),
+        Node::Paren { inner, .. } | Node::Negative(inner) => find_multi_unit(inner),
+        _ => None,
+    }
+}
+
+/// A `%` keyword anywhere a declaration value would render it (incl. deferred
+/// operations and re-emitted call args) — less.js `Keyword.genCSS` throws on it.
+fn find_percent_keyword(v: &Node) -> Option<()> {
+    match v {
+        Node::Keyword(k) if k == "%" => Some(()),
+        Node::Value(items) | Node::Expression(items) | Node::Call { args: items, .. } => {
+            items.iter().find_map(find_percent_keyword)
+        }
+        Node::Paren { inner, .. } | Node::Negative(inner) => find_percent_keyword(inner),
+        Node::Operation { left, right, .. } => {
+            find_percent_keyword(left).or_else(|| find_percent_keyword(right))
+        }
+        _ => None,
+    }
+}
+
 fn guard_text(guard: &Node) -> String {
     match guard {
         Node::Anonymous(s) => s.clone(),
@@ -4427,7 +4845,7 @@ pub(crate) fn interpolate_standalone(
     opts: &LessOptions,
     resolver: &dyn ImportResolver,
 ) -> Result<String, LessError> {
-    let mut ctx = Ctx::new(opts, resolver);
+    let mut ctx = Ctx::new(opts, resolver, std::sync::Arc::from(""));
     for list in frames_outer_first {
         ctx.push_frame(frame_of(list.clone()));
     }
@@ -4736,6 +5154,37 @@ mod tests {
         crate::compile(src, &opts, &NoopResolver)
             .unwrap_err()
             .to_string()
+    }
+
+    /// §C-jserr: the disabled-JS error text is byte-exact even though the JS
+    /// feature itself is unimplemented — the backtick parses far enough to
+    /// raise less.js's precise message (the tests-config/no-js-errors golden,
+    /// pinned here because that suite is not vendored).
+    #[test]
+    fn disabled_inline_javascript_error_is_byte_exact() {
+        let mut opts = LessOptions::default();
+        opts.filename = Some("no-js.less".to_string());
+        let e = crate::compile(".a {\n  a: `1 + 1`;\n}", &opts, &NoopResolver)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            e,
+            "SyntaxError: Inline JavaScript is not enabled. Is it set in your options? \
+             in no-js.less on line 2, column 6:\n1 .a {\n2   a: `1 + 1`;\n3 }\n"
+        );
+    }
+
+    /// With `javascriptEnabled` the `@{…}` interpolation inside the backtick
+    /// still runs first — an undefined variable is the NameError less.js
+    /// raises before any JS executes (the javascript-undefined-var shape).
+    #[test]
+    fn enabled_inline_javascript_interpolates_before_failing() {
+        let mut opts = LessOptions::default();
+        opts.javascript_enabled = true;
+        let e = crate::compile(".scope {\n    @a: `@{b}`;\n    v: @a;\n}", &opts, &NoopResolver)
+            .unwrap_err()
+            .to_string();
+        assert!(e.starts_with("NameError: variable @b is undefined"), "got: {e}");
     }
 
     /// An in-memory `path -> content` resolver for import/extend tests.

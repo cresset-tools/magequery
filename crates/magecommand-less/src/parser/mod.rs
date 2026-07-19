@@ -25,7 +25,7 @@ use crate::ast::{
     MixinParam, Node, Ruleset, Selector, Span,
 };
 use crate::error::{ErrorKind, LessError};
-use crate::lex::{normalize_source, Cursor, LineMap};
+use crate::lex::{normalize_source, Cursor};
 use crate::options::LessOptions;
 use crate::resolver::FileInfo;
 
@@ -65,11 +65,16 @@ struct Parser<'a> {
     cur: Cursor<'a>,
     file: FileInfo,
     magento_mode: bool,
-    line_map: LineMap,
     /// Nodes a statement parser wants emitted AFTER the statement itself (an
     /// `@import`'s media-feature comments become root-level siblings — the
     /// less.js commentStore flush).
     pending: Vec<Node>,
+    /// less.js `parserInput`'s furthest-failure bookkeeping (minimal form):
+    /// a `restore("Expected ')'")`-style CANDIDATE recorded by a soft failure.
+    /// If the enclosing statement ultimately fails, the candidate becomes the
+    /// reported error (message + position); a successful statement clears it.
+    furthest: usize,
+    furthest_msg: Option<String>,
 }
 
 impl<'a> Parser<'a> {
@@ -78,8 +83,9 @@ impl<'a> Parser<'a> {
             cur: Cursor::new(src),
             file,
             magento_mode: opts.magento_mode,
-            line_map: LineMap::new(src),
             pending: Vec::new(),
+            furthest: 0,
+            furthest_msg: None,
         }
     }
 
@@ -93,19 +99,243 @@ impl<'a> Parser<'a> {
 
     /// Build a located parse error at the current position.
     fn err(&self, msg: impl Into<String>) -> LessError {
-        let (line, column) = self.line_map.line_col(self.cur.i);
-        LessError {
-            kind: ErrorKind::Parse,
-            message: msg.into(),
-            filename: if self.file.filename.is_empty() {
-                None
-            } else {
-                Some(self.file.filename.clone())
-            },
-            line: Some(line),
-            column: Some(column),
-            excerpt: Vec::new(),
+        self.err_kind_at(ErrorKind::Parse, msg, self.cur.i)
+    }
+
+    /// A located parse-time error with an explicit kind — less.js's parser
+    /// raises both `Parse` (the default) and `Syntax` (an explicit
+    /// `error(msg, 'Syntax')`) types.
+    fn err_kind(&self, kind: ErrorKind, msg: impl Into<String>) -> LessError {
+        self.err_kind_at(kind, msg, self.cur.i)
+    }
+
+    /// A located parse-time error at an explicit byte index.
+    fn err_kind_at(&self, kind: ErrorKind, msg: impl Into<String>, index: usize) -> LessError {
+        LessError::at(kind, msg, self.file.filename.clone(), index).located(self.cur.src())
+    }
+
+    /// less.js `$parseUntil` pairing over a raw capture: every closer must
+    /// match the innermost opener (`Expected ']'` at the offender) and every
+    /// quote must close on its own line (`Expected '"'` at the opener).
+    /// Comments are skipped. `base` = the capture's byte offset in the source.
+    fn validate_brackets(&self, base: usize, text: &str) -> Result<(), LessError> {
+        let bytes = text.as_bytes();
+        let mut stack: Vec<u8> = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 1,
+                b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                    i += 2;
+                    while i < bytes.len() && !(bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/')) {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'"' | b'\'' => {
+                    let q = bytes[i];
+                    let qpos = i;
+                    i += 1;
+                    loop {
+                        match bytes.get(i) {
+                            Some(b'\\') => i += 2,
+                            Some(&c) if c == q => break,
+                            Some(&b'\n') | None => {
+                                return Err(self.err_kind_at(
+                                    ErrorKind::Parse,
+                                    format!("Expected '{}'", q as char),
+                                    base + qpos,
+                                ));
+                            }
+                            Some(_) => i += 1,
+                        }
+                    }
+                }
+                b'{' | b'(' | b'[' => stack.push(bytes[i]),
+                b'}' | b')' | b']' => {
+                    let expected = match stack.last() {
+                        Some(b'{') => b'}',
+                        Some(b'(') => b')',
+                        Some(b'[') => b']',
+                        _ => bytes[i],
+                    };
+                    if expected != bytes[i] {
+                        return Err(self.err_kind_at(
+                            ErrorKind::Parse,
+                            format!("Expected '{}'", expected as char),
+                            base + i,
+                        ));
+                    }
+                    stack.pop();
+                }
+                _ => {}
+            }
+            i += 1;
         }
+        Ok(())
+    }
+
+    /// less.js's mixin-args `Cannot mix ; and , as delimiter types` check
+    /// (parser.js:1097/1147), replayed over the raw argument text. Two error
+    /// sites, both Syntax, positions matching the real parser:
+    /// - a NAMED arg (`@x:`) while accumulating under `;` separation — at the
+    ///   value after the `:` (+ whitespace);
+    /// - a `;` separator closing a group whose comma-run contained a named arg
+    ///   — right after the `;` (+ whitespace).
+    fn validate_arg_separators(&self, base: usize, raw: &str) -> Result<(), LessError> {
+        let bytes = raw.as_bytes();
+        let len = bytes.len();
+        let mut i = 0usize;
+        let mut is_semi = false;
+        let mut expr_count = 0usize;
+        let mut expr_named = false;
+        let skip_ws = |i: &mut usize| {
+            while *i < len && bytes[*i].is_ascii_whitespace() {
+                *i += 1;
+            }
+        };
+        let skip_value = |i: &mut usize| {
+            // consume to a TOP-LEVEL `,`/`;`
+            let mut depth = 0i32;
+            while *i < len {
+                match bytes[*i] {
+                    b',' | b';' if depth == 0 => break,
+                    b'(' | b'[' | b'{' => depth += 1,
+                    b')' | b']' | b'}' => depth -= 1,
+                    b'"' | b'\'' => {
+                        let q = bytes[*i];
+                        *i += 1;
+                        while *i < len && bytes[*i] != q {
+                            if bytes[*i] == b'\\' {
+                                *i += 1;
+                            }
+                            *i += 1;
+                        }
+                    }
+                    _ => {}
+                }
+                *i += 1;
+            }
+        };
+        while i < len {
+            skip_ws(&mut i);
+            if i >= len {
+                break;
+            }
+            // A named argument head: `@name :` / `$name :` at top level.
+            let mut named = false;
+            if bytes[i] == b'@' || bytes[i] == b'$' {
+                let mut j = i + 1;
+                while j < len
+                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-' || bytes[j] == b'_')
+                {
+                    j += 1;
+                }
+                let mut k = j;
+                while k < len && bytes[k].is_ascii_whitespace() {
+                    k += 1;
+                }
+                if j > i + 1 && k < len && bytes[k] == b':' {
+                    named = true;
+                    i = k + 1;
+                    skip_ws(&mut i);
+                    if expr_count > 0 {
+                        if is_semi {
+                            return Err(self.err_kind_at(
+                                ErrorKind::Syntax,
+                                "Cannot mix ; and , as delimiter types",
+                                base + i,
+                            ));
+                        }
+                        expr_named = true;
+                    }
+                }
+            }
+            let _ = named;
+            skip_value(&mut i);
+            expr_count += 1;
+            if i < len && bytes[i] == b',' {
+                i += 1;
+                continue;
+            }
+            let has_sep = i < len && bytes[i] == b';';
+            if has_sep {
+                i += 1;
+                skip_ws(&mut i);
+            }
+            if has_sep || is_semi {
+                if expr_named {
+                    return Err(self.err_kind_at(
+                        ErrorKind::Syntax,
+                        "Cannot mix ; and , as delimiter types",
+                        base + i,
+                    ));
+                }
+                is_semi = true;
+                expr_count = 0;
+                expr_named = false;
+            }
+            if !has_sep && (i >= len || bytes[i] != b',') {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Scan a backtick-delimited inline-JS expression (verbatim body).
+    fn parse_javascript(&mut self, escaped: bool, start: usize) -> Node {
+        self.cur.bump(); // `
+        let es = self.here();
+        while let Some(b) = self.cur.cur() {
+            if b == b'`' {
+                break;
+            }
+            self.cur.bump();
+        }
+        let expr = self.cur.src()[es..self.here()].to_string();
+        self.cur.eat(b'`');
+        Node::JavaScript {
+            expr,
+            escaped,
+            span: self.span(start),
+        }
+    }
+
+    /// A SOFT failure marker (message-less): a statement alternative that
+    /// sees it backtracks and tries the next parse; if every alternative
+    /// fails, [`Self::unrecognised`] surfaces the recorded furthest candidate.
+    fn soft_fail(&mut self, msg: &str, index: usize) -> LessError {
+        if index >= self.furthest {
+            self.furthest = index;
+            self.furthest_msg = Some(msg.to_string());
+        }
+        LessError::new(ErrorKind::Parse, "")
+    }
+
+    /// less.js's end-of-parse error (`parser.js` `end()` handling): the
+    /// message is `Unrecognised input` plus a hint derived from the character
+    /// at the failure index — `}` / `)` suggest a missing opener, reaching EOF
+    /// suggests something missing.
+    fn unrecognised(&self, index: usize) -> LessError {
+        // A recorded furthest candidate (a soft `restore("Expected ')'")`)
+        // wins over the generic message — less.js `endInfo
+        // .furthestPossibleErrorMessage`.
+        if let Some(msg) = &self.furthest_msg {
+            return self.err_kind_at(ErrorKind::Parse, msg.clone(), self.furthest);
+        }
+        let mut msg = String::from("Unrecognised input");
+        match self.cur.src().as_bytes().get(index) {
+            Some(b'}') => msg.push_str(". Possibly missing opening '{'"),
+            Some(b')') => msg.push_str(". Possibly missing opening '('"),
+            None => msg.push_str(". Possibly missing something"),
+            _ => {}
+        }
+        self.err_kind_at(ErrorKind::Parse, msg, index)
     }
 
     fn expect_eof(&mut self) -> Result<(), LessError> {
@@ -113,10 +343,7 @@ impl<'a> Parser<'a> {
         if self.cur.eof() {
             Ok(())
         } else {
-            Err(self.err(format!(
-                "unexpected '{}'",
-                self.cur.rest().chars().next().unwrap_or(' ')
-            )))
+            Err(self.unrecognised(self.cur.i))
         }
     }
 
@@ -126,7 +353,7 @@ impl<'a> Parser<'a> {
 
     /// Parse a rule list. `root` selects top-level vs a braced block (which stops
     /// at `}`).
-    fn parse_primary(&mut self, root: bool) -> Result<Vec<Node>, LessError> {
+    fn parse_primary(&mut self, _root: bool) -> Result<Vec<Node>, LessError> {
         let mut rules = Vec::new();
         loop {
             // Whitespace + line comments (dropped) + block comments (kept).
@@ -157,14 +384,26 @@ impl<'a> Parser<'a> {
             if self.cur.eof() {
                 break;
             }
-            if !root && self.cur.cur() == Some(b'}') {
+            if self.cur.cur() == Some(b'}') {
+                // In a block the caller consumes it; at root `expect_eof`
+                // raises less.js's `Possibly missing opening '{'` error.
                 break;
             }
             // Stray semicolons between rules.
             if self.cur.eat(b';') {
                 continue;
             }
-            let node = self.parse_statement()?;
+            let node = match self.parse_statement() {
+                Ok(n) => n,
+                // A SOFT failure reaching statement level surfaces as the
+                // recorded candidate (or generic unrecognised input).
+                Err(e) if e.message.is_empty() => return Err(self.unrecognised(self.cur.i)),
+                Err(e) => return Err(e),
+            };
+            // The statement parsed — any soft furthest candidate recorded by a
+            // failed alternative inside it is moot (less.js's furthest only
+            // matters when the whole parse fails).
+            self.furthest_msg = None;
             rules.push(node);
             rules.append(&mut self.pending);
         }
@@ -179,7 +418,9 @@ impl<'a> Parser<'a> {
         let rules = self.parse_primary(false)?;
         self.cur.skip_trivia();
         if !self.cur.eat(b'}') {
-            return Err(self.err("expected '}'"));
+            // Unclosed block: less.js's primary just stops and the end check
+            // reports the furthest position (EOF → `Possibly missing something`).
+            return Err(self.unrecognised(self.cur.i));
         }
         Ok(rules)
     }
@@ -305,7 +546,7 @@ impl<'a> Parser<'a> {
             Ok(v) => v,
             Err(_) => {
                 self.cur.i = vsave;
-                self.parse_custom_property_raw()
+                self.parse_custom_property_raw()?
             }
         };
         self.cur.skip_whitespace();
@@ -330,7 +571,7 @@ impl<'a> Parser<'a> {
                 return Ok(None);
             }
             self.cur.i = vsave;
-            let value = self.parse_custom_property_raw();
+            let value = self.parse_custom_property_raw()?;
             self.cur.skip_whitespace();
             let important = self.parse_important();
             self.cur.skip_trivia();
@@ -423,6 +664,13 @@ impl<'a> Parser<'a> {
         self.cur.bump(); // @
         let name = format!("@{}", self.cur.scan_ident());
 
+        // `@@x: …` / a lone `@` — nothing in less.js parses this statement
+        // (variable regexes need a word after `@`): Unrecognised input at the
+        // statement start (bad-variable-declaration1).
+        if name == "@" {
+            return Err(self.unrecognised(start));
+        }
+
         // less.js's at-rule matcher is lowercase-only (`@[a-z-]+`-shaped):
         // `@MEDIA`/`@CHARSET` fall through to `variableCall` and die on the
         // missing lookup (verified vs 4.6.7).
@@ -438,7 +686,7 @@ impl<'a> Parser<'a> {
         // when non-empty (media queries, `@charset "UTF-8"`, `@namespace svg "…"`).
         self.cur.skip_trivia();
         let prelude_start = self.here();
-        self.scan_prelude();
+        self.scan_prelude()?;
         let prelude_all = self.cur.src()[prelude_start..self.here()].trim();
         // Block comments in the prelude relocate into the block (less.js's
         // commentStore attaches them to the body's rules — `@-webkit-keyframes
@@ -452,8 +700,27 @@ impl<'a> Parser<'a> {
         };
 
         self.cur.skip_trivia();
+        // less.js `prepareAndGetNestableAtRule` (@media/@container): a missing
+        // or unclosed block is a Syntax error at the failure position.
+        let requires_block = matches!(name.as_str(), "@media" | "@container");
+        if requires_block && self.cur.cur() != Some(b'{') {
+            return Err(self.err_kind(
+                ErrorKind::Syntax,
+                "media definitions require block statements after any features",
+            ));
+        }
         let block = if self.cur.cur() == Some(b'{') {
-            let mut rules = self.parse_block()?;
+            let mut rules = match self.parse_block() {
+                Ok(r) => r,
+                Err(e) if requires_block => {
+                    return Err(self.err_kind_at(
+                        ErrorKind::Syntax,
+                        "media definitions require block statements after any features",
+                        e.index.unwrap_or(self.here()),
+                    ));
+                }
+                Err(e) => return Err(e),
+            };
             for (i, text) in prelude_comments.into_iter().enumerate() {
                 rules.insert(
                     i,
@@ -480,16 +747,59 @@ impl<'a> Parser<'a> {
 
     /// Advance over an at-rule prelude: everything up to a top-level `{` or `;`,
     /// respecting nested `()`/`[]`, strings, and comments.
-    fn scan_prelude(&mut self) {
+    fn scan_prelude(&mut self) -> Result<(), LessError> {
         let mut depth = 0i32;
         while let Some(b) = self.cur.cur() {
             match b {
                 b'{' | b';' if depth == 0 => break,
                 b'}' if depth == 0 => break,
+                // A `{` INSIDE parens: the feature parser never closed its
+                // paren — less.js's `Missing closing ')'`
+                // (parse-error-missing-parens).
+                b'{' => {
+                    return Err(self.err("Missing closing ')'"));
+                }
+                b'u' if self.cur.rest().starts_with("url(") => {
+                    // less.js `entities.url()`: the raw run consumes anything
+                    // but `()'"` (braces/newlines included), then REQUIRES the
+                    // `)` — `expected ')' got ''` at EOF
+                    // (at-rules-unmatching-block).
+                    self.cur.eat_str("url(");
+                    loop {
+                        match self.cur.cur() {
+                            Some(b'\\') => {
+                                self.cur.bump();
+                                self.cur.bump();
+                            }
+                            Some(b'"') | Some(b'\'') => {
+                                self.cur.scan_string();
+                            }
+                            Some(b'(') | Some(b')') | None => break,
+                            Some(_) => {
+                                self.cur.bump();
+                            }
+                        }
+                    }
+                    if !self.cur.eat(b')') {
+                        let got = self
+                            .cur
+                            .cur()
+                            .map(|c| (c as char).to_string())
+                            .unwrap_or_default();
+                        return Err(self.err_kind(
+                            ErrorKind::Syntax,
+                            format!("expected ')' got '{got}'"),
+                        ));
+                    }
+                }
                 b'(' | b'[' => {
                     depth += 1;
                     self.cur.bump();
                 }
+                // A stray closer at depth 0 ends the prelude unconsumed — the
+                // at-rule then fails its block requirement THERE (less.js's
+                // mediaFeatures stop at `(extra: bracket))`'s second `)`).
+                b')' | b']' if depth == 0 => break,
                 b')' | b']' => {
                     depth -= 1;
                     self.cur.bump();
@@ -507,6 +817,7 @@ impl<'a> Parser<'a> {
                 _ => self.cur.bump(),
             }
         }
+        Ok(())
     }
 
     fn parse_import(&mut self, start: usize) -> Result<Node, LessError> {
@@ -552,7 +863,17 @@ impl<'a> Parser<'a> {
         } else if matches!(self.cur.cur(), Some(b'"') | Some(b'\'')) {
             self.parse_quoted()
         } else {
-            // Interpolated / bare path — capture up to a media list, `;` or EOF.
+            // less.js accepts only `quoted() || url()` here — a bare WORD is
+            // its `malformed import statement` Syntax error, reported with
+            // `parserInput.i` reset to the `@import` (parser.js:1827).
+            if matches!(self.cur.cur(), Some(b) if b.is_ascii_alphabetic()) {
+                return Err(self.err_kind_at(
+                    ErrorKind::Syntax,
+                    "malformed import statement",
+                    start,
+                ));
+            }
+            // Interpolated path — capture up to a media list, `;` or EOF.
             let ps = self.here();
             while let Some(b) = self.cur.cur() {
                 if matches!(b, b';' | b'{') || b.is_ascii_whitespace() {
@@ -566,7 +887,7 @@ impl<'a> Parser<'a> {
         // root-level siblings AFTER the import (less.js commentStore flush).
         self.cur.skip_whitespace();
         let fs = self.here();
-        self.scan_prelude();
+        self.scan_prelude()?;
         let feat_all = self.cur.src()[fs..self.here()].trim();
         let (feat_clean, feat_comments) = split_prelude_comments(feat_all);
         for text in feat_comments {
@@ -582,7 +903,16 @@ impl<'a> Parser<'a> {
         } else {
             Some(Box::new(Node::Anonymous(feat_raw.to_string())))
         };
-        self.cur.eat(b';');
+        // less.js: the statement must close with `;` — EOF included
+        // (import-no-semi) — reported at the @import (`i = index; error(…)`,
+        // parser.js:1820).
+        if !self.cur.eat(b';') {
+            return Err(self.err_kind_at(
+                ErrorKind::Syntax,
+                "missing semi-colon or unrecognised media features on import",
+                start,
+            ));
+        }
         Ok(Node::Import {
             path: Box::new(path),
             options,
@@ -615,12 +945,27 @@ impl<'a> Parser<'a> {
         }
         self.cur.skip_trivia();
 
+        // A `{` after a PROPERTY's colon: detached rulesets only bind to
+        // `@vars` — less.js has no parser for this and dies with the furthest
+        // `Unrecognised input` at the `{` (detached-ruleset-6).
+        if !custom && self.cur.cur() == Some(b'{') {
+            return Err(self.unrecognised(self.here()));
+        }
         let value = if custom {
-            self.parse_custom_property_value()
+            self.parse_custom_property_value()?
         } else if let Some(v) = self.try_anonymous_value() {
             v
         } else {
-            self.parse_value()?
+            match self.parse_value() {
+                Ok(v) => v,
+                // A SOFT failure backtracks — the statement may still be a
+                // ruleset (glued-pseudo heads like `a:hover when (…)`).
+                Err(e) if e.message.is_empty() => {
+                    self.cur.i = save;
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            }
         };
 
         self.cur.skip_whitespace();
@@ -707,6 +1052,13 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
+        if self.cur.src()[start..self.here()] == *"*" {
+            // The IE star hack needs a NAME glued to the `*` — a lone `*` is
+            // not a property (less.js `ruleProperty` requires `\*?[-\w…]+`;
+            // property-asterisk-only-name).
+            self.cur.i = start;
+            return None;
+        }
         if self.here() == start {
             return None;
         }
@@ -749,10 +1101,10 @@ impl<'a> Parser<'a> {
     /// `--x: rgba(0, 30, 0, 238);` IS evaluated, matching less.js — while
     /// anything the entity chain can't fully consume falls back to the raw
     /// capture (where `@{}` interpolation still runs in the eval step).
-    fn parse_custom_property_value(&mut self) -> Node {
+    fn parse_custom_property_value(&mut self) -> Result<Node, LessError> {
         let save = self.here();
         if let Some(v) = self.try_custom_entities() {
-            return v;
+            return Ok(v);
         }
         self.cur.i = save;
         self.parse_custom_property_raw()
@@ -818,31 +1170,72 @@ impl<'a> Parser<'a> {
     /// Raw custom-property capture up to `;`/`}` (balanced). A backslash
     /// escapes the next byte — `\'` inside the value must NOT open a string
     /// (less.js's permissive scanner honors escapes; review F5).
-    fn parse_custom_property_raw(&mut self) -> Node {
+    ///
+    /// less.js `$parseUntil` faithfulness (the custom-property-unmatched-block
+    /// fixtures): a closer that does not match the innermost opener is
+    /// `Expected '<matching closer>'` at the closer's position, and a quote
+    /// with no closing mate on the same line is `Expected '<quote>'` at the
+    /// OPENING quote (less.js quoted-string regexes never span newlines).
+    fn parse_custom_property_raw(&mut self) -> Result<Node, LessError> {
         let start = self.here();
-        let mut depth = 0i32;
+        let mut stack: Vec<u8> = Vec::new();
         while let Some(b) = self.cur.cur() {
             match b {
-                b';' | b'}' if depth == 0 => break,
+                b';' | b'}' if stack.is_empty() => break,
                 b'\\' if self.cur.peek(1).is_some() => {
                     self.cur.bump();
                     self.cur.bump();
                 }
                 b'{' | b'(' | b'[' => {
-                    depth += 1;
+                    stack.push(b);
                     self.cur.bump();
                 }
                 b'}' | b')' | b']' => {
-                    depth -= 1;
+                    let expected = match stack.last() {
+                        Some(b'{') => b'}',
+                        Some(b'(') => b')',
+                        Some(b'[') => b']',
+                        _ => b,
+                    };
+                    if expected != b {
+                        return Err(self.err(format!("Expected '{}'", expected as char)));
+                    }
+                    stack.pop();
                     self.cur.bump();
                 }
                 b'"' | b'\'' => {
-                    self.cur.scan_string();
+                    let quote = b;
+                    let qpos = self.here();
+                    let rest = &self.cur.rest()[1..];
+                    let mut close = None;
+                    let mut k = 0;
+                    let bytes = rest.as_bytes();
+                    while k < bytes.len() {
+                        match bytes[k] {
+                            b'\\' => k += 2,
+                            b'\n' => break,
+                            c if c == quote => {
+                                close = Some(k);
+                                break;
+                            }
+                            _ => k += 1,
+                        }
+                    }
+                    match close {
+                        Some(k) => self.cur.i = qpos + 1 + k + 1,
+                        None => {
+                            return Err(self.err_kind_at(
+                                ErrorKind::Parse,
+                                format!("Expected '{}'", quote as char),
+                                qpos,
+                            ))
+                        }
+                    }
                 }
                 _ => self.cur.bump(),
             }
         }
-        Node::Anonymous(self.cur.src()[start..self.here()].trim().to_string())
+        Ok(Node::Anonymous(self.cur.src()[start..self.here()].trim().to_string()))
     }
 
     // -----------------------------------------------------------------------
@@ -883,10 +1276,34 @@ impl<'a> Parser<'a> {
                     return Ok(Node::ExtendRule(selectors.remove(0).extend_list));
                 }
                 // A bare mixin call: `.mixin;` / `.mixin(args);` / `.m() !important;`.
+                // less.js `mixin.call` only matches `.`/`#` heads — anything
+                // else here is unparseable input, reported at the FURTHEST
+                // position reached (the terminator), like the real parser's
+                // furthest-failure bookkeeping.
+                let is_mixin_head = selectors
+                    .first()
+                    .and_then(|s| s.elements.first())
+                    .map(|e| e.value.starts_with('.') || e.value.starts_with('#'))
+                    .unwrap_or(false);
+                if !is_mixin_head {
+                    return Err(self.unrecognised(self.here()));
+                }
+                // less.js's args parser rejects mixing `;` and `,` argument
+                // delimiters (mixed-mixin-definition-args-1/-2) — validate the
+                // raw arg text with the same state machine before accepting.
+                if let Some(lp) = self.cur.src()[start..self.here()].find('(') {
+                    let inner_start = start + lp + 1;
+                    let end = self.cur.src()[inner_start..self.here()]
+                        .rfind(')')
+                        .map(|r| inner_start + r)
+                        .unwrap_or(self.here());
+                    let raw = self.cur.src()[inner_start..end].to_string();
+                    self.validate_arg_separators(inner_start, &raw)?;
+                }
                 self.cur.eat(b';');
                 Ok(self.as_mixin_call(selectors, important, start))
             }
-            _ => Err(self.err("expected '{', ';' or '}' after selector")),
+            _ => Err(self.unrecognised(self.here())),
         }
     }
 
@@ -898,9 +1315,26 @@ impl<'a> Parser<'a> {
             let sel = self.parse_selector()?;
             selectors.push(sel);
             self.cur.skip_trivia();
+            // less.js `parsers.selectors`: a guard is only allowed on a lone
+            // selector — checked after EVERY selector parse (`s.condition &&
+            // selectors.length > 1`) and again right after a comma when the
+            // guarded selector comes first. Both are Syntax errors at the
+            // current (whitespace-skipped) position.
+            if selectors.len() > 1 && selectors.last().is_some_and(|s| s.guard.is_some()) {
+                return Err(self.err_kind(
+                    ErrorKind::Syntax,
+                    "Guards are only currently allowed on a single selector.",
+                ));
+            }
             if self.cur.cur() == Some(b',') {
                 self.cur.bump();
                 self.cur.skip_trivia();
+                if selectors.last().is_some_and(|s| s.guard.is_some()) {
+                    return Err(self.err_kind(
+                        ErrorKind::Syntax,
+                        "Guards are only currently allowed on a single selector.",
+                    ));
+                }
                 continue;
             }
             break;
@@ -924,10 +1358,13 @@ impl<'a> Parser<'a> {
             }
             // A trailing `:extend(…)` clause — with or without a leading
             // combinator (`.a:extend(.b)` ≡ `.a :extend(.b)`); several may
-            // chain (`:extend(.a):extend(.b)`). Plan §2.8.
-            if !first && self.cur.rest().starts_with(":extend(") {
+            // chain (`:extend(.a):extend(.b)`). Plan §2.8. less.js also parses
+            // it FIRST in a selector (`extend()` is tried before elements) —
+            // a selector that then never gains an element errors below.
+            if self.cur.rest().starts_with(":extend(") {
                 self.cur.eat_str(":extend(");
                 extend_list.extend(self.parse_extend_targets()?);
+                first = false;
                 continue;
             }
             let ws = if first { false } else { ws };
@@ -947,8 +1384,14 @@ impl<'a> Parser<'a> {
                 break;
             }
             if !extend_list.is_empty() {
-                // less.js: extend must be the last thing in the selector.
-                return Err(self.err("Extend can only be used at the end of selector"));
+                // less.js: extend must be the last thing in the selector — a
+                // Syntax `error(...)` at the current position, which sits
+                // AFTER the auto-skipped whitespace (extend-not-at-end).
+                self.cur.skip_trivia();
+                return Err(self.err_kind(
+                    ErrorKind::Syntax,
+                    "Extend can only be used at the end of selector",
+                ));
             }
             elements.push(Element {
                 combinator,
@@ -956,6 +1399,15 @@ impl<'a> Parser<'a> {
                 span: self.span(elem_start),
             });
             first = false;
+        }
+        // A selector that is ONLY `:extend(…)` clauses (no elements) is
+        // less.js's "cannot be used on its own" Syntax error, raised at the
+        // current position (after the clause + whitespace).
+        if elements.is_empty() && !extend_list.is_empty() {
+            return Err(self.err_kind(
+                ErrorKind::Syntax,
+                "Extend must be used to extend a selector, it cannot be used on its own",
+            ));
         }
         // Optional guard.
         let guard = self.try_parse_guard()?;
@@ -1100,6 +1552,18 @@ impl<'a> Parser<'a> {
                 // `:extend(…)` is never part of an element — it ends the
                 // compound so the selector parser can claim it (plan §2.8).
                 Some(b':') if self.cur.rest().starts_with(":extend(") => break,
+                // A `:` OPENING an element without pseudo-name material ends
+                // the selector (`* : 1;` — less.js's element() fails at the
+                // bare colon and the statement dies `Unrecognised input`
+                // there). Mid-element (`color:`) the colon is consumed as
+                // before — the glued-declaration head shape.
+                Some(b':') if self.here() == start
+                    && !matches!(self.cur.peek(1), Some(n) if n == b':' || n == b'-'
+                        || n == b'_' || n == b'\\' || n == b'@' || n.is_ascii_alphanumeric()
+                        || n >= 0x80) =>
+                {
+                    break;
+                }
                 Some(b'.') | Some(b'#') | Some(b':') | Some(b'&') | Some(b'*') | Some(b'%')
                 | Some(b'|') => {
                     self.cur.bump();
@@ -1159,10 +1623,31 @@ impl<'a> Parser<'a> {
         }
         self.cur.eat_str("when");
         self.cur.skip_trivia();
+        // less.js `expect(this.conditions, 'expected condition')`: a guard
+        // condition must open with `(` or `not` (mixins-guards-cond-expected).
+        if self.cur.cur() != Some(b'(')
+            && !(self.cur.rest().starts_with("not")
+                && matches!(self.cur.peek(3), Some(b) if b.is_ascii_whitespace() || b == b'('))
+        {
+            return Err(self.err_kind(ErrorKind::Syntax, "expected condition"));
+        }
         let gs = self.here();
         // The guard runs up to the block/terminator, balancing parens + strings.
         let mut depth = 0i32;
         while let Some(b) = self.cur.cur() {
+            // less.js `conditions()` continues past a comma ONLY when it opens
+            // another parenthesized/`not(` condition (`peek(/^,\s*(not\s*)?\(/)`)
+            // — otherwise the comma belongs to the SELECTOR GROUP and the
+            // guards-on-multiple-selectors error fires there.
+            if b == b',' && depth == 0 {
+                let rest = &self.cur.rest()[1..];
+                let t = rest.trim_start();
+                let continues = t.starts_with('(')
+                    || (t.starts_with("not") && t[3..].trim_start().starts_with('('));
+                if !continues {
+                    break;
+                }
+            }
             match b {
                 b'{' | b';' if depth == 0 => break,
                 b'}' if depth == 0 => break,
@@ -1540,10 +2025,19 @@ impl<'a> Parser<'a> {
     /// A value leaf (plan §2.1/§2.7/§2.18).
     fn parse_entity(&mut self) -> Result<Node, LessError> {
         self.skip_value_trivia();
+        let ent_start = self.here();
         match self.cur.cur() {
             Some(b'"') | Some(b'\'') => Ok(self.parse_quoted()),
             Some(b'~') if matches!(self.cur.peek(1), Some(b'"') | Some(b'\'')) => {
                 Ok(self.parse_quoted())
+            }
+            // Inline JavaScript backticks (plan §8): parsed far enough to
+            // raise the precise disabled-JS error at EVAL (§C-jserr) — the
+            // backtick body is captured verbatim, never executed.
+            Some(b'`') => Ok(self.parse_javascript(false, ent_start)),
+            Some(b'~') if self.cur.peek(1) == Some(b'`') => {
+                self.cur.bump();
+                Ok(self.parse_javascript(true, ent_start))
             }
             // `%(fmt, …)` and the `~(…)` list escape are calls whose names are
             // punctuation (less.js call-name regex `[\w-]+|%|~|progid:[\w.]+`).
@@ -1554,25 +2048,44 @@ impl<'a> Parser<'a> {
                 let args = self.parse_call_args()?;
                 self.skip_value_trivia();
                 self.cur.eat(b')');
-                Ok(Node::Call { name, args })
+                Ok(Node::Call { name, args, span: self.span(ent_start) })
             }
             Some(b'(') => {
+                // less.js `sub` = `'(' addition ')'` — a SINGLE chain, parsed
+                // STRICT-FIRST so an inner paren's failure is the furthest
+                // candidate (parens-error-2/3) while a list after the chain
+                // fails at the outer stop (parens-error-1: less.js never even
+                // reaches the inner paren there).
                 let psave = self.here();
                 self.cur.bump();
-                let inner = self.parse_value()?;
                 self.skip_value_trivia();
-                self.cur.eat(b')');
+                let inner = self.parse_addition()?;
+                self.skip_value_trivia();
+                if self.cur.eat(b')') {
+                    return Ok(Node::Paren { inner: Box::new(inner), in_op: false });
+                }
+                let at = self.here();
                 // A declaration-shaped paren (`(min-width: @val)`) is not an
                 // expression — keep it VERBATIM like less.js's permissive
                 // capture, so the parens and `:` survive re-rendering
                 // (namespacing-media).
-                if contains_colon_stall(&inner) {
-                    self.cur.i = psave;
-                    let vs = self.here();
-                    self.skip_balanced(b'(', b')');
-                    return Ok(Node::Anonymous(self.cur.src()[vs..self.here()].to_string()));
+                self.cur.i = psave;
+                let vs = self.here();
+                self.skip_balanced(b'(', b')');
+                let text = self.cur.src()[vs..self.here()].to_string();
+                // The verbatim capture still obeys less.js `$parseUntil`
+                // bracket/quote pairing — `({ …: [ })` is `Expected ']'` at
+                // the mismatched closer, never a silent capture
+                // (custom-property-unmatched-block-1).
+                self.validate_brackets(vs, &text)?;
+                if paren_text_has_colon(&text) {
+                    return Ok(Node::Anonymous(text));
                 }
-                Ok(Node::Paren { inner: Box::new(inner), in_op: false })
+                // SOFT: another statement alternative may still parse this
+                // (`a:hover when (2 = true) { }` — the declaration try fails
+                // here but the ruleset succeeds, like less.js's restore).
+                self.cur.i = at;
+                Err(self.soft_fail("Expected ')'", at))
             }
             Some(b'[') => {
                 // A bracketed value token (`[line-name]` in grid) — captured
@@ -1603,7 +2116,11 @@ impl<'a> Parser<'a> {
                 let text = self.cur.src()[s..self.here()].to_string();
                 match crate::color::Color::from_hex(&text) {
                     Some(color) => Ok(Node::Color(color)),
-                    None => Err(self.err("Unrecognised input")),
+                    // SOFT: the declaration try backtracks and the statement
+                    // fails later at its furthest point — less.js reports
+                    // `Unrecognised input` at the post-comment `;`, not at the
+                    // bad literal (invalid-color-with-comment).
+                    None => Err(LessError::new(ErrorKind::Parse, "")),
                 }
             }
             Some(b'.') if matches!(self.cur.peek(1), Some(b) if b == b'-' || b == b'_'
@@ -1680,6 +2197,7 @@ impl<'a> Parser<'a> {
                     }
                     self.cur.i = save;
                 } else if self.cur.cur() == Some(b'[') {
+                    let lb = self.here();
                     if let Some(keys) = self.try_rule_lookups() {
                         return Ok(Node::Lookup {
                             target: Box::new(Node::VariableCall {
@@ -1687,7 +2205,11 @@ impl<'a> Parser<'a> {
                                 span: self.span(start),
                             }),
                             keys,
-                            span: self.span(start),
+                            // less.js's value-position `variableCall(parsedName)`
+                            // captures `i` AFTER the consumed `@name` — the
+                            // NamespaceValue (and its not-found errors) anchor
+                            // at the `[` (namespacing-2/-4).
+                            span: self.span(lb),
                         });
                     }
                 }
@@ -1791,9 +2313,15 @@ impl<'a> Parser<'a> {
                     let args = self.parse_call_args()?;
                     self.skip_value_trivia();
                     self.cur.eat(b')');
-                    return Ok(Node::Call { name: ident, args });
+                    return Ok(Node::Call { name: ident, args, span: self.span(ent_start) });
                 }
                 Ok(Node::Keyword(ident))
+            }
+            // A bare `%` is a KEYWORD in less.js (`/^%|…/`) whose eval throws
+            // `Invalid % without number` (percentage-missing-space).
+            Some(b'%') => {
+                self.cur.bump();
+                Ok(Node::Keyword("%".to_string()))
             }
             _ => {
                 // A stray punctuation entity (e.g. a lone `/` in `0 0 / 1`).
@@ -2189,12 +2717,29 @@ fn utf8_char_len(b: u8) -> usize {
 /// carry the flag for us — see `Node::Paren`).
 /// Whether a parsed value contains a stalled `:` item — the signature of a
 /// declaration-shaped parenthesized capture (`(min-width: 480px)`).
-fn contains_colon_stall(n: &Node) -> bool {
-    match n {
-        Node::Anonymous(t) => t == ":",
-        Node::Expression(items) | Node::Value(items) => items.iter().any(contains_colon_stall),
-        _ => false,
+/// A `: ` inside balanced paren text (outside quotes) — the declaration-shaped
+/// paren fallback's trigger (`(min-width: @val)`).
+fn paren_text_has_colon(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' | b'\'' => {
+                let q = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b':' => return true,
+            _ => {}
+        }
+        i += 1;
     }
+    false
 }
 
 /// Remove `/* … */` and `// …` comments from a raw mixin param/argument list
@@ -2505,7 +3050,7 @@ mod tests {
         let Node::Declaration(d0) = &rs.rules[0] else {
             panic!()
         };
-        assert!(matches!(d0.value.as_ref(), Node::Call { name, args } if name == "rgba" && args.len() == 4));
+        assert!(matches!(d0.value.as_ref(), Node::Call { name, args, .. } if name == "rgba" && args.len() == 4));
         let Node::Declaration(d1) = &rs.rules[1] else {
             panic!()
         };

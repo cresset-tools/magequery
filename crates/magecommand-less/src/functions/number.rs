@@ -218,6 +218,7 @@ mod tests {
         let call = Node::Call {
             name: "calc".into(),
             args: vec![dim(1.0, "")],
+            span: Default::default(),
         };
         assert!(min_max(&[call, dim(1.0, "")], true, 8).is_none());
     }

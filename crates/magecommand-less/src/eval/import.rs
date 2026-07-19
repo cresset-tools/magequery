@@ -42,6 +42,10 @@ pub(crate) struct FileScope {
     pub rootpath: String,
     /// The file was reached through a `(reference)` import.
     pub reference: bool,
+    /// The file's NORMALIZED source — the base for locating errors raised
+    /// while evaluating its rules (§5.5). Empty when unknown (bare `eval()`
+    /// callers; locations then degrade to the message-only rendering).
+    pub source: std::sync::Arc<str>,
 }
 
 impl FileScope {
@@ -63,6 +67,7 @@ impl FileScope {
             current_directory,
             rootpath,
             reference: false,
+            source: std::sync::Arc::from(""),
         }
     }
 }
@@ -81,12 +86,15 @@ pub(crate) fn resolve_imports(
     rules: &mut Vec<Node>,
     opts: &LessOptions,
     resolver: &dyn ImportResolver,
+    entry_source: std::sync::Arc<str>,
 ) -> Result<(), LessError> {
-    let entry = FileScope::entry(opts);
+    let mut entry = FileScope::entry(opts);
+    entry.source = entry_source;
     let mut pass = ImportPass {
         opts,
         resolver,
         parsed: FxHashMap::default(),
+        sources: FxHashMap::default(),
         fetched: FxHashSet::default(),
         queue: std::collections::VecDeque::new(),
     };
@@ -151,7 +159,7 @@ fn stamp_node(node: &mut Node, tag: &std::sync::Arc<crate::ast::FileTag>) {
                 tag: tag.clone(),
             };
         }
-        Node::Call { name, args } => {
+        Node::Call { name, args, .. } => {
             if is_resource_fn(name) {
                 let inner = std::mem::replace(node, Node::Anonymous(String::new()));
                 *node = Node::WithFile {
@@ -348,6 +356,8 @@ struct ImportPass<'a> {
     resolver: &'a dyn ImportResolver,
     /// full_path → parsed rules (one parse per file, `(multiple)` clones).
     parsed: FxHashMap<String, Vec<Node>>,
+    /// full_path → normalized source (error locations/excerpts, §5.5).
+    sources: FxHashMap<String, std::sync::Arc<str>>,
     /// less.js `recursionDetector` ∪ `files`: canonical paths already fetched.
     fetched: FxHashSet<String>,
     /// Pending file visits (locations of freshly attached `ImportResolved`
@@ -435,6 +445,7 @@ impl<'a> ImportPass<'a> {
                 current_directory: ir.current_directory.clone(),
                 rootpath: ir.rootpath.clone(),
                 reference: ir.reference,
+                source: ir.source.clone(),
             };
             let mut trail = loc.clone();
             self.visit_list(&mut ir.rules, &scope, multiple, depth, &mut trail)?;
@@ -470,6 +481,7 @@ impl<'a> ImportPass<'a> {
                         current_directory: ir.current_directory.clone(),
                         rootpath: ir.rootpath.clone(),
                         reference: ir.reference,
+                        source: ir.source.clone(),
                     };
                 }
                 let children = child_lists(node);
@@ -625,13 +637,23 @@ impl<'a> ImportPass<'a> {
                     layer_css: false,
                     path: None,
                     span: *span,
+                    source: std::sync::Arc::from(""),
                 })))
             }
             Err(e) => {
-                return Err(LessError::new(
-                    ErrorKind::Import,
-                    format!("'{raw_path}' wasn't found. {e}"),
-                ))
+                // less.js node file manager: `'<path>' wasn't found. Tried - <list>`
+                // (FileError), anchored at the @import statement in the
+                // importing file.
+                let msg = match &e {
+                    crate::resolver::ImportError::NotFound(tried) => {
+                        format!("'{raw_path}' wasn't found. Tried - {tried}")
+                    }
+                    other => format!("'{raw_path}' wasn't found. {other}"),
+                };
+                return Err(
+                    LessError::at(ErrorKind::Import, msg, scope.filename.clone(), span.start)
+                        .located(&scope.source),
+                );
             }
         };
         // Lexically normalized — the once-dedup key must treat
@@ -673,6 +695,7 @@ impl<'a> ImportPass<'a> {
                     layer_css: false,
                     path: None,
                     span: *span,
+                    source: std::sync::Arc::from(""),
                 })))
             }
             payload => {
@@ -692,11 +715,18 @@ impl<'a> ImportPass<'a> {
                         layer_css: false,
                         path: None,
                         span: *span,
+                        source: std::sync::Arc::from(""),
                     })));
                 }
                 self.fetched.insert(full_path.clone());
 
+                let file_source: std::sync::Arc<str>;
                 let mut rules: Vec<Node> = if let Some(cached) = self.parsed.get(&full_path) {
+                    file_source = self
+                        .sources
+                        .get(&full_path)
+                        .cloned()
+                        .unwrap_or_else(|| std::sync::Arc::from(""));
                     cached.clone()
                 } else {
                     let src: std::sync::Arc<str> = match payload {
@@ -728,6 +758,7 @@ impl<'a> ImportPass<'a> {
                                 layer_css,
                                 orig_path,
                                 *span,
+                                std::sync::Arc::from(""),
                             );
                         }
                     };
@@ -739,6 +770,8 @@ impl<'a> ImportPass<'a> {
                     // `(optional)` swallows ANY error of the target file —
                     // parse errors included (less.js import-manager.js:49,
                     // review F10) — turning it into an empty-rules skip.
+                    let norm: std::sync::Arc<str> =
+                        std::sync::Arc::from(crate::lex::normalize_source(&src).as_ref());
                     let parsed = match crate::parser::parse(&src, file, self.opts) {
                         Ok(p) => p,
                         Err(_) if optional => {
@@ -755,6 +788,7 @@ impl<'a> ImportPass<'a> {
                                 layer_css: false,
                                 path: None,
                                 span: *span,
+                                source: std::sync::Arc::from(""),
                             })))
                         }
                         Err(e) => return Err(e),
@@ -764,6 +798,8 @@ impl<'a> ImportPass<'a> {
                         other => vec![other.clone()],
                     };
                     self.parsed.insert(full_path.clone(), rules.clone());
+                    self.sources.insert(full_path.clone(), norm.clone());
+                    file_source = norm;
                     rules
                 };
 
@@ -791,6 +827,7 @@ impl<'a> ImportPass<'a> {
                     layer_css,
                     orig_path,
                     *span,
+                    file_source,
                 )
             }
         }
@@ -809,6 +846,7 @@ impl<'a> ImportPass<'a> {
         layer_css: bool,
         path: Option<Box<Node>>,
         span: crate::ast::Span,
+        source: std::sync::Arc<str>,
     ) -> Result<Node, LessError> {
         Ok(Node::ImportResolved(Box::new(ImportResolved {
             rules,
@@ -823,6 +861,7 @@ impl<'a> ImportPass<'a> {
             layer_css,
             path,
             span,
+            source,
         })))
     }
 }
