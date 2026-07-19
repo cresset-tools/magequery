@@ -717,10 +717,12 @@ multi-construct batches diffed byte-identical against `lessc`).
   (subject to the caller-wins variable filter); `(optional)` misses are silent;
   `(inline)` splices the payload verbatim. `once`/`reference`/media-feature
   wrapping/path rewriting remain 4B (`import/*` fixtures stay xfail).
-- **`!important` interplay (§2.15)** probed: DR-call bodies under
-  `.m() !important` force importance (incl. simpleBlock-nested at-rule bodies),
-  `@v: red !important` propagates through DR bodies, and merge groups OR their
-  flags — all byte-identical to less.js.
+- **`!important` interplay (§2.15)** probed: `@v: red !important` propagates
+  through DR bodies, and merge groups OR their flags — byte-identical to
+  less.js. (The 4A claim that `.m() !important` forces importance into at-rule
+  bodies was WRONG — less.js implements `makeImportant` only on
+  Declaration/Ruleset/MixinDefinition; corrected in the Phase 4 review fixes
+  below: Media/AtRule bodies pass through untouched.)
 - **Selector join fix:** `os.replace('&', parent)` now trims only the LEADING
   whitespace — a trailing `&` at root keeps its descendant space
   (`.outOfMedia &` → `.outOfMedia  {`, two spaces, as less.js renders).
@@ -911,11 +913,143 @@ Remaining red (5): `at-rules-compressed`, `at-rules-compressed-evaluation`,
 phase); `import/import` + `config/3rd-party/bootstrap4` — need JS `@plugin`
 execution (out of scope, §8).
 
-Known deviations kept (noted while porting): URL rewriting uses the current
-eval file's rootpath (less.js uses the node's declaration-site fileInfo — a
-url inside a variable defined in an imported file but USED in the entry file
-would take the caller's rootpath); the extend carrier inside a bubbling
+Known deviations kept (noted while porting): ~~URL rewriting uses the current
+eval file's rootpath~~ (FIXED in the Phase 4 review — urls and resource calls
+are now stamped with their declaration-site file info, see below); the extend
+carrier inside a bubbling
 `@media` under a selector-attached extend does not re-collect in the media
 scope (less.js's derived media ruleset shares the selector objects); strict
 units error only through `Dimension::operate`'s existing checks (the genCSS
 multi-unit throw is not modeled).
+
+### Phase 4 review fixes (adversarial audit vs less.js 4.6.7, post-4B)
+
+Four review lenses (imports+URLs, :extend, detached rulesets/maps, at-rule
+bubbling/residuals) audited a0fd6c6 against real lessc 4.6.7. All confirmed
+in-phase findings folded in; every fix re-verified against lessc (probe
+drivers in the session scratchpad) plus ~350 reviewer probes re-run as a
+regression smoke. Corpus stays 122/127 (floor 122, 5 xfail), 138 unit tests.
+
+**Imports (§2.9):**
+- **BFS once-slots (F13)** — stage 1 now fetches breadth-first by file visit
+  (the less.js `ImportSequencer` registration order): all of a file's imports
+  claim their once-slots before any import discovered inside a fetched
+  subtree, so a root-level import beats a nested one (output ORDER and, under
+  `(reference)`, VISIBILITY both flip vs the old depth-first walk).
+- **`layer(...)` imports (F1)** — a LESS import whose feature list is a single
+  expression opening `layer(...)` re-emits the literal `@import` (less.js
+  `layerCss`); the file is still fetched (once-slots consumed), its rules
+  discarded. Bare `layer` and comma lists still @media-wrap.
+- **Saved path-eval errors (F2/F4)** — a variable-path import whose path can't
+  interpolate at import time stores the NameError on the node; at eval the
+  re-evaluated path decides: css-shaped → literal re-emit, else the saved
+  error RETHROWS (so a mixin-param-interpolated `.less` path fails even though
+  the path resolves at eval). The root frame used for var-import interpolation
+  is SNAPSHOT at the first variable import (modeling less.js's stale
+  `Ruleset.variables()` memo) — chained variable-path imports now fail
+  exactly like less.js.
+- **`(reference)` css imports emit nothing (F6)**; **`(optional)` swallows
+  parse errors too (F10)**; **inline payloads strip a UTF-8 BOM (F14)**;
+  **unknown import options are a parse error (F9)**; **root-level
+  "Properties must be inside selector blocks" fires through reference-hidden
+  imports (F15)**; **strictImports + a real ruleset-level import fails the
+  compile** (a duplicate/skip one silently drops, matching the fixture golden)
+  (F5); **the stage-1 walk has a depth cap** (`max_eval_depth`, default 64) so
+  a `(multiple)` self-cycle errors cleanly instead of overflowing (F7).
+- **Harness FsResolver `.less`-append (F12)** — now mirrors less.js's
+  `/(\.[a-z]*$)|([?;].*)$/`: lowercase-only extensions and `?`/`;` suffixes
+  exempt; `up.CSS` gets `.less` appended (the raw path is never tried). This
+  is the documented contract for orchestration resolvers.
+
+**URL rewriting (§2.18):**
+- **Declaration-site fileInfo (F3/F8)** — the import pass stamps `url(...)`
+  values and resource-function calls (`data-uri`/`image-size`/`-width`/
+  `-height`) with a `FileTag` (rootpath + directory of the file the token was
+  WRITTEN in, per import statement); eval unwraps `Node::WithFile` through a
+  `decl_file` stack. Urls in variables/mixins defined in imported files now
+  rewrite against the DECLARING file in both directions; `data-uri` resolves
+  against the declaring dir when rewriteUrls is on (entry dir when off) and
+  its missing-file fallback url is rewritten too.
+- **Slashless rootpath (F11)** — a non-empty `rootpath` without a trailing
+  `/` gets one appended (core less.js parse-setup normalization).
+
+**:extend (§2.8):**
+- `!all` accepted as a synonym of `all` (E1); attribute case-flags
+  (`[a="v" i]`) ignored in the structural compare and ops inside quoted
+  values no longer corrupt `parse_attr` (E2/E8); interpolated extend TARGETS
+  never match — less.js needles keep non-string element values (hay-side
+  interpolation still matches; E5); grafted selectors keep the leading space
+  of an explicit first combinator (E7); the no-match warning renders less.js's
+  leading space (`extend ' .zzz' …`) and dedups by (source span, selector) so
+  two extends at different positions warn twice (E3/E6); the parse-time
+  "Targeting complex selectors…" warning is emitted (approximated at eval,
+  deduped by span, message-only — no file/line excerpt) (E4); the circular
+  error text matches less.js's spacing (kind label still differs, see below)
+  (E10).
+
+**Detached rulesets / maps (§2.11–§2.12):**
+- Lookup recursion is depth-guarded (self-referential maps error cleanly;
+  P4DR-1) and `mixin_call_map` deduplicates frames like statement calls (a
+  recursive mixin-as-map lookup errored after minutes of exponential frame
+  growth; P4DR-2). Named lookups take the LAST merge-flagged declaration RAW
+  (no `merge_rules` — `$prop` still merges; P4DR-3). Whitespace inside lookup
+  brackets is skipped (`[ key ]`; P4DR-6); combinator namespace paths parse
+  in value position (`#ns > .m()[k]`, `#ns .m()[k]`; P4DR-7); dynamic keys
+  (`[@@k]`/`[$@k]`) use the raw node value (a Dimension keys by NUMBER, unit
+  dropped; P4DR-8); `@dr()[k]` and quoted/interpolated keys are parse errors
+  (P4DR-9/10); the undefined-namespaced-mixin error renders the path glued
+  (`#a.b.m is undefined`; P4DR-12).
+
+**At-rules (§2.13):**
+- `.m() !important` no longer forces importance into at-rule bodies
+  (@media/@supports/@font-face, incl. through DR calls) — `make_important_out`
+  stops at `Out::At`/`Out::Nested` (F4/P4DR-5).
+- Bare declarations at a rootish level keep SOURCE ORDER relative to nested
+  blocks: they now flow through the child stream as `Out::Decls` runs instead
+  of being hoisted (`@page { @top-center{…} margin: 1cm; … }` and root
+  @media/@supports bodies interleave like less.js) (F9).
+- Merged nested @media/@container blocks DROP bare declaration runs (at every
+  merged depth, incl. mixin/import re-merges) and prune when reduced to
+  comments; root `@container` drops bare decls AND comments, keeping the
+  empty shell (F6/F11/F12/F10).
+- Escaped-string media features keep embedded commas as ONE entry through
+  merges (`~"tv, projection"`), while a parsed comma-list variable
+  (`@pair: screen, print`) still cross-multiplies — the prelude is split
+  BEFORE variable resolution and whole-part variables are evaluated as nodes
+  (F3). Comma tokens glue to the preceding feature in query normalization.
+- Media prelude validation: preludeless `@media {`/`@container {` →
+  "Value requires an array argument"; empty feature parens → "badly formed
+  media feature definition"; `@{var}` inside parenthesized features →
+  ParseError "Missing closing ')'"; uppercase at-rule names (`@MEDIA`) →
+  the less.js variable-call ParseError (F13/F5/F8).
+
+**Deliberately NOT modeled (documented skips):**
+- **P4DR-4 — less.js's order-dependent DR closure-capture flip** (a stale
+  `Ruleset._variables` memo makes a DR declared after any sibling variable
+  lookup capture at the CALL site instead of the declaration site, flipping
+  def-vs-caller precedence). This models a less.js caching accident whose
+  trigger is the position of unrelated sibling rules; the crate's pass-0
+  closure capture always uses the declaration site (the common orderings
+  match; the flip cases diverge). Revisit only if a real theme hits it.
+- **Mid-query prelude comments** are still dropped rather than relocated into
+  the next feature's parens (the 4A deviation; cosmetic).
+- **Upstream less.js crash parity (F7-info):** `media > ruleset > @import` of
+  a media-containing file crashes less.js 4.6.7 ("Maximum call stack size
+  exceeded"); the crate compiles the sane re-merge. Matching a stack overflow
+  is not meaningful — flagged for corpus awareness.
+- **Error KIND labels** still render the crate's 7-kind names (`Runtime:` vs
+  less.js `SyntaxError:` etc.) — the error-format phase owns byte-exact
+  rendering; messages/positions match.
+
+**Out-of-phase findings catalogued for later phases:**
+- **E11 (parser):** `a:hover #main { }` (type+pseudo followed by a
+  whitespace-separated non-hex `#id`) is a hard parse error — the
+  declaration/ruleset backtracking commits to the `ident:` declaration path
+  and dies on the `#id` value token. Also `p:before #i1`,
+  `span:nth-child(2) #i1`, `span:hover>#i1`.
+- **E9 (serializer):** `[ a = v ]` attribute selectors are not re-rendered
+  normalized (`[a=v]`) — less.js rebuilds Attribute nodes structurally; the
+  crate keeps bracket text verbatim (extend MATCHING is already structural).
+- **P4DR-11 (selector join):** `&`-only selectors at root (`& + & {}`)
+  emit garbage instead of being pruned (less.js drops rules whose joined
+  selector is empty) — milestone-1 JoinSelector/genCSS empty-path pruning.

@@ -214,6 +214,23 @@ struct FsResolver {
     include_paths: Vec<PathBuf>,
 }
 
+/// less.js's `.less`-append rule (review F12): append unless the path matches
+/// `/(\.[a-z]*$)|([?;].*)$/` — a LOWERCASE-only (possibly empty) extension at
+/// the end, or a `?`/`;` suffix. `up.CSS` fails the lowercase test, so less.js
+/// tries only `up.CSS.less` (never the raw path).
+fn needs_less_ext(path: &str) -> bool {
+    if path.contains('?') || path.contains(';') {
+        return false;
+    }
+    match path.rfind('.') {
+        Some(dot) => {
+            let ext = &path[dot + 1..];
+            !(ext.chars().all(|c| c.is_ascii_lowercase()))
+        }
+        None => true,
+    }
+}
+
 impl FsResolver {
     fn candidates(&self, req: &ImportRequest) -> Vec<PathBuf> {
         let raw = req.path.as_str();
@@ -244,9 +261,14 @@ impl ImportResolver for FsResolver {
 
         let mut tried = Vec::new();
         let mut found: Option<PathBuf> = None;
+        let append_less = !is_css && needs_less_ext(&req.path);
         for mut candidate in self.candidates(req) {
-            if candidate.extension().is_none() && !is_css {
-                candidate.set_extension("less");
+            if append_less {
+                // Append (never replace) — less.js appends `.less` to the
+                // whole path: `up.CSS` → `up.CSS.less`.
+                let mut os = candidate.into_os_string();
+                os.push(".less");
+                candidate = PathBuf::from(os);
             }
             if candidate.is_file() {
                 found = Some(candidate);
@@ -684,7 +706,7 @@ fn main() {
 
     let p = passed.load(Ordering::Relaxed);
     println!(
-        "\nless.js {TAG} compile corpus (Phase 4B — @import + :extend + tests-config): \
+        "\nless.js {TAG} compile corpus (Phase 4 + review fixes — @import + :extend + tests-config): \
          {p}/{total} passing (ratchet floor {floor}; {} xfail).",
         total - floor
     );

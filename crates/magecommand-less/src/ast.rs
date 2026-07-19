@@ -204,8 +204,26 @@ pub struct ImportResolved {
     pub current_directory: String,
     /// The `rootpath` in effect for urls generated from this file (§2.18).
     pub rootpath: String,
+    /// less.js `layerCss` (§2.9): a LESS import with a single `layer(...)`
+    /// feature re-emits as a literal CSS `@import` at eval — the fetched
+    /// rules are DISCARDED (but fetching still consumed the once-slots).
+    pub layer_css: bool,
+    /// The original import path node (kept for the `layer_css` re-emit).
+    pub path: Option<Box<Node>>,
     /// The original import statement's span.
     pub span: Span,
+}
+
+/// The declaration-site file info a `url(...)` / resource-function call is
+/// stamped with (§2.18): less.js rewrites urls with the fileInfo of the file
+/// the token was WRITTEN in, not the file being evaluated (review F3/F8).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileTag {
+    /// `rootpath` in effect for urls written in that file.
+    pub rootpath: String,
+    /// The file's directory (base for `data-uri`/`image-size` reads when
+    /// `rewriteUrls` is on).
+    pub directory: String,
 }
 
 /// The AST / runtime-value node (plan §9.2). `#[non_exhaustive]` so the set can
@@ -241,7 +259,10 @@ pub enum Node {
     /// `Send + Sync` for `Arc`-sharing across compile jobs).
     Closure { inner: Box<Node>, scope: u64 },
     /// An `@import` (plan §2.9). `options`/`features` retained as source text.
-    Import { path: Box<Node>, options: Vec<String>, features: Option<Box<Node>>, span: Span },
+    /// `error` = the saved import-time path-eval failure (less.js stores it on
+    /// the node; at eval it RETHROWS unless the re-evaluated path is
+    /// css-shaped — review F2).
+    Import { path: Box<Node>, options: Vec<String>, features: Option<Box<Node>>, error: Option<String>, span: Span },
     /// An `@import` resolved by the pre-eval import pass (eval-only, plan §2.9).
     ImportResolved(Box<ImportResolved>),
     /// A body `&:extend(target…);` statement (less.js `Extend` rule, plan §2.8):
@@ -304,6 +325,10 @@ pub enum Node {
     /// [`Node::MixinCall`]; each key keeps its source spelling (`""` for the
     /// unnamed `[]`, `@var`, `@@dyn`, `$prop`, `$@dyn`, or a bare property name).
     Lookup { target: Box<Node>, keys: Vec<String>, span: Span },
+    /// An eval-only wrapper stamping a value with its declaration file's
+    /// url-rewrite info (§2.18, review F3/F8) — attached by the import pass to
+    /// `url(...)` values and resource-function calls; evaluation unwraps it.
+    WithFile { inner: Box<Node>, tag: std::sync::Arc<FileTag> },
 }
 
 impl Node {

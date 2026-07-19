@@ -388,6 +388,9 @@ impl<'a> Parser<'a> {
         while self.cur.cur() == Some(b'[') {
             let save = self.here();
             self.cur.bump();
+            // less.js's parserInput skips whitespace after every matched token,
+            // so `[ key ]` / `[\nkey]` resolve like `[key]`.
+            self.cur.skip_whitespace();
             let ks = self.here();
             let mut sigils = 0;
             while sigils < 2 && matches!(self.cur.cur(), Some(b'@') | Some(b'$')) {
@@ -400,6 +403,7 @@ impl<'a> Parser<'a> {
                 self.cur.bump();
             }
             let key = self.cur.src()[ks..self.here()].to_string();
+            self.cur.skip_whitespace();
             if !self.cur.eat(b']') {
                 self.cur.i = save;
                 break;
@@ -418,6 +422,13 @@ impl<'a> Parser<'a> {
         debug_assert_eq!(self.cur.cur(), Some(b'@'));
         self.cur.bump(); // @
         let name = format!("@{}", self.cur.scan_ident());
+
+        // less.js's at-rule matcher is lowercase-only (`@[a-z-]+`-shaped):
+        // `@MEDIA`/`@CHARSET` fall through to `variableCall` and die on the
+        // missing lookup (verified vs 4.6.7).
+        if name.bytes().any(|b| b.is_ascii_uppercase()) {
+            return Err(self.err("Missing '[...]' lookup in variable call"));
+        }
 
         if name == "@import" {
             return self.parse_import(start);
@@ -518,6 +529,21 @@ impl<'a> Parser<'a> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
+            // less.js `importOption` is the CLOSED set (parser.js:1865); an
+            // unknown word stops the option loop and `expectChar(')')` fails:
+            // `expected ')' got 'b'`.
+            for o in &options {
+                let known = matches!(
+                    o.as_str(),
+                    "less" | "css" | "multiple" | "once" | "inline" | "reference" | "optional"
+                );
+                if !known {
+                    return Err(self.err(format!(
+                        "expected ')' got '{}'",
+                        o.chars().next().unwrap_or(')')
+                    )));
+                }
+            }
             self.cur.skip_trivia();
         }
         // Path: a url() or a quoted string.
@@ -561,6 +587,7 @@ impl<'a> Parser<'a> {
             path: Box::new(path),
             options,
             features,
+            error: None,
             span: self.span(start),
         })
     }
@@ -957,13 +984,23 @@ impl<'a> Parser<'a> {
                     _ => {}
                 }
                 // The `all` option keyword — only just before `)` / `,`.
-                if self.cur.rest().starts_with("all")
+                // less.js `/^(!?all)(?=\s*(\)|,))/`: `!all` is a synonym.
+                let opt_len = if self.cur.rest().starts_with("!all") {
+                    4
+                } else if self.cur.rest().starts_with("all") {
+                    3
+                } else {
+                    0
+                };
+                if opt_len > 0
                     && matches!(
-                        self.cur.rest()[3..].trim_start().as_bytes().first(),
+                        self.cur.rest()[opt_len..].trim_start().as_bytes().first(),
                         None | Some(b')') | Some(b',')
                     )
                 {
-                    self.cur.eat_str("all");
+                    for _ in 0..opt_len {
+                        self.cur.bump();
+                    }
                     all = true;
                     continue;
                 }
@@ -1353,7 +1390,14 @@ impl<'a> Parser<'a> {
             // verbatim — less.js keeps such attribute-ish tails attached, so
             // value rendering and selector re-parse stay unspaced
             // (parse-interpolation).
-            while self.here() > before && self.cur.cur() == Some(b'[') {
+            while self.here() > before
+                && self.cur.cur() == Some(b'[')
+                // Only a keyword-shaped bracket run is absorbed (less.js's
+                // keyword regex needs a word char after `[`): `['key']` /
+                // `[@{k}]` after a failed lookup stay Unrecognised input.
+                && matches!(self.cur.peek(1), Some(b) if b == b'-' || b == b'_'
+                    || b == b'\\' || b == b'*' || b == b'=' || b.is_ascii_alphanumeric() || b >= 0x80)
+            {
                 let bs = self.here();
                 self.skip_balanced(b'[', b']');
                 let txt = self.cur.src()[bs..self.here()].to_string();
@@ -1531,8 +1575,16 @@ impl<'a> Parser<'a> {
                 Ok(Node::Paren { inner: Box::new(inner), in_op: false })
             }
             Some(b'[') => {
-                // A bracketed value token (`[line-name]` in grid, an attribute-ish
-                // run) — captured verbatim as one entity.
+                // A bracketed value token (`[line-name]` in grid) — captured
+                // verbatim as one entity. less.js's keyword regex
+                // `\[?([\w-]|escape)+\]?` needs at least one word char after
+                // the bracket, so `['key']` / `[@{k}]` are Unrecognised input
+                // (the stray-lookup family, verified 4.6.7).
+                if !matches!(self.cur.peek(1), Some(b) if b == b'-' || b == b'_'
+                    || b == b'\\' || b.is_ascii_alphanumeric() || b >= 0x80)
+                {
+                    return Err(self.err("Unrecognised input"));
+                }
                 let s = self.here();
                 self.skip_balanced(b'[', b']');
                 Ok(Node::Anonymous(self.cur.src()[s..self.here()].to_string()))
@@ -1617,20 +1669,14 @@ impl<'a> Parser<'a> {
                     self.cur.bump();
                     self.cur.skip_whitespace();
                     if self.cur.eat(b')') {
-                        let call = Node::VariableCall {
-                            name: name.clone(),
-                            span: self.span(start),
-                        };
-                        return match self.try_rule_lookups() {
-                            Some(keys) => Ok(Node::Lookup {
-                                target: Box::new(call),
-                                keys,
-                                span: self.span(start),
-                            }),
-                            // A value-position variable call REQUIRES a lookup
-                            // (less.js `variableCall` inValue, verified 4.6.7).
-                            None => Err(self.err("Missing '[...]' lookup in variable call")),
-                        };
+                        // A value-position variable call with parens is ALWAYS
+                        // rejected — with or without a lookup chain. less.js
+                        // `variableCall(parsedName)`: the parsed name is the
+                        // bare `@dr` string, so `name[2] !== '()'` holds and
+                        // the saved error surfaces (`@dr()`/`@dr()[k]` both
+                        // parse-error; only `@dr[k]` is legal in value
+                        // position, verified 4.6.7).
+                        return Err(self.err("Missing '[...]' lookup in variable call"));
                     }
                     self.cur.i = save;
                 } else if self.cur.cur() == Some(b'[') {
@@ -1828,7 +1874,28 @@ impl<'a> Parser<'a> {
         let start = self.here();
         let mut path: Vec<Element> = Vec::new();
         loop {
+            // Between segments less.js's `elements()` allows a `>` child
+            // combinator or descendant whitespace (`#ns > .m()[k]`,
+            // `#ns .m()[k]` — verified 4.6.7 in value position). Only commit
+            // the skip when a real `.`/`#` segment follows.
+            let seg_save = self.here();
+            let mut combinator = String::new();
+            if !path.is_empty() {
+                let had_ws = {
+                    let before = self.here();
+                    self.cur.skip_whitespace();
+                    self.here() > before
+                };
+                if self.cur.cur() == Some(b'>') {
+                    self.cur.bump();
+                    self.cur.skip_whitespace();
+                    combinator = ">".to_string();
+                } else if had_ws {
+                    combinator = " ".to_string();
+                }
+            }
             if !matches!(self.cur.cur(), Some(b'.') | Some(b'#')) {
+                self.cur.i = seg_save;
                 break;
             }
             let seg_start = self.here();
@@ -1840,11 +1907,15 @@ impl<'a> Parser<'a> {
                 self.cur.bump();
             }
             if self.here() == nstart {
-                self.cur.i = start;
-                return Ok(None);
+                if path.is_empty() {
+                    self.cur.i = start;
+                    return Ok(None);
+                }
+                self.cur.i = seg_save;
+                break;
             }
             path.push(Element {
-                combinator: if path.is_empty() { String::new() } else { " ".to_string() },
+                combinator,
                 value: self.cur.src()[seg_start..self.here()].to_string(),
                 span: self.span(seg_start),
             });

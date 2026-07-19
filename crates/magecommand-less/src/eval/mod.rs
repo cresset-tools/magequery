@@ -112,6 +112,15 @@ pub struct Ctx<'a> {
     /// Depth of enclosing `(reference)`-imported bodies (§2.8): output
     /// produced while >0 is visibility-blocked until referenced.
     visibility_blocks: usize,
+    /// Extend targets already warned about as complex selectors (source-span
+    /// keyed, so a mixin-replayed extend warns once like less.js's
+    /// parse-time warning).
+    complex_extend_warned: rustc_hash::FxHashSet<(usize, usize)>,
+    /// The declaration-site file tags currently in scope (innermost last):
+    /// pushed while evaluating a [`Node::WithFile`]-stamped value, so url
+    /// rewriting and resource reads use the file the token was WRITTEN in
+    /// (§2.18, review F3/F8).
+    decl_file: Vec<std::sync::Arc<crate::ast::FileTag>>,
     warnings: Vec<Warning>,
 }
 
@@ -247,8 +256,17 @@ pub fn eval(
     ctx.push_frame(frame_of(rules.clone()));
     let (own, children) = ctx.process_body(&rules, None)?;
     // less.js to-css-visitor `checkValidNodes` (firstRoot): a declaration at
-    // the stylesheet root is a hard error, never silently dropped (F11).
-    if own.iter().any(|n| matches!(n, Node::Declaration(_))) {
+    // the stylesheet root is a hard error, never silently dropped (F11) —
+    // including declarations reaching the root through a `(reference)`
+    // import's hidden output (the check runs regardless of visibility, F15).
+    fn has_root_decl(outs: &[Out]) -> bool {
+        outs.iter().any(|o| match o {
+            Out::Decls(ds) => ds.iter().any(|n| matches!(n, Node::Declaration(_))),
+            Out::Hidden(inner) => has_root_decl(std::slice::from_ref(inner)),
+            _ => false,
+        })
+    }
+    if own.iter().any(|n| matches!(n, Node::Declaration(_))) || has_root_decl(&children) {
         return Err(LessError::new(
             ErrorKind::Syntax,
             "Properties must be inside selector blocks. They cannot be in the root",
@@ -340,6 +358,8 @@ impl<'a> Ctx<'a> {
             once_imported,
             file_stack: vec![entry],
             visibility_blocks: 0,
+            complex_extend_warned: rustc_hash::FxHashSet::default(),
+            decl_file: Vec::new(),
             warnings: Vec::new(),
         }
     }
@@ -368,6 +388,18 @@ impl<'a> Ctx<'a> {
             Some(i) => f[..=i].to_string(),
             None => String::new(),
         }
+    }
+
+    /// The base directory for `data-uri`/`image-size` file reads: less.js uses
+    /// the DECLARING file's directory when `fileInfo.rewriteUrls` is on, and
+    /// the entry path when off (review F8).
+    fn resource_dir(&self) -> String {
+        if self.opts.rewrite_urls != crate::options::RewriteUrls::Off {
+            if let Some(t) = self.decl_file.last() {
+                return t.directory.clone();
+            }
+        }
+        self.current_dir()
     }
 
     /// Whether a variable is defined in any live frame (for `isdefined`).
@@ -496,13 +528,21 @@ impl<'a> Ctx<'a> {
                     Some((injected?, ex_own, ex_children, false))
                 }
                 Node::ImportResolved(ir) => {
-                    // `strictImports` (§2.9): imports inside a plain ruleset
-                    // are not evaluated (less.js `Ruleset.eval` gates
-                    // `evalImports` on root/allowImports) — root and at-rule
-                    // bodies still import.
+                    // `strictImports` (§2.9): less.js skips `evalImports` for
+                    // non-root rulesets. A DUPLICATE (skip) import is then
+                    // silently dropped (verified by the strict-imports
+                    // fixture golden), but a stale non-skip Import node
+                    // CRASHES toCSS — the observable contract for a real
+                    // ruleset-level import is that the compile FAILS (F5).
                     if self.opts.strict_imports && self_paths.is_some() {
-                        expansions.push(None);
-                        continue;
+                        if ir.skip {
+                            expansions.push(None);
+                            continue;
+                        }
+                        return Err(self.err(
+                            ErrorKind::Import,
+                            "@import is not allowed inside a ruleset when strictImports is enabled",
+                        ));
                     }
                     // Stage 2 of §2.9: the pre-fetched file's rules evaluate at
                     // this position and splice into the caller's scope, with
@@ -582,7 +622,7 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 Node::Import {
-                    path, features, options, ..
+                    path, features, options, error, ..
                 } => {
                     // With import processing disabled, a LESS import (by
                     // option or less.js's `[#.&?]css([?;].*)?$` path test) has
@@ -602,6 +642,28 @@ impl<'a> Ctx<'a> {
                     // at-rule, with the path rewritten per §2.18 (less.js
                     // `Import.evalPath`).
                     let evaled = self.eval_value(path)?;
+                    // A SAVED import-time path-eval failure rethrows unless
+                    // the RE-evaluated path is css-shaped (less.js
+                    // `Import.eval`: `if (!newImport.css && this.error)
+                    // throw` — the mixin-param-interpolated `.less` path
+                    // case, review F2).
+                    if let Some(err) = error {
+                        let p = render_value(&evaled, self.opts.num_precision)
+                            .trim_matches(|c| c == '"' || c == '\'')
+                            .to_string();
+                        if !import_path_is_css(&p) {
+                            return Err(self.err(ErrorKind::Name, err.clone()));
+                        }
+                    }
+                    // `(reference)` on a css import: the re-emitted literal
+                    // inherits reference visibility and is BLOCKED (never
+                    // re-enabled — an @import has no selector to extend;
+                    // review F6).
+                    if options.iter().any(|o| o == "reference")
+                        || self.visibility_blocks > 0
+                    {
+                        continue;
+                    }
                     let rewritten = self.rewrite_import_path(evaled);
                     let ps = render_value(&rewritten, self.opts.num_precision);
                     let mut header = format!("@import {ps}");
@@ -648,7 +710,21 @@ impl<'a> Ctx<'a> {
                 }
                 Node::Declaration(d) => {
                     let evaled = self.eval_declaration(d)?;
-                    own.push(evaled);
+                    if self_paths.is_none() {
+                        // A rootish context (stylesheet root, rooted at-rule
+                        // body, root @media/@supports body): bare declarations
+                        // keep their SOURCE ORDER relative to nested blocks
+                        // (less.js preserves interleaving — `@page {
+                        // @top-center {…} margin: 1cm; }` must not hoist the
+                        // margin, F9). Emitted as `Out::Decls` runs in the
+                        // child stream; consecutive decls join one run.
+                        match children.last_mut() {
+                            Some(Out::Decls(run)) => run.push(evaled),
+                            _ => children.push(Out::Decls(vec![evaled])),
+                        }
+                    } else {
+                        own.push(evaled);
+                    }
                 }
                 // A body `&:extend(…);` — passed up through `own` (also across
                 // mixin splices) to the enclosing ruleset, which converts it
@@ -775,6 +851,24 @@ impl<'a> Ctx<'a> {
                         } else {
                             format!("{} {}", name, merged.join(", "))
                         };
+                        // A block re-merged into an ambient media path is a
+                        // NESTED merged block: bare declaration runs drop and
+                        // a body reduced to comments prunes, exactly like the
+                        // directly nested case (F6/F11 — e.g. an imported
+                        // file's `@media` inside `@media`).
+                        let mut body = body;
+                        if let AtBody::Rules(rules) = &mut body {
+                            rules.retain(|o| !matches!(o, Out::Decls(_)));
+                            let effectively_empty = rules
+                                .iter()
+                                .all(|o| matches!(o, Out::Comment(_)));
+                            if effectively_empty && base == "@media" {
+                                self.media_blocks
+                                    .get_or_insert_with(Vec::new)
+                                    .push(None);
+                                continue;
+                            }
+                        }
                         self.media_blocks
                             .get_or_insert_with(Vec::new)
                             .push(Some(Out::At {
@@ -891,12 +985,30 @@ impl<'a> Ctx<'a> {
             let si = (pi / per_own.max(1)).min(sel_extends.len().saturating_sub(1));
             let own_list = sel_extends.get(si).map(|v| v.as_slice()).unwrap_or(&[]);
             for (j, t) in own_list.iter().chain(body_targets.iter()).enumerate() {
+                // less.js parser.js:888: any extend target whose 2nd+ element
+                // carries a combinator (incl. descendant whitespace) warns —
+                // even when it matches. Parse-time upstream; approximated here
+                // at eval, deduped by source span.
+                let span = t.elements.first().map(|e| e.span).unwrap_or_default();
+                if t.elements[1..].iter().any(|e| !e.combinator.is_empty())
+                    && self.complex_extend_warned.insert((span.start, span.end))
+                {
+                    self.warnings.push(Warning {
+                        message: "Targeting complex selectors can have unexpected \
+                                  behavior, and this behavior may change in the future."
+                            .to_string(),
+                        filename: None,
+                        line: None,
+                    });
+                }
                 extends.push(extend::EvExtend {
                     self_sel: path.clone(),
                     target_css: self.render_extend_target(&t.elements)?,
                     all: t.all,
                     visible,
                     first_on_path: j == 0,
+                    matchable: !t.elements.iter().any(|e| e.value.contains("@{")),
+                    span,
                 });
             }
             osels.push(OutSel {
@@ -1051,9 +1163,16 @@ impl<'a> Ctx<'a> {
         let AtRuleBlock::Rules(rules) = &a.block else {
             unreachable!("checked by caller");
         };
+        // A preludeless `@media {` / `@container {` fails in less.js with the
+        // Value constructor's guard (F13).
         let features = match &a.prelude {
             Some(p) => self.eval_media_features(p)?,
-            None => Vec::new(),
+            None => {
+                return Err(self.err(
+                    ErrorKind::Syntax,
+                    "Value requires an array argument",
+                ))
+            }
         };
 
         let outermost = self.media_path.is_empty();
@@ -1108,6 +1227,17 @@ impl<'a> Ctx<'a> {
         }
         body_outs.extend(children);
 
+        // Root-level bare declarations (`Out::Decls` runs — only produced
+        // when there is no enclosing selector): less.js DROPS them from every
+        // merged nested block (F6) and from root `@container` bodies —
+        // container also drops comments, keeping the empty shell (F10/F12).
+        // Only the outermost root `@media` keeps its bare decls.
+        if !outermost && merged.is_some() {
+            body_outs.retain(|o| !matches!(o, Out::Decls(_)));
+        } else if outermost && base == "@container" {
+            body_outs.retain(|o| !matches!(o, Out::Decls(_) | Out::Comment(_)));
+        }
+
         let header_features = merged.as_ref().unwrap_or(&features);
         let header = if header_features.is_empty() {
             a.name.clone()
@@ -1116,7 +1246,13 @@ impl<'a> Ctx<'a> {
         };
         // An empty `@media` block is pruned; an empty `@container` still
         // renders its shell (less.js prunes only Media — verified vs 4.6.7).
-        let out = if body_outs.is_empty() && base == "@media" {
+        // A NESTED merged media reduced to comments only also prunes (F11);
+        // a comment-only ROOT media keeps its comment.
+        let effectively_empty = body_outs.is_empty()
+            || (!outermost
+                && merged.is_some()
+                && body_outs.iter().all(|o| matches!(o, Out::Comment(_))));
+        let out = if effectively_empty && base == "@media" {
             None
         } else {
             Some(Out::At {
@@ -1277,16 +1413,28 @@ impl<'a> Ctx<'a> {
                 key: key.clone(),
                 value: Box::new(self.eval_value(value)?),
             }),
+            Node::WithFile { inner, tag } => {
+                // Enter the declaration file's scope for url rewriting and
+                // resource reads (§2.18, review F3/F8).
+                self.decl_file.push(tag.clone());
+                let res = self.eval_value(inner);
+                self.decl_file.pop();
+                res
+            }
             Node::Url(inner) => {
                 let mut v = self.eval_value(inner)?;
-                // less.js `URL.eval` (§2.18): prepend the current file's
-                // rootpath when the path requires a rewrite (mode-dependent),
-                // else normalize; then append `urlArgs`. An unquoted rootpath
-                // is escaped (`folder (1)/` → `folder\ \(1\)/`).
+                // less.js `URL.eval` (§2.18): prepend the DECLARATION-SITE
+                // file's rootpath (the file the url token was written in —
+                // review F3; falls back to the current eval file for
+                // unstamped nodes) when the path requires a rewrite
+                // (mode-dependent), else normalize; then append `urlArgs`.
+                // An unquoted rootpath is escaped (`folder (1)/` →
+                // `folder\ \(1\)/`).
                 let rootpath = self
-                    .file_stack
+                    .decl_file
                     .last()
-                    .map(|f| f.rootpath.clone())
+                    .map(|t| t.rootpath.clone())
+                    .or_else(|| self.file_stack.last().map(|f| f.rootpath.clone()))
                     .unwrap_or_default();
                 let quoted = matches!(v, Node::Quoted { .. });
                 let val: Option<&mut String> = match &mut v {
@@ -1629,8 +1777,18 @@ impl<'a> Ctx<'a> {
             // (plan §2.7/§C-assets) — dispatched here, where the resolver lives.
             let axis = match lname.as_str() {
                 "data-uri" => {
-                    let dir = self.current_dir();
+                    let dir = self.resource_dir();
                     if let Some(r) = functions::data_uri::data_uri(&evaled, self.resolver, &dir) {
+                        // The missing-file FALLBACK is a URL node that less.js
+                        // evaluates normally — so it gets rewritten (F8);
+                        // successful `data:` results are returned as-is.
+                        if let Node::Url(inner) = &r {
+                            let is_data = matches!(inner.as_ref(),
+                                Node::Quoted { value, .. } if value.trim_start().starts_with("data:"));
+                            if !is_data {
+                                return self.eval_value(&r);
+                            }
+                        }
                         return Ok(r);
                     }
                     None
@@ -1641,7 +1799,7 @@ impl<'a> Ctx<'a> {
                 _ => None,
             };
             if let Some(axis) = axis {
-                let dir = self.current_dir();
+                let dir = self.resource_dir();
                 if let Some(r) = functions::misc::image_size(&evaled, axis, self.resolver, &dir) {
                     return Ok(r);
                 }
@@ -1887,9 +2045,11 @@ impl<'a> Ctx<'a> {
                     format!("No matching definition was found for `{}`", format_call(&path, &args, self.opts.num_precision)),
                 ));
             }
+            // less.js renders the namespaced path GLUED (`#a.b.m is
+            // undefined` — Selector.toCSS of the source spelling; P4DR-12).
             return Err(self.err(
                 ErrorKind::Name,
-                format!("{} is undefined", path.join(" ")),
+                format!("{} is undefined", path.concat()),
             ));
         }
 
@@ -2240,6 +2400,52 @@ impl<'a> Ctx<'a> {
             return Ok(Vec::new());
         }
 
+        // less.js `layerCss` (§2.9, review F1): a LESS import with a single
+        // `layer(...)` feature re-emits as a literal CSS `@import` — the
+        // fetched rules are DISCARDED (the once-slot was still consumed
+        // above, so a later plain import of the same file emits nothing).
+        if ir.layer_css {
+            if ir.reference || self.visibility_blocks > 0 {
+                return Ok(Vec::new());
+            }
+            let path = ir
+                .path
+                .clone()
+                .map(|p| *p)
+                .unwrap_or_else(|| Node::Quoted {
+                    escaped: false,
+                    quote: '"',
+                    value: ir.full_path.clone(),
+                });
+            let evaled = self.eval_value(&path)?;
+            let rewritten = self.rewrite_import_path(evaled);
+            let ps = render_value(&rewritten, self.opts.num_precision);
+            let mut header = format!("@import {ps}");
+            if let Some(f) = &ir.features {
+                let fs = self.eval_media_features(f)?.join(", ");
+                if !fs.is_empty() {
+                    header.push(' ');
+                    header.push_str(&fs);
+                }
+            }
+            if self_paths.is_some() {
+                own.push(Node::AtRule(crate::ast::AtRule {
+                    name: "@import".to_string(),
+                    prelude: Some(Box::new(Node::Anonymous(
+                        header["@import ".len()..].to_string(),
+                    ))),
+                    block: AtRuleBlock::None,
+                    span: Default::default(),
+                }));
+            } else {
+                children.push(Out::At {
+                    header,
+                    body: AtBody::None,
+                });
+            }
+            return Ok(Vec::new());
+        }
+
         if let Some(content) = &ir.inline {
             // Inside a ruleset the raw payload renders in the declaration
             // block at its source position (an Anonymous rule in less.js) —
@@ -2435,6 +2641,11 @@ impl<'a> Ctx<'a> {
             new_frames.push(frame_of(param_frame));
             new_frames.extend(cand.def_scope.iter().cloned());
             new_frames.extend(self.frames.iter().cloned());
+            // Same dedup as statement mixin calls (see `dedup_frames`): a
+            // recursive mixin-as-map lookup (`.m() { v: .m()[v]; }`) otherwise
+            // DOUBLES the frame list per level — exponential work that turns
+            // the depth cap into a multi-minute hang (P4DR-2).
+            let new_frames = dedup_frames(new_frames);
             let saved = std::mem::replace(&mut self.frames, new_frames);
             self.mixin_depth += 1;
             let res = self.eval_map_rules(&cand.rules);
@@ -2517,6 +2728,15 @@ impl<'a> Ctx<'a> {
                         self.expand_mixin_call(call, None, &mut ex_own, &mut ex_children)?;
                     out.extend(injected);
                     out.extend(ex_own);
+                    // With no enclosing selector the expansion routes bare
+                    // declarations into the child stream as `Out::Decls` runs
+                    // (source-order preservation, F9) — harvest them back
+                    // into the map.
+                    for c in ex_children {
+                        if let Out::Decls(ds) = c {
+                            out.extend(ds);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -2527,6 +2747,21 @@ impl<'a> Ctx<'a> {
     /// A `[key]` lookup chain over a map value (less.js `NamespaceValue.eval`,
     /// plan §2.12).
     fn eval_lookup(&mut self, target: &Node, keys: &[String]) -> Result<Node, LessError> {
+        // Runaway guard (P4DR-1/2): a self-referential map (`@map: { a:
+        // @map[a]; }`) or a mixin whose body looks itself up recurses through
+        // this eval path unboundedly — less.js dies on its JS stack
+        // ("Maximum call stack size exceeded"); the crate's contract is a
+        // clean depth-capped error instead of a native stack overflow.
+        if self.mixin_depth > self.max_eval_depth() {
+            return Err(self.err(ErrorKind::Runtime, "lookup recursion limit exceeded"));
+        }
+        self.mixin_depth += 1;
+        let res = self.eval_lookup_inner(target, keys);
+        self.mixin_depth -= 1;
+        res
+    }
+
+    fn eval_lookup_inner(&mut self, target: &Node, keys: &[String]) -> Result<Node, LessError> {
         let mut rules: Vec<Node> = match target {
             Node::VariableCall { name, span } => self.variable_call_map(name, *span)?,
             Node::MixinCall(call) => self.mixin_call_map(call)?,
@@ -2567,7 +2802,7 @@ impl<'a> Ctx<'a> {
             } else if key.starts_with('@') {
                 let name = if let Some(dynamic) = key.strip_prefix("@@") {
                     let inner = self.eval_variable(dynamic, Span::default())?;
-                    value_to_plain_string(&inner)
+                    lookup_key_string(&inner)
                 } else {
                     key[1..].to_string()
                 };
@@ -2583,7 +2818,7 @@ impl<'a> Ctx<'a> {
             } else {
                 let name = if let Some(dynamic) = key.strip_prefix("$@") {
                     let inner = self.eval_variable(dynamic, Span::default())?;
-                    value_to_plain_string(&inner)
+                    lookup_key_string(&inner)
                 } else {
                     key.strip_prefix('$').unwrap_or(key).to_string()
                 };
@@ -2606,10 +2841,12 @@ impl<'a> Ctx<'a> {
                         self.err(ErrorKind::Name, format!("property \"{name}\" not found"))
                     );
                 }
-                let merged = merge_rules(&decls);
-                match merged.last() {
+                // less.js `NamespaceValue.eval` takes `rules[rules.length - 1]`
+                // RAW — merge-flagged (`+:`/`+_:`) declarations are NOT merged
+                // here (unlike the `$prop` accessor, which does merge; P4DR-3).
+                match decls.last() {
                     Some(Node::Declaration(d)) => (*d.value).clone(),
-                    _ => unreachable!("merge_rules keeps declarations"),
+                    _ => unreachable!("decls holds declarations"),
                 }
             };
             // Map-rule values are already evaluated; re-evaluate defensively for
@@ -2995,15 +3232,53 @@ impl<'a> Ctx<'a> {
             Node::Anonymous(s) => s.clone(),
             other => render_value(&self.eval_value(other)?, self.opts.num_precision),
         };
+        // `@{var}` inside a parenthesized media feature is a ParseError in
+        // less.js (`Missing closing ')'` — the structured mediaFeature parser
+        // rejects it); only the un-parenthesized position interpolates (F5).
+        if interp_inside_parens(&raw) {
+            return Err(self.err(ErrorKind::Parse, "Missing closing ')'"));
+        }
         let raw = if raw.contains("@{") || raw.contains("${") {
             self.interpolate(&raw)?
         } else {
             raw
         };
-        let raw = self.resolve_prelude_vars(&raw)?;
-        let mut queries = Vec::new();
+        // Split the SOURCE comma list BEFORE resolving variables: an escaped
+        // string's embedded comma (`@pair: ~"tv, projection"`) is ONE parsed
+        // feature entry in less.js and must stay one un-split value through
+        // nested merges (F3). A variable holding a PARSED comma list
+        // (`@pair: screen, print;` — a `Value`) contributes one entry per
+        // item, exactly like source-level commas.
+        let mut parts: Vec<String> = Vec::new();
         for q in split_top(&raw, ',') {
-            let mut q = q.trim().to_string();
+            let q = q.trim();
+            if q.is_empty() {
+                continue;
+            }
+            // A whole-part bare variable: evaluate the NODE to see its shape.
+            let var_name = q
+                .strip_prefix('@')
+                .filter(|n| {
+                    !n.is_empty()
+                        && n.bytes().all(|b| b == b'-' || b == b'_' || b.is_ascii_alphanumeric())
+                });
+            if let Some(name) = var_name {
+                let v = self.eval_variable(name, Span::default())?;
+                match v {
+                    Node::Value(items) => {
+                        for it in &items {
+                            parts.push(render_value(it, self.opts.num_precision));
+                        }
+                    }
+                    other => parts.push(render_value(&other, self.opts.num_precision)),
+                }
+                continue;
+            }
+            parts.push(q.to_string());
+        }
+        let mut queries = Vec::new();
+        for q in parts {
+            let mut q = self.resolve_prelude_vars(&q)?;
             if q.is_empty() {
                 continue;
             }
@@ -3079,7 +3354,11 @@ impl<'a> Ctx<'a> {
             while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'(' {
                 i += 1;
             }
-            parts.push((q[start..i].to_string(), false));
+            // A comma glues to the preceding token (`(a: 1), (b: 2)` — an
+            // escaped string's embedded list renders without a space before
+            // the comma, F3).
+            let glued = bytes[start] == b',';
+            parts.push((q[start..i].to_string(), glued));
         }
         let mut out = String::new();
         for (idx, (text, glued)) in parts.iter().enumerate() {
@@ -3096,6 +3375,13 @@ impl<'a> Ctx<'a> {
     /// conditions) collapses whitespace and normalizes comparison spacing.
     fn normalize_media_feature(&mut self, inner: &str) -> Result<String, LessError> {
         let inner = inner.trim();
+        // `@media ( ) { … }` — less.js: badly formed media feature (F13).
+        if inner.is_empty() {
+            return Err(self.err(
+                ErrorKind::Syntax,
+                "badly formed media feature definition",
+            ));
+        }
         // Top-level `key: value`?
         if let Some(colon) = find_top_level_colon(inner) {
             let (lhs, rhs) = inner.split_at(colon);
@@ -3750,25 +4036,42 @@ fn make_important_out(out: &mut Out) {
                 make_important_node(d);
             }
         }
-        Out::Nested(node) => {
-            if let Node::AtRule(a) = node {
-                if let AtRuleBlock::Rules(rules) = &mut a.block {
-                    for d in rules.iter_mut() {
-                        make_important_node(d);
-                    }
-                }
-            }
-        }
-        Out::At { body, .. } => {
-            if let AtBody::Rules(inner) = body {
-                for o in inner.iter_mut() {
-                    make_important_out(o);
-                }
-            }
-        }
+        // less.js implements `makeImportant` ONLY on Declaration/Ruleset/
+        // MixinDefinition — `.m() !important` never forces importance into
+        // at-rule bodies (@media/@supports/@font-face, incl. through DR
+        // calls); bubbled blocks pass through untouched (F4/P4DR-5).
+        Out::Nested(_) | Out::At { .. } => {}
         Out::Hidden(inner) => make_important_out(inner),
         Out::Comment(_) | Out::Verbatim(_) => {}
     }
+}
+
+/// Whether `@{`/`${` interpolation occurs INSIDE a paren group (outside
+/// quotes) of a media prelude — a ParseError in less.js (F5).
+fn interp_inside_parens(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' => {
+                let q = b[i];
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b'@' | b'$' if depth > 0 && b.get(i + 1) == Some(&b'{') => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Strip a leading `not` (keyword) from a guard atom, returning the remainder.
@@ -3871,6 +4174,24 @@ fn coerce_color(node: Node) -> Node {
 /// render UNROUNDED (less.js `Quoted.eval` calls `v.toCSS()` with no context,
 /// so no `numPrecision` fround applies — `@{x}` with `@x: pi()` interpolates as
 /// `3.141592653589793`).
+/// The string a dynamic lookup key (`[@@k]`/`[$@k]`) resolves to: less.js
+/// reads the evaluated node's raw `.value` — a Dimension contributes its
+/// NUMBER with the unit dropped (`@k: 5px` keys `@5`, P4DR-8); a Quoted its
+/// content. Everything else falls back to the rendered text.
+fn lookup_key_string(node: &Node) -> String {
+    match node {
+        Node::Dimension(d) => {
+            let n = d.value;
+            if n == n.trunc() && n.abs() < 1e15 {
+                format!("{}", n as i64)
+            } else {
+                format!("{n}")
+            }
+        }
+        other => value_to_plain_string(other),
+    }
+}
+
 fn value_to_plain_string(node: &Node) -> String {
     match node {
         Node::Quoted { value, .. } => value.clone(),
@@ -4105,12 +4426,12 @@ pub(crate) fn interpolate_standalone(
     frames_outer_first: &[Vec<Node>],
     opts: &LessOptions,
     resolver: &dyn ImportResolver,
-) -> Option<String> {
+) -> Result<String, LessError> {
     let mut ctx = Ctx::new(opts, resolver);
     for list in frames_outer_first {
         ctx.push_frame(frame_of(list.clone()));
     }
-    ctx.interpolate(raw).ok()
+    ctx.interpolate(raw)
 }
 
 /// Strip a vendor prefix from an at-rule name (`@-moz-document` → `@document`,
@@ -5175,6 +5496,358 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(e.contains("recursion limit"), "got: {e}");
+    }
+
+    // --- Phase 4 review-fix regressions (verified against lessc 4.6.7) ---
+
+    /// F13: the once-slot is claimed in EVAL order per file visit (BFS) — a
+    /// root-level import beats a nested one, flipping output order.
+    #[test]
+    fn once_slot_bfs_root_import_beats_nested() {
+        let files = [
+            ("lib.less", ".plain{p:p;}"),
+            ("wrapper.less", "@import \"lib.less\";\n.w{w:w;}"),
+        ];
+        let out = css_with(
+            &files,
+            "@import \"wrapper.less\";\n@import \"lib.less\";\n.a{a:a;}",
+            &LessOptions::default(),
+        );
+        assert_eq!(out, ".w {\n  w: w;\n}\n.plain {\n  p: p;\n}\n.a {\n  a: a;\n}");
+    }
+
+    /// F13 visibility variant: the plain root import wins the slot over a
+    /// nested `(reference)` one — `.plain` stays visible.
+    #[test]
+    fn once_slot_bfs_reference_visibility() {
+        let files = [
+            ("lib.less", ".plain{p:p;}"),
+            ("wrapper.less", "@import (reference) \"lib.less\";\n.w{w:w;}"),
+        ];
+        let out = css_with(
+            &files,
+            "@import \"wrapper.less\";\n@import \"lib.less\";",
+            &LessOptions::default(),
+        );
+        assert_eq!(out, ".w {\n  w: w;\n}\n.plain {\n  p: p;\n}");
+    }
+
+    /// F1: `@import "x.less" layer(name)` re-emits the literal `@import`; the
+    /// once-slot is still consumed so a later plain import emits nothing.
+    #[test]
+    fn layer_import_reemits_literal() {
+        let files = [("lib.less", ".lib { l: l; }")];
+        let out = css_with(
+            &files,
+            "@import \"lib.less\" layer(base);\n@import \"lib.less\";\n.a { a: a; }",
+            &LessOptions::default(),
+        );
+        assert_eq!(out, "@import \"lib.less\" layer(base);\n.a {\n  a: a;\n}");
+    }
+
+    /// F6: `(reference)` on a css import emits nothing.
+    #[test]
+    fn reference_css_import_hidden() {
+        let files = [("style.css", ".s { s: s; }")];
+        let out = css_with(
+            &files,
+            "@import (reference) \"style.css\";\n.a { a: a; }",
+            &LessOptions::default(),
+        );
+        assert_eq!(out, ".a {\n  a: a;\n}");
+    }
+
+    /// F10: `(optional)` swallows PARSE errors of the target, not just misses.
+    #[test]
+    fn optional_swallows_parse_errors() {
+        let files = [("broken.less", ".broken {{{ nope")];
+        let out = css_with(
+            &files,
+            "@import (optional) \"broken.less\";\n.a{a:a;}",
+            &LessOptions::default(),
+        );
+        assert_eq!(out, ".a {\n  a: a;\n}");
+    }
+
+    /// F14: an `(inline)` payload's UTF-8 BOM is stripped.
+    #[test]
+    fn inline_import_strips_bom() {
+        let files = [("raw.css", "\u{feff}.bom { b: b; }\r\n")];
+        let out = css_with(&files, "@import (inline) \"raw.css\";", &LessOptions::default());
+        assert!(!out.contains('\u{feff}'), "BOM leaked: {out:?}");
+        assert!(out.contains(".bom { b: b; }"));
+    }
+
+    /// F2: a mixin-param-interpolated `.less` import path rethrows the saved
+    /// import-time NameError at eval, even though the path resolves there.
+    #[test]
+    fn interpolated_import_path_rethrows_saved_error() {
+        let files = [("part-two.less", ".two { t: t; }")];
+        let resolver = MapResolver(files.to_vec());
+        let e = crate::compile(
+            ".m(@which) { @import \"part-@{which}.less\"; }\n.call { .m(two); }",
+            &LessOptions::default(),
+            &resolver,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("variable @which is undefined"), "got: {e}");
+    }
+
+    /// F15: root-level declarations error even through a `(reference)` import.
+    #[test]
+    fn reference_import_root_decls_still_error() {
+        let files = [("lib2.less", ".rootcall() { rc: rc; }\n.rootcall();")];
+        let resolver = MapResolver(files.to_vec());
+        let e = crate::compile(
+            "@import (reference) \"lib2.less\";\n.entrysel{s:s;}",
+            &LessOptions::default(),
+            &resolver,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("Properties must be inside selector blocks"), "got: {e}");
+    }
+
+    /// F7: a `(multiple)` self-import cycle dies with a clean depth error,
+    /// never a native stack overflow.
+    #[test]
+    fn multiple_self_import_hits_depth_cap() {
+        let files = [("self.less", "@import (multiple) \"self.less\";\n.s{s:s;}")];
+        let resolver = MapResolver(files.to_vec());
+        let mut opts = LessOptions::default();
+        opts.filename = Some("self.less".into());
+        let e = crate::compile(
+            "@import (multiple) \"self2.less\";\n.r{r:r;}",
+            &LessOptions::default(),
+            &MapResolver(vec![(
+                "self2.less",
+                "@import (multiple) \"self2.less\";\n.s{s:s;}",
+            )]),
+        )
+        .unwrap_err()
+        .to_string();
+        let _ = (files, resolver, opts);
+        assert!(e.contains("import recursion limit exceeded"), "got: {e}");
+    }
+
+    /// F3: url rewriting uses the DECLARATION-site file, both directions and
+    /// through mixin bodies.
+    #[test]
+    fn url_rewrite_uses_declaration_site() {
+        let mut opts = LessOptions::default();
+        opts.rewrite_urls = crate::options::RewriteUrls::All;
+        opts.filename = Some("root/main.less".into());
+        // Var declared in the imported file, used in the entry.
+        let files = [(
+            "root/sub/def.less",
+            "@bg: url(img/pic.png);\n.in-sub { background: @bg; }",
+        )];
+        let resolver = SubDirResolver(files.to_vec());
+        let out = crate::compile(
+            "@import \"sub/def.less\";\n.entry { background: @bg; }",
+            &opts,
+            &resolver,
+        )
+        .unwrap()
+        .code;
+        assert!(
+            out.matches("url(sub/img/pic.png)").count() == 2,
+            "both uses rewrite against sub/: {out}"
+        );
+        // Mixin library shipping a url.
+        let files = [("root/sub/lib.less", ".bgmix() { background: url(img/pic.png); }")];
+        let resolver = SubDirResolver(files.to_vec());
+        let out = crate::compile("@import \"sub/lib.less\";\n.entry { .bgmix(); }", &opts, &resolver)
+            .unwrap()
+            .code;
+        assert!(out.contains("url(sub/img/pic.png)"), "got: {out}");
+    }
+
+    /// F11: a slashless rootpath gets a trailing `/` appended (core less.js
+    /// normalization).
+    #[test]
+    fn slashless_rootpath_gets_separator() {
+        let mut opts = LessOptions::default();
+        opts.rewrite_urls = crate::options::RewriteUrls::All;
+        opts.rootpath = Some("assets".into());
+        let out = crate::compile(".e { a: url(entry.png); }", &opts, &NoopResolver)
+            .unwrap()
+            .code;
+        assert!(out.contains("url(assets/entry.png)"), "got: {out}");
+    }
+
+    /// E1/E5: `!all` parses as `all`; an interpolated extend target never
+    /// matches (the needle stays non-string in less.js).
+    #[test]
+    fn extend_all_bang_and_interpolated_target() {
+        assert_eq!(
+            css(".x .a.b { color: red; }\n.c:extend(.a !all) {}"),
+            ".x .a.b,\n.x .c.b {\n  color: red;\n}"
+        );
+        assert_eq!(
+            css("@name: foo;\n.foo { color: red; }\n.b:extend(.@{name}) {}"),
+            ".foo {\n  color: red;\n}"
+        );
+    }
+
+    /// E2/E8: the attribute case-flag is ignored in extend matching, and ops
+    /// inside quoted values don't corrupt the structural compare.
+    #[test]
+    fn extend_attr_flag_and_quoted_op() {
+        assert_eq!(
+            css("[a=\"v\" i] { x: 1; }\n.p:extend([a='v' i]) {}"),
+            "[a=\"v\" i],\n.p {\n  x: 1;\n}"
+        );
+        assert_eq!(
+            css("[a=\"b~=c\"] { x: 1; }\n.p:extend([a='b~=c']) {}"),
+            "[a=\"b~=c\"],\n.p {\n  x: 1;\n}"
+        );
+    }
+
+    /// E7: a grafted selector keeps less.js's leading space before an
+    /// explicit first-element combinator.
+    #[test]
+    fn extend_graft_keeps_leading_combinator_space() {
+        assert_eq!(
+            css("> .t { x: 1; }\n.b:extend(> .t) {}"),
+            " > .t,\n > .b {\n  x: 1;\n}"
+        );
+    }
+
+    /// P4DR-3: a named lookup takes the LAST merge-flagged declaration raw
+    /// (no merge — unlike the `$prop` accessor).
+    #[test]
+    fn named_lookup_takes_last_raw_no_merge() {
+        assert_eq!(
+            css("@map: { b+: x; b+: y; c+_: p; c+_: q; };\n.x { b: @map[b]; c: @map[c]; }"),
+            ".x {\n  b: y;\n  c: q;\n}"
+        );
+    }
+
+    /// P4DR-8: dynamic lookup keys use the raw node value — a Dimension key
+    /// drops its unit.
+    #[test]
+    fn dynamic_lookup_key_drops_unit() {
+        assert_eq!(
+            css("@k: 5px;\n@map: { @5: found5; };\n.x { v: @map[@@k]; }"),
+            ".x {\n  v: found5;\n}"
+        );
+    }
+
+    /// P4DR-1: a self-referential map lookup errors cleanly instead of
+    /// overflowing the stack. (A tightened cap keeps the recursion inside the
+    /// 2 MiB test-thread stack; the default cap is exercised by the probe
+    /// drivers on the 8 MiB main stack.)
+    #[test]
+    fn self_referential_map_lookup_errors() {
+        let opts = LessOptions {
+            max_eval_depth: Some(16),
+            ..LessOptions::default()
+        };
+        let e = crate::compile(
+            "@map: {\n  a: @map[a];\n};\n.x { v: @map[a]; }",
+            &opts,
+            &NoopResolver,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("recursion limit"), "got: {e}");
+    }
+
+    /// F4/P4DR-5: `.m() !important` never forces importance into at-rule
+    /// bodies.
+    #[test]
+    fn mixin_important_skips_at_rule_bodies() {
+        let out = css(".m() {\n  c: 1;\n  @media screen { d: 2; }\n}\n.x { .m() !important; }");
+        assert!(out.contains("c: 1 !important"), "got: {out}");
+        assert!(out.contains("d: 2;") && !out.contains("d: 2 !important"), "got: {out}");
+    }
+
+    /// F6/F12: merged nested media and root @container drop bare decls.
+    #[test]
+    fn merged_media_and_container_drop_bare_decls() {
+        assert_eq!(
+            css("@media screen {\n  @media print {\n    imported: media;\n    .r { x: y; }\n  }\n}"),
+            "@media screen and print {\n  .r {\n    x: y;\n  }\n}"
+        );
+        assert_eq!(
+            css("@container (a: b) {\n  bare1: x;\n  .r { y: z; }\n  bare2: w;\n}"),
+            "@container (a: b) {\n  .r {\n    y: z;\n  }\n}"
+        );
+    }
+
+    /// F9: declarations inside at-rule bodies keep source order relative to
+    /// nested blocks.
+    #[test]
+    fn at_rule_body_keeps_source_order() {
+        assert_eq!(
+            css("@page {\n  @top-center { content: \"T\"; }\n  margin: 1cm;\n  @bottom-left { content: \"B\"; }\n  size: A4;\n}"),
+            "@page {\n  @top-center {\n    content: \"T\";\n  }\n  margin: 1cm;\n  @bottom-left {\n    content: \"B\";\n  }\n  size: A4;\n}"
+        );
+    }
+
+    /// F3 (at-rules): an escaped string's embedded comma stays ONE feature
+    /// entry through nested merges; a parsed comma-list variable still
+    /// cross-multiplies.
+    #[test]
+    fn escaped_string_media_feature_stays_single() {
+        assert_eq!(
+            css("@pair: ~\"tv, projection\";\n@media @pair {\n  @media (min-width: 1px) {\n    .x { p: q; }\n  }\n}"),
+            "@media tv, projection and (min-width: 1px) {\n  .x {\n    p: q;\n  }\n}"
+        );
+        assert_eq!(
+            css("@pair: screen, print;\n@media @pair {\n  @media (min-width: 1px) {\n    .x { p: q; }\n  }\n}"),
+            "@media screen and (min-width: 1px), print and (min-width: 1px) {\n  .x {\n    p: q;\n  }\n}"
+        );
+    }
+
+    /// F5/F13/F8 (at-rules): media prelude validation + uppercase at-rules.
+    #[test]
+    fn media_prelude_validation_errors() {
+        assert!(errs("@media {\n  .a { p: q; }\n}").contains("Value requires an array argument"));
+        assert!(errs("@media ( ) { .a { x: y; } }").contains("badly formed media feature"));
+        assert!(errs("@feat: \"min-width: 700px\";\n@media (@{feat}) { .x { p: q; } }")
+            .contains("Missing closing ')'"));
+        assert!(errs("@MEDIA screen { .a { x: y; } }")
+            .contains("Missing '[...]' lookup in variable call"));
+    }
+
+    /// F9 (imports): unknown import options are a parse error.
+    #[test]
+    fn unknown_import_option_is_parse_error() {
+        assert!(errs("@import (bogus) \"b.less\";").contains("expected ')' got 'b'"));
+    }
+
+    /// A map-path resolver that keeps each file's directory (for url-rewrite
+    /// tests — `sub/def.less` gets `current_directory: "sub/"`).
+    struct SubDirResolver(Vec<(&'static str, &'static str)>);
+
+    impl crate::resolver::ImportResolver for SubDirResolver {
+        fn resolve(
+            &self,
+            req: &crate::resolver::ImportRequest,
+        ) -> Result<crate::resolver::ResolvedImport, crate::resolver::ImportError> {
+            let raw = req.path.as_str();
+            let joined = format!("{}{}", req.from.current_directory, raw);
+            let key = if joined.ends_with(".less") { joined } else { format!("{joined}.less") };
+            let Some((_, content)) = self.0.iter().find(|(p, _)| *p == key) else {
+                return Err(crate::resolver::ImportError::NotFound(key));
+            };
+            let dir = match key.rfind('/') {
+                Some(i) => key[..=i].to_string(),
+                None => String::new(),
+            };
+            let file = crate::resolver::FileInfo {
+                filename: key.clone(),
+                current_directory: dir,
+                ..Default::default()
+            };
+            Ok(crate::resolver::ResolvedImport {
+                file,
+                payload: crate::resolver::ImportPayload::Less(std::sync::Arc::from(*content)),
+            })
+        }
     }
 }
 

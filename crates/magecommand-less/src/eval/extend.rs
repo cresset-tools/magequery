@@ -46,6 +46,14 @@ pub(super) struct EvExtend {
     /// less.js `firstExtendOnThisSelectorPath` — only the first extend of a
     /// path pushes the chained selector onto its ruleset.
     pub first_on_path: bool,
+    /// An interpolated target (`.@{name}`) NEVER matches in less.js — the
+    /// needle's element values stay non-string nodes after eval, and
+    /// `isElementValuesEqual` rejects them (hay-side interpolation IS
+    /// reparsed and matchable). The warning still shows the evaluated text.
+    pub matchable: bool,
+    /// Source position of the target (for warning dedup — less.js keys its
+    /// no-match dedup by `(index, selector)`).
+    pub span: crate::ast::Span,
 }
 
 // ---------------------------------------------------------------------------
@@ -217,13 +225,38 @@ fn scan_balanced(b: &[u8], mut i: usize, open: u8, close: u8) -> usize {
 
 /// Re-render tokens with the serializer's combinator spacing
 /// ([`combinator_css`]); grafted paths must be byte-identical to joined ones.
+/// A leading EXPLICIT combinator keeps its leading space (` > .b` — less.js
+/// renders a first-element `>` as ` > `, E7); only the implicit descendant
+/// space is trimmed.
 fn render_tokens(toks: &[SelToken]) -> String {
     let mut s = String::new();
     for t in toks {
         s.push_str(&combinator_css(&t.comb));
         s.push_str(&t.value);
     }
-    s.trim_start().to_string()
+    match toks.first() {
+        Some(t) if !matches!(t.comb.as_str(), "" | " ") => s,
+        _ => s.trim_start().to_string(),
+    }
+}
+
+/// Render a target selector the way less.js `Selector.toCSS` does in
+/// warnings/errors: the first element's implicit combinator emits a leading
+/// space (`' .zzz'`), explicit combinators their spaced form (`' > .t'`).
+fn leading_render(toks: &[SelToken], fallback: &str) -> String {
+    if toks.is_empty() {
+        return format!(" {fallback}");
+    }
+    let mut s = String::new();
+    for (i, t) in toks.iter().enumerate() {
+        if i == 0 && matches!(t.comb.as_str(), "" | " ") {
+            s.push(' ');
+        } else {
+            s.push_str(&combinator_css(&t.comb));
+        }
+        s.push_str(&t.value);
+    }
+    s
 }
 
 /// less.js `isElementValuesEqual`: string equality, with attribute selectors
@@ -240,23 +273,65 @@ fn values_eq(a: &str, b: &str) -> bool {
     false
 }
 
-/// Split `[key op value]` into (key, op, unquoted value).
+/// Split `[key op value]` into (key, op, unquoted value). Mirrors less.js
+/// `isElementValuesEqual`'s structural Attribute compare: the op is found
+/// OUTSIDE quotes (`[a="b~=c"]` keeps its embedded op, E8), quote style is
+/// normalized, and a trailing case-flag (`[a="v" i]`) is DROPPED — less.js
+/// never compares `cif` (E2).
 fn parse_attr(s: &str) -> Option<(String, String, String)> {
     let inner = s.strip_prefix('[')?.strip_suffix(']')?;
-    for op in ["~=", "^=", "$=", "*=", "|=", "="] {
-        if let Some(pos) = inner.find(op) {
-            let key = inner[..pos].trim().to_string();
-            let mut val = inner[pos + op.len()..].trim();
-            if val.len() >= 2
-                && ((val.starts_with('"') && val.ends_with('"'))
-                    || (val.starts_with('\'') && val.ends_with('\'')))
-            {
-                val = &val[1..val.len() - 1];
+    // Find the operator outside quoted regions.
+    let b = inner.as_bytes();
+    let mut op_at: Option<(usize, usize)> = None; // (pos, len)
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' => {
+                let q = b[i];
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    if b[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
             }
-            return Some((key, op.to_string(), val.to_string()));
+            b'~' | b'^' | b'$' | b'*' | b'|' if b.get(i + 1) == Some(&b'=') => {
+                op_at = Some((i, 2));
+                break;
+            }
+            b'=' => {
+                op_at = Some((i, 1));
+                break;
+            }
+            _ => i += 1,
         }
     }
-    Some((inner.trim().to_string(), String::new(), String::new()))
+    let Some((pos, len)) = op_at else {
+        // Key-only form `[disabled]` — a trailing flag would be part of the
+        // key text; keep verbatim (matches less.js's key compare).
+        return Some((inner.trim().to_string(), String::new(), String::new()));
+    };
+    let key = inner[..pos].trim().to_string();
+    let op = if len == 2 { inner[pos..pos + 2].to_string() } else { "=".to_string() };
+    let mut val = inner[pos + len..].trim();
+    // Strip the case-sensitivity flag: a single trailing `i`/`I`/`s`/`S`
+    // preceded by whitespace or a closing quote.
+    if val.len() >= 2 && matches!(val.as_bytes()[val.len() - 1], b'i' | b'I' | b's' | b'S') {
+        let prev = val.as_bytes()[val.len() - 2];
+        if prev.is_ascii_whitespace() || prev == b'"' || prev == b'\'' {
+            val = val[..val.len() - 1].trim_end();
+        }
+    }
+    let mut val = val;
+    if val.len() >= 2
+        && ((val.starts_with('"') && val.ends_with('"'))
+            || (val.starts_with('\'') && val.ends_with('\'')))
+    {
+        val = &val[1..val.len() - 1];
+    }
+    Some((key, op, val.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +444,10 @@ struct Work {
     /// Index of the carrying rule in ITS scope's `outs` — only valid for the
     /// scope's own extends (chaining targets), never for inherited ones.
     rule_idx: usize,
+    /// `false` for interpolated targets (see [`EvExtend::matchable`]).
+    matchable: bool,
+    /// Source span of the target (warning dedup key).
+    span: crate::ast::Span,
 }
 
 struct State {
@@ -395,12 +474,21 @@ pub(super) fn apply(outs: &mut Vec<Out>, warnings: &mut Vec<Warning>) -> Result<
     let root_own = process_scope(outs, &[], &mut st)?;
 
     // less.js `checkExtendsForNonMatched(root.allExtends)`: only root-scope
-    // ORIGINAL extends warn (chained ones have longer parent chains).
-    let mut warned: FxHashSet<String> = FxHashSet::default();
+    // ORIGINAL extends warn (chained ones have longer parent chains). The
+    // dedup key is `(index, selector)` — two extends at different source
+    // positions with the same unmatched target warn TWICE — and the selector
+    // renders through `toCSS`, whose implicit leading combinator gives the
+    // quoted text a leading space (`extend ' .zzz' has no matches`).
+    let mut warned: FxHashSet<(usize, usize, String)> = FxHashSet::default();
     for w in &root_own {
-        if !st.found.contains(&w.id) && warned.insert(w.target_css.clone()) {
+        if !st.found.contains(&w.id)
+            && warned.insert((w.span.start, w.span.end, w.target_css.clone()))
+        {
             warnings.push(Warning {
-                message: format!("extend '{}' has no matches", w.target_css),
+                message: format!(
+                    "extend '{}' has no matches",
+                    leading_render(&w.target, &w.target_css)
+                ),
                 filename: None,
                 line: None,
             });
@@ -504,6 +592,8 @@ fn process_scope(
                 visible: ev.visible,
                 first_on_path: ev.first_on_path,
                 rule_idx: i,
+                matchable: ev.matchable,
+                span: ev.span,
             });
         }
     }
@@ -531,6 +621,9 @@ fn process_scope(
             .collect();
         let mut to_add: Vec<OutSel> = Vec::new();
         for ex in &combined {
+            if !ex.matchable {
+                continue;
+            }
             for h in hay.iter().flatten() {
                 let matches = find_match(&ex.target, h, ex.all, ex.all);
                 if matches.is_empty() {
@@ -583,7 +676,7 @@ fn do_chaining(
             for ti in 0..own_len {
                 let src = &combined[si];
                 let tgt = &combined[ti];
-                if src.parent_ids.contains(&tgt.id) {
+                if !src.matchable || src.parent_ids.contains(&tgt.id) {
                     continue;
                 }
                 let matches = find_match(&src.target, &tgt.self_tokens, src.all, src.all);
@@ -606,6 +699,8 @@ fn do_chaining(
                     visible: tgt.visible,
                     first_on_path: tgt.first_on_path,
                     rule_idx: tgt.rule_idx,
+                    matchable: tgt.matchable,
+                    span: tgt.span,
                 };
                 if tgt.first_on_path {
                     // Push the chained selector onto the target's rule (it
@@ -632,9 +727,9 @@ fn do_chaining(
             return Err(LessError::new(
                 ErrorKind::Runtime,
                 format!(
-                    "extend circular reference detected. One of the circular extends is currently:{}:extend({})",
+                    "extend circular reference detected. One of the circular extends is currently: {}:extend({})",
                     render_tokens(&w.self_tokens),
-                    w.target_css
+                    leading_render(&w.target, &w.target_css)
                 ),
             ));
         }

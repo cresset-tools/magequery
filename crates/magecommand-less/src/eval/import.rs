@@ -45,17 +45,23 @@ pub(crate) struct FileScope {
 }
 
 impl FileScope {
-    /// The entry file's scope, derived from the options.
+    /// The entry file's scope, derived from the options. A non-empty
+    /// `rootpath` without a trailing `/` gets one appended — core less.js
+    /// normalizes at parse setup (parse.js:52; review F11).
     pub fn entry(opts: &LessOptions) -> FileScope {
         let filename = opts.filename.clone().unwrap_or_default();
         let current_directory = match filename.rfind('/') {
             Some(i) => filename[..=i].to_string(),
             None => String::new(),
         };
+        let mut rootpath = opts.rootpath.clone().unwrap_or_default();
+        if !rootpath.is_empty() && !rootpath.ends_with('/') {
+            rootpath.push('/');
+        }
         FileScope {
             filename,
             current_directory,
-            rootpath: opts.rootpath.clone().unwrap_or_default(),
+            rootpath,
             reference: false,
         }
     }
@@ -63,6 +69,14 @@ impl FileScope {
 
 /// Stage-1 import resolution over a mutable rule tree. Returns an error only
 /// for a genuinely failing non-`(optional)` fetch or a parse failure.
+///
+/// The walk is **breadth-first by file visit** (review F13): less.js's
+/// `ImportSequencer` runs `onImported` callbacks in registration order, and a
+/// fetched file's own imports register only when its root is visited — so all
+/// of a file's imports claim their once-slots before any import discovered
+/// inside a fetched subtree. A root-level import therefore beats a nested one
+/// to the once-slot (flipping both output order and, under `(reference)`,
+/// visibility, vs the old depth-first walk).
 pub(crate) fn resolve_imports(
     rules: &mut Vec<Node>,
     opts: &LessOptions,
@@ -74,23 +88,115 @@ pub(crate) fn resolve_imports(
         resolver,
         parsed: FxHashMap::default(),
         fetched: FxHashSet::default(),
+        queue: std::collections::VecDeque::new(),
     };
     if !entry.filename.is_empty() {
         pass.fetched.insert(normalize_key(&entry.filename));
     }
-    // Phase 1: every regular (non-variable-path) import, recursively.
-    pass.walk_list(rules, &entry, false)?;
+    // Stamp the entry file's url/resource nodes with its file info (§2.18).
+    let entry_tag = std::sync::Arc::new(crate::ast::FileTag {
+        rootpath: entry.rootpath.clone(),
+        directory: entry.current_directory.clone(),
+    });
+    stamp_urls(rules, &entry_tag);
+    // Phase 1: every regular (non-variable-path) import, BFS by file.
+    pass.visit_list(rules, &entry, false, 0, &mut Vec::new())?;
+    pass.drain_queue(rules)?;
     // Phase 2: variable-path imports, one at a time in document order — each
     // resolution may introduce a subtree whose regular imports are expanded
-    // immediately (inside `fetch`) and whose own variable imports join the
-    // next round.
+    // (queue drained) before the next variable import. The ROOT frame used
+    // for path interpolation is SNAPSHOT at the first variable import —
+    // modeling less.js's `Ruleset.variables()` memo, which freezes before
+    // any variable import's subtree attaches (review F4: chained
+    // variable-path imports must fail like less.js).
+    let mut root_snapshot: Option<Vec<Node>> = None;
     loop {
         let Some(loc) = find_var_import(rules, &mut Vec::new()) else {
             break;
         };
-        pass.resolve_var_import(rules, &loc, &entry)?;
+        if root_snapshot.is_none() {
+            root_snapshot = Some(rules.clone());
+        }
+        let snap = root_snapshot.clone().expect("just set");
+        pass.resolve_var_import(rules, &loc, &entry, snap)?;
+        pass.drain_queue(rules)?;
     }
     Ok(())
+}
+
+/// Recursively stamp `url(...)` values and resource-function calls with the
+/// file they were written in (§2.18, review F3/F8). Already-stamped nodes and
+/// resolved import subtrees (stamped at their own fetch) are left alone; any
+/// node kind the walk doesn't know keeps the old current-eval-file fallback.
+pub(crate) fn stamp_urls(rules: &mut [Node], tag: &std::sync::Arc<crate::ast::FileTag>) {
+    for node in rules.iter_mut() {
+        stamp_node(node, tag);
+    }
+}
+
+fn is_resource_fn(name: &str) -> bool {
+    name.eq_ignore_ascii_case("data-uri")
+        || name.eq_ignore_ascii_case("image-size")
+        || name.eq_ignore_ascii_case("image-width")
+        || name.eq_ignore_ascii_case("image-height")
+}
+
+fn stamp_node(node: &mut Node, tag: &std::sync::Arc<crate::ast::FileTag>) {
+    match node {
+        Node::WithFile { .. } | Node::ImportResolved(_) | Node::Import { .. } => {}
+        Node::Url(_) => {
+            let inner = std::mem::replace(node, Node::Anonymous(String::new()));
+            *node = Node::WithFile {
+                inner: Box::new(inner),
+                tag: tag.clone(),
+            };
+        }
+        Node::Call { name, args } => {
+            if is_resource_fn(name) {
+                let inner = std::mem::replace(node, Node::Anonymous(String::new()));
+                *node = Node::WithFile {
+                    inner: Box::new(inner),
+                    tag: tag.clone(),
+                };
+            } else {
+                for a in args.iter_mut() {
+                    stamp_node(a, tag);
+                }
+            }
+        }
+        Node::Root(rules)
+        | Node::DetachedRuleset { rules, .. }
+        | Node::Value(rules)
+        | Node::Expression(rules) => stamp_urls(rules, tag),
+        Node::Ruleset(r) => stamp_urls(&mut r.rules, tag),
+        Node::Declaration(d) => stamp_node(&mut d.value, tag),
+        Node::VariableDecl { value, .. } => stamp_node(value, tag),
+        Node::MixinDefinition(d) => {
+            for p in d.params.iter_mut() {
+                if let Some(def) = &mut p.default {
+                    stamp_node(def, tag);
+                }
+            }
+            stamp_urls(&mut d.rules, tag);
+        }
+        Node::MixinCall(c) => {
+            for a in c.args.iter_mut() {
+                stamp_node(&mut a.value, tag);
+            }
+        }
+        Node::AtRule(a) => {
+            if let AtRuleBlock::Rules(rules) = &mut a.block {
+                stamp_urls(rules, tag);
+            }
+        }
+        Node::Paren { inner, .. } | Node::Negative(inner) => stamp_node(inner, tag),
+        Node::Assignment { value, .. } => stamp_node(value, tag),
+        Node::Operation { left, right, .. } => {
+            stamp_node(left, tag);
+            stamp_node(right, tag);
+        }
+        _ => {}
+    }
 }
 
 /// The mutable child rule-lists of a node the import walk descends into
@@ -244,22 +350,36 @@ struct ImportPass<'a> {
     parsed: FxHashMap<String, Vec<Node>>,
     /// less.js `recursionDetector` ∪ `files`: canonical paths already fetched.
     fetched: FxHashSet<String>,
+    /// Pending file visits (locations of freshly attached `ImportResolved`
+    /// subtrees), FIFO — the less.js sequencer's registration order (F13).
+    queue: std::collections::VecDeque<(Loc, bool, usize)>,
 }
 
 impl<'a> ImportPass<'a> {
-    /// Phase-1 walk: fetch every regular import in `rules`, recursively
-    /// (including into freshly attached subtrees, which `fetch` walks).
+    /// The import-nesting depth cap (review F7): a `(multiple)` self-cycle
+    /// otherwise grows the queue forever (less.js infinite-loops on the same
+    /// input; the crate's contract is a clean error).
+    fn depth_cap(&self) -> usize {
+        self.opts.max_eval_depth.unwrap_or(64)
+    }
+
+    /// One FILE VISIT (less.js `ImportVisitor.run`/the subtree visit inside
+    /// `onImported`): fetch every regular import of this file's tree in
+    /// document order — descending into rulesets/at-rules, but NOT into
+    /// freshly fetched subtrees, which are QUEUED as their own visits.
     /// `in_multiple` = an enclosing import was `(multiple)` — less.js sets
     /// `context.importMultiple` for the whole subtree, so nested imports skip
     /// the once-dedup too (verified: a twice-`(multiple)`-imported file
     /// re-emits its own once-imports each time).
-    fn walk_list(
+    fn visit_list(
         &mut self,
         rules: &mut Vec<Node>,
         scope: &FileScope,
         in_multiple: bool,
+        depth: usize,
+        trail: &mut Loc,
     ) -> Result<(), LessError> {
-        for node in rules.iter_mut() {
+        for (idx, node) in rules.iter_mut().enumerate() {
             if let Node::Import { path, options, .. } = node {
                 if import_is_css(path, options) || is_variable_import(path) {
                     continue;
@@ -269,41 +389,76 @@ impl<'a> ImportPass<'a> {
                 };
                 let resolved = self.fetch(&p, node, scope, in_multiple)?;
                 *node = resolved;
+                if let Node::ImportResolved(ir) = node {
+                    if !ir.skip && ir.inline.is_none() && !ir.rules.is_empty() {
+                        let mut loc = trail.clone();
+                        loc.push((idx, 0));
+                        self.queue.push_back((loc, ir.multiple, depth + 1));
+                    }
+                }
                 continue;
             }
-            let (child_scope, child_multiple) = match node {
-                Node::ImportResolved(ir) => (
-                    Some(FileScope {
-                        filename: ir.full_path.clone(),
-                        current_directory: ir.current_directory.clone(),
-                        rootpath: ir.rootpath.clone(),
-                        reference: ir.reference,
-                    }),
-                    ir.multiple,
-                ),
-                _ => (None, in_multiple),
-            };
-            let s = child_scope.as_ref().unwrap_or(scope);
-            for list in child_lists_mut(node) {
-                self.walk_list(list, s, child_multiple)?;
+            // A pre-existing resolved subtree was already visited — skip.
+            if matches!(node, Node::ImportResolved(_)) {
+                continue;
+            }
+            for (li, list) in child_lists_mut(node).into_iter().enumerate() {
+                trail.push((idx, li));
+                self.visit_list(list, scope, in_multiple, depth, trail)?;
+                trail.pop();
             }
         }
         Ok(())
     }
 
+    /// Drain the pending file-visit queue FIFO (the BFS of F13). Import node
+    /// replacement is 1:1, so queued locations stay valid across visits.
+    fn drain_queue(&mut self, rules: &mut Vec<Node>) -> Result<(), LessError> {
+        while let Some((loc, multiple, depth)) = self.queue.pop_front() {
+            if depth > self.depth_cap() {
+                return Err(LessError::new(
+                    ErrorKind::Import,
+                    "import recursion limit exceeded",
+                ));
+            }
+            // Navigate to the resolved node.
+            let mut list: &mut Vec<Node> = rules;
+            for &(node_idx, list_idx) in &loc[..loc.len() - 1] {
+                let node = &mut list[node_idx];
+                let children = child_lists_mut(node);
+                list = children.into_iter().nth(list_idx).expect("stable loc");
+            }
+            let node = &mut list[loc[loc.len() - 1].0];
+            let Node::ImportResolved(ir) = node else { continue };
+            let scope = FileScope {
+                filename: ir.full_path.clone(),
+                current_directory: ir.current_directory.clone(),
+                rootpath: ir.rootpath.clone(),
+                reference: ir.reference,
+            };
+            let mut trail = loc.clone();
+            self.visit_list(&mut ir.rules, &scope, multiple, depth, &mut trail)?;
+        }
+        Ok(())
+    }
+
     /// Resolve one located variable-path import: interpolate its path with a
-    /// frame stack built from the enclosing raw rule lists (innermost-first),
-    /// then fetch and replace in place. An uninterpolatable path falls back to
-    /// the less.js behavior: the import is marked CSS and re-emitted literally.
+    /// frame stack built from the enclosing raw rule lists (innermost-first,
+    /// with the ROOT frame replaced by the fixed `root_snapshot` — see
+    /// [`resolve_imports`], review F4), then fetch and replace in place. An
+    /// uninterpolatable path is marked CSS with the failure SAVED on the node:
+    /// at eval the recomputed path decides — css-shaped re-emits literally,
+    /// anything else rethrows the saved error (less.js `Import.eval`, F2).
     fn resolve_var_import(
         &mut self,
         rules: &mut Vec<Node>,
         loc: &Loc,
         entry: &FileScope,
+        root_snapshot: Vec<Node>,
     ) -> Result<(), LessError> {
         // Collect the enclosing rule lists (outermost-first) + the owning file
         // scope by navigating the trail read-only.
-        let mut frames_outer_first: Vec<Vec<Node>> = vec![rules.clone()];
+        let mut frames_outer_first: Vec<Vec<Node>> = vec![root_snapshot];
         let mut scope = entry.clone();
         {
             let mut list: &Vec<Node> = &*rules;
@@ -341,18 +496,24 @@ impl<'a> ImportPass<'a> {
         let interpolated = if raw.contains("@{") {
             super::interpolate_standalone(&raw, &frames_outer_first, self.opts, self.resolver)
         } else {
-            Some(raw.clone())
+            Ok(raw.clone())
         };
-        let Some(p) = interpolated else {
-            // less.js: a path that can't evaluate at import time is treated as
-            // css (emitted literally; its saved error only rethrows for
-            // less-forced imports). Mark it so the fixpoint terminates.
-            let mut opts2 = options.clone();
-            opts2.push("css".to_string());
-            if let Node::Import { options, .. } = node {
-                *options = opts2;
+        let p = match interpolated {
+            Ok(p) => p,
+            Err(e) => {
+                // less.js: a path that fails to evaluate at import time is
+                // treated as css with the error SAVED on the node — the eval
+                // pass rethrows it unless the re-evaluated path is css-shaped
+                // (F2). Marking css also terminates the fixpoint.
+                let mut opts2 = options.clone();
+                opts2.push("css".to_string());
+                let saved = e.message.clone();
+                if let Node::Import { options, error, .. } = node {
+                    *options = opts2;
+                    *error = Some(saved);
+                }
+                return Ok(());
             }
-            return Ok(());
         };
         if is_css_path(&p) && !options.iter().any(|o| o == "less" || o == "inline") {
             // Interpolated into a css path: literal re-emit (keep as Import,
@@ -366,6 +527,16 @@ impl<'a> ImportPass<'a> {
         }
         let resolved = self.fetch(&p, node, &scope, false)?;
         *node = resolved;
+        // Queue the fetched subtree's own regular imports (drained by the
+        // caller before the next variable import).
+        if let Node::ImportResolved(ir) = node {
+            if !ir.skip && ir.inline.is_none() && !ir.rules.is_empty() {
+                let mut l = loc.clone();
+                let last = l.len() - 1;
+                l[last] = (l[last].0, 0);
+                self.queue.push_back((l, ir.multiple, 1));
+            }
+        }
         Ok(())
     }
 
@@ -380,6 +551,7 @@ impl<'a> ImportPass<'a> {
         in_multiple: bool,
     ) -> Result<Node, LessError> {
         let Node::Import {
+            path,
             options,
             features,
             span,
@@ -388,6 +560,18 @@ impl<'a> ImportPass<'a> {
         else {
             unreachable!("fetch() is only called on Import nodes");
         };
+        // less.js `layerCss` (§2.9, review F1): a LESS import whose feature
+        // list is a single expression opening `layer(...)` re-emits as a
+        // literal CSS `@import` at eval — but the file is still fetched and
+        // its subtree visited (once-slots are consumed).
+        let layer_css = features
+            .as_deref()
+            .map(|f| match f {
+                Node::Anonymous(s) => is_layer_feature(s),
+                _ => false,
+            })
+            .unwrap_or(false);
+        let orig_path = if layer_css { Some(path.clone()) } else { None };
         let has = |o: &str| options.iter().any(|x| x == o);
         let inline = has("inline");
         let multiple = has("multiple") || in_multiple;
@@ -438,6 +622,8 @@ impl<'a> ImportPass<'a> {
                     features: features.clone(),
                     current_directory: scope.current_directory.clone(),
                     rootpath: scope.rootpath.clone(),
+                    layer_css: false,
+                    path: None,
                     span: *span,
                 })))
             }
@@ -458,11 +644,11 @@ impl<'a> ImportPass<'a> {
         // entry; otherwise inherited from the importer (less.js
         // `ImportManager.push`).
         let rootpath = if self.opts.rewrite_urls != RewriteUrls::Off {
-            let entry_dir = FileScope::entry(self.opts).current_directory;
+            let entry_scope = FileScope::entry(self.opts);
             format!(
                 "{}{}",
-                self.opts.rootpath.clone().unwrap_or_default(),
-                path_diff(&current_directory, &entry_dir)
+                entry_scope.rootpath,
+                path_diff(&current_directory, &entry_scope.current_directory)
             )
         } else {
             scope.rootpath.clone()
@@ -470,9 +656,13 @@ impl<'a> ImportPass<'a> {
 
         match resolved.payload {
             ImportPayload::Inline(src) | ImportPayload::Css(src) if inline => {
+                // less.js strips a UTF-8 BOM from every loaded file's
+                // contents (import-manager.js:82) — inline payloads included
+                // (review F14). CRLF is kept.
+                let payload = src.strip_prefix('\u{feff}').unwrap_or(&src).to_string();
                 Ok(Node::ImportResolved(Box::new(ImportResolved {
                     rules: Vec::new(),
-                    inline: Some(src.to_string()),
+                    inline: Some(payload),
                     full_path,
                     skip: false,
                     multiple,
@@ -480,6 +670,8 @@ impl<'a> ImportPass<'a> {
                     features: features.clone(),
                     current_directory,
                     rootpath,
+                    layer_css: false,
+                    path: None,
                     span: *span,
                 })))
             }
@@ -497,6 +689,8 @@ impl<'a> ImportPass<'a> {
                         features: features.clone(),
                         current_directory,
                         rootpath,
+                        layer_css: false,
+                        path: None,
                         span: *span,
                     })));
                 }
@@ -515,6 +709,14 @@ impl<'a> ImportPass<'a> {
                                 other => vec![other.clone()],
                             };
                             self.parsed.insert(full_path.clone(), rules.clone());
+                            let mut rules = rules;
+                            stamp_urls(
+                                &mut rules,
+                                &std::sync::Arc::new(crate::ast::FileTag {
+                                    rootpath: rootpath.clone(),
+                                    directory: current_directory.clone(),
+                                }),
+                            );
                             return self.finish_fetch(
                                 rules,
                                 full_path,
@@ -523,6 +725,8 @@ impl<'a> ImportPass<'a> {
                                 features.clone(),
                                 current_directory,
                                 rootpath,
+                                layer_css,
+                                orig_path,
                                 *span,
                             );
                         }
@@ -532,7 +736,29 @@ impl<'a> ImportPass<'a> {
                         current_directory: current_directory.clone(),
                         ..Default::default()
                     };
-                    let parsed = crate::parser::parse(&src, file, self.opts)?;
+                    // `(optional)` swallows ANY error of the target file —
+                    // parse errors included (less.js import-manager.js:49,
+                    // review F10) — turning it into an empty-rules skip.
+                    let parsed = match crate::parser::parse(&src, file, self.opts) {
+                        Ok(p) => p,
+                        Err(_) if optional => {
+                            return Ok(Node::ImportResolved(Box::new(ImportResolved {
+                                rules: Vec::new(),
+                                inline: None,
+                                full_path,
+                                skip: true,
+                                multiple,
+                                reference: own_reference,
+                                features: features.clone(),
+                                current_directory,
+                                rootpath,
+                                layer_css: false,
+                                path: None,
+                                span: *span,
+                            })))
+                        }
+                        Err(e) => return Err(e),
+                    };
                     let rules = match parsed.as_ref() {
                         Node::Root(r) => r.clone(),
                         other => vec![other.clone()],
@@ -541,15 +767,18 @@ impl<'a> ImportPass<'a> {
                     rules
                 };
 
-                // Walk the freshly attached subtree NOW (regular imports;
-                // nested variable imports join the outer fixpoint).
-                let child_scope = FileScope {
-                    filename: full_path.clone(),
-                    current_directory: current_directory.clone(),
-                    rootpath: rootpath.clone(),
-                    reference,
-                };
-                self.walk_list(&mut rules, &child_scope, multiple)?;
+                // Stamp this file's url/resource nodes with ITS file info
+                // (§2.18, F3/F8) — per import statement, since rootpath can
+                // differ per importer chain under rewriteUrls=off. The
+                // subtree's own imports are QUEUED by the caller (BFS, F13),
+                // not walked here.
+                stamp_urls(
+                    &mut rules,
+                    &std::sync::Arc::new(crate::ast::FileTag {
+                        rootpath: rootpath.clone(),
+                        directory: current_directory.clone(),
+                    }),
+                );
 
                 self.finish_fetch(
                     rules,
@@ -559,6 +788,8 @@ impl<'a> ImportPass<'a> {
                     features.clone(),
                     current_directory,
                     rootpath,
+                    layer_css,
+                    orig_path,
                     *span,
                 )
             }
@@ -575,6 +806,8 @@ impl<'a> ImportPass<'a> {
         features: Option<Box<Node>>,
         current_directory: String,
         rootpath: String,
+        layer_css: bool,
+        path: Option<Box<Node>>,
         span: crate::ast::Span,
     ) -> Result<Node, LessError> {
         Ok(Node::ImportResolved(Box::new(ImportResolved {
@@ -587,8 +820,34 @@ impl<'a> ImportPass<'a> {
             features,
             current_directory,
             rootpath,
+            layer_css,
+            path,
             span,
         })))
+    }
+}
+
+/// Whether an import's feature list is the single-expression `layer(...)`
+/// form that takes less.js's `layerCss` literal re-emit path (review F1):
+/// no top-level comma, and the first entry is `layer` followed by a paren
+/// (a trailing feature like `layer(a) screen` still qualifies; a bare
+/// `layer` keyword or a comma list does not).
+fn is_layer_feature(feat: &str) -> bool {
+    // Top-level comma → a feature LIST → @media wrap, not layerCss.
+    let b = feat.as_bytes();
+    let mut depth = 0i32;
+    for &c in b {
+        match c {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b',' if depth == 0 => return false,
+            _ => {}
+        }
+    }
+    let t = feat.trim_start();
+    match t.strip_prefix("layer") {
+        Some(rest) => rest.trim_start().starts_with('('),
+        None => false,
     }
 }
 

@@ -114,6 +114,8 @@ fn gen_root_rules(rules: &[Node], ctx: &mut GenContext, out: &mut String) {
 fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
     match node {
         Node::Root(rules) => gen_root_rules(rules, ctx, out),
+        // Transparent for serialization — the file tag only matters at eval.
+        Node::WithFile { inner, .. } => gen(inner, ctx, out),
         Node::Ruleset(r) => gen_ruleset(&r.selectors, &r.rules, ctx, out),
         Node::Declaration(d) => {
             out.push_str(&d.name);
