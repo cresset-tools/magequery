@@ -30,7 +30,7 @@ use std::sync::Arc;
 use crate::ast::{AtRuleBlock, Declaration, Element, MixinArg, MixinParam, Node, Selector, Span};
 use self::import::FileScope;
 use crate::color::Color;
-use crate::css::{render_value, Css, Warning};
+use crate::css::{render_value, render_value_c, Css, Warning};
 use crate::error::{ErrorKind, LessError};
 use crate::functions;
 use crate::options::{LessOptions, MathMode};
@@ -348,7 +348,10 @@ pub(crate) fn eval_with_source(
         _ => true,
     });
 
-    let code = render_all(&outs, opts.num_precision);
+    let code = render_all(&outs, RenderCfg {
+        np: opts.num_precision,
+        compress: opts.compress,
+    });
     Ok(Css {
         code,
         imports: Vec::new(),
@@ -358,6 +361,13 @@ pub(crate) fn eval_with_source(
 }
 
 impl<'a> Ctx<'a> {
+    /// The comma-list separator for FINAL-output headers (media feature lists,
+    /// `@import` features): `, ` expanded, `,` under compress (§C4 — less.js
+    /// `Value.genCSS`).
+    fn list_sep(&self) -> &'static str {
+        if self.opts.compress { "," } else { ", " }
+    }
+
     /// A fresh evaluation context over `opts` + `resolver`.
     fn new(
         opts: &'a LessOptions,
@@ -815,7 +825,7 @@ impl<'a> Ctx<'a> {
                     let ps = render_value(&rewritten, self.opts.num_precision);
                     let mut header = format!("@import {ps}");
                     if let Some(f) = features {
-                        let fs = self.eval_media_features(f)?.join(", ");
+                        let fs = self.eval_media_features(f)?.join(self.list_sep());
                         if !fs.is_empty() {
                             header.push(' ');
                             header.push_str(&fs);
@@ -963,16 +973,16 @@ impl<'a> Ctx<'a> {
                         }
                         _ => {}
                     }
-                    let text = render_value(&v, self.opts.num_precision);
+                    // NOT a Comment node: less.js emits the evaluated Quoted/
+                    // Anonymous verbatim, so compress must keep it even when
+                    // the text LOOKS like a comment (css-escapes' root
+                    // `e('/* anything to unquote */');`, §C4).
+                    let text = render_value_c(&v, self.opts.num_precision, self.opts.compress);
                     if !text.is_empty() {
                         if self_paths.is_none() {
-                            children.push(Out::Comment(text));
+                            children.push(Out::Verbatim(text));
                         } else {
-                            own.push(Node::Comment {
-                                text,
-                                line: false,
-                                span: Default::default(),
-                            });
+                            own.push(Node::Anonymous(text));
                         }
                     }
                 }
@@ -1017,7 +1027,7 @@ impl<'a> Ctx<'a> {
                         let merged_header = if merged.is_empty() {
                             name
                         } else {
-                            format!("{} {}", name, merged.join(", "))
+                            format!("{} {}", name, merged.join(self.list_sep()))
                         };
                         // A block re-merged into an ambient media path is a
                         // NESTED merged block: bare declaration runs drop and
@@ -1414,7 +1424,7 @@ impl<'a> Ctx<'a> {
         let header = if header_features.is_empty() {
             a.name.clone()
         } else {
-            format!("{} {}", a.name, header_features.join(", "))
+            format!("{} {}", a.name, header_features.join(self.list_sep()))
         };
         // An empty `@media` block is pruned; an empty `@container` still
         // renders its shell (less.js prunes only Media — verified vs 4.6.7).
@@ -1514,7 +1524,15 @@ impl<'a> Ctx<'a> {
                 }
                 other => {
                     let v = self.eval_value(other)?;
-                    render_value(&v, self.opts.num_precision)
+                    // Structured custom values render with the eval context
+                    // (compress), and their standalone comments strip like any
+                    // declaration value's (`--value: a/* c */` → `a`, §C4).
+                    let v = if self.opts.compress {
+                        crate::css::strip_value_comments(&v)
+                    } else {
+                        v
+                    };
+                    render_value_c(&v, self.opts.num_precision, self.opts.compress)
                 }
             };
             return Ok(Node::Declaration(Declaration {
@@ -2110,7 +2128,7 @@ impl<'a> Ctx<'a> {
                     }
                 }
             }
-            if let Some(result) = functions::dispatch(&lname, &filtered, self.opts.num_precision)? {
+            if let Some(result) = functions::dispatch(&lname, &filtered, self.opts.num_precision, self.opts.compress)? {
                 return Ok(result);
             }
         }
@@ -2737,7 +2755,7 @@ impl<'a> Ctx<'a> {
             let ps = render_value(&rewritten, self.opts.num_precision);
             let mut header = format!("@import {ps}");
             if let Some(f) = &ir.features {
-                let fs = self.eval_media_features(f)?.join(", ");
+                let fs = self.eval_media_features(f)?.join(self.list_sep());
                 if !fs.is_empty() {
                     header.push(' ');
                     header.push_str(&fs);
@@ -2773,7 +2791,7 @@ impl<'a> Ctx<'a> {
             }
             let out = match &ir.features {
                 Some(f) => {
-                    let fs = self.eval_media_features(f)?.join(", ");
+                    let fs = self.eval_media_features(f)?.join(self.list_sep());
                     Out::At {
                         header: format!("@media {fs}"),
                         body: AtBody::Verbatim(content.clone()),
@@ -3589,7 +3607,11 @@ impl<'a> Ctx<'a> {
         // nested merges (F3). A variable holding a PARSED comma list
         // (`@pair: screen, print;` — a `Value`) contributes one entry per
         // item, exactly like source-level commas.
-        let mut parts: Vec<String> = Vec::new();
+        // Each part carries a `verbatim` flag: text that came from an ESCAPED
+        // string (`~"only screen and (max-width: 200px)"`) is a Quoted node in
+        // less.js and renders as-written even under compress — its `: ` never
+        // compresses, unlike a parsed paren feature's Declaration (§C4).
+        let mut parts: Vec<(String, bool)> = Vec::new();
         for q in split_top(&raw, ',') {
             let q = q.trim();
             if q.is_empty() {
@@ -3604,20 +3626,33 @@ impl<'a> Ctx<'a> {
                 });
             if let Some(name) = var_name {
                 let v = self.eval_variable(name, Span::default())?;
+                // Verbatim shapes: an ESCAPED string and a permissively
+                // captured raw value (`@tablet: (min-width: @size)`) are
+                // Quoted/Anonymous nodes in less.js — genCSS emits their text
+                // as-written, so compress never touches their `: ` (§C4).
+                let is_escaped = |n: &Node| {
+                    matches!(n, Node::Quoted { escaped: true, .. } | Node::Anonymous(_))
+                };
                 match v {
                     Node::Value(items) => {
                         for it in &items {
-                            parts.push(render_value(it, self.opts.num_precision));
+                            parts.push((
+                                render_value(it, self.opts.num_precision),
+                                is_escaped(it),
+                            ));
                         }
                     }
-                    other => parts.push(render_value(&other, self.opts.num_precision)),
+                    other => parts.push((
+                        render_value(&other, self.opts.num_precision),
+                        is_escaped(&other),
+                    )),
                 }
                 continue;
             }
-            parts.push(q.to_string());
+            parts.push((q.to_string(), false));
         }
         let mut queries = Vec::new();
-        for q in parts {
+        for (q, verbatim) in parts {
             let mut q = self.resolve_prelude_vars(&q)?;
             if q.is_empty() {
                 continue;
@@ -3634,14 +3669,14 @@ impl<'a> Ctx<'a> {
                     }
                 }
             }
-            queries.push(self.normalize_media_query(&q)?);
+            queries.push(self.normalize_media_query(&q, !verbatim)?);
         }
         Ok(queries)
     }
 
     /// One media query: space-joined words and `( … )` feature groups; a word
     /// glued to a paren (`style(…)`, `layer(…)`, `supports(…)`) keeps no space.
-    fn normalize_media_query(&mut self, q: &str) -> Result<String, LessError> {
+    fn normalize_media_query(&mut self, q: &str, compress_colons: bool) -> Result<String, LessError> {
         let bytes = q.as_bytes();
         let mut parts: Vec<(String, bool)> = Vec::new(); // (text, glued-to-previous)
         let mut i = 0;
@@ -3685,7 +3720,7 @@ impl<'a> Ctx<'a> {
                             )
                     })
                     .unwrap_or(false);
-                let norm = self.normalize_media_feature(inner)?;
+                let norm = self.normalize_media_feature(inner, compress_colons)?;
                 parts.push((format!("({norm})"), glued));
                 continue;
             }
@@ -3713,7 +3748,7 @@ impl<'a> Ctx<'a> {
     /// The inside of a `( … )` media feature: `key: value` evaluates the value
     /// (escaped strings render raw); anything else (range syntax, nested
     /// conditions) collapses whitespace and normalizes comparison spacing.
-    fn normalize_media_feature(&mut self, inner: &str) -> Result<String, LessError> {
+    fn normalize_media_feature(&mut self, inner: &str, compress_colons: bool) -> Result<String, LessError> {
         let inner = inner.trim();
         // `@media ( ) { … }` — less.js: badly formed media feature (F13).
         if inner.is_empty() {
@@ -3729,11 +3764,14 @@ impl<'a> Ctx<'a> {
             let value = match crate::parser::parse_value_fragment(rhs, self.opts) {
                 Ok(v) => {
                     let ev = self.eval_value(&v)?;
-                    render_value(&ev, self.opts.num_precision)
+                    render_value_c(&ev, self.opts.num_precision, self.opts.compress)
                 }
                 Err(_) => rhs.to_string(),
             };
-            return Ok(format!("{}: {}", lhs.trim(), value));
+            // A media feature is a Declaration inside the paren — its `: `
+            // compresses like any declaration's (`(min-width:768px)`, §C4).
+            let sep = if compress_colons && self.opts.compress { ":" } else { ": " };
+            return Ok(format!("{}{sep}{}", lhs.trim(), value));
         }
         // Range / boolean feature: single-space words, ` op ` comparisons,
         // nested groups normalized recursively.
@@ -3774,7 +3812,7 @@ impl<'a> Ctx<'a> {
                         i += 1;
                     }
                     let sub = &inner[start + 1..i.saturating_sub(1).max(start + 1)];
-                    let norm = self.normalize_media_feature(sub)?;
+                    let norm = self.normalize_media_feature(sub, compress_colons)?;
                     push_tok(&mut out, &format!("({norm})"), &mut pending_space);
                 }
                 b'<' | b'>' | b'=' => {
@@ -3794,7 +3832,23 @@ impl<'a> Ctx<'a> {
                     {
                         i += 1;
                     }
-                    push_tok(&mut out, &inner[start..i], &mut pending_space);
+                    let tok = &inner[start..i];
+                    // Range-syntax dimensions compress like any Dimension
+                    // (`inline-size >= 0px` → `>= 0`, §C4) — less.js parses
+                    // the range operands as value nodes.
+                    if compress_colons
+                        && self.opts.compress
+                        && tok.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+                    {
+                        if let Ok(v @ Node::Dimension(_)) =
+                            crate::parser::parse_value_fragment(tok, self.opts)
+                        {
+                            let t = render_value_c(&v, self.opts.num_precision, true);
+                            push_tok(&mut out, &t, &mut pending_space);
+                            continue;
+                        }
+                    }
+                    push_tok(&mut out, tok, &mut pending_space);
                 }
             }
         }
@@ -3922,7 +3976,7 @@ impl<'a> Ctx<'a> {
                                 span: Default::default(),
                             };
                             if let Ok(v) = self.eval_lookup(&target, &keys) {
-                                out.push_str(&value_to_plain_string(&v));
+                                out.push_str(&value_to_plain_string_c(&v, self.opts.compress));
                                 i = k;
                                 continue;
                             }
@@ -3930,7 +3984,7 @@ impl<'a> Ctx<'a> {
                     }
                     match self.eval_variable(name, Default::default()) {
                         Ok(v) => {
-                            out.push_str(&value_to_plain_string(&v));
+                            out.push_str(&value_to_plain_string_c(&v, self.opts.compress));
                             i = j;
                             continue;
                         }
@@ -4001,9 +4055,9 @@ impl<'a> Ctx<'a> {
                         };
                         out.push_str(&rest[..start]);
                         if css {
-                            out.push_str(&render_value(&val, 0));
+                            out.push_str(&render_value_c(&val, 0, self.opts.compress));
                         } else {
-                            out.push_str(&value_to_plain_string(&val));
+                            out.push_str(&value_to_plain_string_c(&val, self.opts.compress));
                         }
                         rest = &after[e + 1..];
                         replaced = true;
@@ -4611,11 +4665,20 @@ fn lookup_key_string(node: &Node) -> String {
 }
 
 fn value_to_plain_string(node: &Node) -> String {
+    value_to_plain_string_c(node, false)
+}
+
+/// [`value_to_plain_string`] with the compress flag: less.js's `Quoted.eval`
+/// interpolation renders a non-Quoted value with `v.toCSS(context)` — the
+/// EVAL context, which carries compress — so `@{list}` inside a string joins
+/// with a bare comma under compress (§C4). Internal identity uses (guards,
+/// lookup keys) stay on the expanded form.
+fn value_to_plain_string_c(node: &Node, compress: bool) -> String {
     match node {
         Node::Quoted { value, .. } => value.clone(),
         Node::Keyword(k) => k.clone(),
         Node::Anonymous(s) => s.clone(),
-        other => render_value(other, 0),
+        other => render_value_c(other, 0, compress),
     }
 }
 
@@ -5067,12 +5130,40 @@ fn has_visible(decls: &[Node]) -> bool {
     decls.iter().any(|d| d.is_output_visible())
 }
 
-fn render_all(outs: &[Out], np: u8) -> String {
+/// [`has_visible`] under the compress rules (§C4): a non-bang block comment is
+/// SILENT in compress output (less.js `Comment.isSilent`), so a rule whose
+/// body holds only such comments renders nothing at all.
+fn has_visible_c(decls: &[Node], compress: bool) -> bool {
+    decls.iter().any(|d| match d {
+        Node::Comment { line: false, text, .. } if compress => bang_comment(text),
+        _ => d.is_output_visible(),
+    })
+}
+
+/// A `/*! … */` bang comment — the one comment form compress keeps (§2.3).
+fn bang_comment(text: &str) -> bool {
+    text.as_bytes().get(2) == Some(&b'!')
+}
+
+/// The final-render configuration: `num_precision` for dimension fround plus
+/// the §C4 compress flag. Copy, so it threads freely through the renderer.
+#[derive(Clone, Copy)]
+struct RenderCfg {
+    np: u8,
+    compress: bool,
+}
+
+fn render_all(outs: &[Out], cfg: RenderCfg) -> String {
     let mut parts: Vec<String> = Vec::new();
     for o in outs {
-        if let Some(s) = render_out(o, 0, np) {
+        if let Some(s) = render_out(o, 0, cfg) {
             parts.push(s);
         }
+    }
+    if cfg.compress {
+        // less.js `parse-tree`: compressed output is trimmed of leading and
+        // trailing whitespace and carries no trailing newline.
+        return parts.concat().trim().to_string();
     }
     let mut s = parts.join("\n");
     if !s.is_empty() {
@@ -5081,18 +5172,23 @@ fn render_all(outs: &[Out], np: u8) -> String {
     s
 }
 
-fn render_out(out: &Out, indent: usize, np: u8) -> Option<String> {
-    let ind = "  ".repeat(indent);
+fn render_out(out: &Out, indent: usize, cfg: RenderCfg) -> Option<String> {
+    let ind = if cfg.compress { String::new() } else { "  ".repeat(indent) };
     match out {
-        Out::Comment(t) => Some(format!("{ind}{t}")),
+        Out::Comment(t) => {
+            if cfg.compress && !bang_comment(t) {
+                return None; // silent in compress (less.js `Comment.isSilent`)
+            }
+            Some(format!("{ind}{t}"))
+        }
         // Nested at-rules are routed into their rule's declaration block by
         // `eval_rules`; render standalone (root position) as a plain block.
-        Out::Nested(node) => Some(render_nested_at(node, &ind, np)),
+        Out::Nested(node) => Some(render_nested_at(node, &ind, cfg)),
         Out::Decls(decls) => {
-            if !has_visible(decls) {
+            if !has_visible_c(decls, cfg.compress) {
                 return None;
             }
-            Some(render_decls(decls, &ind, np))
+            Some(render_decls(decls, &ind, cfg, false))
         }
         Out::Rule { selectors, decls, .. } => {
             let vis: Vec<&str> = selectors
@@ -5100,20 +5196,31 @@ fn render_out(out: &Out, indent: usize, np: u8) -> Option<String> {
                 .filter(|s| s.visible)
                 .map(|s| s.css.as_str())
                 .collect();
-            if vis.is_empty() || !has_visible(decls) {
+            if vis.is_empty() || !has_visible_c(decls, cfg.compress) {
                 return None;
+            }
+            if cfg.compress {
+                // Selectors join with a bare comma; the last declaration in
+                // the block drops its `;` (less.js `context.lastRule`).
+                let header: Vec<String> =
+                    vis.iter().map(|s| compress_selector(s)).collect();
+                let body = render_decls(decls, "", cfg, true);
+                return Some(format!("{}{{{body}}}", header.join(",")));
             }
             let header = vis.join(&format!(",\n{ind}"));
             let dind = "  ".repeat(indent + 1);
-            let body = render_decls(decls, &dind, np);
+            let body = render_decls(decls, &dind, cfg, false);
             Some(format!("{ind}{header} {{\n{body}\n{ind}}}"))
         }
         Out::At { header, body } => match body {
             AtBody::None => Some(format!("{ind}{header};")),
             AtBody::Rules(inner) => {
+                if cfg.compress {
+                    return render_at_rules_c(header, inner, cfg);
+                }
                 let mut parts = Vec::new();
                 for o in inner {
-                    if let Some(s) = render_out(o, indent + 1, np) {
+                    if let Some(s) = render_out(o, indent + 1, cfg) {
                         parts.push(s);
                     }
                 }
@@ -5126,6 +5233,9 @@ fn render_out(out: &Out, indent: usize, np: u8) -> Option<String> {
             // as `<indent+2><raw content>\n}` — the content verbatim (its own
             // trailing newline included), first line indented only.
             AtBody::Verbatim(content) => {
+                if cfg.compress {
+                    return Some(format!("{header}{{{content}}}"));
+                }
                 let dind = "  ".repeat(indent + 1);
                 Some(format!("{ind}{header} {{\n{dind}{content}\n{ind}}}"))
             }
@@ -5133,6 +5243,115 @@ fn render_out(out: &Out, indent: usize, np: u8) -> Option<String> {
         Out::Verbatim(content) => Some(format!("{ind}{content}")),
         Out::Hidden(_) => None,
     }
+}
+
+/// A braced at-rule body under compress (§C4). Mirrors less.js exactly:
+/// - the toCSSVisitor strips silent comments and invisible nodes BEFORE
+///   genCSS, so "physically last" (the `lastRule` semicolon omission) is
+///   decided on the stripped list;
+/// - a trailing bare-declaration run drops its final `;` (the body is a
+///   `root` Ruleset with `lastRule`) — EXCEPT for the value-less non-rooted
+///   `simpleBlock` at-rules (bare `@layer`/`@starting-style`), whose
+///   compressed `outputRuleset` keeps every semicolon (verified vs 4.6.7);
+/// - a body emptied by the strip prunes the whole at-rule (a comment-only
+///   `@media` under compress), while a deliberately empty shell (root
+///   `@container`) still renders `{}`.
+fn render_at_rules_c(header: &str, inner: &[Out], cfg: RenderCfg) -> Option<String> {
+    if inner.is_empty() {
+        return Some(format!("{header}{{}}"));
+    }
+    let kept: Vec<&Out> = inner
+        .iter()
+        .filter(|o| match o {
+            Out::Comment(t) => bang_comment(t),
+            Out::Hidden(_) => false,
+            _ => true,
+        })
+        .collect();
+    let simple_block = matches!(header, "@supports" | "@document" | "@starting-style" | "@layer");
+    let mut parts: Vec<String> = Vec::new();
+    for (i, o) in kept.iter().enumerate() {
+        let last = i + 1 == kept.len();
+        let rendered = match o {
+            Out::Decls(decls) if last && !simple_block && has_visible_c(decls, true) => {
+                Some(render_decls(decls, "", cfg, true))
+            }
+            _ => render_out(o, 0, cfg),
+        };
+        if let Some(s) = rendered {
+            parts.push(s);
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("{header}{{{}}}", parts.concat()))
+}
+
+/// Compress a joined selector path (§C4): drop the spaces around every
+/// non-descendant combinator (less.js `Combinator.genCSS` with compress) —
+/// ` > ` → `>`, ` + ` → `+`, ` ~ ` → `~`, ` ^ `/` ^^ ` → `^`/`^^`, and the
+/// slashed form ` /deep/ ` → `/deep/`. Quoted strings and paren/bracket
+/// groups are untouched (`[title="x > y"]`, `:nth-child(2n + 1)` — less.js
+/// keeps both expanded, since those spaces live inside an element's value,
+/// not a combinator). Safe textually because these paths were BUILT by
+/// [`combinator_css`], which always spaces a combinator on both sides.
+fn compress_selector(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            b'(' | b'[' => {
+                depth += 1;
+                out.push(c as char);
+                i += 1;
+            }
+            b')' | b']' => {
+                depth = depth.saturating_sub(1);
+                out.push(c as char);
+                i += 1;
+            }
+            b'"' | b'\'' => {
+                let start = i;
+                i += 1;
+                while i < b.len() && b[i] != c {
+                    i += 1;
+                }
+                i = (i + 1).min(b.len());
+                out.push_str(&s[start..i]);
+            }
+            b' ' if depth == 0 => {
+                let mut j = i;
+                while j < b.len() && b[j] == b' ' {
+                    j += 1;
+                }
+                // A combinator token after the spaces? (first char decides —
+                // element values never start with one of these)
+                if j < b.len() && matches!(b[j], b'>' | b'+' | b'~' | b'^' | b'/') {
+                    let start = j;
+                    while j < b.len() && b[j] != b' ' {
+                        j += 1;
+                    }
+                    out.push_str(&s[start..j]);
+                    while j < b.len() && b[j] == b' ' {
+                        j += 1;
+                    }
+                    i = j;
+                } else {
+                    out.push(' ');
+                    i = j;
+                }
+            }
+            _ => {
+                out.push(c as char);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -5227,6 +5446,56 @@ mod tests {
             .code
             .trim_end()
             .to_string()
+    }
+
+    /// §C4 compress serializer — every assertion pinned against a live
+    /// `less@4.6.7` probe (see NOTES.md "Gate T0 compress").
+    #[test]
+    fn compress_serializer_matches_less_js() {
+        let mut opts = LessOptions::default();
+        opts.compress = true;
+        let c = |src: &str| {
+            crate::compile(src, &opts, &NoopResolver).unwrap().code
+        };
+        // Combinators compress outside quotes/parens; selector comma joins bare.
+        assert_eq!(
+            c("a > b, :not(a > b) + [t=\" > \"] { c: d; }"),
+            "a>b,:not(a > b)+[t=\" > \"]{c:d}"
+        );
+        // Silent comments strip; a kept bang comment preserves the `;` before
+        // it; the physically-last declaration drops its `;`.
+        assert_eq!(
+            c("a { x: 1; /* gone */ y: 2; /*! kept */ }"),
+            "a{x:1;y:2;/*! kept */}"
+        );
+        assert_eq!(c("a { x: 1; /* tail */ }"), "a{x:1}");
+        // A nested simpleBlock keeps EVERY semicolon (`outputRuleset`), while
+        // a root at-rule body (root Ruleset, `lastRule`) drops the final one.
+        assert_eq!(
+            c("a { color: red; @starting-style { opacity: 0; } }"),
+            "a{color:red;@starting-style{opacity:0;}}"
+        );
+        assert_eq!(c("@page { margin: 2cm; size: A4; }"), "@page{margin:2cm;size:A4}");
+        // Dimensions: leading zero stripped, a zero LENGTH loses its unit —
+        // on parsed Dimensions only (the anonymousValue fast path, which
+        // captures simple `0px;` runs, stays verbatim like less.js).
+        assert_eq!(c("a{m:0.5px;z:0px}"), "a{m:.5px;z:0}");
+        assert_eq!(c("a { v: 0px; }"), "a{v:0px}");
+        // Colors: computed hex shortens, a written literal stays verbatim,
+        // rgba args join with a bare comma (alpha keeps its leading zero).
+        assert_eq!(
+            c("a{c:#aabbcc + #000000;d:#ffeeaa;e:rgba(255, 238, 170, 0.1)}"),
+            "a{c:#abc;d:#ffeeaa;e:rgba(255,238,170,0.1)}"
+        );
+        // Media: feature declarations compress their `: `, the query comma
+        // list joins bare, `and` keeps its spaces.
+        assert_eq!(
+            c("@media (min-width: 768px), print and (color) { a { b: c } }"),
+            "@media (min-width:768px),print and (color){a{b:c}}"
+        );
+        // Root: parts join with nothing, `@charset` splices first, and the
+        // output carries no trailing newline (less.js `parse-tree` trim).
+        assert_eq!(c("a{b:c}\n@charset \"UTF-8\";"), "@charset \"UTF-8\";a{b:c}");
     }
 
     #[test]
@@ -6419,15 +6688,40 @@ fn remove_duplicate_decls(decls: Vec<Node>, np: u8) -> Vec<Node> {
         .collect()
 }
 
-fn render_decls(decls: &[Node], dind: &str, np: u8) -> String {
+/// Render a declaration block's rules at `dind`. Under compress (§C4) the
+/// silent comments are stripped FIRST (mirroring less.js's toCSSVisitor), and
+/// when `omit_last_semi` the physically-last rule — when it is a declaration —
+/// drops its `;` (`context.lastRule`); a trailing kept comment or nested
+/// at-rule keeps the preceding declaration's semicolon, exactly like less.js.
+fn render_decls(decls: &[Node], dind: &str, cfg: RenderCfg, omit_last_semi: bool) -> String {
+    let np = cfg.np;
     let decls = merge_rules(decls);
     let decls = remove_duplicate_decls(decls, np);
+    let decls: Vec<Node> = if cfg.compress {
+        decls
+            .into_iter()
+            .filter(|d| match d {
+                Node::Comment { line, text, .. } => !line && bang_comment(text),
+                _ => true,
+            })
+            .collect()
+    } else {
+        decls
+    };
+    let colon = if cfg.compress { ":" } else { ": " };
     let mut lines = Vec::new();
-    for d in &decls {
+    for (i, d) in decls.iter().enumerate() {
+        let last = i + 1 == decls.len();
         match d {
             Node::Declaration(decl) => {
-                let val = render_value(&decl.value, np);
-                lines.push(format!("{dind}{}: {}{};", decl.name, val, decl.important));
+                let val = if cfg.compress {
+                    // the toCSSVisitor comment strip (see `strip_value_comments`)
+                    render_value_c(&crate::css::strip_value_comments(&decl.value), np, true)
+                } else {
+                    render_value(&decl.value, np)
+                };
+                let semi = if cfg.compress && omit_last_semi && last { "" } else { ";" };
+                lines.push(format!("{dind}{}{colon}{}{}{semi}", decl.name, val, decl.important));
             }
             Node::Comment { line: false, text, .. } => {
                 lines.push(format!("{dind}{text}"));
@@ -6447,16 +6741,20 @@ fn render_decls(decls: &[Node], dind: &str, np: u8) -> String {
                     lines.push(format!("{dind}{}{prelude};", a.name));
                 }
                 // A simpleBlock at-rule nested inside the rule (§2.13).
-                AtRuleBlock::Rules(_) => lines.push(render_nested_at(d, dind, np)),
+                AtRuleBlock::Rules(_) => lines.push(render_nested_at(d, dind, cfg)),
             },
             _ => {}
         }
     }
-    lines.join("\n")
+    lines.join(if cfg.compress { "" } else { "\n" })
 }
 
 /// Render a `simpleBlock` at-rule (`@starting-style { decls }`) at `ind`.
-fn render_nested_at(node: &Node, ind: &str, np: u8) -> String {
+/// Compressed, a simpleBlock keeps EVERY `;` — less.js's `outputRuleset`
+/// compress path has no `lastRule` handling (verified vs 4.6.7:
+/// `a{color:red;@starting-style{opacity:0;}}`).
+fn render_nested_at(node: &Node, ind: &str, cfg: RenderCfg) -> String {
+    let np = cfg.np;
     let Node::AtRule(a) = node else {
         return String::new();
     };
@@ -6467,7 +6765,11 @@ fn render_nested_at(node: &Node, ind: &str, np: u8) -> String {
     let AtRuleBlock::Rules(rules) = &a.block else {
         return format!("{ind}{}{prelude};", a.name);
     };
+    if cfg.compress {
+        let body = render_decls(rules, "", cfg, false);
+        return format!("{}{prelude}{{{body}}}", a.name);
+    }
     let dind = format!("{ind}  ");
-    let body = render_decls(rules, &dind, np);
+    let body = render_decls(rules, &dind, cfg, false);
     format!("{ind}{}{prelude} {{\n{body}\n{ind}}}", a.name)
 }

@@ -152,7 +152,15 @@ impl Color {
 
     /// less.js `toCSS`, expanded (non-compress) form (plan §2.18, §4).
     pub fn to_css(&self, num_precision: u8) -> String {
+        self.to_css_c(num_precision, false)
+    }
+
+    /// less.js `toCSS` with the compress flag (§C4): `rgba`/`hsl(a)` args join
+    /// with a bare comma, and a COMPUTED hex (no original literal — a written
+    /// `#ffeeaa` stays verbatim) shortens `#aabbcc` → `#abc`.
+    pub fn to_css_c(&self, num_precision: u8, compress: bool) -> String {
         let alpha = fround(self.alpha, num_precision);
+        let sep = if compress { "," } else { ", " };
 
         // Decide the output function from the original literal (less.js `value`).
         let mut color_function: Option<&str> = None;
@@ -179,7 +187,7 @@ impl Color {
                     .map(|c| clamp(js_round(*c), 255.0).to_string())
                     .collect();
                 parts.push(format_alpha(clamp(alpha, 1.0)));
-                format!("rgba({})", parts.join(", "))
+                format!("rgba({})", parts.join(sep))
             }
             Some("hsl") | Some("hsla") => {
                 let (h, s, l, _) = self.to_hsl();
@@ -191,9 +199,17 @@ impl Color {
                 if color_function == Some("hsla") {
                     args.push(format_alpha(clamp(alpha, 1.0)));
                 }
-                format!("{}({})", color_function.unwrap(), args.join(", "))
+                format!("{}({})", color_function.unwrap(), args.join(sep))
             }
-            _ => self.to_rgb_hex(),
+            _ => {
+                let hex = self.to_rgb_hex();
+                let b = hex.as_bytes();
+                if compress && b.len() == 7 && b[1] == b[2] && b[3] == b[4] && b[5] == b[6] {
+                    format!("#{}{}{}", b[1] as char, b[3] as char, b[5] as char)
+                } else {
+                    hex
+                }
+            }
         }
     }
 

@@ -56,8 +56,8 @@ impl Css {
 #[derive(Debug, Clone, Default)]
 pub struct GenContext {
     /// Whether to emit the compressed serializer (gated by the `compress`
-    /// fixtures, §C4). This step wires the expanded path; `compress` remains a
-    /// later refinement.
+    /// fixtures, §C4): comma lists join with `,`, dimensions drop the leading
+    /// zero (and the unit of a zero length), computed colors hex-shorten.
     pub compress: bool,
     /// Current nesting depth (`tabLevel` in less.js).
     pub tab_level: usize,
@@ -86,8 +86,15 @@ pub fn render_root(root: &Node) -> String {
 /// evaluator's flat serializer reuses this so value spacing/number formatting
 /// lives in one place (plan §4.7).
 pub(crate) fn render_value(node: &Node, num_precision: u8) -> String {
+    render_value_c(node, num_precision, false)
+}
+
+/// [`render_value`] with an explicit compress flag (§C4) — the evaluator's
+/// FINAL-output sites use this; internal comparisons (mixin pattern matching,
+/// declaration dedup) stay on the expanded form so identities never shift.
+pub(crate) fn render_value_c(node: &Node, num_precision: u8, compress: bool) -> String {
     let mut ctx = GenContext {
-        compress: false,
+        compress,
         tab_level: 0,
         num_precision,
     };
@@ -121,7 +128,7 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
         Node::Ruleset(r) => gen_ruleset(&r.selectors, &r.rules, ctx, out),
         Node::Declaration(d) => {
             out.push_str(&d.name);
-            out.push_str(": ");
+            out.push_str(if ctx.compress { ":" } else { ": " });
             gen(&d.value, ctx, out);
             out.push_str(&d.important);
             out.push(';');
@@ -158,7 +165,9 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
         Node::Value(items) => {
             for (i, it) in items.iter().enumerate() {
                 if i > 0 {
-                    out.push_str(", ");
+                    // less.js `Value.genCSS`: the comma list is the ONE value
+                    // join that compresses (`Call` args keep `, ` even then).
+                    out.push_str(if ctx.compress { "," } else { ", " });
                 }
                 gen(it, ctx, out);
             }
@@ -177,10 +186,21 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
         }
         Node::Anonymous(s) => out.push_str(s),
         Node::Dimension(d) => {
-            out.push_str(&format_number(d.value, ctx.num_precision));
-            d.unit.gen_css(false, out);
+            // less.js `Dimension.genCSS` compress branch (§2.18), decided on
+            // the FROUNDED value (which `format_number` already applied): a
+            // zero length drops its unit; `0 < v < 1` drops the leading zero.
+            let s = format_number(d.value, ctx.num_precision);
+            let zero_length = ctx.compress && s == "0" && d.unit.is_length();
+            if ctx.compress && s.starts_with("0.") {
+                out.push_str(&s[1..]);
+            } else {
+                out.push_str(&s);
+            }
+            if !zero_length {
+                d.unit.gen_css(false, out);
+            }
         }
-        Node::Color(c) => out.push_str(&c.to_css(ctx.num_precision)),
+        Node::Color(c) => out.push_str(&c.to_css_c(ctx.num_precision, ctx.compress)),
         Node::Quoted {
             escaped,
             quote,
@@ -283,6 +303,40 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
         | Node::ExtendRule(_)
         | Node::MagentoImport { .. } => {}
     }
+}
+
+/// Strip the silent comments out of a DECLARATION VALUE tree (§C4): less.js's
+/// toCSSVisitor removes them before genCSS, so under compress the list joins
+/// skip them entirely — `grey, /* blue */ orange` compresses to `grey,orange`.
+/// Bang comments stay. Applied only where the visitor would reach (declaration
+/// values at final render) — an interpolated property NAME was flattened to a
+/// string at eval time, so its comments survive, exactly like less.js.
+pub(crate) fn strip_value_comments(node: &Node) -> Node {
+    fn keep(n: &Node) -> bool {
+        !matches!(n, Node::Comment { line, text, .. }
+                  if *line || text.as_bytes().get(2) != Some(&b'!'))
+    }
+    fn walk(n: &Node) -> Node {
+        match n {
+            Node::Value(items) => {
+                Node::Value(items.iter().filter(|i| keep(i)).map(walk).collect())
+            }
+            Node::Expression(items) => {
+                Node::Expression(items.iter().filter(|i| keep(i)).map(walk).collect())
+            }
+            Node::Paren { inner, in_op } => Node::Paren {
+                inner: Box::new(walk(inner)),
+                in_op: *in_op,
+            },
+            Node::Call { name, args, span } => Node::Call {
+                name: name.clone(),
+                args: args.iter().filter(|a| keep(a)).map(walk).collect(),
+                span: *span,
+            },
+            other => other.clone(),
+        }
+    }
+    walk(node)
 }
 
 /// A nested ruleset (`root=false`; §4.7). `selectors` render as paths joined by

@@ -908,13 +908,13 @@ option-driven `tests-config/` suites). The subsystems:
   namespace names during candidate lookup; injected rulesets freeze frames as
   closures so `.@{param}` names resolve later).
 
-Remaining red (4 after the Gate T0 reclassification below):
-`at-rules-compressed`, `at-rules-compressed-evaluation`, `compression` — the
-§C4 compress serializer (deliberately not forced this phase); and
-`config/3rd-party/bootstrap4` — needs JS `@plugin` execution (out of scope,
-§8; the plan's classification keeps it in-scope, so it stays a permanent
-xfail). `import/import` (the other JS-plugin fixture) is reclassified OUT per
-plan §5.2 — see the Gate T0 error-half section.
+Remaining red (1 after the Gate T0 compress stretch below): the three
+compress fixtures greened with the §C4 serializer (see "Gate T0 compress
+serializer" at the end of this file); `config/3rd-party/bootstrap4` — needs
+JS `@plugin` execution (out of scope, §8; the plan's classification keeps it
+in-scope, so it stays a permanent xfail). `import/import` (the other
+JS-plugin fixture) is reclassified OUT per plan §5.2 — see the Gate T0
+error-half section.
 
 Known deviations kept (noted while porting): ~~URL rewriting uses the current
 eval file's rootpath~~ (FIXED in the Phase 4 review — urls and resource calls
@@ -1185,3 +1185,83 @@ installed `less@4.6.7`.
 - `javascript-undefined-var`'s exact golden needs interpolation inside an
   EXECUTED backtick context; it is OUT (inline-JS x1) — our enabled-JS path
   interpolates then reports execution unsupported.
+
+## Gate T0 compress serializer (§C4) + compile residuals
+
+`LessOptions::compress` now drives a byte-exact compress mode of the final
+renderer (never delegated to lightningcss, §9.4). Greened
+`config/at-rules-compressed`, `config/at-rules-compressed-evaluation`,
+`config/compression` → compile 125/126, ratchet floor 199 (125+74). Every
+rule below was verified against live `lessc 4.6.7 --compress` probes, and the
+whole default-options `tests-unit` corpus (78 runnable fixtures + the
+resolvable `import/*` ones) byte-matches the live binary under `--compress`.
+
+The rule set (each mirrors a `context.compress` branch in less.js's tree/*):
+- **Structure** (`Ruleset.genCSS`/`AtRule.outputRuleset`): no indentation or
+  newlines, selectors join `,`, `{`/`}` unspaced, root parts concatenate and
+  the whole output is trimmed (`parse-tree`'s leading/trailing strip — no
+  trailing newline).
+- **`lastRule` semicolons**: the physically-LAST declaration of a rule block
+  or of a root at-rule body drops its `;` — decided AFTER the silent-comment
+  strip (toCSSVisitor order), so `a { x: 1; /* tail */ }` → `a{x:1}` while a
+  kept bang comment preserves the `;` before it. The value-less non-rooted
+  `simpleBlock` at-rules (bare `@layer`/`@starting-style`, nested or root)
+  keep EVERY `;` — their compressed `outputRuleset` has no lastRule handling
+  (probed: `@starting-style{opacity:0;}` vs `@page{margin:2cm;size:A4}`).
+- **Comments** (§2.3): non-bang block comments are SILENT — stripped from
+  rule bodies, at-rule bodies, and declaration VALUE trees
+  (`css::strip_value_comments`, recursing Value/Expression/Paren/Call — the
+  visitor analog), so `grey, /* blue */ orange` → `grey,orange`. `/*!` bang
+  comments survive everywhere. An interpolated property NAME keeps its
+  comments (flattened to a string at eval time, before the visitor — matches
+  less.js).
+- **Selectors** (`Combinator.genCSS`): spaces dropped around every
+  non-descendant combinator (`a>b`, `c+d~.e`, `a^b`, `x^^y`, `a/deep/b`) —
+  applied as a render-time transform (`compress_selector`) over the joined
+  paths so extend/dedup identities never shift; quoted strings and
+  paren/bracket groups untouched (`[title="x > y"]`, `:nth-child(2n + 1)` —
+  less.js keeps both, they are element values not combinators).
+- **Values**: `Value` comma lists join `,` (the ONE value join that
+  compresses — `Call` args keep `, `, probed); `Dimension` drops the leading
+  zero (`.5px`) and the unit of a frounded ZERO with a length unit (`0px` →
+  `0` — but only for PARSED Dimensions: the `anonymousValue` fast path
+  captures simple `0px;` runs verbatim, exactly like less.js, which is why
+  `compression.css` keeps `0em`/`0px`); computed colors hex-shorten
+  (`#aabbcc` → `#abc`) while written literals/named colors stay verbatim
+  (`Color.value` short-circuit), and `rgba()`/`hsla()` args join `,` with the
+  alpha's leading zero KEPT (dimension-only rule).
+- **Media/at-rule headers**: feature lists join `,`; a paren feature's
+  `key: value` colon compresses (it is a Declaration in less.js) and its
+  value renders compressed; range-syntax dimension operands compress
+  (`inline-size >= 0px` → `>= 0`); `and` keeps its spaces. Text from an
+  ESCAPED string or a permissively captured raw value (`@tablet:
+  (min-width: @size)`) stays verbatim — Quoted/Anonymous nodes render
+  as-written even under compress, so their `: ` survives (the media.less
+  `@smartphone` case). `@supports`/generic preludes are Anonymous raw text
+  and stay verbatim (golden keeps `(display: grid)`).
+- **Interpolation & substitution render with the eval context** (which
+  carries compress in less.js): `@{list}` inside a string joins `,`
+  (strings.less `~"Univers, @{test}"` → `Univers, Arial,Verdana,San-Serif` —
+  the written `, ` stays, the interpolated list compresses), custom-property
+  structured values compress (+ comment strip), raw-capture/prelude `@ref`
+  substitution compresses, and the `min()`/`max()` literal passthrough joins
+  args with `,` (`functions/number.js` `minMax`). Internal identity uses
+  (guard compares, mixin matching, dedup keys) stay on the expanded form.
+- A statement-level function call's result (`e('/* anything to unquote */')`)
+  is emitted as a VERBATIM node, not a Comment — compress must keep it even
+  though the text looks like a comment (css-escapes).
+
+Pinned by `eval::tests::compress_serializer_matches_less_js` (unit) plus the
+three fixture goldens. Harness gained `MQ_DIFF_DETAIL=1` (prints each red
+compile fixture's first divergence, the `MQ_ERR_DETAIL` twin).
+
+### bootstrap4 (the 1 remaining xfail) — diagnosis
+
+First divergence chased to its root: `_variables.less:139` fails with
+`darken(@link-color, 15%)` because `@link-color: theme-color(primary)` and
+`theme-color` is a **JS plugin function** (bootstrap-less-port registers
+`plugins/theme-color.js` et al. via `@plugin`). Without JS execution the call
+stays unevaluated and every downstream color function on it fails. That is
+the out-of-scope subsystem (plan §8) already named in the fixture-harness
+header — not an engine bug; the fixture stays a permanent xfail inside the
+126.

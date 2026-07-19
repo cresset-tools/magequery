@@ -46,9 +46,11 @@
 //! `plugi` are false-positive-JS and stay IN. One vendored compile fixture
 //! still depends on JS `@plugin` execution and stays a permanent xfail
 //! *inside* the 126: `config/3rd-party/bootstrap4` (bootstrap-less-port's
-//! theme-color/gray plugins; the plan's classification keeps it in-scope).
-//! The three `compress` fixtures wait on the §C4 compress serializer
-//! (deliberately not forced).
+//! theme-color/gray plugins — `@link-color: theme-color(primary)` is
+//! plugin-defined, so every downstream color function fails; the plan's
+//! classification keeps it in-scope). The three `compress` fixtures are
+//! green as of the §C4 compress serializer (see NOTES.md "Gate T0 compress
+//! serializer").
 
 use libtest_mimic::{Arguments, Failed, Trial};
 use magecommand_less::{
@@ -74,11 +76,11 @@ const SKIP_SUITES: &[&str] = &["javascript", "plugin", "plugin-module", "plugin-
 /// Invariant enforced by the harness: a fixture on this list that regresses, or
 /// an off-list fixture that starts passing, fails the suite. Keep it sorted; when
 /// a phase lands new coverage, ADD the newly-green fixtures here (never remove one
-/// to hide a regression). 122/127 after Phase 4B (`:extend` full §2.8, full
-/// two-stage `@import` §2.9, URL rewriting §2.18, the tests-config option
-/// corpus, and the Phase-3 parser-debt catalog; see NOTES.md "Phase 4B"). The
-/// 5 still-red fixtures: 3 wait on the §C4 compress serializer, 2 on JS
-/// `@plugin` execution (out of scope, §8) — see the header note.
+/// to hide a regression). 125/126 after the Gate T0 compress stretch (the §C4
+/// compress serializer greened the three `compress` fixtures on top of Phase
+/// 4B's 122; see NOTES.md "Gate T0 compress serializer"). The 1 still-red
+/// fixture, `config/3rd-party/bootstrap4`, needs JS `@plugin` execution (out
+/// of scope, §8) — see the header note.
 const EXPECTED_PASS: &[&str] = &[
     "at-rules-declarations/at-rules-declarations",
     "at-rules-empty-block/at-rules-empty-block",
@@ -98,6 +100,9 @@ const EXPECTED_PASS: &[&str] = &[
     "color-functions/rgba",
     "comments/comments",
     "comments/comments2",
+    "config/at-rules-compressed-evaluation/at-rules-compressed-evaluation",
+    "config/at-rules-compressed/at-rules-compressed",
+    "config/compression/compression",
     "config/globalVars/extended",
     "config/globalVars/simple",
     "config/include-path-string/include-path-string",
@@ -907,6 +912,12 @@ fn run_one(fx: &Fixture, root: &Path, passed: &AtomicUsize) -> Result<(), Failed
     // Debug affordance for the error-corpus sweep: MQ_ERR_DETAIL=1 prints the
     // expected-vs-got text of every red error fixture (xfails included).
     if !did_pass && fx.verify == Verify::Error && std::env::var_os("MQ_ERR_DETAIL").is_some() {
+        eprintln!("### {name}
+{detail}");
+    }
+    // Same for the compile corpus: MQ_DIFF_DETAIL=1 prints each red diff
+    // fixture's first divergence (xfails included).
+    if !did_pass && fx.verify == Verify::Diff && std::env::var_os("MQ_DIFF_DETAIL").is_some() {
         eprintln!("### {name}
 {detail}");
     }

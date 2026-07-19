@@ -49,7 +49,7 @@ pub(crate) type FnResult = Result<Option<Node>, LessError>;
 /// whose non-fit is one less.js *catches* — so the caller falls through to the
 /// passthrough rule (plan §2.7/§4.8). Registered functions whose throw
 /// propagates in less.js return `Err`.
-pub fn dispatch(name: &str, args: &[Node], np: u8) -> Result<Option<Node>, LessError> {
+pub fn dispatch(name: &str, args: &[Node], np: u8, compress: bool) -> Result<Option<Node>, LessError> {
     // less.js turns named-color keywords into `Color` nodes at *parse* time; we
     // keep them as keywords until an operation needs them, so the function
     // boundary applies the same coercion (`lighten(blue, 10%)`, `iscolor(red)`).
@@ -84,8 +84,8 @@ pub fn dispatch(name: &str, args: &[Node], np: u8) -> Result<Option<Node>, LessE
 
         // --- number ---
         "percentage" => number::percentage(a),
-        "min" => Ok(number::min_max(a, true, np)),
-        "max" => Ok(number::min_max(a, false, np)),
+        "min" => Ok(number::min_max(a, true, np, compress)),
+        "max" => Ok(number::min_max(a, false, np, compress)),
         "convert" => number::convert(a),
         "pi" => Ok(Some(Node::Dimension(Dimension::number(std::f64::consts::PI)))),
         "mod" => number::modulo(a),
