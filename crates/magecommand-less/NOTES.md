@@ -842,3 +842,80 @@ and fold into Phase 4's map/property-accessor work.
 - **AST completeness:** the parse-side node set is in place; a handful of the 44
   `tree/` nodes are still parsed structurally rather than fully evaluated (they
   land with the phase that needs them, above).
+
+### Phase 4B — `:extend`, full `@import`, URL rewriting, tests-config corpus
+
+122/127 (floor 70→122 across the phase; the corpus grew 87→127 with the
+option-driven `tests-config/` suites). The subsystems:
+
+- **`:extend` full (§2.8)** — a faithful port of less.js 4.6.7's
+  `ExtendFinderVisitor`/`ProcessExtendsVisitor` re-targeted at the evaluator's
+  flattened `Out` tree (`eval/extend.rs`): selector-attached + body `&:extend`,
+  exact vs `all` fragment matching at simple-selector granularity (rendered
+  paths are re-tokenized into less.js `Element`-level runs; combinator-
+  sensitive; attribute quote style normalized; non-overlapping matches),
+  `doExtendChaining` with `parent_ids` circular cuts and the 100-iteration
+  `extend circular reference detected` error, per-at-rule scope stacks (outer
+  extends propagate in, never out — validated by the post-bubbling sibling
+  structure matching less.js's post-eval tree), the `extendOnEveryPath`/
+  `extendList` matching skips, and `(reference)` visibility: per-selector
+  `visible` flags, hidden subtrees marked dark, a visible extend's graft
+  re-enabling exactly the matched rule, pruned after the pass. The
+  `has no matches` warning mirrors `checkExtendsForNonMatched` (root-scope
+  originals only). Multi-`&` selectors now cross-multiply over parent paths
+  (`parents^N`, leftmost slowest — extend-nest's amp-test).
+- **`@import` follow-ups on the 4B-checkpoint machinery (§2.9)** — the
+  ImportResolved node carries only the DIRECT `(reference)` flag (inherited
+  hiding is the enclosing import's visibility blanket at eval, so mixins
+  replayed from visible call sites emit); inline imports splice into the
+  enclosing declaration block; mixin lookup descends into un-inlined import
+  roots inside namespaces; `strictImports` gates ruleset-level imports;
+  `processImports=false` drops unfetched LESS imports (the upstream
+  `[#.&?]css([?;].*)?$` path test decides what still re-emits).
+- **URL handling (§2.18)** — `URL.eval` ported: `pathRequiresRewrite` (`local`
+  = explicit `./`-relative; `all` AND `off` = plain-relative — upstream's
+  `off` differs only in skipping the per-file rootpath accumulation in
+  `ImportManager.push`), rootpath prepend with unquoted-path escaping
+  (`folder (1)/` → `folder\ \(1\)/`), `normalizePath`, and `urlArgs` (after
+  `?`/before `#`, never on `data:`). Import path rewrite shares the rule.
+- **Option wiring (§2.0)** — `banner`/`globalVars`/`modifyVars` as source-text
+  augmentation (`serializeVars`), `strictUnits` output (a fully-cancelled unit
+  renders empty, never the backupUnit guess), the `font`/math=always
+  shorthand bypass (`Declaration.eval` drops to parens-division), the legacy
+  `./` forced-division operator, and `LessOptions::custom_functions` — the
+  minimal `functionRegistry.add` surface the harness uses for the runner's
+  `add`/`increment`/`_color`.
+- **Parser debt (the Phase-3 catalog, each probed vs 4.6.7 first)** — no
+  scientific notation (`1e-2` = `1e` minus `2` → `-1e`); invalid hex =
+  ParseError; comments between property name and `:` drop while post-comma
+  value comments render; a stranded `+`/`*` after a quoted literal errors
+  (quoted strings are not less.js operands — and `operand()`'s real set is
+  enforced in multiplication, so `small/20px` stays an entity list rendering
+  spaced); comments stripped from mixin param/arg lists; the sticky
+  `expand` args-parser quirk (once an arg spreads, every later list-valued
+  arg spreads too) reproduced faithfully.
+- **Residual fixture work** — namespacing (bare lookup guards, each()'s
+  source-map frame, operable re-parsed lookup values, mixin-call map
+  contributions, declaration-shaped parens kept verbatim, media-prelude
+  lookups incl. namespaced mixin-call targets), selectors (pseudo-class heads
+  are never mixin splits; comment-aware balanced scans), parse-interpolation
+  (interpolated selectors re-parse as selector groups; glued bracket runs),
+  permissive-parse (variable declarations fall back to the brace-balanced
+  permissive capture — glued-colon heads only — and raw captures resolve bare
+  `@refs`), mixins-interpolated (`interp_name` resolves `@{}` in mixin/
+  namespace names during candidate lookup; injected rulesets freeze frames as
+  closures so `.@{param}` names resolve later).
+
+Remaining red (5): `at-rules-compressed`, `at-rules-compressed-evaluation`,
+`compression` — the §C4 compress serializer (deliberately not forced this
+phase); `import/import` + `config/3rd-party/bootstrap4` — need JS `@plugin`
+execution (out of scope, §8).
+
+Known deviations kept (noted while porting): URL rewriting uses the current
+eval file's rootpath (less.js uses the node's declaration-site fileInfo — a
+url inside a variable defined in an imported file but USED in the entry file
+would take the caller's rootpath); the extend carrier inside a bubbling
+`@media` under a selector-attached extend does not re-collect in the media
+scope (less.js's derived media ruleset shares the selector objects); strict
+units error only through `Dimension::operate`'s existing checks (the genCSS
+multi-unit throw is not modeled).

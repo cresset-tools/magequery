@@ -1,10 +1,14 @@
-//! less.js v4.6.7 default-option compile-fixture harness (plan §5.5, Step 2).
-//!
-//! Vendored DEFAULT-OPTION compile fixtures only (`tests/fixtures/less-testdata/
-//! tests-unit/`). Each `<name>.less` with a sibling `<name>.css` becomes one
-//! [`libtest_mimic`] Trial that:
-//!   1. compiles the input with default [`LessOptions`] + a filesystem
-//!      [`ImportResolver`] rooted at the fixture's directory,
+//! less.js v4.6.7 compile-fixture harness (plan §5.5) — the FULL compile
+//! corpus: `tests-unit/` (default options) plus the option-driven
+//! `tests-config/` suites (per-directory options in [`config_options`],
+//! transcribed from upstream's cosmiconfig `styles.config.cjs` files). Each
+//! `<name>.less` with a golden `<name>.css` becomes one [`libtest_mimic`]
+//! Trial that:
+//!   1. compiles the input with the directory's [`LessOptions`] + a filesystem
+//!      [`ImportResolver`] rooted at the fixture's directory (plus any
+//!      include-paths and the vendored `node_modules/` packages), with the
+//!      less.js test runner's registered custom functions
+//!      (`add`/`increment`/`_color`),
 //!   2. applies less.js's `doReplacements` placeholder substitution (§5.5) and
 //!      trailing-newline normalization to the expected `.css`,
 //!   3. byte-diffs the two.
@@ -22,9 +26,16 @@
 //! + `tests-config`/`tests-error` denominator, plan §5.6) is DEFERRED; this is its
 //! milestone-1 form over the default-option compile corpus.
 //!
-//! DEFERRED (plan §5.2, see NOTES.md): the option-driven `tests-config/` and
-//! `tests-error/` suites, and — within `tests-unit/` — the `javascript`/`plugin*`
-//! JS/plugin sub-suites.
+//! OUT OF SCOPE (plan §5.2/§8, documented not silent): `tests-error/` (a later
+//! increment), the JS-plugin config dirs (`filemanagerPlugin`,
+//! `postProcessorPlugin`, `preProcessorPlugin`, `visitorPlugin` — not
+//! vendored), `debug/` (dumpLineNumbers), `sourcemaps*`, the
+//! javascript-enabled error suites, and — within `tests-unit/` — the
+//! `javascript`/`plugin*` sub-suites. Two vendored fixtures depend on JS
+//! `@plugin` EXECUTION and stay permanent xfails: `import/import` (needs the
+//! plugin-defined `pi-anon()`) and `config/3rd-party/bootstrap4`
+//! (bootstrap-less-port's theme-color/gray plugins). The three `compress`
+//! fixtures wait on the §C4 compress serializer (deliberately not forced).
 
 use libtest_mimic::{Arguments, Failed, Trial};
 use magecommand_less::{
@@ -50,14 +61,11 @@ const SKIP_SUITES: &[&str] = &["javascript", "plugin", "plugin-module", "plugin-
 /// Invariant enforced by the harness: a fixture on this list that regresses, or
 /// an off-list fixture that starts passing, fails the suite. Keep it sorted; when
 /// a phase lands new coverage, ADD the newly-green fixtures here (never remove one
-/// to hide a regression). 64/87 after Phase 4A (detached rulesets §2.11,
-/// maps/lookups/variable calls/`$prop` accessors §2.12, and at-rule
-/// bubbling/merging/ordering §2.13 — nested `@media`/`@container` `and`-merge
-/// with source-order block surfacing, `@supports`/`@document`/`@layer`
-/// selector-wrap bubbling, `@starting-style` in-place nesting, `@charset`
-/// dedup, plus a stopgap `.less` `@import` inline; see NOTES.md "Phase 4A").
-/// The still-red fixtures wait on Phase 4B (`:extend`, full `@import`
-/// machinery) and the residual selector/comment edge cases.
+/// to hide a regression). 122/127 after Phase 4B (`:extend` full §2.8, full
+/// two-stage `@import` §2.9, URL rewriting §2.18, the tests-config option
+/// corpus, and the Phase-3 parser-debt catalog; see NOTES.md "Phase 4B"). The
+/// 5 still-red fixtures: 3 wait on the §C4 compress serializer, 2 on JS
+/// `@plugin` execution (out of scope, §8) — see the header note.
 const EXPECTED_PASS: &[&str] = &[
     "at-rules-declarations/at-rules-declarations",
     "at-rules-empty-block/at-rules-empty-block",
@@ -150,6 +158,7 @@ const EXPECTED_PASS: &[&str] = &[
     "mixins-guards-default-func/mixins-guards-default-func",
     "mixins-guards/mixins-guards",
     "mixins-important/mixins-important",
+    "mixins-interpolated/mixins-interpolated",
     "mixins-named-args/mixins-named-args",
     "mixins-nested/mixins-nested",
     "mixins-pattern/mixins-pattern",
@@ -675,8 +684,8 @@ fn main() {
 
     let p = passed.load(Ordering::Relaxed);
     println!(
-        "\nless.js {TAG} default-option compile corpus (Phase 4A — detached rulesets + \
-         maps + at-rule bubbling): {p}/{total} passing (ratchet floor {floor}; {} xfail).",
+        "\nless.js {TAG} compile corpus (Phase 4B — @import + :extend + tests-config): \
+         {p}/{total} passing (ratchet floor {floor}; {} xfail).",
         total - floor
     );
 

@@ -21,18 +21,32 @@ less-testdata/data/         Binary assets (image.jpg/.svg, data-uri-fail.png,
                             (plan §C-assets), wired through the harness's
                             filesystem ImportResolver.
 
-DEFERRED to later phases (NOT vendored here — see NOTES.md, plan §5.2/§5.4)
---------------------------------------------------------------------------
-- tests-config/  (math/*, strict-units, globalVars/modifyVars, url-args,
-                  rootpath/static-urls, rewrite-urls, namespacing, compression,
-                  include-path, strict-imports, sourcemaps, plugins) — every
-                  option-driven sub-suite.
-- tests-error/   the 74 error-message fixtures (byte-exact err.toString()).
-- the cosmiconfig `styles.config.cjs` option files (recorded here, deleted from
-  the vendored tree) and the generated `manifest.json` (a Node-toolchain
-  maintenance step, plan §G-node).
-- plugin/@plugin, inline-JS, source-map, dumpLineNumbers fixtures (out of scope
-  for a pure headless compiler, plan §5.2/§8).
+ALSO VENDORED (Phase 4B — the option-driven compile corpus, plan §5.2)
+----------------------------------------------------------------------
+less-testdata/tests-config/   The option-driven compile fixtures: namespacing,
+                              rewrite-urls-*/rootpath-*, static-urls, url-args,
+                              include-path(+string), strict-imports,
+                              process-imports, globalVars/modifyVars (+ their
+                              per-file .json vars), units/{strict,no-strict},
+                              math-{always,strict,parens-division} (goldens
+                              under math/<mode>/ — the upstream layout),
+                              at-rules-compressed*/compression (xfail until
+                              the §C4 compress serializer), and 3rd-party.
+                              Options from the deleted cosmiconfig
+                              `styles.config.cjs` files are transcribed into
+                              the harness's `config_options` table.
+less-testdata/node_modules/bootstrap-less-port/
+                              The npm package (0.3.0, MIT — LICENSE included)
+                              the 3rd-party/bootstrap4 fixture imports.
+
+STILL NOT VENDORED (see NOTES.md, plan §5.2/§5.4/§8)
+----------------------------------------------------
+- tests-error/   the error-message fixtures (byte-exact err.toString()) — a
+                 later increment.
+- tests-config plugin dirs (filemanagerPlugin, postProcessorPlugin,
+  preProcessorPlugin, visitorPlugin), debug/ (dumpLineNumbers), sourcemaps*,
+  js-type-errors/no-js-errors — JS/plugin/source-map surface, out of scope
+  for a pure headless compiler (plan §5.2/§8).
 
 Within tests-unit, the harness additionally SKIPS the `javascript/`, `plugin/`,
 `plugin-module/`, `plugin-preeval/` sub-suites (JS/plugin — plan §5.2). The

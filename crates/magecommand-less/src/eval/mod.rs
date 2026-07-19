@@ -2149,7 +2149,14 @@ impl<'a> Ctx<'a> {
                     self.closures.push(self.frames.clone());
                     out.push(Node::Closure { inner: Box::new(r.clone()), scope });
                 }
-                Node::Ruleset(_) => out.push(r.clone()),
+                Node::Ruleset(_) => {
+                    // Freeze frames for rulesets too: an interpolated selector
+                    // (`.@{name}` under a mixin param) must resolve at a later
+                    // lookup from the caller (mixins-interpolated mi-test-d).
+                    let scope = self.closures.len() as u64;
+                    self.closures.push(self.frames.clone());
+                    out.push(Node::Closure { inner: Box::new(r.clone()), scope });
+                }
                 _ => {}
             }
         }
@@ -3453,6 +3460,41 @@ fn accepts_zero_args(params: &[MixinParam]) -> bool {
 /// body as a definition-scope frame (closure capture, plan §4.3). `path_guards`
 /// accumulates the guards of the namespace segments already traversed, so a
 /// leaf candidate carries every `#ns when (…)` guard on its path (§2.6).
+/// Interpolate `@{name}` references in a mixin/namespace NAME against the
+/// definition-scope frames (less.js evaluates ruleset selectors before they
+/// land in frames, so lookup sees resolved names — mixins-interpolated).
+fn interp_name(name: &str, frames: &[Frame]) -> String {
+    if !name.contains("@{") {
+        return name.to_string();
+    }
+    let mut cur = name.to_string();
+    for _ in 0..4 {
+        let Some(pos) = cur.find("@{") else { break };
+        let Some(end_rel) = cur[pos..].find('}') else { break };
+        let end = pos + end_rel;
+        let var = cur[pos + 2..end].to_string();
+        let mut rep = String::new();
+        for f in frames {
+            if let Some((val, _)) = frame_variable(f, &var) {
+                // Follow variable-to-variable indirection (`@c1: @a1`).
+                let mut v = val;
+                for _ in 0..8 {
+                    let Node::Variable { name: n, .. } = &v else { break };
+                    let n = n.trim_start_matches('@').to_string();
+                    match frames.iter().find_map(|f| frame_variable(f, &n)) {
+                        Some((next, _)) => v = next,
+                        None => break,
+                    }
+                }
+                rep = value_to_plain_string(&v);
+                break;
+            }
+        }
+        cur.replace_range(pos..=end, &rep);
+    }
+    cur
+}
+
 fn find_candidates(
     rules: &[Node],
     path: &[String],
@@ -3473,9 +3515,43 @@ fn find_candidates(
             // A scope-injected closure: resolve against the frames frozen at
             // injection (the enclosing mixin's bound params), not the caller's.
             Node::Closure { inner, scope } => {
+                if let Node::Ruleset(rs) = inner.as_ref() {
+                    let captured = &closures[*scope as usize];
+                    for sel in &rs.selectors {
+                        let mut joined = String::new();
+                        for e in &sel.elements {
+                            joined.push_str(&e.combinator);
+                            joined.push_str(&e.value);
+                        }
+                        let joined = interp_name(&joined, captured);
+                        let mut names = extract_mixin_tokens(&joined);
+                        if names.first().map(|s| s == "&").unwrap_or(false) {
+                            names.remove(0);
+                        }
+                        if let Some(m) = match_prefix(path, &names) {
+                            if m == path.len() {
+                                out.push(Candidate {
+                                    name: joined.clone(),
+                                    params: Vec::new(),
+                                    guard: sel.guard.as_deref().cloned(),
+                                    rules: rs.rules.clone(),
+                                    def_scope: captured.to_vec(),
+                                    path_guards: path_guards.to_vec(),
+                                    ruleset_span: Some(rs.span),
+                                });
+                            } else {
+                                let mut inner_scope = vec![frame_of(rs.rules.clone())];
+                                inner_scope.extend(captured.iter().cloned());
+                                let child = push_guard(path_guards, sel.guard.as_deref());
+                                out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope, closures, &child, true));
+                            }
+                            break;
+                        }
+                    }
+                }
                 if let Node::MixinDefinition(def) = inner.as_ref() {
                     let captured = &closures[*scope as usize];
-                    let names = extract_names_dropamp(&def.name);
+                    let names = extract_names_dropamp(&interp_name(&def.name, captured));
                     if let Some(m) = match_prefix(path, &names) {
                         if m == path.len() {
                             out.push(Candidate {
@@ -3497,7 +3573,7 @@ fn find_candidates(
                 }
             }
             Node::MixinDefinition(def) => {
-                let names = extract_names_dropamp(&def.name);
+                let names = extract_names_dropamp(&interp_name(&def.name, def_scope));
                 if let Some(m) = match_prefix(path, &names) {
                     if m == path.len() {
                         out.push(Candidate {
@@ -3522,7 +3598,16 @@ fn find_candidates(
             }
             Node::Ruleset(rs) => {
                 for sel in &rs.selectors {
-                    let names = mixin_names(&sel.elements);
+                    let mut joined = String::new();
+                    for e in &sel.elements {
+                        joined.push_str(&e.combinator);
+                        joined.push_str(&e.value);
+                    }
+                    let joined = interp_name(&joined, def_scope);
+                    let mut names = extract_mixin_tokens(&joined);
+                    if names.first().map(|s| s == "&").unwrap_or(false) {
+                        names.remove(0);
+                    }
                     if let Some(m) = match_prefix(path, &names) {
                         if m == path.len() {
                             out.push(Candidate {
@@ -4330,6 +4415,144 @@ mod tests {
         crate::compile(src, &opts, &NoopResolver)
             .unwrap_err()
             .to_string()
+    }
+
+    /// An in-memory `path -> content` resolver for import/extend tests.
+    struct MapResolver(Vec<(&'static str, &'static str)>);
+
+    impl crate::resolver::ImportResolver for MapResolver {
+        fn resolve(
+            &self,
+            req: &crate::resolver::ImportRequest,
+        ) -> Result<crate::resolver::ResolvedImport, crate::resolver::ImportError> {
+            let raw = req.path.as_str();
+            let key = if raw.ends_with(".less") || raw.ends_with(".css") {
+                raw.to_string()
+            } else {
+                format!("{raw}.less")
+            };
+            let Some((_, content)) = self.0.iter().find(|(p, _)| *p == key) else {
+                return Err(crate::resolver::ImportError::NotFound(key));
+            };
+            let file = crate::resolver::FileInfo {
+                filename: key.clone(),
+                current_directory: String::new(),
+                ..Default::default()
+            };
+            let payload = if req.options.inline {
+                crate::resolver::ImportPayload::Inline(std::sync::Arc::from(*content))
+            } else if key.ends_with(".css") {
+                crate::resolver::ImportPayload::Css(std::sync::Arc::from(*content))
+            } else {
+                crate::resolver::ImportPayload::Less(std::sync::Arc::from(*content))
+            };
+            Ok(crate::resolver::ResolvedImport { file, payload })
+        }
+    }
+
+    fn css_with(files: &[(&'static str, &'static str)], src: &str, opts: &LessOptions) -> String {
+        let resolver = MapResolver(files.to_vec());
+        crate::compile(src, opts, &resolver)
+            .unwrap()
+            .code
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn phase4b_import_once_vs_multiple() {
+        let files: &[(&'static str, &'static str)] = &[("a.less", ".a { x: 1; }\n")];
+        let opts = LessOptions::default();
+        assert_eq!(
+            css_with(files, "@import \"a\";\n@import \"a\";", &opts),
+            ".a {\n  x: 1;\n}"
+        );
+        assert_eq!(
+            css_with(files, "@import (multiple) \"a\";\n@import (multiple) \"a\";", &opts),
+            ".a {\n  x: 1;\n}\n.a {\n  x: 1;\n}"
+        );
+    }
+
+    #[test]
+    fn phase4b_import_optional_missing_is_silent() {
+        let opts = LessOptions::default();
+        assert_eq!(
+            css_with(&[], "@import (optional) \"nope\";\n.b { y: 2; }", &opts),
+            ".b {\n  y: 2;\n}"
+        );
+    }
+
+    #[test]
+    fn phase4b_css_import_passthrough_rewrite() {
+        // A `.css` import re-emits literally; with rewriting on, the rootpath
+        // joins the path (less.js `Import.evalPath`).
+        let mut opts = LessOptions::default();
+        opts.rewrite_urls = crate::options::RewriteUrls::All;
+        opts.rootpath = Some("http://example.com/css/".into());
+        assert_eq!(
+            css_with(&[], "@import \"theme.css\";", &opts),
+            "@import \"http://example.com/css/theme.css\";"
+        );
+        // Absolute path: untouched.
+        assert_eq!(
+            css_with(&[], "@import \"/abs/theme.css\";", &opts),
+            "@import \"/abs/theme.css\";"
+        );
+    }
+
+    #[test]
+    fn phase4b_reference_extend_visibility() {
+        // (reference): hidden until an extend re-enables the matched rule —
+        // and ONLY the grafted selector renders.
+        let files: &[(&'static str, &'static str)] =
+            &[("lib.less", ".abs { color: red; }\n.dark { color: black; }\n")];
+        let opts = LessOptions::default();
+        assert_eq!(
+            css_with(
+                files,
+                "@import (reference) \"lib\";\n.use:extend(.abs all) {}",
+                &opts
+            ),
+            ".use {\n  color: red;\n}"
+        );
+    }
+
+    #[test]
+    fn phase4b_extend_media_scoping() {
+        // An extend inside @media affects only that block; an outer extend
+        // reaches INTO media blocks.
+        assert_eq!(
+            css(".a { c: 1; }\n@media tv { .a { c: 2; } .in:extend(.a all) {} }\n.out:extend(.a all) {}"),
+            ".a,\n.out {\n  c: 1;\n}\n@media tv {\n  .a,\n  .in,\n  .out {\n    c: 2;\n  }\n}"
+        );
+    }
+
+    #[test]
+    fn phase4b_rewrite_urls_matrix() {
+        let mk = |mode: crate::options::RewriteUrls| {
+            let mut o = LessOptions::default();
+            o.rewrite_urls = mode;
+            o.rootpath = Some("assets/".into());
+            css_with(
+                &[],
+                ".u { a: url(\"./x.png\"); b: url(\"x.png\"); c: url(\"/x.png\"); d: url(\"http://h/x.png\"); }",
+                &o,
+            )
+        };
+        // local: only explicitly-relative (`./`) paths rewrite.
+        assert_eq!(
+            mk(crate::options::RewriteUrls::Local),
+            ".u {\n  a: url(\"./assets/x.png\");\n  b: url(\"x.png\");\n  c: url(\"/x.png\");\n  d: url(\"http://h/x.png\");\n}"
+        );
+        // all AND off (upstream `pathRequiresRewrite` treats them alike —
+        // off differs only in per-file rootpath accumulation): every
+        // relative path rewrites.
+        for mode in [crate::options::RewriteUrls::All, crate::options::RewriteUrls::Off] {
+            assert_eq!(
+                mk(mode),
+                ".u {\n  a: url(\"./assets/x.png\");\n  b: url(\"assets/x.png\");\n  c: url(\"/x.png\");\n  d: url(\"http://h/x.png\");\n}"
+            );
+        }
     }
 
     #[test]
