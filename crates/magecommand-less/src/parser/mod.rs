@@ -3027,27 +3027,68 @@ fn mark_in_op(node: &mut Node) {
     }
 }
 
-/// Parse a `//@magento_import [(reference)] 'path';` directive line (§7.1).
+/// Parse a `//@magento_import [(reference)] 'path';` directive line (§7.1),
+/// matching Magento's `MagentoImport::REPLACE_PATTERN` exactly (ORD-1):
+///
+/// `#//@magento_import(?P<reference>\s+\(reference\))?\s+`
+/// `['\"](?P<path>(?![/\\]|\w:[/\\])[^\"']+)['\"]\s*?;#`
+///
+/// A line the pattern rejects stays an INERT comment (no splice): missing
+/// trailing `;`, missing whitespace after the keyword / around
+/// `(reference)`, an absolute (`/…`, `\…`) or drive-letter (`C:/…`) path,
+/// an empty path, or a path containing a quote of EITHER kind (the char
+/// class excludes both regardless of the delimiter — and the closing class
+/// `['\"]` faithfully accepts either quote).
 fn parse_magento_import(comment: &str, span: Span) -> Option<Node> {
-    let body = comment.strip_prefix("//")?.trim_start();
-    let rest = body.strip_prefix("@magento_import")?.trim_start();
-    let (reference, rest) = match rest.strip_prefix("(reference)") {
-        Some(r) => (true, r.trim_start()),
-        None => (false, rest),
+    let body = comment.strip_prefix("//")?;
+    let rest = body.strip_prefix("@magento_import")?;
+    // `(?:\s+\(reference\))?\s+` — at least one whitespace char is REQUIRED
+    // right after the keyword, both with and without `(reference)`.
+    let trimmed = rest.trim_start();
+    if trimmed.len() == rest.len() {
+        return None;
+    }
+    let (reference, rest) = match trimmed.strip_prefix("(reference)") {
+        Some(r) => {
+            let r2 = r.trim_start();
+            if r2.len() == r.len() {
+                return None; // no whitespace between `(reference)` and quote
+            }
+            (true, r2)
+        }
+        None => (false, trimmed),
     };
-    // The path is a quoted string.
     let bytes = rest.as_bytes();
     let quote = *bytes.first()?;
     if quote != b'"' && quote != b'\'' {
         return None;
     }
-    let end = rest[1..].find(quote as char)? + 1;
-    let path = rest[1..end].to_string();
+    let after = &rest[1..];
+    let end = after.find(['\'', '"'])?;
+    if end == 0 {
+        return None; // `[^\"']+` — empty path never matches
+    }
+    let path = &after[..end];
+    let pb = path.as_bytes();
+    if pb[0] == b'/' || pb[0] == b'\\' {
+        return None; // `(?![/\\])` — absolute path
+    }
+    if pb.len() >= 3
+        && (pb[0].is_ascii_alphanumeric() || pb[0] == b'_')
+        && pb[1] == b':'
+        && (pb[2] == b'/' || pb[2] == b'\\')
+    {
+        return None; // `(?!\w:[/\\])` — drive-letter path
+    }
+    // `\s*?;` — the trailing semicolon is REQUIRED.
+    if !after[end + 1..].trim_start().starts_with(';') {
+        return None;
+    }
     Some(Node::MagentoImport {
         path: Box::new(Node::Quoted {
             escaped: false,
             quote: quote as char,
-            value: path,
+            value: path.to_string(),
         }),
         reference,
         span,
@@ -3335,6 +3376,50 @@ mod tests {
         assert!(
             matches!(&rules[0], Node::MagentoImport { reference, .. } if *reference)
         );
+    }
+
+    #[test]
+    fn magento_import_grammar_matches_replace_pattern() {
+        // ORD-1: forms Magento's REPLACE_PATTERN rejects must stay INERT
+        // comments (no directive node, no splice).
+        let opts = LessOptions::magento_production();
+        let rejected = [
+            "//@magento_import 'source/_module.less'",       // missing `;`
+            "//@magento_import'source/_module.less';",       // no ws after keyword
+            "//@magento_import(reference) 'x.less';",        // no ws before (reference)
+            "//@magento_import (reference)'x.less';",        // no ws after (reference)
+            "//@magento_import '/etc/passwd.less';",         // absolute path
+            "//@magento_import 'C:/x.less';",                // drive-letter path
+            "//@magento_import '';",                         // empty path
+            "// @magento_import 'x.less';",                  // ws between // and @
+        ];
+        for src in rejected {
+            let parsed = parse(src, FileInfo::default(), &opts).unwrap();
+            let Node::Root(rules) = parsed.as_ref() else {
+                panic!()
+            };
+            assert!(
+                !rules.iter().any(|r| matches!(r, Node::MagentoImport { .. })),
+                "must stay inert: {src}"
+            );
+        }
+        // Accepted forms, incl. the pattern's quirks: either closing quote
+        // (`['\"]`), and whitespace before the `;`.
+        let accepted = [
+            "//@magento_import 'source/_module.less' ;",
+            "//@magento_import \"source/_module.less\";",
+            "//@magento_import 'source/_module.less\";", // mismatched closer
+        ];
+        for src in accepted {
+            let parsed = parse(src, FileInfo::default(), &opts).unwrap();
+            let Node::Root(rules) = parsed.as_ref() else {
+                panic!()
+            };
+            assert!(
+                rules.iter().any(|r| matches!(r, Node::MagentoImport { .. })),
+                "must parse: {src}"
+            );
+        }
     }
 }
 

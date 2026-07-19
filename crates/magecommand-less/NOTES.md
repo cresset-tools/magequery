@@ -1478,7 +1478,96 @@ Also orchestration-level: Magento's `VariableNotation` asset pre-processor
 applied post-compile, and the differ canonicalizes number PRINT (parse +
 round-8 + shortest print) because less.php leaks PHP float artifacts
 (`71.42857143000001%`, `1.0E-6px`) for the same pinned 8-decimal value.
+(Phase-5 review correction: only `71.42857143000001%` occurs in the actual
+goldens — 6 spots total; `1.0E-6px` came from standalone less.php probes.
+And 8 further number deltas were OURS, not PHP's: see D-interp below.)
 
 Probes: scratchpad `refprobe/` (less.js 4.6.7 via lessprobe; less.php 5.5.1
 via bougie on the oracle copy, scripts run1–run7). Conformance tests pin all
 four behaviors in both profiles.
+
+## Phase 5 — adversarial review fixes (four lenses)
+
+Four review lenses audited the Tier-2 state; every confirmed finding folded.
+The Tier-2 zero-residual verdict survived all four audits AND the fixes below
+(re-run after each): semantic diff 0 on 12/12 LESS entries, critical.css
+byte-identical.
+
+**D-interp — the FOURTH probed less.php-vs-less.js divergence (DS-2/TG-2/
+RT-1), now modeled.** less.php's `Quoted` compile renders an interpolated
+value via `toCSS($env)` — env carries `numPrecision`, so `~"@{v}"` of
+`1.428571429` prints `1.42857143`; less.js's `Quoted.eval` renders with NO
+context (no fround, full digits). Blank/Luma-real: `lib/_forms.less`
+interpolates `@{@{_type}__line-height}` — the real SCD styles-m prints the
+rounded form at 4 spots per theme. Previously the differ's round-8
+canonicalization silently absorbed this and the reports misattributed those
+8 lines as "PHP float artifacts" — at those lines OURS was the deviant side.
+Modeled as `LessOptions::php_interp_rounding` (Magento profiles only;
+`interp_precision()` feeds every `@{}` render site — quoted-string, selector/
+prelude, property-name; the quoted-string case is the probed one, the others
+follow the same `toCSS($env)` mechanism). Conformance test pins all
+quadrants; those 8 output spots are now byte-equal to the golden.
+
+**Entry banner strip (TG-1/RT-2/DS-6), now modeled.** Magento's
+`Instruction\Import::process` runs `removeComments` on the chain-processed
+ENTRY file (related files are materialized verbatim — verified in
+view_preprocessed: entry banners blanked, partial banners kept), but the
+stripped content only STICKS when the `@import` rewrite changed something
+(`if ($processedContent !== $content) setContent`). Modeled as
+`strip_entry_comments` (whole-line block comments only — `//` comments never
+survive LESS anyway, and our directive expansion is at parse time) gated by
+`entry_strip_applies` (a `//@magento_import` directive, `::` notation, or an
+extension-less import path = a rewrite). Verified against the goldens:
+styles-m/styles-l/email/email-inline lose their banners, print/email-fonts
+KEEP theirs. With this + D-interp the whole-corpus byte diff vs real SCD is
+now EXACTLY the 6 golden-side `71.42857143000001%` float-artifact lines
+(styles-m/email/email-inline × 2 themes); the other 7 of 13 outputs are
+byte-identical.
+
+**Differ tightened (DS-1/DS-3/DS-4/DS-5)** — see
+`crates/magecommand/src/static_deploy/cssdiff.rs`: declaration LISTS are now
+order-checked across different props (`DeclsReordered` — shorthand/longhand
+reorder can no longer pass silently; 169 golden rules carry order-sensitive
+pairs), `url(…)` contents (quoted or not, incl. unquoted `data:` payloads
+and fragment ids) compare VERBATIM via placeholder protection, `;` inside
+parens no longer splits declarations, and a round-8 scaling overflow falls
+back to verbatim compare. G3 validation re-run after tightening (self 0 /
+mutation exactly 1) and the full 12-entry matrix re-run: still 0 findings —
+the clean verdict now stands by the differ's own guarantee.
+
+**//@magento_import grammar (ORD-1), tightened to Magento's
+`REPLACE_PATTERN`.** Missing `;`, missing whitespace after the keyword or
+around `(reference)`, absolute/drive-letter paths, and empty paths now stay
+INERT comments (no splice) — including the pattern's real quirks (either
+closing quote accepted). Zero occurrences in blank/luma; parser unit test
+pins accept/reject forms.
+
+**Theme-context module-dir predicate (ORD-4)** widened to Magento's
+collector glob `*_*` (lowercase/dotted dirs are module contexts; leading `.`
+excluded like PHP glob). No such dir exists in blank/luma.
+
+### Known deviations catalogued, deliberately NOT modeled (out of phase)
+
+- **ORD-2**: the `static_content_only_enabled_modules` deployment-config
+  flag is unmodeled — when set, Magento's `MagentoImport::replace` drops
+  theme-context imports of non-enabled modules (this oracle ships context
+  dirs for Magento_MultipleWishlist/Magento_Reward and runs flag-UNSET, which
+  is what we implement; goldens include those modules). Needs an env.php
+  accessor (magequery-core) + a synthetic fixture to validate.
+- **ORD-3 (latent, suspected)**: a `//@magento_import` inside a
+  module-context file would bake the `Vendor_Module` logical prefix into the
+  search path instead of resolving module-relative like `createRelated`. No
+  real Magento source puts the directive in a module file.
+- **RT-4**: Gate T2 is against the oracle-PATCHED noncompressed SCD run; the
+  out-of-the-box production artifact on this target is COMPRESSED
+  (`default-mode-compressed/` goldens) and remains undiffed — the compress
+  serializer's Magento-path validation is a follow-up.
+- **TG-3**: plan §7.4's literal G-ref wording ("zero bare `.abs-` grep") is
+  contradicted by the REAL SCD output itself (D-refext renders extend-added
+  `.abs-*` selectors — 270 bare parts in luma styles-m). The amended,
+  satisfiable gate is selector-set equality vs the oracle, which holds
+  exactly.
+- The differ's round-8 number canonicalization is RETAINED, now justified
+  solely by the 6 golden-side PHP float-print artifacts (plan §8: byte-exact
+  PHP float formatting is a non-goal); with D-interp modeled it no longer
+  hides any ours-side divergence.

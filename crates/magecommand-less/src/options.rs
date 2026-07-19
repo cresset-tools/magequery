@@ -128,6 +128,18 @@ pub struct LessOptions {
     pub php_reference_visibility: bool,
     /// Profile-gated PHP-encoding shim (off by default) — diagnostic only (§3-G).
     pub php_encoding_shim: bool,
+    /// less.php `@{}` interpolation rounding (§3, probed v5.5.1): less.php's
+    /// `Quoted` compile renders an interpolated value with `toCSS($env)` — the
+    /// env carries `numPrecision`, so an interpolated dimension prints rounded
+    /// to 8 decimals (`~"@{v}"` of `1.428571429` → `1.42857143`). less.js's
+    /// `Quoted.eval` calls `toCSS()` with NO context, so no fround happens and
+    /// the full digits print. Blank/Luma-real: `_forms.less` interpolates
+    /// `@{@{_type}__line-height}` (base `1.428571429`) — the real SCD output
+    /// prints `1.42857143`. On in Magento profiles. The quoted-string case is
+    /// the probed one; selector/property interpolation follows the same
+    /// `toCSS($env)` mechanism and is rounded under the flag too (no corpus
+    /// construct exercises it).
+    pub php_interp_rounding: bool,
     /// Registered custom functions (the less.js `functionRegistry.add`
     /// surface, minimal form): `(lowercased name, fn)` pairs consulted before
     /// the built-in registry. `None` from the fn = not handled → the unknown-
@@ -171,6 +183,7 @@ impl Default for LessOptions {
             magento_mode: false,
             php_float_shim: false,
             php_encoding_shim: false,
+            php_interp_rounding: false,
             php_reference_visibility: false,
             max_eval_depth: None,
         }
@@ -194,6 +207,7 @@ impl LessOptions {
             rewrite_urls: RewriteUrls::Off,
             javascript_enabled: false,
             magento_mode: true,
+            php_interp_rounding: true,
             php_reference_visibility: true,
             ..LessOptions::default()
         }
@@ -206,6 +220,7 @@ impl LessOptions {
         LessOptions {
             profile: CompatProfile::Magento248,
             magento_mode: true,
+            php_interp_rounding: true,
             php_reference_visibility: true,
             ..LessOptions::default()
         }

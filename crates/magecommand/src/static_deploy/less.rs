@@ -382,6 +382,11 @@ impl LessOrchestrator {
             file: Some(entry_file.clone()),
             message: format!("read failed: {e}"),
         })?;
+        let source = if entry_strip_applies(&source) {
+            strip_entry_comments(&source)
+        } else {
+            source
+        };
 
         let mut less_opts = LessOptions::magento_production();
         less_opts.filename = Some(logical.clone());
@@ -571,11 +576,122 @@ impl LessOrchestrator {
     }
 }
 
+/// Magento's `Css\PreProcessor\Instruction\Import::removeComments` runs on
+/// every asset that goes through the preprocessor CHAIN — i.e. the ENTRY
+/// file only (related/imported files are materialized verbatim by
+/// `RelatedGenerator`; verified in the oracle's view_preprocessed tree:
+/// entry banners blanked, partial banners kept). Its regex
+/// (`#(^\s*//.*$)|((^\s*/\*(?s).*?(\*/)(?!\*/))$)#m`) removes whole-line
+/// `//` comments and whole-line `/* … */` blocks, AFTER `MagentoImport`
+/// has already replaced the `//@magento_import` directives.
+///
+/// Only the BLOCK-comment half is modeled here: `//` line comments never
+/// survive LESS compilation (removing them is output-invisible), and our
+/// `//@magento_import` expansion happens at parse time — i.e. after this
+/// strip — so eating those lines would break the splice. This is what
+/// removes the entry file's own license banner from the output, matching
+/// the real SCD bytes (Phase-5 review TG-1/RT-2/DS-6).
+///
+/// The strip only takes EFFECT when [`entry_strip_applies`] — see there.
+fn strip_entry_comments(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    let mut line_start = true;
+    while i < bytes.len() {
+        if line_start {
+            // `^\s*/\*` — leading blanks then a block opener on this line.
+            let mut j = i;
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                j += 1;
+            }
+            if j + 1 < bytes.len() && bytes[j] == b'/' && bytes[j + 1] == b'*' {
+                // Lazily find the first `*/` that is NOT followed by another
+                // `*/` AND sits at end-of-line (the regex's `(\*/)(?!\*/)$`).
+                let mut k = j + 2;
+                let mut end = None;
+                while k + 1 < bytes.len() {
+                    if bytes[k] == b'*' && bytes[k + 1] == b'/' {
+                        if bytes.get(k + 2) == Some(&b'*') && bytes.get(k + 3) == Some(&b'/') {
+                            k += 2; // `*/` immediately followed by `*/` — skip
+                            continue;
+                        }
+                        let after = k + 2;
+                        let at_eol = after == bytes.len()
+                            || bytes[after] == b'\n'
+                            || (bytes[after] == b'\r' && bytes.get(after + 1) == Some(&b'\n'));
+                        if at_eol {
+                            end = Some(after);
+                            break;
+                        }
+                    }
+                    k += 1;
+                }
+                if let Some(end) = end {
+                    // Drop `[i..end]`; the trailing newline (outside the
+                    // match) stays, leaving one blank line like Magento.
+                    i = end;
+                    line_start = false;
+                    continue;
+                }
+            }
+        }
+        let ch = src[i..].chars().next().unwrap();
+        out.push(ch);
+        line_start = ch == '\n';
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// Whether Magento's entry comment strip takes effect for this entry.
+///
+/// `Import::process` ends with `if ($processedContent !== $content) {
+/// $chain->setContent($processedContent); }` — `$content` is the
+/// comment-STRIPPED text and `$processedContent` is that text after the
+/// `@import` rewrite. The strip itself is not a "change": it only sticks
+/// when the rewrite altered at least one import statement. Real triggers:
+/// - a `//@magento_import` directive (its expansion produces module-notation
+///   `Mod_X::…` imports, which `convertModuleNotationToPath` rewrites);
+/// - an `@import` path carrying `::` module notation directly;
+/// - an extension-less `@import` path (`fixFileExtension` appends `.less`).
+///
+/// Verified against the oracle SCD output: styles-m/styles-l/email/
+/// email-inline (directives present) lose their banners; print/email-fonts
+/// (plain fully-extensioned imports only — identity rewrite) KEEP theirs.
+fn entry_strip_applies(src: &str) -> bool {
+    if src.contains("//@magento_import") {
+        return true;
+    }
+    let mut rest = src;
+    while let Some(pos) = rest.find("@import") {
+        rest = &rest[pos + "@import".len()..];
+        let Some(q) = rest.find(['\'', '"']) else { continue };
+        let quote = rest.as_bytes()[q];
+        let after = &rest[q + 1..];
+        let Some(end) = after.find(quote as char) else { continue };
+        let path = &after[..end];
+        if path.contains("::") {
+            return true;
+        }
+        let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+        if !base.contains('.') {
+            return true; // fixFileExtension appends `.less` — a rewrite
+        }
+        rest = &after[end + 1..];
+    }
+    false
+}
+
 /// Does a path segment look like a `Vendor_Module` context dir?
+///
+/// Mirrors Magento's collector glob `*_*` (`Override\Base` searches
+/// `<theme>/*_*/web/<path>`; PHP `glob` never matches a leading `.`), so a
+/// lowercase or dotted dir like `vendor_module` IS a module context — the
+/// earlier uppercase-first/no-dot predicate skipped dirs Magento collects
+/// (review ORD-4; no such dir exists in blank/luma).
 fn is_module_segment(s: &str) -> bool {
-    s.contains('_')
-        && !s.contains('.')
-        && s.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+    s.contains('_') && !s.starts_with('.')
 }
 
 /// Join a logical directory (may carry a trailing `/`) and a relative path.
@@ -969,6 +1085,41 @@ mod tests {
         assert!(e.message.contains("entry point not found"), "{e}");
         assert!(e.message.contains("theme-child"), "{e}");
         assert!(e.message.contains("lib/web"), "{e}");
+    }
+
+    #[test]
+    fn strip_entry_comments_matches_magento() {
+        // Whole-line block banner removed (its trailing newline stays —
+        // one blank line, like the oracle's view_preprocessed entries).
+        let src = "/**\n * Copyright\n */\n\n.a { color: red; }\n";
+        assert_eq!(strip_entry_comments(src), "\n\n.a { color: red; }\n");
+        // Indented whole-line block removed too (`^\s*`).
+        assert_eq!(strip_entry_comments("  /* x */\n.b {}\n"), "\n.b {}\n");
+        // A block NOT ending at end-of-line is kept (regex `$` fails)…
+        let keep = "/* x */ .c {}\n";
+        assert_eq!(strip_entry_comments(keep), keep);
+        // …and one not starting at line begin is kept.
+        let keep = ".d {} /* x */\n";
+        assert_eq!(strip_entry_comments(keep), keep);
+        // Line comments (incl. //@magento_import, expanded later at parse
+        // time) are untouched — output-invisible either way.
+        let keep = "//@magento_import 'source/_module.less';\n// note\n";
+        assert_eq!(strip_entry_comments(keep), keep);
+    }
+
+    #[test]
+    fn entry_strip_gate_mirrors_import_rewrite() {
+        // Strip sticks only when the @import rewrite would CHANGE something
+        // (Magento setContent gate): magento_import directives, module
+        // notation, or an extension-less path.
+        assert!(entry_strip_applies("//@magento_import 'source/_module.less';\n"));
+        assert!(entry_strip_applies("@import 'Magento_Theme::css/source/_x.less';\n"));
+        assert!(entry_strip_applies("@import 'source/lib/_lib';\n"));
+        // Fully-extensioned plain imports = identity rewrite → banner kept
+        // (the real SCD print.css / email-fonts.css keep theirs).
+        assert!(!entry_strip_applies(
+            "/**\n * banner\n */\n@import 'source/lib/_lib.less';\n@import (reference) 'source/_email-base.less';\n"
+        ));
     }
 
     #[test]

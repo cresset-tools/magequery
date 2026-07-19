@@ -12,12 +12,21 @@
 //! - whitespace collapse outside strings; `,` canonicalized to `", "`;
 //! - hex colors lowercased and `#abc` expanded to `#aabbcc` (values only);
 //! - leading zero: `.5` → `0.5` (the oracle's expanded mode canonicalizes);
-//! - property names lowercased.
+//! - property names lowercased;
+//! - number PRINT canonicalized (parse, round to the pinned numPrecision=8,
+//!   shortest print) — less.php leaks PHP float-print artifacts
+//!   (`71.42857143000001%`, `1.0E-6px`) for the same 8-decimal value. The
+//!   VALUE is never loosened beyond the round-8 pin (a genuine 8th-decimal
+//!   difference still reports); a magnitude that overflows the round-8
+//!   scaling falls back to a verbatim compare.
 //!
 //! Deliberately NOT normalized (probed: less.php never does):
 //! - `0px` stays `0px` (never collapsed to `0`);
-//! - trailing zeros / number precision (both engines print 8 sig decimals);
-//! - anything inside quoted strings or `url(…)`.
+//! - anything inside quoted strings or `url(…)` — url tokens (quoted or
+//!   not, including unquoted `data:` payloads) compare verbatim;
+//! - rule order AND declaration order within a rule (the cascade and
+//!   shorthand/longhand overlap are order-sensitive: per §7.7 the
+//!   per-selector declaration LIST must match, not the multiset).
 
 use std::fmt;
 
@@ -56,6 +65,9 @@ pub enum Finding {
     DeclMissing { rule: String, prop: String, value: String },
     /// Our rule carries a declaration the golden lacks.
     DeclExtra { rule: String, prop: String, value: String },
+    /// Same declarations, different relative order within the rule
+    /// (shorthand/longhand overlap makes this semantic — §7.7 list equality).
+    DeclsReordered { rule: String, expected: Vec<String>, actual: Vec<String> },
 }
 
 impl fmt::Display for Finding {
@@ -76,6 +88,14 @@ impl fmt::Display for Finding {
             Finding::DeclExtra { rule, prop, value } => {
                 write!(f, "extra decl:   {rule} {{ {prop}: {value} }}")
             }
+            Finding::DeclsReordered { rule, expected, actual } => {
+                write!(
+                    f,
+                    "reordered decls: {rule} {{ expected order `{}`, got `{}` }}",
+                    expected.join("; "),
+                    actual.join("; ")
+                )
+            }
         }
     }
 }
@@ -91,6 +111,9 @@ pub fn parse_css(text: &str) -> Vec<CssRule> {
     // Whether the innermost block has emitted its entry (a block that holds
     // only nested blocks — e.g. `@media` — emits nothing itself).
     let mut buf = String::new();
+    // Paren depth inside the accumulating buffer: a `;` inside `url(data:…;base64,…)`
+    // is part of the value, never a declaration separator (DS-4).
+    let mut paren = 0usize;
     let mut chars = stripped.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -109,10 +132,12 @@ pub fn parse_css(text: &str) -> Vec<CssRule> {
             '{' => {
                 stack.push(buf.trim().to_string());
                 buf.clear();
+                paren = 0;
                 decls.clear();
             }
             '}' => {
                 flush_decl(&mut buf, &mut decls);
+                paren = 0;
                 if !decls.is_empty() {
                     let selector = normalize_selector(stack.last().map(String::as_str).unwrap_or(""));
                     let context: Vec<String> = stack[..stack.len().saturating_sub(1)]
@@ -124,6 +149,7 @@ pub fn parse_css(text: &str) -> Vec<CssRule> {
                 stack.pop();
                 decls.clear();
             }
+            ';' if paren > 0 => buf.push(c),
             ';' => {
                 if stack.is_empty() {
                     // Block-less at-rule at top level (@import, @charset).
@@ -140,6 +166,8 @@ pub fn parse_css(text: &str) -> Vec<CssRule> {
                     flush_decl(&mut buf, &mut decls);
                 }
             }
+            '(' => { paren += 1; buf.push(c); }
+            ')' => { paren = paren.saturating_sub(1); buf.push(c); }
             _ => buf.push(c),
         }
     }
@@ -259,10 +287,118 @@ fn normalize_selector(text: &str) -> String {
     collapse_ws(text)
 }
 
+/// Extract `url(…)` tokens (case-insensitive, string- and escape-aware) and
+/// replace each with an inert letters-only placeholder so no downstream
+/// normalization touches its contents — url contents (quoted or not, incl.
+/// unquoted `data:` payloads and fragment ids) compare VERBATIM (DS-3).
+fn protect_urls(text: &str) -> (String, Vec<String>) {
+    fn is_ident(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '-' || c == '_'
+    }
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut urls: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match c {
+            b'"' | b'\'' => {
+                let quote = c;
+                out.push(c as char);
+                i += 1;
+                while i < bytes.len() {
+                    let d = bytes[i];
+                    out.push(d as char);
+                    i += 1;
+                    if d == b'\\' && i < bytes.len() {
+                        out.push(bytes[i] as char);
+                        i += 1;
+                    } else if d == quote {
+                        break;
+                    }
+                }
+            }
+            b'u' | b'U'
+                if i + 3 < bytes.len()
+                    && bytes[i + 1].eq_ignore_ascii_case(&b'r')
+                    && bytes[i + 2].eq_ignore_ascii_case(&b'l')
+                    && bytes[i + 3] == b'('
+                    && !out.chars().last().is_some_and(is_ident) =>
+            {
+                let start = i;
+                i += 4;
+                let mut depth = 1usize;
+                while i < bytes.len() && depth > 0 {
+                    match bytes[i] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        b'\\' if i + 1 < bytes.len() => i += 1,
+                        b'"' | b'\'' => {
+                            let quote = bytes[i];
+                            i += 1;
+                            while i < bytes.len() {
+                                let d = bytes[i];
+                                if d == b'\\' && i + 1 < bytes.len() {
+                                    i += 1;
+                                } else if d == quote {
+                                    break;
+                                }
+                                i += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                let mut idx = urls.len();
+                urls.push(text[start..i].to_string());
+                out.push('\u{3}');
+                loop {
+                    out.push((b'a' + (idx % 26) as u8) as char);
+                    idx /= 26;
+                    if idx == 0 { break; }
+                }
+                out.push('\u{3}');
+            }
+            _ => {
+                let ch = text[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    (out, urls)
+}
+
+/// Substitute the [`protect_urls`] placeholders back with the verbatim tokens.
+fn restore_urls(text: &str, urls: &[String]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{3}' {
+            let mut idx = 0usize;
+            let mut mult = 1usize;
+            for d in chars.by_ref() {
+                if d == '\u{3}' { break; }
+                idx += (d as usize - 'a' as usize) * mult;
+                mult *= 26;
+            }
+            if let Some(u) = urls.get(idx) {
+                out.push_str(u);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Value normalization: whitespace/comma collapse, hex lowercase+expand,
-/// leading-zero canonicalization — everything else preserved verbatim.
+/// leading-zero + number-print canonicalization — everything else (strings,
+/// url tokens) preserved verbatim.
 fn normalize_value(text: &str) -> String {
-    let collapsed = collapse_ws(text);
+    let (text, urls) = protect_urls(text);
+    let collapsed = collapse_ws(&text);
     let mut out = String::with_capacity(collapsed.len());
     let mut chars = collapsed.chars().peekable();
     let mut prev: Option<char> = None;
@@ -359,10 +495,12 @@ fn normalize_value(text: &str) -> String {
                     }
                 }
                 match tok.parse::<f64>() {
-                    Ok(v) if v.is_finite() => {
+                    Ok(v) if v.is_finite() && (v * 1e8).is_finite() => {
                         let r = (v * 1e8).round() / 1e8;
                         out.push_str(&format!("{r}"));
                     }
+                    // Non-finite (or round-8 scaling overflowed, DS-5):
+                    // canonicalization is meaningless — compare verbatim.
                     _ => out.push_str(&tok),
                 }
                 prev = Some('0');
@@ -373,7 +511,7 @@ fn normalize_value(text: &str) -> String {
             }
         }
     }
-    out
+    if urls.is_empty() { out } else { restore_urls(&out, &urls) }
 }
 
 /// The diff result.
@@ -477,12 +615,18 @@ fn diff_decls(ra: &CssRule, rb: &CssRule, findings: &mut Vec<Finding>) {
     // Order-preserving pass: align by (prop) greedily like the hunk pairing —
     // decls with the same prop pair up in order; leftover = missing/extra.
     let mut used_b = vec![false; rb.decls.len()];
+    let mut max_bi: Option<usize> = None;
+    let mut reordered = false;
     for (pa, va) in &ra.decls {
         let hit = rb.decls.iter().enumerate()
             .find(|(bi, (pb, _))| !used_b[*bi] && pb == pa);
         match hit {
             Some((bi, (_, vb))) => {
                 used_b[bi] = true;
+                if max_bi.is_some_and(|m| bi < m) {
+                    reordered = true;
+                }
+                max_bi = Some(max_bi.map_or(bi, |m| m.max(bi)));
                 if vb != va {
                     findings.push(Finding::DeclChanged {
                         rule:     name.clone(),
@@ -507,6 +651,17 @@ fn diff_decls(ra: &CssRule, rb: &CssRule, findings: &mut Vec<Finding>) {
                 value: vb.clone(),
             });
         }
+    }
+    // §7.7 list equality (DS-1): the prop-keyed pairing above is blind to the
+    // RELATIVE order of different props — semantic when a shorthand overlaps
+    // a longhand (`margin` vs `margin-top`). If any pair matched out of
+    // sequence, the declaration lists differ as LISTS: report it.
+    if reordered {
+        findings.push(Finding::DeclsReordered {
+            rule:     name,
+            expected: ra.decls.iter().map(|(p, _)| p.clone()).collect(),
+            actual:   rb.decls.iter().map(|(p, _)| p.clone()).collect(),
+        });
     }
 }
 
@@ -728,6 +883,68 @@ mod tests {
         let b = "@charset \"utf-8\"; .a { color: red; }";
         let d = diff(a, b);
         assert!(d.is_clean(), "{:?}", d.findings);
+    }
+
+    #[test]
+    fn decl_reorder_within_rule_flags() {
+        // DS-1: shorthand/longhand relative order is semantic (§7.7 list
+        // equality) — a reorder must never be a silent green.
+        let d = diff(
+            ".a { margin: 0; margin-top: 5px; }",
+            ".a { margin-top: 5px; margin: 0; }",
+        );
+        assert_eq!(d.findings.len(), 1, "{:?}", d.findings);
+        assert!(matches!(&d.findings[0], Finding::DeclsReordered { .. }));
+        let d = diff(
+            ".a { background: #fff; background-image: url(x.png); }",
+            ".a { background-image: url(x.png); background: #fff; }",
+        );
+        assert!(!d.is_clean());
+        // Identical order stays clean.
+        let d = diff(
+            ".a { margin: 0; margin-top: 5px; }",
+            ".a { margin: 0; margin-top: 5px; }",
+        );
+        assert!(d.is_clean(), "{:?}", d.findings);
+    }
+
+    #[test]
+    fn url_contents_verbatim() {
+        // DS-3: nothing inside url(…) is normalized — different fragment
+        // ids, sprite versions, or query strings must flag.
+        assert!(!diff(".a { fill: url(#abc); }", ".a { fill: url(#aabbcc); }").is_clean());
+        assert!(!diff(
+            ".a { background: url(sprite-1.0.png); }",
+            ".a { background: url(sprite-1.png); }",
+        )
+        .is_clean());
+        assert!(!diff(
+            "@font-face { src: url(a.woff?v=1.20); }",
+            "@font-face { src: url(a.woff?v=1.2); }",
+        )
+        .is_clean());
+        // Identical urls (and surrounding value normalization) stay clean.
+        assert!(diff(
+            ".a { background: #ABC url(sprite-1.0.png) no-repeat; }",
+            ".a { background: #aabbcc url(sprite-1.0.png) no-repeat; }",
+        )
+        .is_clean());
+    }
+
+    #[test]
+    fn unquoted_data_uri_payload_compares() {
+        // DS-4: the `;` inside url(data:…;base64,…) is not a declaration
+        // separator — a payload-only difference must flag.
+        let a = ".a { background: url(data:image/svg+xml;base64,AAAABBBB); }";
+        let b = ".a { background: url(data:image/svg+xml;base64,CCCCDDDD); }";
+        assert!(!diff(a, b).is_clean());
+        assert!(diff(a, a).is_clean());
+    }
+
+    #[test]
+    fn huge_magnitudes_not_collapsed() {
+        // DS-5: round-8 scaling overflow must not equate different values.
+        assert!(!diff(".a { width: 2e300px; }", ".a { width: 3e300px; }").is_clean());
     }
 
     #[test]

@@ -515,3 +515,45 @@ fn amp_fusion_extend_element_granularity() {
          .abs-tax-total-expanded:after,\n.consumer:after {\n  content: 'x';\n}\n"
     );
 }
+
+/// §3 profile question #4 (D-interp, probed 2026-07, Phase-5 review DS-2/TG-2/
+/// RT-1): `@{}` string-interpolated dimension print precision.
+///
+/// - less.js 4.6.7: `Quoted.eval` renders the looked-up value with `toCSS()`
+///   and NO context — no `fround`, the literal's full digits print
+///   (`~"@{v}"` of `1.428571429` → `1.428571429`).
+/// - less.php 5.5.1 (bougie probe, oracle copy): `Quoted` compile renders via
+///   `toCSS($env)` — the env carries `numPrecision = 8`, so the interpolated
+///   dimension prints ROUNDED (`1.42857143`).
+///
+/// Blank/Luma-real: `lib/_forms.less` interpolates
+/// `~"@{@{_type}__line-height}"` (base `@line-height__base: 1.428571429`) —
+/// the real SCD styles-m prints `line-height: 1.42857143` (4 spots/theme).
+/// DIRECT declaration output is rounded to numPrecision in BOTH engines
+/// (`Dimension.genCSS` frounds with the eval context), also asserted.
+#[test]
+fn php_interp_rounding_quadrants() {
+    let src = "@v: 1.428571429;\n.a {\n  line-height: ~\"@{v}\";\n  top: @v;\n}\n";
+    let resolver = MapResolver(Vec::new());
+
+    // less.js semantics (default profile): interpolation keeps full digits,
+    // the direct declaration rounds.
+    let js = magecommand_less::compile(src, &LessOptions::default(), &resolver)
+        .expect("must compile")
+        .code;
+    assert_eq!(js, ".a {\n  line-height: 1.428571429;\n  top: 1.42857143;\n}\n");
+
+    // less.php semantics (`php_interp_rounding`, on in Magento profiles):
+    // both round to numPrecision 8.
+    let opts = LessOptions {
+        php_interp_rounding: true,
+        ..LessOptions::default()
+    };
+    let php = magecommand_less::compile(src, &opts, &resolver)
+        .expect("must compile")
+        .code;
+    assert_eq!(php, ".a {\n  line-height: 1.42857143;\n  top: 1.42857143;\n}\n");
+
+    // The Magento profile carries the flag.
+    assert!(LessOptions::magento_production().php_interp_rounding);
+}

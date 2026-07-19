@@ -4376,7 +4376,11 @@ impl<'a> Ctx<'a> {
                                 span: Default::default(),
                             };
                             if let Ok(v) = self.eval_lookup(&target, &keys) {
-                                out.push_str(&value_to_plain_string_c(&v, self.opts.compress));
+                                out.push_str(&value_to_plain_string_p(
+                                    &v,
+                                    self.interp_precision(),
+                                    self.opts.compress,
+                                ));
                                 i = k;
                                 continue;
                             }
@@ -4384,7 +4388,11 @@ impl<'a> Ctx<'a> {
                     }
                     match self.eval_variable(name, Default::default()) {
                         Ok(v) => {
-                            out.push_str(&value_to_plain_string_c(&v, self.opts.compress));
+                            out.push_str(&value_to_plain_string_p(
+                                &v,
+                                self.interp_precision(),
+                                self.opts.compress,
+                            ));
                             i = j;
                             continue;
                         }
@@ -4424,6 +4432,16 @@ impl<'a> Ctx<'a> {
     /// iterated interpolation (`@{box-large}` produced by a pass) resolve too.
     fn interpolate(&mut self, input: &str) -> Result<String, LessError> {
         self.interpolate_with(input, false)
+    }
+
+    /// Print precision for interpolated values (D-interp, §3): less.php's
+    /// `Quoted` compile renders the looked-up value with `toCSS($env)` — the
+    /// env carries `numPrecision`, so an interpolated dimension prints ROUNDED
+    /// (`~"@{v}"` of `1.428571429` → `1.42857143`, probed v5.5.1). less.js's
+    /// `Quoted.eval` calls `toCSS()` with NO context — no fround, full digits
+    /// (probed 4.6.7). `0` = full digits (the less.js profile).
+    fn interp_precision(&self) -> u8 {
+        if self.opts.php_interp_rounding { self.opts.num_precision } else { 0 }
     }
 
     /// Selector / property-name interpolation: like [`Self::interpolate`] but a
@@ -4489,9 +4507,17 @@ impl<'a> Ctx<'a> {
                         })?;
                         out.push_str(&rest[..start]);
                         if css {
-                            out.push_str(&render_value_c(&val, 0, self.opts.compress));
+                            out.push_str(&render_value_c(
+                                &val,
+                                self.interp_precision(),
+                                self.opts.compress,
+                            ));
                         } else {
-                            out.push_str(&value_to_plain_string_c(&val, self.opts.compress));
+                            out.push_str(&value_to_plain_string_p(
+                                &val,
+                                self.interp_precision(),
+                                self.opts.compress,
+                            ));
                         }
                         rest = &after[e + 1..];
                         replaced = true;
@@ -5154,11 +5180,19 @@ fn value_to_plain_string(node: &Node) -> String {
 /// with a bare comma under compress (§C4). Internal identity uses (guards,
 /// lookup keys) stay on the expanded form.
 fn value_to_plain_string_c(node: &Node, compress: bool) -> String {
+    value_to_plain_string_p(node, 0, compress)
+}
+
+/// [`value_to_plain_string_c`] with a print precision (D-interp, §3): less.php
+/// renders interpolated values through `toCSS($env)` whose env carries
+/// `numPrecision` — the php profiles pass `num_precision` here
+/// (`php_interp_rounding`); less.js renders context-free (0 = full digits).
+fn value_to_plain_string_p(node: &Node, num_precision: u8, compress: bool) -> String {
     match node {
         Node::Quoted { value, .. } => value.clone(),
         Node::Keyword(k) => k.clone(),
         Node::Anonymous(s) => s.clone(),
-        other => render_value_c(other, 0, compress),
+        other => render_value_c(other, num_precision, compress),
     }
 }
 
