@@ -66,6 +66,12 @@ pub(super) struct EvExtend {
 struct SelToken {
     comb: String,
     value: String,
+    /// Glued to the PREVIOUS token by `&`-concatenation (the element-fusion
+    /// marker, see `splice_parent`): `.abs-tax-total` + `-expanded`. less.php
+    /// never matches an extend across or into a fused element (probed
+    /// v5.5.1), so php-profile matching rejects fragments whose edge cuts a
+    /// fusion; less.js DOES match element-wise through it (probed 4.6.7).
+    fused: bool,
 }
 
 /// Tokenize a rendered selector string into simple-selector elements (the
@@ -126,6 +132,19 @@ fn tokenize(s: &str) -> Vec<SelToken> {
         if i >= b.len() {
             break;
         }
+        // The element-fusion marker (`\u{2}`, see `splice_parent`): a `&`
+        // concatenation boundary — the fused halves are SEPARATE elements
+        // (less.js Element granularity), so an extend target spelling the
+        // fused text as one element must not match. Consume the marker and
+        // start a fresh combinator-less token flagged as fused.
+        let mut fused = false;
+        if b[i] == 0x02 {
+            fused = true;
+            i += 1;
+            if i >= b.len() {
+                break;
+            }
+        }
         // Element value.
         let start = i;
         match b[i] {
@@ -169,6 +188,7 @@ fn tokenize(s: &str) -> Vec<SelToken> {
         toks.push(SelToken {
             comb,
             value: s[start..i].to_string(),
+            fused,
         });
     }
     toks
@@ -406,6 +426,12 @@ fn find_match(
     matches
 }
 
+/// Does this match's fragment edge cut a `&`-fusion boundary? (php profile:
+/// such matches are rejected — less.php never extends into a fused element.)
+fn cuts_fusion(hay: &[SelToken], m: &MatchSpan) -> bool {
+    hay[m.index].fused || hay.get(m.index + m.len).is_some_and(|t| t.fused)
+}
+
 /// less.js `extendSelector`: replace each matched fragment with the
 /// replacement selector (its first element takes the match's combinator).
 fn extend_selector(matches: &[MatchSpan], hay: &[SelToken], repl: &[SelToken]) -> Vec<SelToken> {
@@ -416,6 +442,7 @@ fn extend_selector(matches: &[MatchSpan], hay: &[SelToken], repl: &[SelToken]) -
         out.push(SelToken {
             comb: m.initial_comb.clone(),
             value: repl[0].value.clone(),
+            fused: false,
         });
         out.extend_from_slice(&repl[1..]);
         cur = m.index + m.len;
@@ -453,6 +480,9 @@ struct Work {
 struct State {
     next_id: u64,
     found: FxHashSet<u64>,
+    /// less.php profile: reject extend matches whose fragment edge cuts a
+    /// `&`-fusion boundary (see [`SelToken::fused`]).
+    php_mode: bool,
 }
 
 impl State {
@@ -464,13 +494,17 @@ impl State {
 
 /// Run the extend pass over the flattened output tree, then resolve
 /// `(reference)` visibility (drop what stayed dark). Mutates `outs` in place.
-pub(super) fn apply(outs: &mut Vec<Out>, warnings: &mut Vec<Warning>) -> Result<(), LessError> {
+pub(super) fn apply(
+    outs: &mut Vec<Out>,
+    warnings: &mut Vec<Warning>,
+    php_mode: bool,
+) -> Result<(), LessError> {
     // MarkVisibleSelectors: everything under a Hidden wrapper starts dark.
     for o in outs.iter_mut() {
         mark_hidden(o, false);
     }
 
-    let mut st = State { next_id: 0, found: FxHashSet::default() };
+    let mut st = State { next_id: 0, found: FxHashSet::default(), php_mode };
     let root_own = process_scope(outs, &[], &mut st)?;
 
     // less.js `checkExtendsForNonMatched(root.allExtends)`: only root-scope
@@ -505,6 +539,9 @@ pub(super) fn apply(outs: &mut Vec<Out>, warnings: &mut Vec<Warning>) -> Result<
 fn mark_hidden(out: &mut Out, dark: bool) {
     match out {
         Out::Hidden(inner) => mark_hidden(inner, true),
+        // The less.php-profile visibility shield: darkness stops here — the
+        // content of a visibly-defined mixin stays visible (§3).
+        Out::Visible(inner) => mark_hidden(inner, false),
         Out::Rule { selectors, .. } if dark => {
             for s in selectors.iter_mut() {
                 s.visible = false;
@@ -525,6 +562,7 @@ fn mark_hidden(out: &mut Out, dark: bool) {
 fn prune(out: Out) -> Option<Out> {
     match out {
         Out::Hidden(inner) => prune_hidden(*inner),
+        Out::Visible(inner) => prune(*inner),
         Out::At { header, body: AtBody::Rules(rules) } => Some(Out::At {
             header,
             body: AtBody::Rules(rules.into_iter().filter_map(prune).collect()),
@@ -535,6 +573,9 @@ fn prune(out: Out) -> Option<Out> {
 
 fn prune_hidden(out: Out) -> Option<Out> {
     match out {
+        // A shield inside a hidden region: its content renders (recursing
+        // through `prune` so deeper Hidden subtrees still resolve normally).
+        Out::Visible(inner) => prune(*inner),
         Out::Rule { ref selectors, .. } => {
             if selectors.iter().any(|s| s.visible) {
                 Some(out)
@@ -559,10 +600,7 @@ fn prune_hidden(out: Out) -> Option<Out> {
 fn rule_of_mut(out: &mut Out) -> Option<&mut Out> {
     match out {
         Out::Rule { .. } => Some(out),
-        Out::Hidden(inner) => match inner.as_mut() {
-            Out::Rule { .. } => Some(inner.as_mut()),
-            _ => None,
-        },
+        Out::Hidden(inner) | Out::Visible(inner) => rule_of_mut(inner.as_mut()),
         _ => None,
     }
 }
@@ -625,7 +663,10 @@ fn process_scope(
                 continue;
             }
             for h in hay.iter().flatten() {
-                let matches = find_match(&ex.target, h, ex.all, ex.all);
+                let mut matches = find_match(&ex.target, h, ex.all, ex.all);
+                if st.php_mode {
+                    matches.retain(|m| !cuts_fusion(h, m));
+                }
                 if matches.is_empty() {
                     continue;
                 }
@@ -643,14 +684,14 @@ fn process_scope(
 
     // 4. Recurse into nested at-rule scopes with the combined list.
     for out in outs.iter_mut() {
-        let inner = match out {
-            Out::At { body: AtBody::Rules(rules), .. } => Some(rules),
-            Out::Hidden(b) => match b.as_mut() {
+        fn at_rules_mut(out: &mut Out) -> Option<&mut Vec<Out>> {
+            match out {
                 Out::At { body: AtBody::Rules(rules), .. } => Some(rules),
+                Out::Hidden(b) | Out::Visible(b) => at_rules_mut(b.as_mut()),
                 _ => None,
-            },
-            _ => None,
-        };
+            }
+        }
+        let inner = at_rules_mut(out);
         if let Some(rules) = inner {
             process_scope(rules, &combined, st)?;
         }
@@ -679,7 +720,10 @@ fn do_chaining(
                 if !src.matchable || src.parent_ids.contains(&tgt.id) {
                     continue;
                 }
-                let matches = find_match(&src.target, &tgt.self_tokens, src.all, src.all);
+                let mut matches = find_match(&src.target, &tgt.self_tokens, src.all, src.all);
+                if st.php_mode {
+                    matches.retain(|m| !cuts_fusion(&tgt.self_tokens, m));
+                }
                 if matches.is_empty() {
                     continue;
                 }

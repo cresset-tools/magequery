@@ -118,6 +118,14 @@ pub struct LessOptions {
     pub magento_mode: bool,
     /// Profile-gated PHP-float shim (off by default) — diagnostic only (§3-C).
     pub php_float_shim: bool,
+    /// less.php `(reference)` visibility semantics (§3, probed v5.5.1):
+    /// mixin-call output is visible when the mixin is DEFINED in a
+    /// non-reference file, even when the call site sits inside a
+    /// `(reference)` import (less.js hides it — visibility follows the call
+    /// context). Luma-real: `_email-base.less` is reference-imported and
+    /// calls the visibly-defined `.lib-typography-all()` at top level; the
+    /// real SCD email.css contains that output. On in Magento profiles.
+    pub php_reference_visibility: bool,
     /// Profile-gated PHP-encoding shim (off by default) — diagnostic only (§3-G).
     pub php_encoding_shim: bool,
     /// Registered custom functions (the less.js `functionRegistry.add`
@@ -163,6 +171,7 @@ impl Default for LessOptions {
             magento_mode: false,
             php_float_shim: false,
             php_encoding_shim: false,
+            php_reference_visibility: false,
             max_eval_depth: None,
         }
     }
@@ -185,6 +194,7 @@ impl LessOptions {
             rewrite_urls: RewriteUrls::Off,
             javascript_enabled: false,
             magento_mode: true,
+            php_reference_visibility: true,
             ..LessOptions::default()
         }
     }
@@ -196,6 +206,7 @@ impl LessOptions {
         LessOptions {
             profile: CompatProfile::Magento248,
             magento_mode: true,
+            php_reference_visibility: true,
             ..LessOptions::default()
         }
     }

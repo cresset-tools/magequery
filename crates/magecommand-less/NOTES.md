@@ -1435,3 +1435,50 @@ ObjectManager probe of `Css\PreProcessor\File\Collector\Aggregated`
 (library file → module-own view files in config.php load order → theme
 module contexts root-ancestor-first alphabetical, with remove-and-append
 collation).
+
+## Phase 5 — Tier-2 burn-down: GATE T2 REACHED (zero semantic residuals)
+
+`magecommand static cssdiff` (the §7.7 semantic differ, §G3-validated against
+the known-good SCD pair: self-diff 0, one-mutation pair exactly 1) reports
+**zero findings on every entry point of both themes** (blank 6/6, luma 6/6
+LESS entries; luma's 7th entry `critical.css` is a verbatim pre-minified copy,
+byte-identical). Getting there surfaced three probed less.php-vs-less.js
+divergences — all REAL on the Luma path, all modeled behind
+`LessOptions::php_reference_visibility` (on in the Magento profiles only, so
+Gate T0 keeps pure less.js semantics) — plus one genuine engine bug:
+
+- **D-refvis (mixin-call visibility, §3)**: less.php outputs a mixin call
+  inside a `(reference)` file when the mixin is DEFINED in a visible file
+  (visibility follows the definition); less.js hides it (visibility follows
+  the call context). Luma-real: `_email-base.less` (reference) calls the
+  visibly-defined `.lib-typography-all()` — 52 rules of the real email.css.
+  Implemented via `Candidate::def_in_reference` (FileEnter/FileExit region
+  scan in `find_candidates`) + a visibility-block lift in `emit_candidate`,
+  with an `Out::Visible` shield the extend pass's darkening stops at.
+- **D-refext (extend visibility)**: less.php extend-added selectors are
+  ALWAYS visible and chaining passes through reference-declared extends
+  (`.abs-b:extend(.abs-a all)` in the reference library renders `.abs-b, …`
+  on `.abs-a`'s rule; less.js emits nothing). Luma-real: the `_extends.less`
+  abs-on-abs extends — the 276 `.abs-`-prefixed lines of the real luma
+  styles-m (now matched exactly).
+- **Engine bug (both ground truths agreed)**: extend matching over-matched
+  `&`-concatenated selectors — `.abs-tax-total { &-expanded {…} }` joins to
+  TWO elements, so `:extend(.abs-tax-total-expanded all)` must not match the
+  fused path. String-rendered selectors had lost the element boundary; a
+  `\u{2}` fusion marker (inserted by `splice_parent`, honored by the extend
+  tokenizer, stripped at render) restores less.js Element granularity.
+- **D-ampext (fused-prefix extend)**: on the fused path's PREFIX
+  (`:extend(.abs-tax-total all)`), less.js grafts element-wise
+  (`.consumer-expanded`), less.php never matches into a fused element —
+  php-profile matching rejects fragments whose edge cuts a fusion
+  (`SelToken::fused` + `cuts_fusion`).
+
+Also orchestration-level: Magento's `VariableNotation` asset pre-processor
+(`{{base_url_path}}` → `{{base_url_path}}<area>/<theme>/{{locale}}`) is
+applied post-compile, and the differ canonicalizes number PRINT (parse +
+round-8 + shortest print) because less.php leaks PHP float artifacts
+(`71.42857143000001%`, `1.0E-6px`) for the same pinned 8-decimal value.
+
+Probes: scratchpad `refprobe/` (less.js 4.6.7 via lessprobe; less.php 5.5.1
+via bougie on the oracle copy, scripts run1–run7). Conformance tests pin all
+four behaviors in both profiles.

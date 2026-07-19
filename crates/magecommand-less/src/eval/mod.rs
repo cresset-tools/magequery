@@ -149,6 +149,11 @@ struct Candidate {
     /// `Some(span)` for a ruleset-as-mixin (subject to the recursion guard);
     /// `None` for a `MixinDefinition` (exempt).
     ruleset_span: Option<Span>,
+    /// The definition sits inside a `(reference)` import region (§2.8). Drives
+    /// the less.php profile's definition-based visibility
+    /// ([`LessOptions::php_reference_visibility`]): a visibly-defined mixin
+    /// called from a reference context still emits under less.php.
+    def_in_reference: bool,
 }
 
 /// An evaluated call argument: optional name (`@x:`) + its value.
@@ -218,6 +223,11 @@ enum Out {
     /// A visibility-blocked block (`(reference)` import output, §2.8): kept in
     /// the tree so `:extend` can re-enable matched selectors, but not rendered.
     Hidden(Box<Out>),
+    /// A visibility SHIELD (less.php profile, §3): output of a visibly-defined
+    /// mixin called inside a `(reference)` region. Regional `Hidden` wrapping
+    /// still applies around it, but the extend pass's darkening stops here and
+    /// pruning unwraps it — the content renders.
+    Visible(Box<Out>),
 }
 
 /// One enclosing nestable at-rule on the bubbling path (less.js
@@ -284,7 +294,9 @@ pub(crate) fn eval_with_source(
     fn has_root_decl(outs: &[Out]) -> bool {
         outs.iter().any(|o| match o {
             Out::Decls(ds) => ds.iter().any(|n| matches!(n, Node::Declaration(_))),
-            Out::Hidden(inner) => has_root_decl(std::slice::from_ref(inner)),
+            Out::Hidden(inner) | Out::Visible(inner) => {
+                has_root_decl(std::slice::from_ref(inner))
+            }
             _ => false,
         })
     }
@@ -305,7 +317,7 @@ pub(crate) fn eval_with_source(
     // The extend pass (plan §2.8): finder → chaining fixpoint → replace, then
     // `(reference)` visibility resolution — runs on the flattened output tree
     // (post eval + join + visibility marking), before output ordering.
-    extend::apply(&mut outs, &mut ctx.warnings)?;
+    extend::apply(&mut outs, &mut ctx.warnings, ctx.opts.php_reference_visibility)?;
 
     // Output ordering — the less.js `Ruleset.genCSS` root splice (§2.13/§C):
     // `@charset`s go to the very top; `@import`s float up to just after any
@@ -561,7 +573,9 @@ impl<'a> Ctx<'a> {
                         Node::Declaration(d) => Some(d),
                         _ => None,
                     }),
-                    Out::Hidden(inner) => first_decl(std::slice::from_ref(inner)),
+                    Out::Hidden(inner) | Out::Visible(inner) => {
+                        first_decl(std::slice::from_ref(inner))
+                    }
                     _ => None,
                 })
             }
@@ -1330,6 +1344,15 @@ impl<'a> Ctx<'a> {
             _ => true,
         });
         let visible = self.visibility_blocks == 0;
+        // less.php profile (§3, probed v5.5.1 `ext_ref` pair): an extend
+        // declared inside a `(reference)` file still GRAFTS VISIBLY — less.php
+        // has no per-selector visibility on extend-added selectors, so
+        // `.abs-b:extend(.abs-a all)` in the reference library makes `.abs-b`
+        // (and every chained consumer) render on `.abs-a`'s rule while the
+        // original `.abs-a` selector stays hidden. less.js instead darkens
+        // the graft and suppresses chaining through it (probed: emits
+        // nothing). Luma-real: the `_extends.less` abs-on-abs extends.
+        let ext_visible = visible || self.opts.php_reference_visibility;
         let per_own = if own_sel.is_empty() { 1 } else { joined.len() / own_sel.len() };
         let mut extends: Vec<extend::EvExtend> = Vec::new();
         let mut osels: Vec<OutSel> = Vec::with_capacity(joined.len());
@@ -1357,7 +1380,7 @@ impl<'a> Ctx<'a> {
                     self_sel: path.clone(),
                     target_css: self.render_extend_target(&t.elements)?,
                     all: t.all,
-                    visible,
+                    visible: ext_visible,
                     first_on_path: j == 0,
                     matchable: !t.elements.iter().any(|e| e.value.contains("@{")),
                     span,
@@ -2577,7 +2600,7 @@ impl<'a> Ctx<'a> {
         let mut chosen: Vec<Candidate> = Vec::new();
         for k in 0..frames.len() {
             let def_scope: Vec<Frame> = frames[k..].to_vec();
-            let mut found = find_candidates(&frames[k].borrow(), &path, &def_scope, &self.closures, &[], false);
+            let mut found = find_candidates(&frames[k].borrow(), &path, &def_scope, &self.closures, &[], false, false);
             // A name hit counts as "found" BEFORE the recursion filter — less.js
             // sets `isOneFound` on the frame `find` result, then `continue`s the
             // on-stack candidates, so a fully-recursive call errors "No matching
@@ -2823,9 +2846,30 @@ impl<'a> Ctx<'a> {
         }
         self.mixin_depth += 1;
 
+        // less.php profile (§3, probed v5.5.1): mixin-call output visibility
+        // follows the DEFINITION's file — a visibly-defined mixin called
+        // inside a `(reference)` region still emits. Temporarily lift the
+        // visibility block for the body eval; less.js semantics (visibility
+        // follows the call context) stay the default.
+        let saved_vis = self.visibility_blocks;
+        let unhide = self.opts.php_reference_visibility
+            && self.visibility_blocks > 0
+            && !cand.def_in_reference;
+        if unhide {
+            self.visibility_blocks = 0;
+        }
+
         let mut sub_own = Vec::new();
         let mut sub_children = Vec::new();
         let res = self.eval_rules(&cand.rules, self_paths, &mut sub_own, &mut sub_children);
+        if unhide {
+            // Shield the expansion from the enclosing region's Hidden wrap
+            // (the extend pass's darkening stops at the shield).
+            sub_children = sub_children
+                .into_iter()
+                .map(|o| Out::Visible(Box::new(o)))
+                .collect();
+        }
 
         // Collect scope-injection nodes from the body's top level.
         let injected = if res.is_ok() {
@@ -2834,6 +2878,7 @@ impl<'a> Ctx<'a> {
             Vec::new()
         };
 
+        self.visibility_blocks = saved_vis;
         self.mixin_depth -= 1;
         if cand.ruleset_span.is_some() {
             self.active_rulesets.pop();
@@ -4629,15 +4674,32 @@ fn find_candidates(
     closures: &[Vec<Frame>],
     path_guards: &[Node],
     follow_imports: bool,
+    in_reference: bool,
 ) -> Vec<Candidate> {
     let mut out = Vec::new();
+    // `(reference)` region tracking over the X1-flattened rule list: defs
+    // between a reference `FileEnter` and its `FileExit` are reference-defined.
+    let mut ref_stack: Vec<bool> = Vec::new();
+    let mut ref_depth = 0usize;
     for r in rules {
+        let here = in_reference || ref_depth > 0;
         match r {
+            Node::FileEnter(fc) => {
+                ref_stack.push(fc.reference);
+                if fc.reference {
+                    ref_depth += 1;
+                }
+            }
+            Node::FileExit => {
+                if ref_stack.pop() == Some(true) {
+                    ref_depth -= 1;
+                }
+            }
             // An un-inlined import's top level is part of this rule list for
             // lookup purposes (less.js peeks inside Import roots, §2.9) — the
             // `#ns { @import (reference) "…" }` namespaced-mixin case.
             Node::ImportResolved(ir) if !ir.skip && follow_imports => {
-                out.extend(find_candidates(&ir.rules, path, def_scope, closures, path_guards, true));
+                out.extend(find_candidates(&ir.rules, path, def_scope, closures, path_guards, true, here || ir.reference));
             }
             // A scope-injected closure: resolve against the frames frozen at
             // injection (the enclosing mixin's bound params), not the caller's.
@@ -4665,12 +4727,13 @@ fn find_candidates(
                                     def_scope: captured.to_vec(),
                                     path_guards: path_guards.to_vec(),
                                     ruleset_span: Some(rs.span),
+                                    def_in_reference: here,
                                 });
                             } else {
                                 let mut inner_scope = vec![frame_of(rs.rules.clone())];
                                 inner_scope.extend(captured.iter().cloned());
                                 let child = push_guard(path_guards, sel.guard.as_deref());
-                                out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope, closures, &child, true));
+                                out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope, closures, &child, true, here));
                             }
                             break;
                         }
@@ -4689,12 +4752,13 @@ fn find_candidates(
                                 def_scope: captured.to_vec(),
                                 path_guards: path_guards.to_vec(),
                                 ruleset_span: None,
+                                def_in_reference: here,
                             });
                         } else if accepts_zero_args(&def.params) {
                             let mut inner_scope = vec![frame_of(def.rules.clone())];
                             inner_scope.extend(captured.iter().cloned());
                             let child = push_guard(path_guards, def.guard.as_deref());
-                            out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child, true));
+                            out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child, true, here));
                         }
                     }
                 }
@@ -4711,6 +4775,7 @@ fn find_candidates(
                             def_scope: def_scope.to_vec(),
                             path_guards: path_guards.to_vec(),
                             ruleset_span: None,
+                            def_in_reference: here,
                         });
                     } else if accepts_zero_args(&def.params) {
                         // A parametric namespace is only entered with zero args
@@ -4719,7 +4784,7 @@ fn find_candidates(
                         let mut inner_scope = vec![frame_of(def.rules.clone())];
                         inner_scope.extend(def_scope.iter().cloned());
                         let child = push_guard(path_guards, def.guard.as_deref());
-                        out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child, true));
+                        out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child, true, here));
                     }
                 }
             }
@@ -4749,6 +4814,7 @@ fn find_candidates(
                                 def_scope: def_scope.to_vec(),
                                 path_guards: path_guards.to_vec(),
                                 ruleset_span: Some(rs.span),
+                                def_in_reference: here,
                             });
                         } else {
                             // A ruleset namespace has no params (always zero-arg);
@@ -4756,7 +4822,7 @@ fn find_candidates(
                             let mut inner_scope = vec![frame_of(rs.rules.clone())];
                             inner_scope.extend(def_scope.iter().cloned());
                             let child = push_guard(path_guards, sel.guard.as_deref());
-                            out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope, closures, &child, true));
+                            out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope, closures, &child, true, here));
                         }
                         break; // one selector per ruleset matches the prefix
                     }
@@ -4910,7 +4976,7 @@ fn make_important_out(out: &mut Out) {
         // at-rule bodies (@media/@supports/@font-face, incl. through DR
         // calls); bubbled blocks pass through untouched (F4/P4DR-5).
         Out::Nested(_) | Out::At { .. } => {}
-        Out::Hidden(inner) => make_important_out(inner),
+        Out::Hidden(inner) | Out::Visible(inner) => make_important_out(inner),
         Out::Comment(_) | Out::Verbatim(_) => {}
     }
 }
@@ -5415,7 +5481,7 @@ fn join_selectors(parent: Option<&[String]>, own: &[String]) -> Vec<String> {
                 let mut next = Vec::with_capacity(acc.len() * parents.len());
                 for s in &acc {
                     for pp in &parents {
-                        next.push(s.replacen('&', pp, 1));
+                        next.push(splice_parent(s, pp));
                     }
                 }
                 acc = next;
@@ -5436,6 +5502,46 @@ fn join_selectors(parent: Option<&[String]>, own: &[String]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Replace the first `&` in `s` with the parent path `pp`, inserting the
+/// ELEMENT-FUSION MARKER (`\u{2}`) where the parent text fuses with an
+/// identifier continuation (`&-expanded` → `.parent\u{2}-expanded`). The
+/// marker keeps less.js's Element granularity inside our rendered-string
+/// selectors: `&`-concatenation produces SEPARATE elements (`.abs-tax-total`
+/// + `-expanded`), so `:extend(.abs-tax-total-expanded all)` must NOT match
+/// the fused path (probed against less.js 4.6.7 AND less.php 5.5.1 — both
+/// graft only the literally-declared selector). The extend tokenizer treats
+/// the marker as an element boundary; renderers strip it.
+fn splice_parent(s: &str, pp: &str) -> String {
+    let Some(pos) = s.find('&') else {
+        return s.to_string();
+    };
+    let ident = |c: char| c.is_alphanumeric() || c == '-' || c == '_' || c == '%';
+    let before = s[..pos].chars().next_back();
+    let after = s[pos + 1..].chars().next();
+    let mut out = String::with_capacity(s.len() + pp.len() + 2);
+    out.push_str(&s[..pos]);
+    if !pp.is_empty() {
+        if before.is_some_and(ident) {
+            out.push('\u{2}');
+        }
+        out.push_str(pp);
+        if after.is_some_and(ident) {
+            out.push('\u{2}');
+        }
+    }
+    out.push_str(&s[pos + 1..]);
+    out
+}
+
+/// Strip the element-fusion marker ([`splice_parent`]) for rendering.
+fn strip_fusion_marker(s: &str) -> String {
+    if s.contains('\u{2}') {
+        s.replace('\u{2}', "")
+    } else {
+        s.to_string()
+    }
 }
 
 /// Combinator spacing (less.js `Combinator.genCSS`): `>`/`+`/`~`/`^`/`^^` get a
@@ -5605,10 +5711,10 @@ fn render_out(out: &Out, indent: usize, cfg: RenderCfg) -> Option<String> {
             Some(render_decls(decls, &ind, cfg, false))
         }
         Out::Rule { selectors, decls, .. } => {
-            let vis: Vec<&str> = selectors
+            let vis: Vec<String> = selectors
                 .iter()
                 .filter(|s| s.visible)
-                .map(|s| s.css.as_str())
+                .map(|s| strip_fusion_marker(&s.css))
                 .collect();
             if vis.is_empty() || !has_visible_c(decls, cfg.compress) {
                 return None;
@@ -5656,6 +5762,9 @@ fn render_out(out: &Out, indent: usize, cfg: RenderCfg) -> Option<String> {
         },
         Out::Verbatim(content) => Some(format!("{ind}{content}")),
         Out::Hidden(_) => None,
+        // A visibility shield that survived to render (extend pass unwraps
+        // these; kept for safety): render the content.
+        Out::Visible(inner) => render_out(inner, indent, cfg),
     }
 }
 

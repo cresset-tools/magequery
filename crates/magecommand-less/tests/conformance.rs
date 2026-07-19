@@ -343,3 +343,175 @@ fn lib_css_skips_false_values() {
 "
     );
 }
+
+/// §3 profile question, probed 2026-07 against BOTH ground truths: a mixin
+/// DEFINED in a visible (non-reference) file but CALLED at the top level of a
+/// `(reference)`-imported file.
+///
+/// - less.js 4.6.7: output hidden — visibility follows the CALL context.
+/// - wikimedia/less.php 5.5.1 (the Magento oracle): output VISIBLE —
+///   visibility follows the DEFINITION's file (`Mixin_Call::compile` only
+///   skips `markReferenced` when the call site itself is in a reference
+///   file, so rules parsed in a visible file keep their visibility).
+///
+/// Luma-real: `email.less` reference-imports `_email-base.less`, which calls
+/// the visibly-defined `.lib-typography-all()` at top level — the real SCD
+/// email.css contains that typography output (52 rules). Gated by
+/// `LessOptions::php_reference_visibility` (on in Magento profiles only).
+/// The fourth quadrant (defined AND called inside reference files) stays
+/// hidden in both engines, also probed.
+#[test]
+fn php_reference_visibility_definition_based() {
+    let files: Vec<(&'static str, &'static str)> = vec![
+        ("vis.less", ".tools() {\n  .t { color: red; }\n}\n"),
+        (
+            "reffile.less",
+            ".tools();\n.selfmix() {\n  .s { color: blue; }\n}\n.selfmix();\n.hidden { color: black; }\n",
+        ),
+    ];
+    let src = "@import 'vis.less';\n@import (reference) 'reffile.less';\n";
+
+    // less.js semantics (default profile): everything in the reference file
+    // stays hidden.
+    let js = {
+        let resolver = MapResolver(files.clone());
+        magecommand_less::compile(src, &LessOptions::default(), &resolver)
+            .expect("must compile")
+            .code
+    };
+    assert_eq!(js, "");
+
+    // less.php semantics (Magento profiles): the visibly-defined mixin's
+    // output emits; the reference-defined mixin's output and the file's
+    // direct rules stay hidden.
+    let php = {
+        let resolver = MapResolver(files);
+        let opts = LessOptions {
+            php_reference_visibility: true,
+            ..LessOptions::default()
+        };
+        magecommand_less::compile(src, &opts, &resolver)
+            .expect("must compile")
+            .code
+    };
+    assert_eq!(php, ".t {\n  color: red;\n}\n");
+}
+
+/// §3 profile question #2 (probed 2026-07, `ext_ref` pair): extends DECLARED
+/// inside a `(reference)` file.
+///
+/// - less.js 4.6.7: the graft inherits the extend's (hidden) visibility and
+///   chaining through it yields nothing — `.consumer:extend(.abs-b all)`
+///   where `.abs-b:extend(.abs-a all)` lives in the reference file emits
+///   NOTHING for `.abs-a`'s rule.
+/// - less.php 5.5.1: extend-added selectors are ALWAYS visible (less.php has
+///   no per-selector visibility on grafts) and chaining passes through:
+///   the same input emits `.abs-b, .consumer { … }` — `.abs-b` (the
+///   reference-file extender) renders, the original `.abs-a` stays hidden.
+///
+/// Luma-real: `_extends.less`'s abs-on-abs extends
+/// (`.abs-action-addto-product:extend(.abs-action-link-button all)`) — the
+/// real SCD styles-m contains the `.abs-*`-prefixed grafted selector lists.
+#[test]
+fn php_reference_extend_grafts_are_visible() {
+    let files: Vec<(&'static str, &'static str)> = vec![
+        (
+            "ext_ref.less",
+            ".abs-a { color: red; }\n.abs-b { &:extend(.abs-a all); }\n",
+        ),
+    ];
+    let src = "@import (reference) 'ext_ref.less';\n.consumer { &:extend(.abs-b all); }\n.consumer { margin: 0; }\n";
+
+    let js = {
+        let resolver = MapResolver(files.clone());
+        magecommand_less::compile(src, &LessOptions::default(), &resolver)
+            .expect("must compile")
+            .code
+    };
+    assert_eq!(js, ".consumer {\n  margin: 0;\n}\n");
+
+    let php = {
+        let resolver = MapResolver(files);
+        let opts = LessOptions {
+            php_reference_visibility: true,
+            ..LessOptions::default()
+        };
+        magecommand_less::compile(src, &opts, &resolver)
+            .expect("must compile")
+            .code
+    };
+    assert_eq!(
+        php,
+        ".abs-b,\n.consumer {\n  color: red;\n}\n.consumer {\n  margin: 0;\n}\n"
+    );
+}
+
+/// §2.8 element granularity through `&`-concatenation (probed 2026-07,
+/// `amp_ref2` triple): `.abs-tax-total { &-expanded { .mixsym(); } }` joins
+/// to elements `.abs-tax-total` + `-expanded` — NOT one element
+/// `.abs-tax-total-expanded`.
+///
+/// - Both engines: `:extend(.abs-tax-total-expanded all)` does NOT match the
+///   fused path (only the literally-declared `.abs-tax-total-expanded` rule
+///   grafts). This was an engine bug (string-rendered selectors lost the
+///   element boundary); the `\u{2}` fusion marker restores it.
+/// - Divergence on the PREFIX: `:extend(.abs-tax-total all)` DOES match the
+///   fused path's first element in less.js (graft `.consumer-expanded`);
+///   less.php never matches into a fused element (no graft) — php-profile
+///   matching rejects fragments whose edge cuts a fusion.
+///
+/// Luma-real: the `.abs-tax-total`/`-expanded` pair in `_extends.less` — the
+/// real SCD styles-m has the fused rule UNGRAFTED and the literal rule
+/// grafted.
+#[test]
+fn amp_fusion_extend_element_granularity() {
+    let files: Vec<(&'static str, &'static str)> = vec![
+        ("lib.less", ".mixsym() { &:after { content: 'x'; } }\n"),
+        (
+            "amp_ref.less",
+            ".abs-tax-total { &-expanded { .mixsym(); } }\n.abs-tax-total-expanded { .mixsym(); }\n",
+        ),
+    ];
+
+    // less.js: extend of the fused spelling matches only the literal rule.
+    let js = {
+        let resolver = MapResolver(files.clone());
+        let src = "@import 'lib.less';\n@import (reference) 'amp_ref.less';\n\
+                   .consumer { &:extend(.abs-tax-total-expanded all); }\n";
+        magecommand_less::compile(src, &LessOptions::default(), &resolver)
+            .expect("must compile")
+            .code
+    };
+    assert_eq!(js, ".consumer:after {\n  content: 'x';\n}\n");
+
+    // less.js: the PREFIX extend matches the fused path element-wise.
+    let js_prefix = {
+        let resolver = MapResolver(files.clone());
+        let src = "@import 'lib.less';\n@import (reference) 'amp_ref.less';\n\
+                   .consumer { &:extend(.abs-tax-total all); }\n";
+        magecommand_less::compile(src, &LessOptions::default(), &resolver)
+            .expect("must compile")
+            .code
+    };
+    assert_eq!(js_prefix, ".consumer-expanded:after {\n  content: 'x';\n}\n");
+
+    // less.php profile: fused rule visible (visible-defined mixin) but never
+    // grafted — neither by the fused spelling nor by the prefix.
+    let php = {
+        let resolver = MapResolver(files);
+        let opts = LessOptions {
+            php_reference_visibility: true,
+            ..LessOptions::default()
+        };
+        let src = "@import 'lib.less';\n@import (reference) 'amp_ref.less';\n\
+                   .consumer { &:extend(.abs-tax-total-expanded all); }\n";
+        magecommand_less::compile(src, &opts, &resolver)
+            .expect("must compile")
+            .code
+    };
+    assert_eq!(
+        php,
+        ".abs-tax-total-expanded:after {\n  content: 'x';\n}\n\
+         .abs-tax-total-expanded:after,\n.consumer:after {\n  content: 'x';\n}\n"
+    );
+}
