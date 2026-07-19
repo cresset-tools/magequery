@@ -705,11 +705,15 @@ multi-construct batches diffed byte-identical against `lessc`).
   `@media @smartphone` resolves. Empty `@media` blocks prune; empty
   `@container` blocks KEEP their shell (less.js prunes only `Media`).
   `@charset`: hoisted AND deduped to the first occurrence. Prelude comments
-  relocate into the block only when directly before a `,`/prelude-end
-  (`@import` feature comments become root-level siblings after the import —
-  the commentStore flush); a mid-query comment is dropped (less.js embeds it
-  inside the feature value — a render-inside-header case no default fixture
-  exercises).
+  (Gate T0 review C1/C1c, all probed vs 4.6.7): a comment directly before a
+  `,`/prelude-end relocates into the block; in `@media`/`@container` a
+  LEADING comment additionally lands in the block TWICE (less.js's feature
+  scan passes it twice — a faithful quirk) and one right after a query `,`
+  once; EVERY `@import` feature comment becomes a root-level sibling after
+  the import (the commentStore flush). Still dropped (known divergence C1b):
+  a comment between `and` and a feature paren — less.js embeds it INSIDE the
+  paren (`and (/*! k */ color)`), a render-inside-feature-value case our
+  string-shaped prelude model doesn't carry.
 - **Stopgap `.less` `@import` inline** (full §2.9 two-stage machinery is 4B):
   resolved through the `ImportResolver`, parsed, evaluated at the import's
   position with the same fresh-media-context + re-merge treatment as mixin
@@ -1115,14 +1119,23 @@ installed `less@4.6.7`.
 - The less.js error-anchoring chain is ported: **Call.eval** re-anchors any
   un-wrapped error at the call's index with the ``Error evaluating function
   `name`: …`` wrap (arg-eval errors included; `Node::Call` gained a `span`);
-  **MixinCall.eval** rethrows `{...e, index: call, filename}` — everything a
-  mixin call raises (body errors included) re-anchors at the call;
-  **Declaration.eval** anchors index-less errors (operations' plain throws) at
-  the declaration. Variable/Property/NamespaceValue errors carry their own
-  index (`$prop` at the accessor, lookup `[k]` at the bracket — the
-  value-position `@dr[k]` span starts at `[`, matching less.js's post-name
-  `i`); the mixin-call lookup form (`#ns[k]`) has NO fileInfo upstream and
-  stays honestly location-less.
+  **MixinCall.eval** re-anchors SELECTIVELY (Gate T0 review F2): candidate
+  selection — arg eval, arity/pattern match, GUARD evaluation — runs outside
+  less.js's try/catch and keeps its own index (an undefined guard variable
+  cites the guard), while BODY errors rethrow `{...e, index: call, filename}`
+  (nested calls surface at the outermost call) and the terminal
+  `is undefined`/`No matching definition`/ambiguous-`default()` errors carry
+  the call index directly; **Declaration.eval** anchors index-less errors
+  (operations' plain throws) at the declaration. Variable/Property/
+  NamespaceValue errors carry their own index (plain `@var` included since
+  the Gate T0 review fixes — `eval_variable` uses its span, sanity-checked
+  against the current file's source so re-parsed guard/prelude text can't
+  excerpt garbage, with a `find_token_in_source` fallback; `$prop` at the
+  accessor, lookup `[k]` at the bracket — the value-position `@dr[k]` span
+  starts at `[`, matching less.js's post-name `i`); the mixin-call lookup
+  form (`#ns[k]`) has NO fileInfo upstream and stays honestly location-less.
+  String-interpolation failures anchor at the OPENING QUOTE (the Quoted
+  node's index in less.js), selector/media interpolation at the `@{` token.
 - The root-properties error blames the DECLARATION's own site/file (recorded
   during eval where the file scope is live — mixin-emitted and imported
   declarations included), not the call/import position.
@@ -1265,3 +1278,89 @@ stays unevaluated and every downstream color function on it fails. That is
 the out-of-scope subsystem (plan §8) already named in the fixture-harness
 header — not an engine bug; the fixture stays a permanent xfail inside the
 126.
+
+## Gate T0 review fixes (four adversarial audits vs less.js 4.6.7)
+
+**Gate state after the review pass: compile 125/126 · error 75/75 (ratchet
+floor 125+75=200; 1 permanent xfail = bootstrap4).** The corpus grew by
+`config/no-js-errors` (see the classification note below), so the universe is
+now 201 fixtures / 126+75 in-scope / 37 CLASSIFIED_OUT.
+
+### Fixed (each probed against real less.js 4.6.7 before and after)
+
+- **Undefined-variable anchoring (F1 family)** — `eval_variable` now raises at
+  its span (the `@` token), with a source sanity check + token-search fallback
+  (details in "Provenance plumbing" above). Covers value position, multi-line
+  values, recursive definitions (RHS), string/url interpolation (the opening
+  quote), selector interpolation, `@media` preludes/features, detached-ruleset
+  calls, guards, and globalVars/modifyVars-injected declarations.
+- **Guard errors keep their own index (F2)** — mixin-call re-anchoring is now
+  selective, exactly less.js's try/catch extent.
+- **UTF-16 columns (F4/R2)** — `LineMap::line_col_utf16`; every rendered
+  column now counts UTF-16 code units like less.js's `utils.getLocation`.
+- **End-of-parse messages (F5/F6)** — the crate-invented "expected a
+  selector" is gone; `Unrecognised input` + the `'{'`/`'('`/reached-end
+  suffix rules, with true furthest-position anchoring (message-less
+  `soft_fail_pos`, unterminated strings anchor at the quote). `parse_quoted`
+  now REJECTS unterminated strings like less.js's `$quoted` (close quote
+  required before any bare newline/EOF).
+- **Parse-error kind/message/anchor picks (F7/F11/F12/F14, E1/E2/E3, F4-fca)**
+  — `@import (bogus)` = SyntaxError at the offending option char; unterminated
+  import path = `malformed import statement`; `expectChar` at EOF = Syntax
+  `got ''`; empty `:extend()` = `Missing target selector for :extend().`;
+  `@keyframes @{n}` = `expected @keyframes identifier` at the `@`; `@CHARSET`
+  column after the `$re` whitespace skip; interp-in-feature-paren
+  `Missing closing ')'` stalls at the `@`; `@media @{x}` (defined or not) =
+  the block-statement Syntax error at the `@` (mediaFeature has no
+  variableCurly alternative).
+- **OperationError (R1)** — `Operation on an invalid type` when math is on
+  and an operand is not Dimension/Color, with less.js's parens-division
+  deferred-`/`-left-operand exception; all 7 error kinds now reachable (§F3).
+- **Compress C2** — an escaped-string media fragment joined with `and` stays
+  verbatim (`substitute_query_words` wraps it; `normalize_media_query` emits
+  the wrapped run untouched).
+- **Media prelude comments (C1/C1c/C1i)** — see the amended §C4 rules above.
+- **Classification (R4)** — `tests-config/no-js-errors` vendored and IN
+  (upstream runs it through `testErrors`; plan §5.2's prose counts disabled-JS
+  error fixtures in-scope even though its table tallied tests-error/ only);
+  `tests-config/js-type-errors` vendored and CLASSIFIED_OUT (V8 TypeError
+  golden of an executed backtick). Error denominator 74 → 75, OUT set 36 → 37
+  — the reconciliation is documented in tests/fixtures.rs + VENDOR.txt.
+- **S1** — `wrong number of arguments for X (N for M)` suffix mirrored from
+  mixin-definition.js:177 (believed unreachable; matchArgs rejects first).
+
+### Known divergences left OPEN (out of Gate T0's phase, catalogued)
+
+Parser-acceptance surface (we accept what less.js rejects — invisible to the
+error corpus, which can only catch reject-what-should-compile):
+- `("x" - 1)` / `(#fff - bob)` / `(1 + true)` in source: less.js's strict
+  `sub` grammar raises ParseError (`Expected ')'` / `Unrecognised input.
+  Possibly missing opening '('`); we parse them — since R1 they now raise
+  OperationError at EVAL (right rejection, wrong kind/position). (F8/F13/R3)
+- Non-ASCII property names (`colöör:`): less.js's ASCII-only property regex
+  makes this a ParseError; we parse the declaration and any error surfaces
+  downstream. (F9)
+- Valueless custom at-rules (`@bare-last;`, `@layer;`): less.js errors
+  (`Missing '[...]' lookup in variable call` / an internal crash); we accept
+  and emit. (E4)
+- Attribute-selector interpolation in the NAME position
+  (`[data-@{a}="x"]`): less.js raises `expected ']' got '@'`; we compile.
+  The full-token form `[@{a}=…]` matches in both. (F5-fca)
+- **C1b**: a comment between `and` and a media feature paren is dropped;
+  less.js embeds it inside the paren.
+- Cross-file mixin GUARD errors: a guard defined in an imported file but
+  failing during a call from another file degrades to the location-less →
+  call-site re-anchor fallback (the span sanity check rejects the foreign
+  span) instead of citing the definition file like less.js. MixinDefinition
+  carries no file tag yet; same-file guards (the overwhelmingly common case)
+  are exact.
+- **X1 (CRITICAL, Phase 4B follow-up — the import splicing stopgap)**: a
+  mixin defined in a LATER-imported file is `NameError: … is undefined` at
+  the earlier import's use site (`@import "one"; @import "two";` with
+  one.less calling a mixin two.less defines). Same-file forward mixin refs
+  and cross-import forward VARIABLE refs both work; only cross-import forward
+  MIXIN lookup fails. Kills Bootstrap 3.4.1 wholesale (navbar.less:379
+  `.pull-left()`; utilities.less imported later) while lessc compiles it —
+  the full §2.9 two-stage import machinery (eval imports first, then the
+  ruleset pass over the merged tree) is the fix, deliberately NOT attempted
+  inside the Gate T0 error/compress diff.

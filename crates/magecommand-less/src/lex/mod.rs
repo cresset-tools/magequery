@@ -418,9 +418,9 @@ impl LineMap {
         }
     }
 
-    /// The 1-based `(line, column)` for a byte `offset`. Column counts bytes from
-    /// the line start (1-based), matching less.js's column arithmetic; multibyte
-    /// column refinement, if ever needed, is a later concern.
+    /// The 1-based `(line, column)` for a byte `offset`. Column counts bytes
+    /// from the line start (1-based); for less.js parity use
+    /// [`LineMap::line_col_utf16`], which counts UTF-16 code units.
     pub fn line_col(&self, offset: usize) -> (usize, usize) {
         let offset = offset.min(self.len);
         // Number of newlines strictly before `offset` = 0-based line index.
@@ -431,6 +431,27 @@ impl LineMap {
             self.newlines[line_idx - 1] + 1
         };
         (line_idx + 1, offset - line_start + 1)
+    }
+
+    /// The 1-based `(line, column)` for a byte `offset`, with the column in
+    /// **UTF-16 code units** — less.js's `utils.getLocation` indexes JS
+    /// strings, so a 2- or 3-byte UTF-8 char before the column counts 1 and an
+    /// astral (4-byte) char counts 2 (review F4/R2). `src` must be the source
+    /// this map was built over.
+    pub fn line_col_utf16(&self, offset: usize, src: &str) -> (usize, usize) {
+        let offset = offset.min(self.len);
+        let line_idx = self.newlines.partition_point(|&nl| nl < offset);
+        let line_start = if line_idx == 0 {
+            0
+        } else {
+            self.newlines[line_idx - 1] + 1
+        };
+        let col = match src.get(line_start..offset) {
+            Some(prefix) => prefix.chars().map(char::len_utf16).sum::<usize>() + 1,
+            // Off-char-boundary offset (defensive): byte arithmetic fallback.
+            None => offset - line_start + 1,
+        };
+        (line_idx + 1, col)
     }
 
     /// Total number of lines.
@@ -459,6 +480,20 @@ mod tests {
         assert_eq!(lm.line_col(4), (2, 2)); // second 'b'
         assert_eq!(lm.line_col(7), (3, 1)); // first 'c'
         assert_eq!(lm.line_count(), 3);
+    }
+
+    /// Review F4/R2: UTF-16 columns — a 2-byte `é` and a 3-byte `€` each
+    /// count 1 unit, a 4-byte astral emoji counts 2 (less.js indexes JS
+    /// strings).
+    #[test]
+    fn line_col_utf16_counts_code_units() {
+        let src = "é€x\n😀y";
+        let lm = LineMap::new(src);
+        // 'x' sits after 2+3 bytes but 2 UTF-16 units → column 3.
+        assert_eq!(lm.line_col_utf16(5, src), (1, 3));
+        assert_eq!(lm.line_col(5), (1, 6)); // byte column for contrast
+        // 'y' (byte 11) after the 4-byte emoji = 2 UTF-16 units → column 3.
+        assert_eq!(lm.line_col_utf16(11, src), (2, 3));
     }
 
     #[test]

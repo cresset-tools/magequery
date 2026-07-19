@@ -59,14 +59,32 @@ less-testdata/tests-error/  The byte-exact error-message fixtures: each
                             math parens, strictUnits: true, javascriptEnabled:
                             true) are transcribed into the harness.
 
+ALSO VENDORED (Gate T0 review pass — the tests-config ERROR suites, review R4)
+------------------------------------------------------------------------------
+less-testdata/tests-config/no-js-errors/
+                            The disabled-JS ERROR fixture. Upstream runs it
+                            through lessTester.testErrors (test/index.js:160)
+                            and plan §5.2's PROSE counts disabled-JS error
+                            fixtures in-scope (§C-jserr) even though its table
+                            (74) tallied tests-error/ only. Now an IN-SCOPE
+                            error trial (config/no-js-errors/no-js-errors;
+                            error denominator 75). Its styles.config.cjs
+                            (math strict, strictUnits, javascriptEnabled
+                            false) is transcribed into `config_options`.
+less-testdata/tests-config/js-type-errors/
+                            Vendored for classification visibility but
+                            CLASSIFIED_OUT: its golden is the V8 TypeError
+                            string of a successfully EXECUTED backtick —
+                            genuine JS. (Upstream's testTypeErrors accepts two
+                            node-version variants; js-type-error-2.txt is the
+                            alternate golden, with no .less sibling.)
+
 STILL NOT VENDORED (see NOTES.md, plan §5.2/§5.4/§8)
 ----------------------------------------------------
 - tests-config plugin dirs (filemanagerPlugin, postProcessorPlugin,
-  preProcessorPlugin, visitorPlugin), debug/ (dumpLineNumbers), sourcemaps*,
-  js-type-errors/no-js-errors — JS/plugin/source-map surface, out of scope
-  for a pure headless compiler (plan §5.2/§8). (The disabled-JS error message
-  `Inline JavaScript is not enabled. Is it set in your options?` is pinned by
-  a unit test instead — §C-jserr; js-type-errors needs real JS execution.)
+  preProcessorPlugin, visitorPlugin), debug/ (dumpLineNumbers), sourcemaps*
+  — JS/plugin/source-map surface, out of scope for a pure headless compiler
+  (plan §5.2/§8).
 
 Within tests-unit, the harness additionally SKIPS the `javascript/`, `plugin/`,
 `plugin-module/`, `plugin-preeval/` sub-suites (JS/plugin — plan §5.2). The

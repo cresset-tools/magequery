@@ -9,8 +9,11 @@
 # plugin-config x3, inline-JS x1 — the exclusion list below; the harness
 # meta-test in tests/fixtures.rs pins the same names). The option-driven
 # `tests-config/` sub-suites were vendored BY HAND in Phase 4B (selective dirs
-# + the bootstrap-less-port node_modules package) — this script does NOT
-# refresh them; re-vendor those dirs manually on a tag bump (see VENDOR.txt).
+# + the bootstrap-less-port node_modules package), joined in the Gate T0
+# review pass (R4) by the two tests-config ERROR suites — no-js-errors
+# (IN-SCOPE, error denominator 75) and js-type-errors (CLASSIFIED_OUT) —
+# this script does NOT refresh them; re-vendor those dirs manually on a tag
+# bump (see VENDOR.txt).
 #
 # Re-run to refresh; it is idempotent (wipes and repopulates the target dir).
 # A tag bump is a Node-free operation for this script, but regenerating the

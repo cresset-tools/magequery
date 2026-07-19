@@ -317,6 +317,18 @@ impl<'a> Parser<'a> {
         LessError::new(ErrorKind::Parse, "")
     }
 
+    /// A message-less furthest candidate — less.js `restore()` without a
+    /// message: a strictly further failure advances `furthest` and CLEARS any
+    /// recorded message, so end-of-parse reports plain `Unrecognised input`
+    /// at that position (review F6).
+    fn soft_fail_pos(&mut self, index: usize) -> LessError {
+        if index > self.furthest {
+            self.furthest = index;
+            self.furthest_msg = None;
+        }
+        LessError::new(ErrorKind::Parse, "")
+    }
+
     /// less.js's end-of-parse error (`parser.js` `end()` handling): the
     /// message is `Unrecognised input` plus a hint derived from the character
     /// at the failure index — `}` / `)` suggest a missing opener, reaching EOF
@@ -328,11 +340,18 @@ impl<'a> Parser<'a> {
         if let Some(msg) = &self.furthest_msg {
             return self.err_kind_at(ErrorKind::Parse, msg.clone(), self.furthest);
         }
+        // less.js anchors at the FURTHEST position any backtracked
+        // alternative reached (`if (i < furthest) i = furthest`), and the
+        // `Possibly missing something` suffix fires whenever furthest reached
+        // the LAST char or beyond (`furthest >= input.length - 1`), not only
+        // at EOF (review F6).
+        let index = index.max(self.furthest);
+        let src = self.cur.src();
         let mut msg = String::from("Unrecognised input");
-        match self.cur.src().as_bytes().get(index) {
+        match src.as_bytes().get(index) {
             Some(b'}') => msg.push_str(". Possibly missing opening '{'"),
             Some(b')') => msg.push_str(". Possibly missing opening '('"),
-            None => msg.push_str(". Possibly missing something"),
+            _ if index + 1 >= src.len() => msg.push_str(". Possibly missing something"),
             _ => {}
         }
         self.err_kind_at(ErrorKind::Parse, msg, index)
@@ -402,8 +421,11 @@ impl<'a> Parser<'a> {
             };
             // The statement parsed — any soft furthest candidate recorded by a
             // failed alternative inside it is moot (less.js's furthest only
-            // matters when the whole parse fails).
+            // matters when the whole parse fails, and a later failure always
+            // sits past it; resetting keeps our per-statement machinery from
+            // resurrecting stale positions).
             self.furthest_msg = None;
+            self.furthest = 0;
             rules.push(node);
             rules.append(&mut self.pending);
         }
@@ -673,8 +695,11 @@ impl<'a> Parser<'a> {
 
         // less.js's at-rule matcher is lowercase-only (`@[a-z-]+`-shaped):
         // `@MEDIA`/`@CHARSET` fall through to `variableCall` and die on the
-        // missing lookup (verified vs 4.6.7).
+        // missing lookup (verified vs 4.6.7). Its name token was matched via
+        // `$re`, which skips trailing whitespace/comments — the error anchors
+        // AFTER them (`@CHARSET "x"` cites the quote, review E2).
         if name.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.cur.skip_trivia();
             return Err(self.err("Missing '[...]' lookup in variable call"));
         }
 
@@ -684,14 +709,57 @@ impl<'a> Parser<'a> {
 
         // Prelude: raw source up to `{` or `;`, structurally re-parsed as a value
         // when non-empty (media queries, `@charset "UTF-8"`, `@namespace svg "…"`).
-        self.cur.skip_trivia();
+        // Whitespace only — a comment between the name and the prelude must
+        // reach `split_prelude_comments` as a LEADING prelude comment (@media
+        // relocates it into the block twice, review C1).
+        self.cur.skip_whitespace();
         let prelude_start = self.here();
         self.scan_prelude()?;
+        // An un-parenthesized `@{`/`${` stops `scan_prelude` at the interp's
+        // `{` — mirroring where less.js's structured prelude parsers halt
+        // (`mediaFeature` has no `variableCurly` alternative, `entity()`
+        // rejects `@{`). The at-rule kind picks the error (reviews F4/E1):
+        // @media/@container → the block-statement Syntax error; identifier
+        // at-rules → `expected <name> identifier`; both anchored at the `@`.
+        if self.cur.cur() == Some(b'{')
+            && matches!(
+                self.cur.src().as_bytes().get(self.here().wrapping_sub(1)),
+                Some(b'@') | Some(b'$')
+            )
+            && self.here() > prelude_start
+        {
+            let interp_pos = self.here() - 1;
+            if matches!(name.as_str(), "@media" | "@container") {
+                return Err(self.err_kind_at(
+                    ErrorKind::Syntax,
+                    "media definitions require block statements after any features",
+                    interp_pos,
+                ));
+            }
+            if matches!(name.as_str(), "@keyframes" | "@counter-style")
+                || name.strip_prefix("@-").is_some_and(|r| {
+                    r.split_once('-').is_some_and(|(_, tail)| tail == "keyframes")
+                })
+            {
+                return Err(self.err_kind_at(
+                    ErrorKind::Syntax,
+                    format!("expected {name} identifier"),
+                    interp_pos,
+                ));
+            }
+        }
         let prelude_all = self.cur.src()[prelude_start..self.here()].trim();
         // Block comments in the prelude relocate into the block (less.js's
         // commentStore attaches them to the body's rules — `@-webkit-keyframes
         // hover /* c */{}` renders the comment inside the braces).
-        let (prelude_raw, prelude_comments) = split_prelude_comments(prelude_all);
+        let (prelude_raw, prelude_comments) = split_prelude_comments_mode(
+            prelude_all,
+            if matches!(name.as_str(), "@media" | "@container") {
+                PreludeComments::Media
+            } else {
+                PreludeComments::AtRule
+            },
+        );
         let prelude_raw = prelude_raw.trim();
         let prelude = if prelude_raw.is_empty() {
             None
@@ -755,9 +823,20 @@ impl<'a> Parser<'a> {
                 b'}' if depth == 0 => break,
                 // A `{` INSIDE parens: the feature parser never closed its
                 // paren — less.js's `Missing closing ')'`
-                // (parse-error-missing-parens).
+                // (parse-error-missing-parens). An interpolation's `{` stalls
+                // less.js at the `@`/`$` itself (no `variableCurly`
+                // alternative in `mediaFeature`), one char earlier (review E3).
                 b'{' => {
-                    return Err(self.err("Missing closing ')'"));
+                    let at = self.here();
+                    let at = match self.cur.src().as_bytes().get(at.wrapping_sub(1)) {
+                        Some(b'@') | Some(b'$') if at > 0 => at - 1,
+                        _ => at,
+                    };
+                    return Err(self.err_kind_at(
+                        ErrorKind::Parse,
+                        "Missing closing ')'",
+                        at,
+                    ));
                 }
                 b'u' if self.cur.rest().starts_with("url(") => {
                     // less.js `entities.url()`: the raw run consumes anything
@@ -826,34 +905,46 @@ impl<'a> Parser<'a> {
         let mut options = Vec::new();
         if self.cur.cur() == Some(b'(') {
             self.cur.bump();
-            let opt_start = self.here();
-            while let Some(b) = self.cur.cur() {
-                if b == b')' {
-                    break;
-                }
-                self.cur.bump();
-            }
-            let raw = self.cur.src()[opt_start..self.here()].to_string();
-            self.cur.eat(b')');
-            options = raw
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
             // less.js `importOption` is the CLOSED set (parser.js:1865); an
-            // unknown word stops the option loop and `expectChar(')')` fails:
-            // `expected ')' got 'b'`.
-            for o in &options {
+            // unknown word stops the option loop THERE, so `expectChar(')')`
+            // fails AT the offending word — `SyntaxError: expected ')' got
+            // 'b'` anchored on its first char (review F7), never past the
+            // consumed list. `error()` defaults to the Syntax kind.
+            loop {
+                self.cur.skip_trivia();
+                let word_start = self.here();
+                while matches!(self.cur.cur(), Some(b) if b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                {
+                    self.cur.bump();
+                }
+                let word = self.cur.src()[word_start..self.here()].to_string();
                 let known = matches!(
-                    o.as_str(),
+                    word.as_str(),
                     "less" | "css" | "multiple" | "once" | "inline" | "reference" | "optional"
                 );
-                if !known {
-                    return Err(self.err(format!(
-                        "expected ')' got '{}'",
-                        o.chars().next().unwrap_or(')')
-                    )));
+                if !word.is_empty() && known {
+                    options.push(word);
+                    self.cur.skip_trivia();
+                    if self.cur.eat(b',') {
+                        continue;
+                    }
+                    self.cur.skip_trivia();
+                } else {
+                    self.cur.i = word_start;
                 }
+                if !self.cur.eat(b')') {
+                    let got = self
+                        .cur
+                        .cur()
+                        .map(|b| (b as char).to_string())
+                        .unwrap_or_default();
+                    return Err(self.err_kind_at(
+                        ErrorKind::Syntax,
+                        format!("expected ')' got '{got}'"),
+                        self.cur.i,
+                    ));
+                }
+                break;
             }
             self.cur.skip_trivia();
         }
@@ -861,7 +952,19 @@ impl<'a> Parser<'a> {
         let path = if self.cur.rest().starts_with("url(") || self.cur.rest().starts_with("url (") {
             self.parse_url()?
         } else if matches!(self.cur.cur(), Some(b'"') | Some(b'\'')) {
-            self.parse_quoted()
+            match self.parse_quoted() {
+                Some(q) => q,
+                // An UNTERMINATED path: less.js's `entities.quoted` rejects
+                // it, nulling the path → `SyntaxError: malformed import
+                // statement` at the `@import` (review F11).
+                None => {
+                    return Err(self.err_kind_at(
+                        ErrorKind::Syntax,
+                        "malformed import statement",
+                        start,
+                    ));
+                }
+            }
         } else {
             // less.js accepts only `quoted() || url()` here — a bare WORD is
             // its `malformed import statement` Syntax error, reported with
@@ -889,7 +992,10 @@ impl<'a> Parser<'a> {
         let fs = self.here();
         self.scan_prelude()?;
         let feat_all = self.cur.src()[fs..self.here()].trim();
-        let (feat_clean, feat_comments) = split_prelude_comments(feat_all);
+        // EVERY feature-list comment flushes as a root sibling after the
+        // import (less.js commentStore; probed: a mid-feature `/*! c */`
+        // renders after the import's media block too — review C1i).
+        let (feat_clean, feat_comments) = split_prelude_comments_all(feat_all);
         for text in feat_comments {
             self.pending.push(Node::Comment {
                 text,
@@ -1379,7 +1485,11 @@ impl<'a> Parser<'a> {
             let value = self.scan_element_value();
             if value.is_empty() {
                 if first {
-                    return Err(self.err("expected a selector"));
+                    // less.js has no "expected a selector" — a failed selector
+                    // alternative backtracks and the end-of-parse machinery
+                    // reports `Unrecognised input` (+ char-derived suffix) at
+                    // the furthest position (review F5).
+                    return Err(self.unrecognised(self.here()));
                 }
                 break;
             }
@@ -1471,7 +1581,13 @@ impl<'a> Parser<'a> {
                 first = false;
             }
             if elements.is_empty() {
-                return Err(self.err("expected a selector in :extend"));
+                // less.js `extend()`: `error('Missing target selector for
+                // :extend().')` — Syntax kind (error()'s default), period
+                // included (review F14).
+                return Err(self.err_kind(
+                    ErrorKind::Syntax,
+                    "Missing target selector for :extend().",
+                ));
             }
             targets.push(crate::ast::ExtendTarget { elements, all });
             self.cur.skip_trivia();
@@ -1738,8 +1854,16 @@ impl<'a> Parser<'a> {
             return Err(self.err("expected '(' after url"));
         }
         self.cur.skip_whitespace();
-        let inner = if matches!(self.cur.cur(), Some(b'"') | Some(b'\'') | Some(b'~')) {
+        // An unterminated quote falls through to the raw run, which stops AT
+        // the quote — so `expectChar(')')` then fails there (`expected ')'
+        // got '"'`), exactly less.js's cascade.
+        let quoted = if matches!(self.cur.cur(), Some(b'"') | Some(b'\'') | Some(b'~')) {
             self.parse_quoted()
+        } else {
+            None
+        };
+        let inner = if let Some(q) = quoted {
+            q
         } else if self.cur.cur() == Some(b'@') && self.cur.peek(1) != Some(b'{') {
             // entities.variable: `@@?[\w-]+` — resolved at eval time. (The
             // interpolated `@{a}` form stays a raw Anonymous, like less.js.)
@@ -1791,28 +1915,61 @@ impl<'a> Parser<'a> {
             // consumed it into the value instead (`url(spaced.png  )` keeps it).
             self.cur.skip_whitespace();
         }
+        // less.js `expectChar(')')` → `error(…)` — SYNTAX kind by default,
+        // and EOF renders as `got ''` (empty currentChar), review F12.
         match self.cur.cur() {
             Some(b')') => {
                 self.cur.bump();
             }
             Some(c) => {
-                return Err(self.err(format!("expected ')' got '{}'", c as char)));
+                return Err(self.err_kind(
+                    ErrorKind::Syntax,
+                    format!("expected ')' got '{}'", c as char),
+                ));
             }
-            None => return Err(self.err("expected ')' got end of input")),
+            None => return Err(self.err_kind(ErrorKind::Syntax, "expected ')' got ''")),
         }
         Ok(Node::Url(Box::new(inner)))
     }
 
-    fn parse_quoted(&mut self) -> Node {
+    /// Parse a quoted string (`"…"`, `'…'`, `~"…"`). `None` (cursor restored)
+    /// when the string is UNTERMINATED — less.js's `$quoted` requires the
+    /// closing quote before any bare `\r`/`\n` or EOF (a `\` escapes even a
+    /// newline), so an open quote fails the alternative instead of swallowing
+    /// the rest of the file (review F6/F11).
+    fn parse_quoted(&mut self) -> Option<Node> {
+        let save = self.here();
         let escaped = self.cur.eat(b'~');
+        let bytes = self.cur.src().as_bytes();
+        let qpos = self.here();
+        let quote_b = match bytes.get(qpos) {
+            Some(&b @ (b'"' | b'\'')) => b,
+            _ => {
+                self.cur.i = save;
+                return None;
+            }
+        };
+        let mut i = qpos + 1;
+        let terminated = loop {
+            match bytes.get(i) {
+                None | Some(b'\r') | Some(b'\n') => break false,
+                Some(b'\\') => i += 2,
+                Some(&b) if b == quote_b => break true,
+                Some(_) => i += 1,
+            }
+        };
+        if !terminated {
+            self.cur.i = save;
+            return None;
+        }
         let raw = self.cur.scan_string();
         let quote = raw.chars().next().unwrap_or('"');
         let inner = &raw[1..raw.len().saturating_sub(1)];
-        Node::Quoted {
+        Some(Node::Quoted {
             escaped,
             quote,
             value: inner.to_string(),
-        }
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -2027,9 +2184,21 @@ impl<'a> Parser<'a> {
         self.skip_value_trivia();
         let ent_start = self.here();
         match self.cur.cur() {
-            Some(b'"') | Some(b'\'') => Ok(self.parse_quoted()),
+            Some(b'"') | Some(b'\'') => match self.parse_quoted() {
+                Some(n) => Ok(n),
+                // Unterminated: the alternative fails, recording the quote as
+                // the furthest position — end-of-parse then reports
+                // `Unrecognised input` AT the quote (review F6, less.js
+                // furthest tracking).
+                None => Err(self.soft_fail_pos(self.here())),
+            },
             Some(b'~') if matches!(self.cur.peek(1), Some(b'"') | Some(b'\'')) => {
-                Ok(self.parse_quoted())
+                match self.parse_quoted() {
+                    Some(n) => Ok(n),
+                    // less.js consumed the `~` before `$quoted` failed, so
+                    // furthest sits one past it.
+                    None => Err(self.soft_fail_pos(self.here() + 1)),
+                }
             }
             // Inline JavaScript backticks (plan §8): parsed far enough to
             // raise the precise disabled-JS error at EVAL (§C-jserr) — the
@@ -2534,14 +2703,18 @@ impl<'a> Parser<'a> {
             return Err(self.err("Could not parse alpha"));
         };
         self.skip_value_trivia();
+        // `expectChar(')')` — Syntax kind, `got ''` at EOF (review F12).
         match self.cur.cur() {
             Some(b')') => {
                 self.cur.bump();
             }
             Some(c) => {
-                return Err(self.err(format!("expected ')' got '{}'", c as char)));
+                return Err(self.err_kind(
+                    ErrorKind::Syntax,
+                    format!("expected ')' got '{}'", c as char),
+                ));
             }
-            None => return Err(self.err("expected ')' got end of input")),
+            None => return Err(self.err_kind(ErrorKind::Syntax, "expected ')' got ''")),
         }
         Ok(Some(Node::Quoted {
             escaped: true,
@@ -2654,26 +2827,57 @@ fn group_args(v: Vec<Node>) -> Node {
 
 /// Split `/* … */` comments out of an at-rule prelude (they relocate into the
 /// block; see `parse_at_rule`). Quotes are respected.
-fn split_prelude_comments(s: &str) -> (String, Vec<String>) {
+/// Every comment relocates, once, in order — the `@import` feature list
+/// (less.js flushes its commentStore as root siblings after the import).
+fn split_prelude_comments_all(s: &str) -> (String, Vec<String>) {
+    split_prelude_comments_mode(s, PreludeComments::All)
+}
+
+/// Which comments of a prelude relocate (probed vs 4.6.7, review C1/C1c).
+#[derive(Clone, Copy, PartialEq)]
+enum PreludeComments {
+    /// Generic at-rule: only a comment directly before a `,` / the end.
+    AtRule,
+    /// `@media`/`@container` (less.js `mediaFeatures` commentStore quirks):
+    /// additionally a LEADING comment lands in the block TWICE (the feature
+    /// scan passes it twice) and a comment right after a query `,` once.
+    Media,
+    /// `@import` features: every comment, once.
+    All,
+}
+
+fn split_prelude_comments_mode(s: &str, mode: PreludeComments) -> (String, Vec<String>) {
     let mut clean = String::with_capacity(s.len());
     let mut comments = Vec::new();
     let b = s.as_bytes();
     let mut i = 0;
+    // Tracks the last non-ws byte BEFORE the current position (None = start).
+    let mut prev_sig: Option<u8> = None;
     while i < b.len() {
         match b[i] {
             b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
                 let end = s[i + 2..].find("*/").map(|e| i + 2 + e + 2).unwrap_or(b.len());
-                // Only a comment directly before a `,` (or the prelude's end)
-                // relocates into the block (the less.js commentStore behavior);
-                // a mid-query comment embeds in the feature value — which we
-                // drop (it can only render inside a header, a case no default
-                // fixture exercises).
+                // A comment directly before a `,` (or the prelude's end)
+                // relocates into the block (the less.js commentStore
+                // behavior). In media preludes, so does one at the START
+                // (twice) or right after a `,` (once); a truly mid-query
+                // comment embeds in the feature value — which we drop (only
+                // renderable inside a header, a case no default fixture
+                // exercises).
                 let mut j = end;
                 while j < b.len() && b[j].is_ascii_whitespace() {
                     j += 1;
                 }
-                if j >= b.len() || b[j] == b',' {
-                    comments.push(s[i..end].to_string());
+                let text = &s[i..end];
+                if mode == PreludeComments::Media && prev_sig.is_none() {
+                    comments.push(text.to_string());
+                    comments.push(text.to_string());
+                } else if j >= b.len() || b[j] == b',' {
+                    comments.push(text.to_string());
+                } else if mode == PreludeComments::Media && prev_sig == Some(b',') {
+                    comments.push(text.to_string());
+                } else if mode == PreludeComments::All {
+                    comments.push(text.to_string());
                 }
                 i = end;
             }
@@ -2688,9 +2892,13 @@ fn split_prelude_comments(s: &str) -> (String, Vec<String>) {
                 }
                 i = (i + 1).min(b.len());
                 clean.push_str(&s[start..i]);
+                prev_sig = Some(q);
             }
             _ => {
                 let ch_len = utf8_char_len(b[i]);
+                if !b[i].is_ascii_whitespace() {
+                    prev_sig = Some(b[i]);
+                }
                 clean.push_str(&s[i..i + ch_len]);
                 i += ch_len;
             }

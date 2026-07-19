@@ -13,7 +13,7 @@
 //!      trailing-newline normalization to the expected `.css`,
 //!   3. byte-diffs the two.
 //!
-//! The runner prints a `compile X/126 · error Y/74` summary and enforces a
+//! The runner prints a `compile X/126 · error Y/75` summary and enforces a
 //! **ratchet gate** (plan §5.6): [`EXPECTED_PASS`] (compile) and
 //! [`EXPECTED_PASS_ERROR`] (error) are the checked-in floors — the fixtures
 //! that currently produce byte-identical output. Every other in-scope fixture
@@ -37,12 +37,16 @@
 //! err.filename)`) — falling back to the fixture's own directory — so an error
 //! raised inside an imported file resolves against THAT file's directory.
 //!
-//! OUT OF SCOPE — the classified 36 (plan §5.2, pinned by [`CLASSIFIED_OUT`]
-//! and its meta-test): compile 17 (plugin/`@plugin` x8 — incl. `import/import`,
-//! which loads `plugin-simple` and calls the plugin-defined `pi-anon()` —,
-//! sourcemap x5, debug-linenumbers x3, inline-JS x1) + error 19
-//! (`@plugin`-error x15, plugin-config x3, inline-JS x1; excluded at vendor
-//! time — see scripts/vendor-less-testdata.sh). `parser-property-interp` and
+//! OUT OF SCOPE — the classified 37 (plan §5.2 reconciled, pinned by
+//! [`CLASSIFIED_OUT`] and its meta-test): compile 17 (plugin/`@plugin` x8 —
+//! incl. `import/import`, which loads `plugin-simple` and calls the
+//! plugin-defined `pi-anon()` —, sourcemap x5, debug-linenumbers x3,
+//! inline-JS x1) + error 20 (`@plugin`-error x15, plugin-config x3,
+//! inline-JS x1, js-type-errors x1; most excluded at vendor time — see
+//! scripts/vendor-less-testdata.sh). The §5.2 table itself missed
+//! tests-config's two error suites (its prose counts disabled-JS error
+//! fixtures IN, §C-jserr): `config/no-js-errors` is IN (error denominator 75),
+//! `config/js-type-errors` OUT (Gate T0 review R4). `parser-property-interp` and
 //! `plugi` are false-positive-JS and stay IN. One vendored compile fixture
 //! still depends on JS `@plugin` execution and stays a permanent xfail
 //! *inside* the 126: `config/3rd-party/bootstrap4` (bootstrap-less-port's
@@ -212,10 +216,13 @@ const EXPECTED_PASS: &[&str] = &[
 /// The **error-corpus ratchet floor** (plan §5.6): `tests-error` fixtures whose
 /// rendered `err.to_string()` is byte-identical to the substituted golden.
 /// Same invariants as [`EXPECTED_PASS`]: keep sorted, add newly-green fixtures,
-/// never remove one to hide a regression. ALL 74 in-scope error fixtures are
-/// green as of the Gate T0 error half — the floor is the full corpus, so any
-/// error-rendering change that breaks byte-parity fails the suite.
+/// never remove one to hide a regression. ALL 75 in-scope error fixtures are
+/// green as of the Gate T0 review pass (the 74 tests-error ones plus
+/// `config/no-js-errors`, vendored per §5.2's prose — review R4) — the floor
+/// is the full corpus, so any error-rendering change that breaks byte-parity
+/// fails the suite.
 const EXPECTED_PASS_ERROR: &[&str] = &[
+    "config/no-js-errors/no-js-errors",
     "error/eval/add-mixed-units",
     "error/eval/add-mixed-units2",
     "error/eval/at-rules-undefined-var",
@@ -292,12 +299,13 @@ const EXPECTED_PASS_ERROR: &[&str] = &[
     "error/parse/single-character",
 ];
 
-/// The classified OUT set — exactly 36 (plan §5.2). The §5.6 **meta-test**
-/// (`corpus-classification` trial) pins this list: every runnable fixture on
-/// disk must be either in-scope or named here, the in-scope denominators must
-/// be exactly 126 compile + 74 error, and this list must hold exactly 36
-/// distinct names — so a tag bump that adds a fixture (or resurrects an
-/// excluded one) fails loudly instead of silently shifting the denominator.
+/// The classified OUT set — exactly 37 (plan §5.2 reconciled, review R4). The
+/// §5.6 **meta-test** (`corpus-classification` trial) pins this list: every
+/// runnable fixture on disk must be either in-scope or named here, the
+/// in-scope denominators must be exactly 126 compile + 75 error, and this
+/// list must hold exactly 37 distinct names — so a tag bump that adds a
+/// fixture (or resurrects an excluded one) fails loudly instead of silently
+/// shifting the denominator.
 ///
 /// Names use the harness's trial naming (`<suite>/<stem>`, `config/…`,
 /// `error/…`). Entries marked (not vendored) have no on-disk counterpart —
@@ -348,11 +356,21 @@ const CLASSIFIED_OUT: &[&str] = &[
     // -- error: inline-JS x1 (interpolation INSIDE an executed backtick under
     //    javascriptEnabled: true; not vendored) --
     "error/eval/javascript-undefined-var",
+    // -- error: js-type-errors x1 (successful backtick execution whose V8
+    //    TypeError text is the golden — genuinely needs JS, §8; upstream runs
+    //    it via testTypeErrors with two node-version-dependent goldens).
+    //    Plan §5.2's own table missed tests-config's two error suites (its
+    //    prose counts disabled-JS error fixtures IN, §C-jserr) — this entry
+    //    plus the in-scope config/no-js-errors reconcile table and prose
+    //    (Gate T0 review R4). --
+    "config/js-type-errors/js-type-error",
 ];
 
-/// The plan §5.2 denominators the meta-test pins.
+/// The reconciled §5.2 denominators the meta-test pins (see R4 note above:
+/// 75 = the table's 74 + tests-config/no-js-errors, which §5.2's prose
+/// already counted as in-scope).
 const IN_SCOPE_COMPILE: usize = 126;
-const IN_SCOPE_ERROR: usize = 74;
+const IN_SCOPE_ERROR: usize = 75;
 
 /// Absolute path of the vendored fixture root (`…/tests/fixtures/less-testdata`).
 fn testdata_root() -> PathBuf {
@@ -583,13 +601,23 @@ fn discover_runnable() -> Vec<Fixture> {
         } else {
             less.with_extension("css")
         };
-        if !expected.is_file() {
-            continue;
-        }
         let name = format!(
             "config/{}",
             rel_str.trim_end_matches(".less")
         );
+        if !expected.is_file() {
+            // A `.txt` sibling instead of `.css` = a tests-config ERROR
+            // fixture — upstream runs `no-js-errors` through
+            // `lessTester.testErrors` (test/index.js:160), and plan §5.2's
+            // prose counts the disabled-JS error fixtures IN-SCOPE
+            // (§C-jserr). (`js-type-errors` is discovered the same way and
+            // then dropped via CLASSIFIED_OUT — it needs real JS execution.)
+            let txt = less.with_extension("txt");
+            if txt.is_file() {
+                out.push(Fixture { less, expected: txt, name, verify: Verify::Error });
+            }
+            continue;
+        }
         out.push(Fixture { less, expected, name, verify: Verify::Diff });
     }
 
@@ -672,6 +700,13 @@ fn config_options(first_dir: &str, less: &Path) -> (LessOptions, Vec<PathBuf>) {
         "math-always" => opts.math = MathMode::Always,
         "math-parens-division" => opts.math = MathMode::ParensDivision,
         "math-strict" => opts.math = MathMode::Parens,
+        // The disabled-JS error fixture (§C-jserr): math strict + strictUnits,
+        // javascriptEnabled false (upstream styles.config.cjs, transcribed).
+        "no-js-errors" => {
+            opts.math = MathMode::Parens;
+            opts.strict_units = true;
+            opts.javascript_enabled = false;
+        }
         "namespacing" => {}
         _ => {}
     }
@@ -840,13 +875,13 @@ fn run_one(fx: &Fixture, root: &Path, passed: &AtomicUsize) -> Result<(), Failed
         .map_err(|e| Failed::from(format!("read expected {}: {e}", less.display())))?;
 
     let dir = less.parent().unwrap_or(root);
-    let (mut opts, include_paths) = if fx.verify == Verify::Error {
-        (error_options(), Vec::new())
-    } else {
-        match fx.name.strip_prefix("config/") {
-            Some(rest) => config_options(rest.split('/').next().unwrap_or(""), less),
-            None => (LessOptions::default(), Vec::new()),
-        }
+    // A `config/…` error fixture (no-js-errors) uses its DIRECTORY's options
+    // like any tests-config fixture; tests-error fixtures share the one
+    // error-suite option set.
+    let (mut opts, include_paths) = match fx.name.strip_prefix("config/") {
+        Some(rest) => config_options(rest.split('/').next().unwrap_or(""), less),
+        None if fx.verify == Verify::Error => (error_options(), Vec::new()),
+        None => (LessOptions::default(), Vec::new()),
     };
     opts.filename = Some(less.display().to_string());
     opts.custom_functions = harness_functions();
@@ -934,23 +969,24 @@ fn run_one(fx: &Fixture, root: &Path, passed: &AtomicUsize) -> Result<(), Failed
     }
 }
 
-/// The §5.6 meta-test: the classified OUT set is EXACTLY the plan's 36, and the
-/// in-scope denominators are exactly 126 compile + 74 error. A tag bump that
-/// adds/renames a runnable fixture (or resurrects an excluded one) fails here
-/// loudly instead of silently shifting the denominator.
+/// The §5.6 meta-test: the classified OUT set is EXACTLY the reconciled 37,
+/// and the in-scope denominators are exactly 126 compile + 75 error. A tag
+/// bump that adds/renames a runnable fixture (or resurrects an excluded one)
+/// fails here loudly instead of silently shifting the denominator.
 fn run_meta() -> Result<(), Failed> {
     let mut problems: Vec<String> = Vec::new();
 
-    // 1. The classification list itself: exactly 36 distinct names.
+    // 1. The classification list itself: exactly 37 distinct names.
     let mut seen = std::collections::BTreeSet::new();
     for n in CLASSIFIED_OUT {
         if !seen.insert(*n) {
             problems.push(format!("CLASSIFIED_OUT lists `{n}` twice"));
         }
     }
-    if CLASSIFIED_OUT.len() != 36 {
+    if CLASSIFIED_OUT.len() != 37 {
         problems.push(format!(
-            "CLASSIFIED_OUT holds {} names; the plan §5.2 classification is exactly 36",
+            "CLASSIFIED_OUT holds {} names; the reconciled plan §5.2 classification is \
+             exactly 37 (the table's 36 + config/js-type-errors, review R4)",
             CLASSIFIED_OUT.len()
         ));
     }

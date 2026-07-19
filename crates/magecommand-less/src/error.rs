@@ -162,7 +162,8 @@ impl LessError {
             return;
         }
         let Some(index) = self.index else { return };
-        let (line, column) = LineMap::new(source).line_col(index);
+        // Columns in UTF-16 code units — less.js parity (review F4/R2).
+        let (line, column) = LineMap::new(source).line_col_utf16(index, source);
         self.line = Some(line);
         self.column = Some(column);
         let lines: Vec<&str> = source.split('\n').collect();

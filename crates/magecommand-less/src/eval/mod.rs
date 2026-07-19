@@ -1495,16 +1495,11 @@ impl<'a> Ctx<'a> {
         let name = if d.name.contains("@{") || d.name.contains("${") {
             // An undefined variable in the property NAME locates at the
             // interpolation token, not the declaration head (less.js keeps
-            // the name as [Keyword, Variable…] pieces, each with its index).
-            self.interpolate_css(&d.name).map_err(|mut e| {
-                if e.index.is_none() && e.line.is_none() {
-                    let off = d.name.find("@{").or_else(|| d.name.find("${")).unwrap_or(0);
-                    let relocated =
-                        self.err_at(e.kind, std::mem::take(&mut e.message), d.span.start + off);
-                    return relocated;
-                }
-                e
-            })?
+            // the name as [Keyword, Variable…] pieces, each with its index) —
+            // the precise anchor is passed down so the in-place token search
+            // never picks an earlier identical token (review F1b).
+            let off = d.name.find("@{").or_else(|| d.name.find("${")).unwrap_or(0);
+            self.interpolate_at(&d.name, true, Some(d.span.start + off))?
         } else {
             d.name.clone()
         };
@@ -1707,9 +1702,25 @@ impl<'a> Ctx<'a> {
                 quote,
                 value,
             } => {
-                // Interpolation runs inside quoted strings (plan §2.14).
+                // Interpolation runs inside quoted strings (plan §2.14). A
+                // failed lookup anchors at the OPENING QUOTE — less.js
+                // `Quoted.eval` builds the replacement `Variable` with
+                // `this.getIndex()`, the Quoted node's own index (review F1b:
+                // `content: "@{undef}";` cites the `"`). The node carries no
+                // span, so the literal is located in the current source.
                 let v = if value.contains("@{") || value.contains("${") || value.contains("@") {
-                    self.interpolate(value)?
+                    let anchor = self.file_stack.last().and_then(|f| {
+                        let lit = format!("{quote}{value}{quote}");
+                        f.source.find(&lit).map(|i| {
+                            // An escaped string's index is at the `~`.
+                            if *escaped && i > 0 && f.source.as_bytes()[i - 1] == b'~' {
+                                i - 1
+                            } else {
+                                i
+                            }
+                        })
+                    });
+                    self.interpolate_at(value, false, anchor)?
                 } else {
                     value.clone()
                 };
@@ -1812,14 +1823,51 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    fn eval_variable(&mut self, name: &str, _span: crate::ast::Span) -> Result<Node, LessError> {
+    /// less.js `Variable.eval` throws `{ type: 'Name', …, index: this.getIndex() }`
+    /// — the error anchors at the REFERENCE (`@` token), never at the enclosing
+    /// declaration (review F1: `.a { c: @nope; }` cites the `@`, and `@a: @a;`
+    /// cites the RHS `@a`). The span is trusted only when the current file's
+    /// source actually reads `@` there — a definition-file span evaluated under
+    /// a different file scope (cross-file mixin guard) would otherwise excerpt
+    /// garbage; those degrade to the caller's re-anchor fallback.
+    fn var_err(&self, msg: String, span: crate::ast::Span, name: &str) -> LessError {
+        if span.end > 0 {
+            if let Some(scope) = self.file_stack.last() {
+                // Trust the span only when the source actually spells this
+                // reference there (`@name`, `@{name}` or `@@…`) — re-parsed
+                // guard/prelude text carries TEXT-relative spans that must
+                // not be read against the file.
+                let ok = scope.source.get(span.start..).is_some_and(|rest| {
+                    rest.starts_with("@@")
+                        || rest
+                            .strip_prefix('@')
+                            .map(|r| r.strip_prefix('{').unwrap_or(r))
+                            .is_some_and(|r| r.starts_with(name.trim_start_matches('@')))
+                });
+                if ok {
+                    return self.err_at(ErrorKind::Name, msg, span.start);
+                }
+            }
+        }
+        // No usable span (string-evaluated guards, raw prelude fragments):
+        // locate the first standalone `@name` token in the current source —
+        // less.js's Variable ALWAYS carries an index, so a located guess at
+        // the token beats the location-less form (review F2/F3).
+        if let Some(idx) = self.find_token_in_source(&format!("@{name}")) {
+            return self.err_at(ErrorKind::Name, msg, idx);
+        }
+        self.err(ErrorKind::Name, msg)
+    }
+
+    fn eval_variable(&mut self, name: &str, span: crate::ast::Span) -> Result<Node, LessError> {
         // Strip a leading `@@` handled by caller; here `name` has no `@`.
         let key = name.trim_start_matches('@').to_string();
 
         if self.evaluating.iter().any(|n| n == &key) {
-            return Err(self.err(
-                ErrorKind::Name,
+            return Err(self.var_err(
                 format!("Recursive variable definition for @{key}"),
+                span,
+                &key,
             ));
         }
 
@@ -1832,7 +1880,7 @@ impl<'a> Ctx<'a> {
             }
         }
         let Some((val, important)) = found else {
-            return Err(self.err(ErrorKind::Name, format!("variable @{key} is undefined")));
+            return Err(self.var_err(format!("variable @{key} is undefined"), span, &key));
         };
 
         if important {
@@ -1956,13 +2004,25 @@ impl<'a> Ctx<'a> {
             (Node::Dimension(da), Node::Color(cb)) => Ok(Node::Color(da.to_color().operate(op, cb))),
             (Node::Color(ca), Node::Dimension(db)) => Ok(Node::Color(ca.operate(op, &db.to_color()))),
             _ => {
-                // Not both operable — defer (emit literally).
-                Ok(Node::Operation {
-                    op: op.to_string(),
-                    left: Box::new(a),
-                    right: Box::new(b),
-                    spaced,
-                })
+                // Not both operable with math ON — less.js `Operation.eval`
+                // throws `{ type: 'Operation', message: 'Operation on an
+                // invalid type' }` (no index → the Declaration re-anchor
+                // cites the declaration head). Sole exception: under
+                // parens-division, a LEFT operand that is itself a deferred
+                // `/` operation stays deferred (`10px / 5 + 3`) — review R1.
+                let parens_division_slash = matches!(
+                    &a,
+                    Node::Operation { op, .. } if op == "/"
+                ) && self.math == MathMode::ParensDivision;
+                if parens_division_slash {
+                    return Ok(Node::Operation {
+                        op: op.to_string(),
+                        left: Box::new(a),
+                        right: Box::new(b),
+                        spaced,
+                    });
+                }
+                Err(self.err(ErrorKind::Operation, "Operation on an invalid type"))
             }
         }
     }
@@ -2282,34 +2342,29 @@ impl<'a> Ctx<'a> {
         own: &mut Vec<Node>,
         children: &mut Vec<Out>,
     ) -> Result<Vec<Node>, LessError> {
-        // less.js `MixinCall.eval` rethrows every error as
-        // `{ ...e, index: this.getIndex(), filename: this.fileInfo().filename }`
-        // — kind/message kept, location re-anchored at the CALL (§5.5; the
-        // `is undefined` / `No matching definition` / body errors all render
-        // at the call site).
-        match self.expand_mixin_call_inner(call, self_paths, own, children) {
-            Ok(v) => Ok(v),
-            Err(e) => {
-                let mut out = self.err_at(e.kind, e.message, call.span.start);
-                out.wrapped = e.wrapped;
-                Err(out)
-            }
-        }
-    }
-
-    fn expand_mixin_call_inner(
-        &mut self,
-        call: &crate::ast::MixinCall,
-        self_paths: Option<&[String]>,
-        own: &mut Vec<Node>,
-        children: &mut Vec<Out>,
-    ) -> Result<Vec<Node>, LessError> {
+        // less.js `MixinCall.eval` re-anchors at the CALL selectively (review
+        // F2): candidate selection — arg eval, arity/pattern match, GUARD
+        // evaluation — runs outside its try/catch, so those errors keep their
+        // own index (an undefined guard variable cites the guard, not the
+        // call); only BODY evaluation (`evalCall`, the try at
+        // mixin-call.js:227) is rethrown as `{ ...e, index: this.getIndex(),
+        // filename: … }`. The terminal `is undefined` / `No matching
+        // definition` / ambiguous-`default()` errors carry the call's index
+        // directly (raised so in `choose_candidates`).
         let (chosen, args) = self.choose_candidates(call)?;
 
-        // Emit every candidate that survived guard/default() selection.
+        // Emit every candidate that survived guard/default() selection; body
+        // errors re-anchor at the call unconditionally (nested calls therefore
+        // surface at the outermost call, like less.js).
         let mut injected: Vec<Node> = Vec::new();
         for cand in &chosen {
-            let inj = self.emit_candidate(cand, &args, call.important, self_paths, own, children)?;
+            let inj = self
+                .emit_candidate(cand, &args, call.important, self_paths, own, children)
+                .map_err(|e| {
+                    let mut out = self.err_at(e.kind, e.message, call.span.start);
+                    out.wrapped = e.wrapped;
+                    out
+                })?;
             injected.extend(inj);
         }
         Ok(injected)
@@ -2324,7 +2379,13 @@ impl<'a> Ctx<'a> {
         call: &crate::ast::MixinCall,
     ) -> Result<(Vec<Candidate>, Vec<EvArg>), LessError> {
         if self.mixin_depth > self.max_eval_depth() {
-            return Err(self.err(ErrorKind::Runtime, "mixin recursion limit exceeded"));
+            // Crate-specific guard (less.js would stack-overflow); anchored at
+            // the call like the terminal lookup errors.
+            return Err(self.err_at(
+                ErrorKind::Runtime,
+                "mixin recursion limit exceeded",
+                call.span.start,
+            ));
         }
         let path = mixin_names(&call.path);
         if path.is_empty() {
@@ -2373,16 +2434,18 @@ impl<'a> Ctx<'a> {
 
         if chosen.is_empty() {
             if is_one_found {
-                return Err(self.err(
+                return Err(self.err_at(
                     ErrorKind::Runtime,
                     format!("No matching definition was found for `{}`", format_call(&path, &args, self.opts.num_precision)),
+                    call.span.start,
                 ));
             }
             // less.js renders the namespaced path GLUED (`#a.b.m is
             // undefined` — Selector.toCSS of the source spelling; P4DR-12).
-            return Err(self.err(
+            return Err(self.err_at(
                 ErrorKind::Name,
                 format!("{} is undefined", path.concat()),
+                call.span.start,
             ));
         }
 
@@ -2401,12 +2464,13 @@ impl<'a> Ctx<'a> {
             2 // defFalse
         } else {
             if count[1] + count[2] > 1 {
-                return Err(self.err(
+                return Err(self.err_at(
                     ErrorKind::Runtime,
                     format!(
                         "Ambiguous use of `default()` found when matching for `{}`",
                         format_call(&path, &args, self.opts.num_precision)
                     ),
+                    call.span.start,
                 ));
             }
             1 // defTrue
@@ -3351,9 +3415,19 @@ impl<'a> Ctx<'a> {
                     frame.push(var_decl(key, v.clone()));
                     evald[i] = Some(v);
                 } else {
+                    // less.js mixin-definition.js:177 — suffix included
+                    // (`(N for M)`, N = call args, M = the definition's
+                    // arity). Believed unreachable (matchArgs rejects first
+                    // with "No matching definition"), mirrored regardless
+                    // (review S1).
                     return Err(self.err(
                         ErrorKind::Runtime,
-                        format!("wrong number of arguments for {}", cand.name),
+                        format!(
+                            "wrong number of arguments for {} ({} for {})",
+                            cand.name,
+                            args.len(),
+                            params.len()
+                        ),
                     ));
                 }
             } else if p.variadic {
@@ -3593,7 +3667,12 @@ impl<'a> Ctx<'a> {
         // `@{var}` inside a parenthesized media feature is a ParseError in
         // less.js (`Missing closing ')'` — the structured mediaFeature parser
         // rejects it); only the un-parenthesized position interpolates (F5).
-        if interp_inside_parens(&raw) {
+        // Anchored at the first char after the enclosing `(` (review E3),
+        // located by finding the raw prelude in the current file's source.
+        if let Some(off) = interp_inside_parens(&raw) {
+            if let Some(base) = self.file_stack.last().and_then(|f| f.source.find(&raw)) {
+                return Err(self.err_at(ErrorKind::Parse, "Missing closing ')'", base + off));
+            }
             return Err(self.err(ErrorKind::Parse, "Missing closing ')'"));
         }
         let raw = if raw.contains("@{") || raw.contains("${") {
@@ -3625,7 +3704,17 @@ impl<'a> Ctx<'a> {
                         && n.bytes().all(|b| b == b'-' || b == b'_' || b.is_ascii_alphanumeric())
                 });
             if let Some(name) = var_name {
-                let v = self.eval_variable(name, Span::default())?;
+                // A bare `@name` media fragment has no span of its own; an
+                // undefined variable locates at the `@name` token in source
+                // (less.js's Variable node index — review F3, `@media @cond`).
+                let v = self.eval_variable(name, Span::default()).map_err(|mut e| {
+                    if e.index.is_none() && e.line.is_none() {
+                        if let Some(idx) = self.find_token_in_source(q) {
+                            return self.err_at(e.kind, std::mem::take(&mut e.message), idx);
+                        }
+                    }
+                    e
+                })?;
                 // Verbatim shapes: an ESCAPED string and a permissively
                 // captured raw value (`@tablet: (min-width: @size)`) are
                 // Quoted/Anonymous nodes in less.js — genCSS emits their text
@@ -3649,7 +3738,7 @@ impl<'a> Ctx<'a> {
                 }
                 continue;
             }
-            parts.push((q.to_string(), false));
+            parts.push((self.substitute_query_words(q)?, false));
         }
         let mut queries = Vec::new();
         for (q, verbatim) in parts {
@@ -3674,6 +3763,81 @@ impl<'a> Ctx<'a> {
         Ok(queries)
     }
 
+    /// Substitute top-level bare `@name` WORDS of a mixed media query
+    /// (`screen and @phone`). An ESCAPED string's (or permissive Anonymous)
+    /// text is wrapped in `\x01…\x02` so [`Self::normalize_media_query`]
+    /// emits it verbatim — less.js keeps the Quoted node inside the query
+    /// expression and genCSSes it as-written, so its `: ` never compresses
+    /// (review C2); other values substitute plainly and normalize as usual.
+    fn substitute_query_words(&mut self, q: &str) -> Result<String, LessError> {
+        if !q.contains('@') {
+            return Ok(q.to_string());
+        }
+        let bytes = q.as_bytes();
+        let mut out = String::with_capacity(q.len());
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let b = bytes[i];
+            // Copy paren groups / quoted runs untouched (deeper refs go
+            // through `resolve_prelude_vars` later, unchanged behavior).
+            if b == b'(' {
+                let start = i;
+                let mut depth = 0i32;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'(' => depth += 1,
+                        b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                i += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                out.push_str(&q[start..i]);
+                continue;
+            }
+            if b == b'@' && bytes.get(i + 1) != Some(&b'{') {
+                let start = i;
+                let mut j = i + 1;
+                while j < bytes.len()
+                    && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-' || bytes[j] == b'_')
+                {
+                    j += 1;
+                }
+                // A bare word only: preceded/followed by whitespace or ends.
+                let word_ok = j > i + 1
+                    && (start == 0 || bytes[start - 1].is_ascii_whitespace())
+                    && (j >= bytes.len() || bytes[j].is_ascii_whitespace());
+                if word_ok {
+                    let name = &q[i + 1..j];
+                    if let Ok(v) = self.eval_variable(name, Span::default()) {
+                        // Only the verbatim shapes substitute HERE (wrapped);
+                        // anything else keeps the exact `resolve_prelude_vars`
+                        // rendering it always had.
+                        if matches!(
+                            &v,
+                            Node::Quoted { escaped: true, .. } | Node::Anonymous(_)
+                        ) {
+                            out.push('\u{1}');
+                            out.push_str(&render_value(&v, self.opts.num_precision));
+                            out.push('\u{2}');
+                            i = j;
+                            continue;
+                        }
+                    }
+                }
+            }
+            let ch_len = utf8_len(bytes[i]);
+            out.push_str(&q[i..i + ch_len]);
+            i += ch_len;
+        }
+        Ok(out)
+    }
+
     /// One media query: space-joined words and `( … )` feature groups; a word
     /// glued to a paren (`style(…)`, `layer(…)`, `supports(…)`) keeps no space.
     fn normalize_media_query(&mut self, q: &str, compress_colons: bool) -> Result<String, LessError> {
@@ -3684,6 +3848,19 @@ impl<'a> Ctx<'a> {
             let b = bytes[i];
             if b.is_ascii_whitespace() {
                 i += 1;
+                continue;
+            }
+            // A `\x01…\x02`-wrapped run is a VERBATIM fragment (an escaped
+            // string substituted by `substitute_query_words`) — emitted
+            // as-written, no feature normalization (review C2).
+            if b == 0x01 {
+                let start = i + 1;
+                let end = q[start..]
+                    .find('\u{2}')
+                    .map(|e| start + e)
+                    .unwrap_or(bytes.len());
+                parts.push((q[start..end].to_string(), false));
+                i = (end + 1).min(bytes.len());
                 continue;
             }
             if b == b'(' {
@@ -3724,9 +3901,13 @@ impl<'a> Ctx<'a> {
                 parts.push((format!("({norm})"), glued));
                 continue;
             }
-            // A word / raw run up to whitespace or `(`.
+            // A word / raw run up to whitespace, `(`, or a verbatim wrap.
             let start = i;
-            while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'(' {
+            while i < bytes.len()
+                && !bytes[i].is_ascii_whitespace()
+                && bytes[i] != b'('
+                && bytes[i] != 0x01
+            {
                 i += 1;
             }
             // A comma glues to the preceding token (`(a: 1), (b: 2)` — an
@@ -4034,6 +4215,21 @@ impl<'a> Ctx<'a> {
     }
 
     fn interpolate_with(&mut self, input: &str, css: bool) -> Result<String, LessError> {
+        self.interpolate_at(input, css, None)
+    }
+
+    /// The interpolation core. `anchor` is the error location for a failed
+    /// `@{name}`/`${name}` lookup when the caller knows it precisely (less.js:
+    /// a Quoted anchors at its opening quote, an interpolated property name at
+    /// its own `@` piece); with `None` the `@{name}` token is located in the
+    /// current file's source instead (selector / media-prelude interpolation,
+    /// whose raw text has no per-token span — review F2/F3).
+    fn interpolate_at(
+        &mut self,
+        input: &str,
+        css: bool,
+        anchor: Option<usize>,
+    ) -> Result<String, LessError> {
         let mut s = input.to_string();
         for _ in 0..100 {
             let mut out = String::with_capacity(s.len());
@@ -4048,11 +4244,30 @@ impl<'a> Ctx<'a> {
                         let name = &after[..e];
                         // `${prop}` reads a property, `@{var}` a variable
                         // (less.js `Quoted.eval`'s two replacement passes).
+                        let sigil = if is_prop { '$' } else { '@' };
                         let val = if is_prop {
-                            self.eval_property(name)?
+                            self.eval_property(name)
                         } else {
-                            self.eval_variable(name, Default::default())?
-                        };
+                            self.eval_variable(name, Default::default())
+                        }
+                        .map_err(|mut err| {
+                            if err.index.is_none() && err.line.is_none() {
+                                let idx = anchor.or_else(|| {
+                                    let tok = format!("{sigil}{{{name}}}");
+                                    self.file_stack
+                                        .last()
+                                        .and_then(|f| f.source.find(&tok))
+                                });
+                                if let Some(idx) = idx {
+                                    return self.err_at(
+                                        err.kind,
+                                        std::mem::take(&mut err.message),
+                                        idx,
+                                    );
+                                }
+                            }
+                            err
+                        })?;
                         out.push_str(&rest[..start]);
                         if css {
                             out.push_str(&render_value_c(&val, 0, self.opts.compress));
@@ -4520,10 +4735,15 @@ fn make_important_out(out: &mut Out) {
 
 /// Whether `@{`/`${` interpolation occurs INSIDE a paren group (outside
 /// quotes) of a media prelude — a ParseError in less.js (F5).
-fn interp_inside_parens(s: &str) -> bool {
+/// `@{}`/`${}` inside a parenthesized media feature. Returns the byte offset
+/// (in `s`) of the first non-whitespace char after the INNERMOST enclosing
+/// `(` — where less.js's `mediaFeature` sits when `expectChar(')')` raises
+/// `Missing closing ')'` (`$char('(')` skips trailing whitespace; review E3).
+fn interp_inside_parens(s: &str) -> Option<usize> {
     let b = s.as_bytes();
     let mut depth = 0i32;
     let mut i = 0usize;
+    let mut content_start: Vec<usize> = Vec::new();
     while i < b.len() {
         match b[i] {
             b'"' | b'\'' => {
@@ -4536,14 +4756,26 @@ fn interp_inside_parens(s: &str) -> bool {
                     i += 1;
                 }
             }
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            b'@' | b'$' if depth > 0 && b.get(i + 1) == Some(&b'{') => return true,
+            b'(' => {
+                depth += 1;
+                let mut j = i + 1;
+                while j < b.len() && b[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                content_start.push(j);
+            }
+            b')' => {
+                depth -= 1;
+                content_start.pop();
+            }
+            b'@' | b'$' if depth > 0 && b.get(i + 1) == Some(&b'{') => {
+                return content_start.last().copied().or(Some(i));
+            }
             _ => {}
         }
         i += 1;
     }
-    false
+    None
 }
 
 /// Strip a leading `not` (keyword) from a guard atom, returning the remainder.
@@ -6566,6 +6798,212 @@ mod tests {
                 payload: crate::resolver::ImportPayload::Less(std::sync::Arc::from(*content)),
             })
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Gate T0 review regressions — error anchoring/kind/column parity
+    // (each expectation probed against real less.js 4.6.7).
+    // -------------------------------------------------------------------
+
+    /// Compile with a fixed filename so errors render located.
+    fn errf(src: &str) -> String {
+        let mut opts = LessOptions::default();
+        opts.filename = Some("t.less".to_string());
+        crate::compile(src, &opts, &NoopResolver)
+            .unwrap_err()
+            .to_string()
+    }
+
+    /// Review F1: an undefined `@var` in a declaration VALUE anchors at the
+    /// variable token, not the declaration head.
+    #[test]
+    fn undef_var_anchors_at_reference() {
+        let e = errf(".a {\n  color: @undef;\n}");
+        assert_eq!(
+            e,
+            "NameError: variable @undef is undefined in t.less on line 2, column 10:\
+             \n1 .a {\n2   color: @undef;\n3 }\n"
+        );
+    }
+
+    /// Review F1 (multi-line value): wrong line AND excerpt window before.
+    #[test]
+    fn undef_var_multiline_value_anchor() {
+        let e = errf(".a {\n  padding: 1px\n    @undef;\n}");
+        assert!(e.starts_with(
+            "NameError: variable @undef is undefined in t.less on line 3, column 5:"
+        ), "got: {e}");
+    }
+
+    /// Review F1b: `@a: @a;` cites the RHS reference (col 5).
+    #[test]
+    fn recursive_var_anchors_at_rhs() {
+        let e = errf("@a: @a;\n.x { width: @a; }");
+        assert!(e.starts_with(
+            "NameError: Recursive variable definition for @a in t.less on line 1, column 5:"
+        ), "got: {e}");
+    }
+
+    /// Review F1b: string interpolation anchors at the OPENING QUOTE
+    /// (less.js `Quoted.eval` throws with the Quoted node's index).
+    #[test]
+    fn string_interp_undef_anchors_at_quote() {
+        let e = errf(".a { content: \"@{undef}\"; }");
+        assert!(e.contains("on line 1, column 15:"), "got: {e}");
+        let e = errf(".a { background: url(\"@{undef}.png\"); }");
+        assert!(e.contains("on line 1, column 22:"), "got: {e}");
+    }
+
+    /// Review F2: an undefined variable in a mixin GUARD cites the guard,
+    /// not the call site (selection runs outside less.js's re-anchor).
+    #[test]
+    fn guard_undef_var_cites_guard() {
+        let e = errf(".m(@a) when (@x > 0) { color: red; }\n.use { .m(1); }");
+        assert!(e.starts_with(
+            "NameError: variable @x is undefined in t.less on line 1, column 14:"
+        ), "got: {e}");
+    }
+
+    /// Review F3: selector interpolation / media prelude / detached-ruleset
+    /// call errors are LOCATED (previously the bare two-newline form).
+    #[test]
+    fn non_declaration_undef_vars_are_located() {
+        let e = errf(".@{undef-sel} { a: b; }");
+        assert!(e.contains("in t.less on line 1, column 2:"), "got: {e}");
+        let e = errf("@media @cond { .a { color: red; } }");
+        assert!(e.contains("in t.less on line 1, column 8:"), "got: {e}");
+        let e = errf("@media (min-width: @bp) { .a { color: red; } }");
+        assert!(e.contains("in t.less on line 1, column 20:"), "got: {e}");
+        let e = errf(".u { @nope(); }");
+        assert!(e.contains("in t.less on line 1, column 6:"), "got: {e}");
+    }
+
+    /// Review F4/R2: columns count UTF-16 code units, not bytes (é = 1).
+    #[test]
+    fn error_columns_count_utf16_units() {
+        let e = errf("/* é */ .a { color: red; } !");
+        assert!(e.contains("on line 1, column 28:"), "got: {e}");
+    }
+
+    /// Review R1: `Operation on an invalid type` — the previously-unreachable
+    /// 7th kind; anchored at the declaration head (less.js throws index-less).
+    #[test]
+    fn operation_on_invalid_type() {
+        let e = errf("@k: foo;\n.a { width: (@k + 1); }");
+        assert_eq!(
+            e,
+            "OperationError: Operation on an invalid type in t.less on line 2, column 6:\
+             \n1 @k: foo;\n2 .a { width: (@k + 1); }\n"
+        );
+        // The parens-division exception: a deferred `/` LEFT operand stays
+        // deferred (less.js operation.js).
+        assert_eq!(css(".a { width: 10px / 5 + 3; }"), ".a {\n  width: 10px / 5 + 3;\n}");
+    }
+
+    /// Review F5/F6: less.js's end-of-parse messages — no crate-invented
+    /// "expected a selector"; unterminated strings anchor at the furthest
+    /// point (the quote), suffix only when furthest reached the end.
+    #[test]
+    fn unrecognised_input_message_parity() {
+        // With a trailing newline the `!` is not the last char → no suffix;
+        // without one, less.js's `furthest >= len - 1` adds it (both probed).
+        let e = errf("/* e */ .a { color: red; } !\n");
+        assert!(e.starts_with(
+            "ParseError: Unrecognised input in t.less on line 1, column 28:"
+        ), "got: {e}");
+        let e = errf("/* e */ .a { color: red; } !");
+        assert!(e.starts_with(
+            "ParseError: Unrecognised input. Possibly missing something in t.less on line 1, column 28:"
+        ), "got: {e}");
+        let e = errf(")");
+        assert!(e.starts_with(
+            "ParseError: Unrecognised input. Possibly missing opening '(' in t.less on line 1, column 1:"
+        ), "got: {e}");
+        let e = errf(".a { content: \"abc\n");
+        assert!(e.starts_with(
+            "ParseError: Unrecognised input in t.less on line 1, column 15:"
+        ), "got: {e}");
+    }
+
+    /// Review F7/F11/F12/F14: parse-error kind + message + anchor picks.
+    #[test]
+    fn parse_error_kind_message_parity() {
+        // Unknown @import option: Syntax kind, anchored at the offending char.
+        let e = errf("@import (bogus) \"lib.less\";");
+        assert!(e.starts_with(
+            "SyntaxError: expected ')' got 'b' in t.less on line 1, column 10:"
+        ), "got: {e}");
+        // Unterminated import path: the quoted parser rejects it → malformed.
+        let e = errf("@import \"unterm\n");
+        assert!(e.starts_with(
+            "SyntaxError: malformed import statement in t.less on line 1, column 1:"
+        ), "got: {e}");
+        // expectChar at EOF: `got ''`, Syntax kind.
+        let e = errf(".a { background: url(foo.png; }\n");
+        assert!(e.starts_with(
+            "SyntaxError: expected ')' got '' in t.less on line 2, column 1:"
+        ), "got: {e}");
+        // Empty :extend(): less.js's exact message, period included.
+        let e = errf(".a:extend() { color: red; }");
+        assert!(e.starts_with(
+            "SyntaxError: Missing target selector for :extend(). in t.less on line 1, column 11:"
+        ), "got: {e}");
+    }
+
+    /// Review E1/E2/E3/F4-fca: at-rule prelude interpolation + column anchors.
+    #[test]
+    fn at_rule_prelude_error_anchors() {
+        // `@keyframes @{name}`: entity() rejects the interpolation.
+        let e = errf("@name: slide;\n@keyframes @{name} {\n  0% { left: 0px; }\n}");
+        assert!(e.starts_with(
+            "SyntaxError: expected @keyframes identifier in t.less on line 2, column 12:"
+        ), "got: {e}");
+        // Uppercase at-rule → variable-call path; `$re` skipped the space.
+        let e = errf("@CHARSET \"UTF-8\";\n");
+        assert!(e.starts_with(
+            "ParseError: Missing '[...]' lookup in variable call in t.less on line 1, column 10:"
+        ), "got: {e}");
+        // Interp inside a feature paren stalls at the `@`.
+        let e = errf("@feat: min-width;\n@media (@{feat}: 10px) { a { color: red; } }");
+        assert!(e.starts_with(
+            "ParseError: Missing closing ')' in t.less on line 2, column 9:"
+        ), "got: {e}");
+        // `@media @{x}` is a parse error even when @x is defined.
+        let e = errf("@cond: screen;\n@media @{cond} { .c { x: y; } }");
+        assert!(e.starts_with(
+            "SyntaxError: media definitions require block statements after any features \
+             in t.less on line 2, column 8:"
+        ), "got: {e}");
+    }
+
+    /// Review C2: an escaped-string media fragment joined with `and` stays
+    /// VERBATIM under compress (its `: ` never compresses).
+    #[test]
+    fn compress_media_escaped_fragment_verbatim() {
+        let mut opts = LessOptions::default();
+        opts.compress = true;
+        let out = crate::compile(
+            "@phone: ~\"(max-width: 599px)\";\n@media screen and @phone { b { color: blue; } }",
+            &opts,
+            &NoopResolver,
+        )
+        .unwrap()
+        .code;
+        assert_eq!(out, "@media screen and (max-width: 599px){b{color:blue}}");
+    }
+
+    /// Review C1/C1c: @media prelude comments — a LEADING comment lands in
+    /// the block twice (less.js commentStore quirk), an after-comma one once.
+    #[test]
+    fn media_prelude_comment_relocation() {
+        assert_eq!(
+            css("@media /*! med */ screen { b { color: blue; } }"),
+            "@media screen {\n  /*! med */\n  /*! med */\n  b {\n    color: blue;\n  }\n}"
+        );
+        assert_eq!(
+            css("@media screen, /*! k */ print { a { color: red; } }"),
+            "@media screen, print {\n  /*! k */\n  a {\n    color: red;\n  }\n}"
+        );
     }
 }
 
