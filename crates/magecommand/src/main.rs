@@ -6,12 +6,13 @@
 //! `di compile` (generate generated/code + metadata), `di verify` (the archive
 //! oracle every milestone is accepted against), `di watch`, `di digest`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 
+mod static_deploy;
 mod watch;
 
 #[derive(Parser)]
@@ -47,6 +48,44 @@ enum Command {
     Di {
         #[command(subcommand)]
         command: DiCommand,
+    },
+    /// Static content — reproduce `setup:static-content:deploy` artifacts.
+    #[command(name = "static", arg_required_else_help = true)]
+    Static {
+        #[command(subcommand)]
+        command: StaticCommand,
+    },
+}
+
+/// `magecommand static <subcommand>` — the static-content group. Only the
+/// LESS pipeline is built today; JS/requirejs come later.
+#[derive(Subcommand)]
+enum StaticCommand {
+    /// Assemble and compile a theme's LESS entry points (pure Rust — no PHP,
+    /// no node; theme fallback + `//@magento_import` + `Vendor_Module::`
+    /// resolution handled by the orchestration layer).
+    Less {
+        /// Theme id, e.g. `Magento/luma` (or `frontend/Magento/luma`).
+        #[arg(long, value_name = "VENDOR/NAME")]
+        theme: String,
+        /// Locale for the `pub/static` placement.
+        #[arg(long, default_value = "en_US")]
+        locale: String,
+        /// Entry point(s) to compile (`styles-m`, `styles-l`, `print`,
+        /// `email`, `email-inline`, `email-fonts`). Default: every standard
+        /// entry the theme chain provides.
+        #[arg(long, value_name = "NAME")]
+        entry: Vec<String>,
+        /// Write compiled CSS under this directory instead of `pub/static`.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Print the compiled CSS of a single --entry to stdout (no writes).
+        #[arg(long, conflicts_with = "out")]
+        stdout: bool,
+        /// Drop a broken module's LESS partial and re-splice instead of
+        /// failing the entry point (default: fail loudly naming the module).
+        #[arg(long)]
+        skip_broken_modules: bool,
     },
 }
 
@@ -165,7 +204,129 @@ fn main() -> anyhow::Result<ExitCode> {
                 show_residual.as_deref(),
             ),
         },
+        Command::Static { command } => match command {
+            StaticCommand::Less {
+                ref theme,
+                ref locale,
+                ref entry,
+                ref out,
+                stdout,
+                skip_broken_modules,
+            } => static_less(
+                cli.root,
+                theme,
+                locale,
+                entry,
+                out.as_deref(),
+                stdout,
+                skip_broken_modules,
+            ),
+        },
     }
+}
+
+/// `magecommand static less` — compile a theme's LESS entry points into
+/// `pub/static/<area>/<theme>/<locale>/css/` (or `--out`/`--stdout`).
+fn static_less(
+    root: Option<PathBuf>,
+    theme: &str,
+    locale: &str,
+    entries: &[String],
+    out: Option<&Path>,
+    to_stdout: bool,
+    skip_broken_modules: bool,
+) -> anyhow::Result<ExitCode> {
+    use static_deploy::less as sdless;
+
+    let root = root.unwrap_or_else(|| PathBuf::from("."));
+    let root = std::path::absolute(&root).unwrap_or(root);
+    let magento = magequery_core::Magento::open(&root)
+        .with_context(|| format!("not a Magento root: {}", root.display()))?;
+    let area = "frontend";
+    let orch = sdless::LessOrchestrator::from_magento(&magento, area, theme)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    eprintln!(
+        "theme fallback chain: {}",
+        orch.chain()
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    );
+
+    let opts = sdless::LessDeployOptions {
+        skip_broken_modules,
+    };
+    let names: Vec<String> = if entries.is_empty() {
+        // Every standard entry the theme chain actually provides.
+        sdless::ENTRY_POINTS
+            .iter()
+            .map(|n| n.to_string())
+            .collect()
+    } else {
+        entries.to_vec()
+    };
+    if to_stdout && names.len() != 1 {
+        anyhow::bail!("--stdout needs exactly one --entry");
+    }
+
+    let mut failed = false;
+    for name in &names {
+        match orch.compile_entry(name, &opts) {
+            Ok(compiled) => {
+                for (module, err) in &compiled.skipped_modules {
+                    eprintln!("warning: skipped broken module {module}: {err}");
+                }
+                for w in &compiled.warnings {
+                    eprintln!("warning: {}: {w}", compiled.entry);
+                }
+                if to_stdout {
+                    print!("{}", compiled.css);
+                    continue;
+                }
+                let target = match out {
+                    Some(dir) => dir.join(format!("{name}.css")),
+                    None => {
+                        let full = if theme.contains('/') && !theme.starts_with(area) {
+                            format!("{area}/{theme}")
+                        } else {
+                            theme.to_string()
+                        };
+                        sdless::output_path(&root, area, &full, locale, name)
+                    }
+                };
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("mkdir {}", parent.display()))?;
+                }
+                std::fs::write(&target, &compiled.css)
+                    .with_context(|| format!("write {}", target.display()))?;
+                println!(
+                    "{name}: {} ({} bytes) -> {}",
+                    compiled.entry_file.display(),
+                    compiled.css.len(),
+                    target.display()
+                );
+            }
+            Err(e) => {
+                // A theme legitimately lacking an entry (no default requested
+                // file) is a hard error only when explicitly requested.
+                let missing = e.message.starts_with("entry point not found");
+                if missing && entries.is_empty() {
+                    eprintln!("{name}: skipped (not provided by the theme chain)");
+                    continue;
+                }
+                eprintln!("error: {e}");
+                failed = true;
+            }
+        }
+    }
+    Ok(if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 // The final `lap!` resets `t` without a subsequent read — expected for a

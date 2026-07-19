@@ -1276,9 +1276,11 @@ dependencies = [
  "clap",
  "libc",
  "magecommand-engine",
+ "magecommand-less",
  "magequery-core",
  "notify",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
