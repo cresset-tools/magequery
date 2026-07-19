@@ -1394,3 +1394,44 @@ in-order splice + cross-entry variable resolution, `(reference)` entries
 contributing scope but no bare output, the unset-mode plain-comment
 contract (resolver asserts the callback never fires), and a missing entry
 surfacing as a located Import error naming the path (§7.5).
+
+## Phase 5 — §7.4 conformance triad suite (done)
+
+`tests/conformance.rs` — 4 tests on synthetic fixtures mirroring the real
+theme shapes (written fresh; no Magento sources vendored), each expected
+output pinned against a live less.js 4.6.7 probe:
+- **G-ref** (`(reference)` × extend-all): the `_extends.less` pattern —
+  zero `.abs-` in output (grep-asserted), extended selectors grafted incl.
+  nested rules and the `& when (@media-common = true)` fold.
+- **G-resp** (the `.media-width` collector): matching module bodies group
+  under ONE `@media` block in splice order; unit-aware guard equality
+  (`@break = @screen__s` → 640px = 640px); an empty collector block prunes;
+  `@media-common: false` and `@media-target` redeclared AFTER the imports
+  suppress correctly (X1 last-wins across imports is what makes the
+  `styles-l` switch work at all).
+- **G-detached**: `@dr()` replay resolves in the DECLARATION scope (a
+  caller-scope shadow does not win) with forward refs inside the defining
+  file.
+- **§7.8 `.lib-css`**: keyword-`false` skip, `''` skip, `extract(@v, 1..5)
+  = false` list skips, and the `@_prefix: 1` `-webkit-` fan-out with
+  `@{_property}` interpolation — the guard shape mirrors the real library.
+
+**Known cosmetic deviation D-fold-join**: for the extend-grafted copy of a
+`& when`-folded hidden rule, less.js joins the folded declarations on one
+line (`margin: 0;padding: 0;`); we emit separate lines. The REAL Magento
+oracle (less.php SCD output on the reference install) contains zero such
+joins — our formatting agrees with the Tier-2 contract, so this is pinned
+as-is, not chased.
+
+## Phase 5 — orchestration smoke against the reference install
+
+`magecommand static less --theme Magento/luma` (the new orchestration in
+`crates/magecommand/src/static_deploy/less.rs`) compiles **all six** luma
+entry points against the untouched reference source tree in <1s total;
+styles-m.css comes out 358 KB vs the SCD oracle's 378 KB with matching
+overall structure. Semantic diffing (Tier 2, §7.7) is the NEXT stage's
+gate; the //@magento_import expansion order was pinned by a live
+ObjectManager probe of `Css\PreProcessor\File\Collector\Aggregated`
+(library file → module-own view files in config.php load order → theme
+module contexts root-ancestor-first alphabetical, with remove-and-append
+collation).

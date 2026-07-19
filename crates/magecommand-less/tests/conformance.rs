@@ -1,0 +1,345 @@
+//! §7.4 conformance triad — the Magento-correctness core, exercised on small
+//! SYNTHETIC fixtures that mirror the real theme shapes (written fresh for
+//! this suite; no Magento sources vendored):
+//!
+//! - **G-ref**: `(reference)`-import visibility × `:extend(.abs-… all)` —
+//!   the `_extends.less` pattern: an `.abs-*` library imported `(reference)`
+//!   must emit NOTHING bare; extended selectors are grafted (nested rules and
+//!   `& when (@media-common = true)` wrappers included).
+//! - **G-resp**: the `.media-width` collector — every module adds guarded
+//!   `.media-width(@extremum, @break)` DEFINITIONS; `_responsive.less` calls
+//!   the mixin inside literal `@media` blocks at the end of the entry, so all
+//!   matching bodies group under ONE `@media` block, with unit-aware guard
+//!   equality (`@break = @screen__m` resolving 768px) and the
+//!   `@media-common: false` / `@media-target` suppression switches
+//!   (redeclared AFTER the imports — last-wins across imports, the X1
+//!   whole-scope semantics).
+//! - **G-detached**: `@dr()` replay — declaration-scope resolution wins over
+//!   a caller-scope shadow, and forward refs within the defining file work.
+//!
+//! Plus the §7.8 load-bearing pattern: **`.lib-css(@prop, @val)` skips output
+//! when `@val` is `false`** (keyword-false guard equality), when it is `''`,
+//! and when ANY of the first five list members is `false` (`extract` guards).
+//!
+//! Every expected output below is **byte-pinned against a live less.js 4.6.7
+//! probe** (2026-07, scratchpad `lessprobe/triad`) — the suite gates our
+//! compiler against ground truth, ahead of the Tier-2 SCD oracle diff.
+
+use magecommand_less::{
+    FileInfo, ImportError, ImportPayload, ImportRequest, ImportResolver, LessOptions,
+    ResolvedImport,
+};
+
+/// In-memory `path -> content` resolver.
+struct MapResolver(Vec<(&'static str, &'static str)>);
+
+impl ImportResolver for MapResolver {
+    fn resolve(&self, req: &ImportRequest) -> Result<ResolvedImport, ImportError> {
+        let raw = req.path.as_str();
+        let key = if raw.ends_with(".less") || raw.ends_with(".css") {
+            raw.to_string()
+        } else {
+            format!("{raw}.less")
+        };
+        let Some((_, content)) = self.0.iter().find(|(p, _)| *p == key) else {
+            return Err(ImportError::NotFound(key));
+        };
+        Ok(ResolvedImport {
+            file: FileInfo {
+                filename: key.clone(),
+                current_directory: String::new(),
+                ..Default::default()
+            },
+            payload: ImportPayload::Less(std::sync::Arc::from(*content)),
+        })
+    }
+}
+
+fn compile_with(files: &[(&'static str, &'static str)], src: &str) -> String {
+    let resolver = MapResolver(files.to_vec());
+    magecommand_less::compile(src, &LessOptions::default(), &resolver)
+        .expect("conformance fixture must compile")
+        .code
+}
+
+/// The `_extends.less`-shaped `(reference)` library: a `& when
+/// (@media-common = true)` wrapped abs rule with a nested child, a plain abs
+/// rule with nested structure, and one that nothing extends.
+const EXTENDS: &str = "\
+& when (@media-common = true) {
+    .abs-reset-list {
+        margin: 0;
+        padding: 0;
+        > li {
+            margin: 0;
+        }
+    }
+}
+.abs-discount-block {
+    .actions-toolbar {
+        .action.primary {
+            border: 1px dashed;
+        }
+    }
+}
+.abs-unused {
+    color: hotpink;
+}
+";
+
+const MODULE_A: &str = "\
+& when (@media-common = true) {
+    .cart-summary .checkout-methods:extend(.abs-reset-list all) {
+        background: white;
+    }
+}
+.media-width(@extremum, @break) when (@extremum = 'min') and (@break = @screen__m) {
+    .mod-a-wide { width: 50%; }
+}
+";
+
+const MODULE_B: &str = "\
+.block-discount:extend(.abs-discount-block all) {
+    display: block;
+}
+.media-width(@extremum, @break) when (@extremum = 'min') and (@break = @screen__m) {
+    .mod-b-wide { float: left; }
+}
+.media-width(@extremum, @break) when (@extremum = 'max') and (@break = @screen__s) {
+    .mod-b-narrow { float: none; }
+}
+";
+
+/// The collector, mirroring `lib/_responsive.less`'s shape: literal `@media`
+/// blocks calling `.media-width(...)`, gated on `@media-target`.
+const RESPONSIVE: &str = "\
+@media-common: true;
+@media-target: 'all';
+& when (@media-target = 'mobile'), (@media-target = 'all') {
+    @media only screen and (max-width: (@screen__s - 1)) {
+        .media-width('max', @screen__s);
+    }
+    @media all and (min-width: @screen__s) {
+        .media-width('min', @screen__s);
+    }
+}
+& when (@media-target = 'desktop'), (@media-target = 'all') {
+    @media all and (min-width: @screen__m),
+    print {
+        .media-width('min', @screen__m);
+    }
+}
+";
+
+const THEME: &str = "\
+@screen__s: 640px;
+@screen__m: 768px;
+";
+
+fn theme_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("_theme.less", THEME),
+        ("_extends.less", EXTENDS),
+        ("_module-a.less", MODULE_A),
+        ("_module-b.less", MODULE_B),
+        ("_responsive.less", RESPONSIVE),
+    ]
+}
+
+const ENTRY: &str = "\
+@import '_theme.less';
+@import (reference) '_extends.less';
+@import '_module-a.less';
+@import '_module-b.less';
+@import '_responsive.less';
+";
+
+/// G-ref + G-resp, the `styles-m` shape: common styles on, mobile target
+/// (declared after the imports — last-wins across imports).
+///
+/// Pinned against less.js 4.6.7. What it locks:
+/// - extended `.abs-reset-list` grafts onto the consumer, its `& when` fold,
+///   nested `> li`, and the `.abs-discount-block` nested graft;
+/// - `.abs-unused` (extended by nothing) and every other bare `.abs-*` rule
+///   emit NOTHING;
+/// - the mobile `min-width: 640px` collector block has no matching
+///   definitions and is pruned entirely;
+/// - the `max-width: 639px` block collects the one matching body, with the
+///   guard `(@break = @screen__s)` resolving 640px = 640px unit-aware;
+/// - the desktop group is suppressed by `@media-target: 'mobile'`.
+///
+/// ONE deliberate byte deviation (D-fold-join): for the extend-grafted copy
+/// of a `& when`-folded hidden rule, less.js joins the folded declarations
+/// on one line (`margin: 0;padding: 0;`); we emit them on separate lines.
+/// Semantically identical — and the REAL Magento oracle (less.php, checked
+/// against the reference install's SCD output) contains ZERO such joins, so
+/// our formatting matches the Tier-2 contract better than less.js does here.
+#[test]
+fn g_ref_and_g_resp_mobile_entry() {
+    let src = format!("{ENTRY}@media-target: 'mobile';\n");
+    let css = compile_with(&theme_files(), &src);
+    assert_eq!(
+        css,
+        "\
+.cart-summary .checkout-methods {
+  margin: 0;
+  padding: 0;
+}
+.cart-summary .checkout-methods > li {
+  margin: 0;
+}
+.block-discount .actions-toolbar .action.primary {
+  border: 1px dashed;
+}
+.cart-summary .checkout-methods {
+  background: white;
+}
+.block-discount {
+  display: block;
+}
+@media only screen and (max-width: 639px) {
+  .mod-b-narrow {
+    float: none;
+  }
+}
+"
+    );
+    // The G-ref grep assertion, explicit: zero `.abs-` anywhere in output.
+    assert!(!css.contains(".abs-"), "bare .abs- leaked:\n{css}");
+}
+
+/// G-resp, the `styles-l` shape: `@media-common: false` suppresses every
+/// `& when (@media-common = true)` block (module commons AND the reference
+/// library's), while the desktop collector groups BOTH modules' matching
+/// `.media-width('min', @screen__m)` bodies under ONE
+/// `@media all and (min-width: 768px), print` block, in module splice order.
+///
+/// Byte-pinned against less.js 4.6.7.
+#[test]
+fn g_resp_desktop_entry_media_common_false() {
+    let src = format!("{ENTRY}@media-common: false;\n@media-target: 'desktop';\n");
+    let css = compile_with(&theme_files(), &src);
+    assert_eq!(
+        css,
+        "\
+.block-discount .actions-toolbar .action.primary {
+  border: 1px dashed;
+}
+.block-discount {
+  display: block;
+}
+@media all and (min-width: 768px), print {
+  .mod-a-wide {
+    width: 50%;
+  }
+  .mod-b-wide {
+    float: left;
+  }
+}
+"
+    );
+    assert!(!css.contains(".abs-"), "bare .abs- leaked:\n{css}");
+    // Exactly one @media block: the collector grouped, not duplicated.
+    assert_eq!(css.matches("@media").count(), 1, "collector split:\n{css}");
+}
+
+/// G-detached: `@dr()` replay resolves in the DECLARATION scope — a
+/// caller-scope `@badge-color: red` shadow does NOT win over the visible
+/// `blue`, and `@dr-outline` (declared AFTER the ruleset in the defining
+/// file) resolves forward. Byte-pinned against less.js 4.6.7.
+#[test]
+fn g_detached_replay_dual_scope() {
+    let files = vec![(
+        "_dr-lib.less",
+        "@dr-badge: {\n    color: @badge-color;\n    outline: @dr-outline;\n};\n@dr-outline: 1px dotted;\n",
+    )];
+    let css = compile_with(
+        &files,
+        "\
+@import '_dr-lib.less';
+@badge-color: blue;
+.a {
+    @badge-color: red;
+    @dr-badge();
+}
+.b {
+    @dr-badge();
+}
+",
+    );
+    assert_eq!(
+        css,
+        "\
+.a {
+  color: blue;
+  outline: 1px dotted;
+}
+.b {
+  color: blue;
+  outline: 1px dotted;
+}
+"
+    );
+}
+
+/// §7.8: `.lib-css(@prop, @val)` — the pervasive "unset = false" idiom. The
+/// mixin definition mirrors the real library's guard shape (keyword-`false`
+/// equality, `''`, and `extract(@_value, 1..5) = false` list checks, plus the
+/// `@_prefix: 1` `-webkit-` fan-out with interpolated `@{_property}`).
+/// Byte-pinned against less.js 4.6.7: only `margin` and the prefixed
+/// `transition` emit; `false`, a list containing `false`, `''`, and a
+/// variable holding `false` all skip.
+#[test]
+fn lib_css_skips_false_values() {
+    let css = compile_with(
+        &[],
+        "\
+.lib-css(
+    @_property,
+    @_value,
+    @_prefix: 0
+) when (@_prefix = 1)
+  and not (@_value = '')
+  and not (@_value = false)
+  and not (extract(@_value, 1) = false)
+  and not (extract(@_value, 2) = false)
+  and not (extract(@_value, 3) = false)
+  and not (extract(@_value, 4) = false)
+  and not (extract(@_value, 5) = false) {
+  -webkit-@{_property}: @_value;
+}
+.lib-css(
+    @_property,
+    @_value,
+    @_prefix: 0
+) when not (@_value = '')
+  and not (@_value = false)
+  and not (extract(@_value, 1) = false)
+  and not (extract(@_value, 2) = false)
+  and not (extract(@_value, 3) = false)
+  and not (extract(@_value, 4) = false)
+  and not (extract(@_value, 5) = false) {
+    @{_property}: @_value;
+}
+@no: false;
+.card {
+    .lib-css(margin, 10px 20px);
+    .lib-css(padding, false);
+    .lib-css(border, 1px solid false);
+    .lib-css(color, '');
+    .lib-css(background, @no);
+    .lib-css(transition, opacity 1s, 1);
+}
+",
+    );
+    assert_eq!(
+        css,
+        "\
+.card {
+  margin: 10px 20px;
+  -webkit-transition: opacity 1s;
+  transition: opacity 1s;
+}
+"
+    );
+}
