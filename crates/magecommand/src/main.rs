@@ -87,6 +87,19 @@ enum StaticCommand {
         #[arg(long)]
         skip_broken_modules: bool,
     },
+    /// Semantic CSS diff (plan §7.7): compare a golden `.css` (real SCD
+    /// output) against ours, normalizing only non-semantic formatting
+    /// (whitespace, hex case/shorthand, leading zeros, comments) —
+    /// order-preserving; every remaining difference is a real residual.
+    Cssdiff {
+        /// The golden CSS (the expected side, e.g. real SCD output).
+        expected: PathBuf,
+        /// Our CSS (the actual side).
+        actual: PathBuf,
+        /// Print at most N findings (0 = all).
+        #[arg(long, default_value_t = 40, value_name = "N")]
+        limit: usize,
+    },
 }
 
 /// `magecommand di <subcommand>` — the DI-compile group. `compile` generates,
@@ -221,6 +234,9 @@ fn main() -> anyhow::Result<ExitCode> {
                 stdout,
                 skip_broken_modules,
             ),
+            StaticCommand::Cssdiff { ref expected, ref actual, limit } => {
+                static_cssdiff(expected, actual, limit, cli.json)
+            }
         },
     }
 }
@@ -327,6 +343,50 @@ fn static_less(
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// `magecommand static cssdiff` — the §7.7 semantic differ. Exit 0 when the
+/// two files are semantically identical, 1 when any residual remains.
+fn static_cssdiff(
+    expected: &Path,
+    actual: &Path,
+    limit: usize,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
+    use static_deploy::cssdiff;
+
+    let exp = std::fs::read_to_string(expected)
+        .with_context(|| format!("read {}", expected.display()))?;
+    let act = std::fs::read_to_string(actual)
+        .with_context(|| format!("read {}", actual.display()))?;
+    let d = cssdiff::diff(&exp, &act);
+
+    if json {
+        let findings: Vec<String> = d.findings.iter().map(|f| f.to_string()).collect();
+        let doc = serde_json::json!({
+            "expected":       expected.display().to_string(),
+            "actual":         actual.display().to_string(),
+            "rules_expected": d.rules_expected,
+            "rules_actual":   d.rules_actual,
+            "findings":       findings,
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+    } else {
+        let shown = if limit == 0 { d.findings.len() } else { limit.min(d.findings.len()) };
+        for f in &d.findings[..shown] {
+            println!("{f}");
+        }
+        if shown < d.findings.len() {
+            println!("… and {} more finding(s)", d.findings.len() - shown);
+        }
+        println!(
+            "{} rule(s) expected, {} actual — {} finding(s)",
+            d.rules_expected,
+            d.rules_actual,
+            d.findings.len()
+        );
+    }
+    Ok(if d.is_clean() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
 }
 
 // The final `lap!` resets `t` without a subsequent read — expected for a
