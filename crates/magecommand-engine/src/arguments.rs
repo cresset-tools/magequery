@@ -147,6 +147,46 @@ impl<'a> ArgsCtx<'a> {
         self.findings.borrow_mut().push(msg);
     }
 
+    /// The constructor of a class this compile itself GENERATES (`X\Proxy`,
+    /// `XFactory`), synthesized from the codegen templates. On a clean root
+    /// the file doesn't exist when arguments are resolved — the oracle never
+    /// hits this because real di:compile writes generated code BEFORE area
+    /// aggregation, so reflection sees it. Without the row, a runtime on the
+    /// compiled config falls back to the template defaults and silently drops
+    /// the di.xml overrides (a proxy vtype's `instanceName` most damagingly).
+    /// Only names whose SOURCE class is known (scanned or autoloadable) are
+    /// synthesized — mirroring Generator::shouldSkipGeneration's source gate.
+    fn generated_base_ctor(&self, name: &str) -> Option<Vec<ParamMeta>> {
+        let om = "Magento\\Framework\\ObjectManagerInterface";
+        // The codegen template's default, as PHP source: '\\Ns\\Class'.
+        let instance_default =
+            |source: &str| format!("'\\\\{}'", source.replace('\\', "\\\\"));
+        let (source, params) = if let Some(source) = name.strip_suffix("\\Proxy") {
+            (
+                source,
+                vec![
+                    ParamMeta::synthetic("objectManager", Some(om), None),
+                    ParamMeta::synthetic("instanceName", None, Some(&instance_default(source))),
+                    ParamMeta::synthetic("shared", None, Some("true")),
+                ],
+            )
+        } else if let Some(source) = name.strip_suffix("Factory") {
+            (
+                source,
+                vec![
+                    ParamMeta::synthetic("objectManager", Some(om), None),
+                    ParamMeta::synthetic("instanceName", None, Some(&instance_default(source))),
+                ],
+            )
+        } else {
+            return None;
+        };
+        if source.is_empty() || (!self.defs.contains(source) && !self.class_loadable(source)) {
+            return None;
+        }
+        Some(params)
+    }
+
     pub fn take_findings(&self) -> Vec<String> {
         std::mem::take(&mut self.findings.borrow_mut())
     }
@@ -851,11 +891,25 @@ pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<Stri
                     PhpValue::Null
                 }
             }
+        } else if let Some(params) = ctx.generated_base_ctor(&base_real) {
+            ctx.resolve_instance(vtype, &base_real, &[], &params)
         } else {
             ctx.finding(format!("{vtype}: base {base_real} not found anywhere"));
             continue;
         };
         out.insert(vtype.clone(), value);
+    }
+    // `<type name="…">` argument overrides on classes the compile itself
+    // generates: the same clean-root gap as vtype bases above — without a
+    // row the override is silently lost at runtime.
+    for name in ctx.type_args.keys() {
+        if out.contains_key(name) || ctx.vtypes.contains_key(name) || ctx.defs.contains(name) {
+            continue;
+        }
+        if let Some(params) = ctx.generated_base_ctor(name) {
+            let value = ctx.resolve_instance(name, name, &[], &params);
+            out.insert(name.clone(), value);
+        }
     }
     out
 }
@@ -1286,5 +1340,117 @@ mod tests {
 
         assert_eq!(merged.len(), 1, "scalar argument dropped by the multi rebuild");
         assert_eq!(item_keys(&merged[0].1), ["aa", "zz"], "items sorted by sortOrder");
+    }
+
+    fn rec(src: &str) -> (String, crate::definitions::ClassRecord) {
+        let meta = magecommand_php::parse_file(src.as_bytes())
+            .declarations
+            .into_iter()
+            .next()
+            .expect("one declaration");
+        (meta.fqcn.clone(), crate::definitions::ClassRecord { meta, file: Default::default() })
+    }
+
+    fn bare_ctx<'a>(
+        defs: &'a Definitions,
+        scanned: &'a HashSet<String>,
+        type_args: HashMap<String, Vec<(String, &'a ArgValue)>>,
+    ) -> ArgsCtx<'a> {
+        ArgsCtx {
+            defs,
+            scanned,
+            overrides: Vec::new(),
+            type_args,
+            non_shared: HashSet::new(),
+            vtypes: HashMap::new(),
+            pref_keys: Vec::new(),
+            magento: None,
+            zend_bridge: false,
+            merged_cache: Default::default(),
+            findings: Default::default(),
+        }
+    }
+
+    /// Clean-root shape of the store-config outage: a vtype over a proxy the
+    /// compile itself generates (`ConfigSourceAggregated\Proxy` has no file
+    /// when arguments are resolved). The synthesized template constructor must
+    /// carry the vtype's `instanceName` override into the row — without it the
+    /// runtime silently proxies the BASE class and `scopes` data comes back
+    /// empty (store:list on a fused-compiled store listed no stores).
+    #[test]
+    fn generated_proxy_vtype_base_synthesizes_ctor_and_keeps_instance_name() {
+        let defs = Definitions::from_records([
+            rec("<?php namespace Magento\\Framework; interface ObjectManagerInterface {}"),
+            rec("<?php namespace Magento\\Framework\\App\\Config; class ConfigSourceAggregated {}"),
+        ]);
+        let scanned = HashSet::new();
+        let configured = ArgValue::Scalar {
+            xsi_type: "string".into(),
+            text: "scopesConfigSourceAggregated".into(),
+        };
+        let ctx = bare_ctx(
+            &defs,
+            &scanned,
+            HashMap::from([(
+                "scopesConfigSourceAggregatedProxy".to_owned(),
+                vec![("instanceName".to_owned(), &configured)],
+            )]),
+        );
+
+        let base = "Magento\\Framework\\App\\Config\\ConfigSourceAggregated\\Proxy";
+        let params = ctx.generated_base_ctor(base).expect("proxy ctor synthesized");
+        let row = ctx.resolve_instance("scopesConfigSourceAggregatedProxy", base, &[], &params);
+
+        let PhpValue::Array(entries) = row else { panic!("array row, got {row:?}") };
+        let get = |name: &str| {
+            entries
+                .iter()
+                .find(|(k, _)| *k == PhpKey::str(name))
+                .map(|(_, v)| v)
+                .unwrap_or_else(|| panic!("row has {name}"))
+        };
+        assert_eq!(
+            *get("objectManager"),
+            PhpValue::Array(vec![(
+                PhpKey::str("_i_"),
+                PhpValue::Str("Magento\\Framework\\ObjectManagerInterface".into()),
+            )]),
+        );
+        assert_eq!(
+            *get("instanceName"),
+            PhpValue::Array(vec![(
+                PhpKey::str("_v_"),
+                PhpValue::Str("scopesConfigSourceAggregated".into()),
+            )]),
+            "the di.xml override, not the template default"
+        );
+        assert_eq!(
+            *get("shared"),
+            PhpValue::Array(vec![(PhpKey::str("_v_"), PhpValue::Bool(true))]),
+        );
+    }
+
+    /// The factory template (objectManager + instanceName, no `shared`), and
+    /// the source-class gate: no known source, no synthesis — a name that
+    /// merely LOOKS generated must keep reporting "not found anywhere".
+    #[test]
+    fn generated_ctor_shapes_and_source_gate() {
+        let defs = Definitions::from_records([
+            rec("<?php namespace Magento\\Framework; interface ObjectManagerInterface {}"),
+            rec("<?php namespace Acme; class Widget {}"),
+        ]);
+        let scanned = HashSet::new();
+        let ctx = bare_ctx(&defs, &scanned, HashMap::new());
+
+        let factory = ctx.generated_base_ctor("Acme\\WidgetFactory").expect("factory synthesized");
+        assert_eq!(
+            factory.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["objectManager", "instanceName"],
+        );
+        assert_eq!(factory[1].default.as_deref(), Some("'\\\\Acme\\\\Widget'"));
+
+        assert!(ctx.generated_base_ctor("Acme\\Missing\\Proxy").is_none(), "unknown source");
+        assert!(ctx.generated_base_ctor("Acme\\MissingFactory").is_none(), "unknown source");
+        assert!(ctx.generated_base_ctor("Acme\\Widget").is_none(), "not a generated name");
     }
 }
