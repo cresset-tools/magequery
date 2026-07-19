@@ -1367,13 +1367,28 @@ impl<'a> Parser<'a> {
             let had_ws = self.cur.skip_whitespace();
             let op = self.cur.cur();
             let is_div = op == Some(b'/') && !matches!(self.cur.peek(1), Some(b'*') | Some(b'/'));
-            if op == Some(b'*') || is_div {
-                let opc = op.unwrap();
-                self.cur.bump();
+            // The legacy forced-division operator `./` (less.js `$str('./')`).
+            let is_legacy_div = op == Some(b'.') && self.cur.peek(1) == Some(b'/');
+            if op == Some(b'*') || is_div || is_legacy_div {
+                // less.js `operand()` accepts dimensions/colors/variables/
+                // calls/subs — NOT plain keywords (`small/20px` is entities,
+                // not an Operation, so it renders spaced; math-strict css).
+                if !operand_like(&left) {
+                    self.cur.i = save;
+                    break;
+                }
+                let op_str = if is_legacy_div {
+                    self.cur.bump();
+                    self.cur.bump();
+                    "./".to_string()
+                } else {
+                    self.cur.bump();
+                    (op.unwrap() as char).to_string()
+                };
                 let ws_after = self.cur.skip_whitespace();
                 let before = self.here();
                 let right = self.parse_operand()?;
-                if self.here() == before {
+                if self.here() == before || !operand_like(&right) {
                     self.cur.i = save; // no right operand — leave the operator alone
                     break;
                 }
@@ -1381,7 +1396,7 @@ impl<'a> Parser<'a> {
                 mark_in_op(&mut left);
                 mark_in_op(&mut right);
                 left = Node::Operation {
-                    op: (opc as char).to_string(),
+                    op: op_str,
                     left: Box::new(left),
                     right: Box::new(right),
                     spaced: had_ws || ws_after,
@@ -2015,6 +2030,30 @@ fn utf8_char_len(b: u8) -> usize {
 /// Mark a parenthesized operand as participating in an operation (less.js sets
 /// `parensInOp` on both operands in `addition`/`multiplication`; only parens
 /// carry the flag for us — see `Node::Paren`).
+/// Whether a parsed node is a valid less.js `operand()` for `*`/`/` (plan
+/// §2.4): dimension, color (hex or NAMED keyword), variable/property accessor,
+/// call, parenthesized sub, negation, lookup — a plain keyword (`small`) or
+/// raw run is NOT, so `small/20px` stays an entity list.
+fn operand_like(n: &Node) -> bool {
+    match n {
+        Node::Dimension(_)
+        | Node::Color(_)
+        | Node::Variable { .. }
+        | Node::VariableVariable { .. }
+        | Node::PropertyAccessor { .. }
+        | Node::Call { .. }
+        | Node::Paren { .. }
+        | Node::Negative(_)
+        | Node::Lookup { .. }
+        | Node::VariableCall { .. }
+        | Node::MixinCall(_)
+        | Node::Operation { .. } => true,
+        Node::Quoted { escaped, .. } => *escaped,
+        Node::Keyword(k) => crate::data::colors::named_color(k).is_some(),
+        _ => false,
+    }
+}
+
 fn mark_in_op(node: &mut Node) {
     if let Node::Paren { in_op, .. } = node {
         *in_op = true;

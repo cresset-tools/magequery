@@ -85,8 +85,50 @@ pub fn compile(
         filename: opts.filename.clone().unwrap_or_default(),
         ..FileInfo::default()
     };
+    // `banner`/`globalVars` prepend and `modifyVars` append SOURCE text before
+    // parsing (less.js `Parser.parse` preText/serializeVars, plan §2.0):
+    // globals are overridable (last-declaration-wins favors the sheet), while
+    // modify-vars appended last override the sheet.
+    let augmented: String;
+    let source = if opts.global_vars.is_empty()
+        && opts.modify_vars.is_empty()
+        && opts.banner.is_none()
+    {
+        source
+    } else {
+        let mut pre = opts.banner.clone().unwrap_or_default();
+        if !opts.global_vars.is_empty() {
+            pre.push_str(&serialize_vars(&opts.global_vars));
+            pre.push('\n');
+        }
+        let post = if opts.modify_vars.is_empty() {
+            String::new()
+        } else {
+            format!("\n{}", serialize_vars(&opts.modify_vars))
+        };
+        augmented = format!("{pre}{source}{post}");
+        &augmented
+    };
     let root = parse(source, file, opts)?;
     eval(&root, opts, resolver)
+}
+
+/// less.js `Parser.serializeVars`: `@name: value;` runs (the `@` prefix and
+/// trailing `;` added when missing).
+fn serialize_vars(vars: &[(String, String)]) -> String {
+    let mut s = String::new();
+    for (name, value) in vars {
+        if !name.starts_with('@') {
+            s.push('@');
+        }
+        s.push_str(name);
+        s.push_str(": ");
+        s.push_str(value);
+        if !value.ends_with(';') {
+            s.push(';');
+        }
+    }
+    s
 }
 
 #[cfg(test)]

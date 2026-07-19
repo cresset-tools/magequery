@@ -95,6 +95,7 @@ pub fn dispatch(name: &str, args: &[Node], np: u8) -> Result<Option<Node>, LessE
         "isruleset" => Ok(Some(types::bool_keyword(matches!(
             a.first(),
             Some(Node::DetachedRuleset { .. })
+                | Some(Node::Closure { .. })
         )))),
         "iscolor" => Ok(Some(types::bool_keyword(matches!(a.first(), Some(Node::Color(_)))))),
         "isnumber" => Ok(Some(types::bool_keyword(matches!(a.first(), Some(Node::Dimension(_)))))),

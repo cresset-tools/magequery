@@ -116,10 +116,63 @@ impl ImportResolver for FsResolver {
 fn main() {
     let path = PathBuf::from(std::env::args().nth(1).expect("usage: lessc <file.less>"));
     let src = std::fs::read_to_string(&path).expect("read input");
-    let opts = LessOptions {
+    let mut opts = LessOptions {
         filename: Some(path.display().to_string()),
         ..LessOptions::default()
     };
+    // Env-driven option overrides for fixture debugging.
+    match std::env::var("LESSC_MATH").as_deref() {
+        Ok("always") => opts.math = magecommand_less::MathMode::Always,
+        Ok("parens") | Ok("strict") => opts.math = magecommand_less::MathMode::Parens,
+        _ => {}
+    }
+    match std::env::var("LESSC_REWRITE").as_deref() {
+        Ok("all") => opts.rewrite_urls = magecommand_less::RewriteUrls::All,
+        Ok("local") => opts.rewrite_urls = magecommand_less::RewriteUrls::Local,
+        _ => {}
+    }
+    if let Ok(rp) = std::env::var("LESSC_ROOTPATH") {
+        opts.rootpath = Some(rp);
+    }
+    if let Ok(ua) = std::env::var("LESSC_URLARGS") {
+        opts.url_args = Some(ua);
+    }
+    if std::env::var("LESSC_STRICT_UNITS").is_ok() {
+        opts.strict_units = true;
+    }
+    if std::env::var("LESSC_STRICT_IMPORTS").is_ok() {
+        opts.strict_imports = true;
+    }
+    if std::env::var("LESSC_NO_PROCESS_IMPORTS").is_ok() {
+        opts.process_imports = false;
+    }
+    // The less.js test runner's registered functions (mirrors the harness).
+    {
+        use magecommand_less::ast::Node;
+        use magecommand_less::value::Dimension;
+        fn num(n: &Node) -> Option<f64> {
+            match n { Node::Dimension(d) => Some(d.value), _ => None }
+        }
+        fn f_add(a: &[Node]) -> Option<Node> {
+            Some(Node::Dimension(Dimension::number(num(a.first()?)? + num(a.get(1)?)?)))
+        }
+        fn f_increment(a: &[Node]) -> Option<Node> {
+            Some(Node::Dimension(Dimension::number(num(a.first()?)? + 1.0)))
+        }
+        fn f_color(a: &[Node]) -> Option<Node> {
+            match a.first()? {
+                Node::Quoted { value, .. } if value == "evil red" => {
+                    Some(Node::Color(magecommand_less::color::Color::rgb(0x66, 0, 0)))
+                }
+                _ => None,
+            }
+        }
+        opts.custom_functions = vec![
+            ("add".to_string(), f_add as magecommand_less::options::CustomFunction),
+            ("increment".to_string(), f_increment as _),
+            ("_color".to_string(), f_color as _),
+        ];
+    }
     let resolver = FsResolver {
         root: path.parent().map(PathBuf::from).unwrap_or_default(),
     };

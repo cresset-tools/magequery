@@ -61,6 +61,11 @@ impl Default for CompatProfile {
     }
 }
 
+/// A custom function callable from LESS (plan §2.7): already-evaluated
+/// arguments in, `Some(result)` out — or `None` to fall through to the
+/// unknown-function passthrough.
+pub type CustomFunction = fn(&[crate::ast::Node]) -> Option<crate::ast::Node>;
+
 /// The full option set the Rust API accepts (plan §5.4/§9.5). Field names and
 /// defaults mirror less.js `default-options.js`.
 #[derive(Debug, Clone)]
@@ -115,6 +120,12 @@ pub struct LessOptions {
     pub php_float_shim: bool,
     /// Profile-gated PHP-encoding shim (off by default) — diagnostic only (§3-G).
     pub php_encoding_shim: bool,
+    /// Registered custom functions (the less.js `functionRegistry.add`
+    /// surface, minimal form): `(lowercased name, fn)` pairs consulted before
+    /// the built-in registry. `None` from the fn = not handled → the unknown-
+    /// function passthrough re-emits the call (plan §2.7). Test harnesses use
+    /// this for less.js's runner-registered `add`/`increment`/`_color`.
+    pub custom_functions: Vec<(String, CustomFunction)>,
     /// Eval-depth cap for mixin/detached-ruleset/import recursion (plan §2.5)
     /// — the runaway-input guard. `None` = the engine default (128). less.js
     /// has no explicit cap (a runaway dies on the JS call stack); we error
@@ -143,6 +154,7 @@ impl Default for LessOptions {
             global_vars: Vec::new(),
             modify_vars: Vec::new(),
             banner: None,
+            custom_functions: Vec::new(),
             dump_line_numbers: false,
             source_map: false,
             process_imports: true,

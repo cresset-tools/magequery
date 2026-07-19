@@ -496,6 +496,14 @@ impl<'a> Ctx<'a> {
                     Some((injected?, ex_own, ex_children, false))
                 }
                 Node::ImportResolved(ir) => {
+                    // `strictImports` (§2.9): imports inside a plain ruleset
+                    // are not evaluated (less.js `Ruleset.eval` gates
+                    // `evalImports` on root/allowImports) — root and at-rule
+                    // bodies still import.
+                    if self.opts.strict_imports && self_paths.is_some() {
+                        expansions.push(None);
+                        continue;
+                    }
                     // Stage 2 of §2.9: the pre-fetched file's rules evaluate at
                     // this position and splice into the caller's scope, with
                     // the same fresh-media-context + re-merge treatment as a
@@ -574,8 +582,22 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 Node::Import {
-                    path, features, ..
+                    path, features, options, ..
                 } => {
+                    // With import processing disabled, a LESS import (by
+                    // option or less.js's `[#.&?]css([?;].*)?$` path test) has
+                    // no fetched root and evaluates to nothing (less.js
+                    // `Import.eval` without an ImportVisitor pass) — only CSS
+                    // imports re-emit (process-imports/google).
+                    if !self.opts.process_imports {
+                        let has = |o: &str| options.iter().any(|x| x == o);
+                        let raw = import_path_text(path);
+                        let is_css = has("css")
+                            || (!has("less") && !has("inline") && import_path_is_css(&raw));
+                        if !is_css {
+                            continue;
+                        }
+                    }
                     // A CSS/`url()` import re-emits as a literal `@import`
                     // at-rule, with the path rewritten per §2.18 (less.js
                     // `Import.evalPath`).
@@ -1104,6 +1126,19 @@ impl<'a> Ctx<'a> {
     // ------------------------------------------------------------------
 
     fn eval_declaration(&mut self, d: &Declaration) -> Result<Node, LessError> {
+        // less.js `Declaration.eval` math bypass: under math=always, a `font`
+        // declaration's value evaluates in parens-division mode (the font
+        // shorthand `0/0` protection — units/no-strict).
+        if self.math == MathMode::Always && d.name == "font" {
+            self.math = MathMode::ParensDivision;
+            let res = self.eval_declaration_inner(d);
+            self.math = MathMode::Always;
+            return res;
+        }
+        self.eval_declaration_inner(d)
+    }
+
+    fn eval_declaration_inner(&mut self, d: &Declaration) -> Result<Node, LessError> {
         // Resolve interpolation in the property name. less.js's `evalName`
         // genCSSes each piece — a quoted variable KEEPS its quotes
         // (`@{prop}: red` with `@prop: "color"` → `"color": red`, F18).
@@ -1218,7 +1253,41 @@ impl<'a> Ctx<'a> {
                 value: Box::new(self.eval_value(value)?),
             }),
             Node::Url(inner) => {
-                let v = self.eval_value(inner)?;
+                let mut v = self.eval_value(inner)?;
+                // less.js `URL.eval` (§2.18): prepend the current file's
+                // rootpath when the path requires a rewrite (mode-dependent),
+                // else normalize; then append `urlArgs`. An unquoted rootpath
+                // is escaped (`folder (1)/` → `folder\ \(1\)/`).
+                let rootpath = self
+                    .file_stack
+                    .last()
+                    .map(|f| f.rootpath.clone())
+                    .unwrap_or_default();
+                let quoted = matches!(v, Node::Quoted { .. });
+                let val: Option<&mut String> = match &mut v {
+                    Node::Quoted { value, .. } => Some(value),
+                    Node::Anonymous(t) => Some(t),
+                    Node::Keyword(t) => Some(t),
+                    _ => None,
+                };
+                if let Some(val) = val {
+                    if self.path_requires_rewrite(val) {
+                        let rp = if quoted { rootpath } else { escape_url_path(&rootpath) };
+                        *val = rewrite_path(val, &rp);
+                    } else {
+                        *val = normalize_path(val);
+                    }
+                    if let Some(args) = &self.opts.url_args {
+                        if !args.is_empty() && !val.trim_start().starts_with("data:") {
+                            let delim = if val.contains('?') { "&" } else { "?" };
+                            let insert = format!("{delim}{args}");
+                            match val.find('#') {
+                                Some(pos) => val.insert_str(pos, &insert),
+                                None => val.push_str(&insert),
+                            }
+                        }
+                    }
+                }
                 Ok(Node::Url(Box::new(v)))
             }
             Node::Quoted {
@@ -1332,7 +1401,7 @@ impl<'a> Ctx<'a> {
     fn eval_negative(&mut self, inner: &Node) -> Result<Node, LessError> {
         if self.is_math_on('*') {
             let minus_one = Node::Dimension(Dimension::number(-1.0));
-            self.eval_binary('*', &minus_one, inner, true)
+            self.eval_binary("*", &minus_one, inner, true)
         } else {
             Ok(Node::Negative(Box::new(self.eval_value(inner)?)))
         }
@@ -1363,9 +1432,18 @@ impl<'a> Ctx<'a> {
         right: &Node,
         spaced: bool,
     ) -> Result<Node, LessError> {
-        let opc = op.chars().next().unwrap_or('+');
-        let opc = if op == "./" { '/' } else { opc };
-        self.eval_binary(opc, left, right, spaced)
+        let mut res = self.eval_binary(op, left, right, spaced)?;
+        // `strictUnits` output rule (less.js `Unit.genCSS` strict branch): a
+        // fully-cancelled unit renders EMPTY — never the `backupUnit` guess
+        // (`(1px / 1px)` → `1`, units/strict).
+        if self.opts.strict_units {
+            if let Node::Dimension(d) = &mut res {
+                if d.unit.numerator.is_empty() {
+                    d.unit.backup = None;
+                }
+            }
+        }
+        Ok(res)
     }
 
     /// The math core (less.js `Operation.eval`): eval operands, and if math is on
@@ -1373,14 +1451,19 @@ impl<'a> Ctx<'a> {
     /// source spacing is preserved for literal emission).
     fn eval_binary(
         &mut self,
-        op: char,
+        op: &str,
         left: &Node,
         right: &Node,
         spaced: bool,
     ) -> Result<Node, LessError> {
+        // `./` — the legacy forced-division operator: division regardless of
+        // the parens-division slash rule (less.js `isMathOn('./')` — only the
+        // parens-mode parens requirement still applies).
+        let opc = if op == "./" { '/' } else { op.chars().next().unwrap_or('+') };
+        let math_on = if op == "./" { self.is_math_on_plain() } else { self.is_math_on(opc) };
         let a = self.eval_value(left)?;
         let b = self.eval_value(right)?;
-        if !self.is_math_on(op) {
+        if !math_on {
             return Ok(Node::Operation {
                 op: op.to_string(),
                 left: Box::new(a),
@@ -1388,6 +1471,7 @@ impl<'a> Ctx<'a> {
                 spaced,
             });
         }
+        let op = opc;
         // Coerce keyword colors, then dimension↔color.
         let a = coerce_color(a);
         let b = coerce_color(b);
@@ -1542,6 +1626,15 @@ impl<'a> Ctx<'a> {
             // BEFORE a registered function sees them — but the passthrough
             // re-emit below keeps the unfiltered args.
             let filtered = filter_call_args(&evaled);
+            // Registered custom functions (the minimal `functionRegistry.add`
+            // surface, plan §2.7) shadow the built-ins; `None` falls through.
+            for (fname, f) in &self.opts.custom_functions {
+                if *fname == lname {
+                    if let Some(result) = f(&filtered) {
+                        return Ok(result);
+                    }
+                }
+            }
             if let Some(result) = functions::dispatch(&lname, &filtered, self.opts.num_precision)? {
                 return Ok(result);
             }
@@ -1807,12 +1900,19 @@ impl<'a> Ctx<'a> {
     /// into individual arguments (less.js `arg.expand`).
     fn eval_call_args(&mut self, args: &[MixinArg]) -> Result<Vec<EvArg>, LessError> {
         let mut out = Vec::with_capacity(args.len());
+        // less.js parser quirk (faithfully reproduced): the args parser's
+        // `expand` local is NEVER reset between arguments, so once one arg
+        // spreads (`@x...`), every LATER list-valued arg in the same call
+        // spreads too (`.aa(@y, @x..., and again)` splits `and again`;
+        // math-*/mixins-args expand-op-9).
+        let mut sticky_expand = false;
         for a in args {
             let name = a.name.as_ref().map(|n| n.trim_start_matches('@').to_string());
             // Detect the spread form on an unnamed argument.
             if name.is_none() {
                 if let Node::Anonymous(s) = a.value.as_ref() {
                     if let Some(inner) = s.trim().strip_suffix("...") {
+                        sticky_expand = true;
                         let value = self.reparse_and_eval(inner.trim())?;
                         match &value {
                             Node::Value(items) | Node::Expression(items) => {
@@ -1827,6 +1927,14 @@ impl<'a> Ctx<'a> {
                 }
             }
             let value = self.reparse_arg(a.value.as_ref())?;
+            if sticky_expand && name.is_none() {
+                if let Node::Value(items) | Node::Expression(items) = &value {
+                    for it in items {
+                        out.push(EvArg { name: None, value: it.clone() });
+                    }
+                    continue;
+                }
+            }
             out.push(EvArg { name, value });
         }
         Ok(out)
@@ -2234,12 +2342,16 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// less.js `contexts.Eval.pathRequiresRewrite`.
+    /// less.js `contexts.Eval.pathRequiresRewrite`: `local` tests explicit
+    /// `./`-relativity, everything else (INCLUDING off) plain relativity —
+    /// `off` differs upstream only in the per-file rootpath accumulation
+    /// (`ImportManager.push` skips the directory diff), not here.
     fn path_requires_rewrite(&self, path: &str) -> bool {
         match self.opts.rewrite_urls {
-            crate::options::RewriteUrls::Off => false,
             crate::options::RewriteUrls::Local => is_path_local_relative(path),
-            crate::options::RewriteUrls::All => is_path_relative(path),
+            crate::options::RewriteUrls::Off | crate::options::RewriteUrls::All => {
+                is_path_relative(path)
+            }
         }
     }
 
@@ -3670,6 +3782,45 @@ fn is_just_parent(sel: &Selector) -> bool {
 }
 
 /// less.js `isPathRelative` (§2.18): not protocol/absolute/fragment.
+/// less.js `url.js` `escapePath`: backslash-escape `( ) ' "` + whitespace.
+fn escape_url_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for ch in path.chars() {
+        if matches!(ch, '(' | ')' | '\'' | '"') || ch.is_whitespace() {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// The raw path text of an `@import` target (quoted string or `url(...)`).
+fn import_path_text(path: &Node) -> String {
+    match path {
+        Node::Quoted { value, .. } => value.clone(),
+        Node::Url(inner) => import_path_text(inner),
+        Node::Anonymous(t) | Node::Keyword(t) => t.clone(),
+        _ => String::new(),
+    }
+}
+
+/// less.js `Import` css-path test: `/[#.&?]css([?;].*)?$/`.
+fn import_path_is_css(path: &str) -> bool {
+    for (i, _) in path.match_indices("css") {
+        if i == 0 {
+            continue;
+        }
+        if !matches!(path.as_bytes()[i - 1], b'#' | b'.' | b'&' | b'?') {
+            continue;
+        }
+        let rest = &path[i + 3..];
+        if rest.is_empty() || rest.starts_with('?') || rest.starts_with(';') {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_path_relative(path: &str) -> bool {
     // /^(?:[a-z-]+:|\/|#)/i
     if path.starts_with('/') || path.starts_with('#') {

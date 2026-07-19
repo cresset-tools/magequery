@@ -29,7 +29,7 @@
 use libtest_mimic::{Arguments, Failed, Trial};
 use magecommand_less::{
     compile, FileInfo, ImportError, ImportPayload, ImportRequest, ImportResolver, LessOptions,
-    ResolvedImport,
+    MathMode, ResolvedImport, RewriteUrls,
 };
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -76,6 +76,36 @@ const EXPECTED_PASS: &[&str] = &[
     "color-functions/operations",
     "color-functions/rgba",
     "comments/comments2",
+    "config/globalVars/extended",
+    "config/globalVars/simple",
+    "config/include-path-string/include-path-string",
+    "config/include-path/include-path",
+    "config/math-always/mixins-guards",
+    "config/math-always/no-sm-operations",
+    "config/math-parens-division/media-math",
+    "config/math-parens-division/mixins-args",
+    "config/math-parens-division/new-division",
+    "config/math-parens-division/parens",
+    "config/math-strict/css",
+    "config/math-strict/media-math",
+    "config/math-strict/mixins-args",
+    "config/math-strict/parens",
+    "config/modifyVars/extended",
+    "config/namespacing/namespacing-1",
+    "config/namespacing/namespacing-2",
+    "config/namespacing/namespacing-5",
+    "config/namespacing/namespacing-6",
+    "config/namespacing/namespacing-functions",
+    "config/process-imports/google",
+    "config/rewrite-urls-all/rewrite-urls-all",
+    "config/rewrite-urls-local/rewrite-urls-local",
+    "config/rootpath-rewrite-urls-all/rootpath-rewrite-urls-all",
+    "config/rootpath-rewrite-urls-local/rootpath-rewrite-urls-local",
+    "config/static-urls/urls",
+    "config/strict-imports/strict-imports",
+    "config/units/no-strict/no-strict",
+    "config/units/strict/strict-units",
+    "config/url-args/urls",
     "container/container",
     "css-3/css-3",
     "css-escapes/css-escapes",
@@ -94,6 +124,7 @@ const EXPECTED_PASS: &[&str] = &[
     "extend/extend-clearfix",
     "extract-and-length/extract-and-length",
     "functions-each/functions-each",
+    "functions/functions",
     "ie-filters/ie-filters",
     "impor/impor",
     "import/import-inline",
@@ -160,6 +191,8 @@ fn testdata_root() -> PathBuf {
 struct FsResolver {
     /// The fixture's directory (fallback for imports with no current file).
     root: PathBuf,
+    /// `paths` — extra import search roots (the include-path configs).
+    include_paths: Vec<PathBuf>,
 }
 
 impl FsResolver {
@@ -176,6 +209,9 @@ impl FsResolver {
             out.push(PathBuf::from(from_dir).join(raw));
         }
         out.push(self.root.join(raw));
+        for p in &self.include_paths {
+            out.push(p.join(raw));
+        }
         out.push(testdata_root().join("node_modules").join(raw));
         out
     }
@@ -235,7 +271,15 @@ impl ImportResolver for FsResolver {
         } else {
             PathBuf::from(current_directory)
         };
-        fs::read(base.join(path)).ok()
+        if let Ok(bytes) = fs::read(base.join(path)) {
+            return Some(bytes);
+        }
+        for p in &self.include_paths {
+            if let Ok(bytes) = fs::read(p.join(path)) {
+                return Some(bytes);
+            }
+        }
+        None
     }
 }
 
@@ -243,14 +287,144 @@ impl ImportResolver for FsResolver {
 // Fixture discovery
 // ---------------------------------------------------------------------------
 
-/// Every in-scope `.less` input (a `.less` with a sibling `.css`, outside the
-/// deferred JS/plugin sub-suites), sorted for a stable test order.
-fn discover() -> Vec<PathBuf> {
-    let unit = testdata_root().join("tests-unit");
+/// One corpus entry: the `.less` input, its golden `.css`, and the trial name.
+struct Fixture {
+    less: PathBuf,
+    css: PathBuf,
+    name: String,
+}
+
+/// Every in-scope `.less` input, sorted for a stable test order:
+/// - `tests-unit/**`: a `.less` with a sibling `.css`, outside the deferred
+///   JS/plugin sub-suites (default options);
+/// - `tests-config/**`: the option-driven compile fixtures (per-directory
+///   options in [`config_options`]); the `math-<mode>/x.less` inputs pair with
+///   goldens under `math/<mode>/x.css` (the upstream v4.6.7 layout).
+///
+/// NOT vendored/in scope (documented, plan §5.2/§8): JS-plugin dirs
+/// (`filemanagerPlugin`, `postProcessorPlugin`, `preProcessorPlugin`,
+/// `visitorPlugin`), `debug/` (dumpLineNumbers), `sourcemaps*`, and the
+/// javascript-enabled error suites (`js-type-errors`, `no-js-errors`) —
+/// `tests-error/` is a later increment.
+fn discover() -> Vec<Fixture> {
+    let root = testdata_root();
+    let unit = root.join("tests-unit");
+    let mut less_files = Vec::new();
+    walk(&unit, &mut less_files);
+    less_files.retain(|less| less.with_extension("css").is_file() && !is_skipped(less));
+    let mut out: Vec<Fixture> = less_files
+        .into_iter()
+        .map(|less| {
+            let css = less.with_extension("css");
+            let name = trial_name(&less);
+            Fixture { less, css, name }
+        })
+        .collect();
+
+    let config = root.join("tests-config");
+    let mut cfg_files = Vec::new();
+    walk(&config, &mut cfg_files);
+    for less in cfg_files {
+        let rel = less.strip_prefix(&config).unwrap();
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        let first = rel_str.split('/').next().unwrap_or("").to_string();
+        // The math goldens live under `math/<mode>/`; inputs under `math-<mode>/`.
+        let css = if let Some(mode) = first.strip_prefix("math-") {
+            config
+                .join("math")
+                .join(mode)
+                .join(rel.file_name().unwrap())
+                .with_extension("css")
+        } else {
+            less.with_extension("css")
+        };
+        if !css.is_file() {
+            continue;
+        }
+        let name = format!(
+            "config/{}",
+            rel_str.trim_end_matches(".less")
+        );
+        out.push(Fixture { less, css, name });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// Per-directory options for `tests-config/` fixtures — the vendored
+/// `styles.config.cjs` contents (deleted from the tree), transcribed here so
+/// the harness needs no Node. Returns (options, include-paths).
+fn config_options(first_dir: &str, less: &Path) -> (LessOptions, Vec<PathBuf>) {
+    let mut opts = LessOptions::default();
+    let mut paths = Vec::new();
+    match first_dir {
+        "3rd-party" => opts.math = MathMode::Always,
+        "at-rules-compressed" | "at-rules-compressed-evaluation" => opts.compress = true,
+        "compression" => {
+            opts.math = MathMode::Parens;
+            opts.compress = true;
+        }
+        "include-path" | "include-path-string" => {
+            paths.push(testdata_root().join("data"));
+        }
+        "process-imports" => opts.process_imports = false,
+        "rewrite-urls-all" => opts.rewrite_urls = RewriteUrls::All,
+        "rewrite-urls-local" => opts.rewrite_urls = RewriteUrls::Local,
+        "rootpath-rewrite-urls-all" => {
+            opts.rootpath = Some("http://example.com/assets/css/".to_string());
+            opts.rewrite_urls = RewriteUrls::All;
+        }
+        "rootpath-rewrite-urls-local" => {
+            opts.rootpath = Some("http://example.com/assets/css/".to_string());
+            opts.rewrite_urls = RewriteUrls::Local;
+        }
+        "static-urls" => {
+            opts.math = MathMode::Parens;
+            opts.rootpath = Some("folder (1)/".to_string());
+        }
+        "strict-imports" => opts.strict_imports = true,
+        "url-args" => opts.url_args = Some("424242".to_string()),
+        "globalVars" => {
+            opts.banner = Some("/**\n  * Test\n  */\n".to_string());
+            opts.global_vars = read_vars_json(less);
+        }
+        "modifyVars" => opts.modify_vars = read_vars_json(less),
+        "units" => {
+            opts.math = MathMode::Always;
+            opts.strict_units = less
+                .to_string_lossy()
+                .contains("/strict/");
+        }
+        "math-always" => opts.math = MathMode::Always,
+        "math-parens-division" => opts.math = MathMode::ParensDivision,
+        "math-strict" => opts.math = MathMode::Parens,
+        "namespacing" => {}
+        _ => {}
+    }
+    (opts, paths)
+}
+
+/// Read the sibling `<name>.json` flat string map (the globalVars/modifyVars
+/// per-file variables the less.js runner loads).
+fn read_vars_json(less: &Path) -> Vec<(String, String)> {
+    let json = less.with_extension("json");
+    let Ok(text) = fs::read_to_string(&json) else { return Vec::new() };
+    parse_flat_json(&text)
+}
+
+/// A tiny parser for the flat `{"key": "value", …}` json the fixtures use.
+fn parse_flat_json(text: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
-    walk(&unit, &mut out);
-    out.retain(|less| less.with_extension("css").is_file() && !is_skipped(less));
-    out.sort();
+    let inner = text.trim().trim_start_matches('{').trim_end_matches('}');
+    for part in inner.split(',') {
+        let mut kv = part.splitn(2, ':');
+        let (Some(k), Some(v)) = (kv.next(), kv.next()) else { continue };
+        let k = k.trim().trim_matches('"');
+        let v = v.trim().trim_matches('"');
+        if !k.is_empty() {
+            out.push((k.to_string(), v.to_string()));
+        }
+    }
     out
 }
 
@@ -351,19 +525,56 @@ fn strip_trailing_newlines(s: &str) -> &str {
 // One fixture
 // ---------------------------------------------------------------------------
 
-fn run_one(less: &Path, root: &Path, passed: &AtomicUsize) -> Result<(), Failed> {
+/// The less.js test runner's globally registered custom functions
+/// (`less-test.js` `functionRegistry.addMultiple`): `add`, `increment`,
+/// `_color` — exercised by `functions/functions`.
+fn harness_functions() -> Vec<(String, magecommand_less::options::CustomFunction)> {
+    use magecommand_less::ast::Node;
+    use magecommand_less::value::Dimension;
+    fn num(n: &Node) -> Option<f64> {
+        match n {
+            Node::Dimension(d) => Some(d.value),
+            _ => None,
+        }
+    }
+    fn f_add(a: &[Node]) -> Option<Node> {
+        Some(Node::Dimension(Dimension::number(num(a.first()?)? + num(a.get(1)?)?)))
+    }
+    fn f_increment(a: &[Node]) -> Option<Node> {
+        Some(Node::Dimension(Dimension::number(num(a.first()?)? + 1.0)))
+    }
+    fn f_color(a: &[Node]) -> Option<Node> {
+        match a.first()? {
+            Node::Quoted { value, .. } if value == "evil red" => {
+                Some(Node::Color(magecommand_less::color::Color::rgb(0x66, 0, 0)))
+            }
+            _ => None,
+        }
+    }
+    vec![
+        ("add".to_string(), f_add as magecommand_less::options::CustomFunction),
+        ("increment".to_string(), f_increment as _),
+        ("_color".to_string(), f_color as _),
+    ]
+}
+
+fn run_one(fx: &Fixture, root: &Path, passed: &AtomicUsize) -> Result<(), Failed> {
+    let less = &fx.less;
     let src = fs::read_to_string(less)
         .map_err(|e| Failed::from(format!("read input {}: {e}", less.display())))?;
-    let expected_raw = fs::read_to_string(less.with_extension("css"))
+    let expected_raw = fs::read_to_string(&fx.css)
         .map_err(|e| Failed::from(format!("read expected {}: {e}", less.display())))?;
 
     let dir = less.parent().unwrap_or(root);
-    let opts = LessOptions {
-        filename: Some(less.display().to_string()),
-        ..LessOptions::default()
+    let (mut opts, include_paths) = match fx.name.strip_prefix("config/") {
+        Some(rest) => config_options(rest.split('/').next().unwrap_or(""), less),
+        None => (LessOptions::default(), Vec::new()),
     };
+    opts.filename = Some(less.display().to_string());
+    opts.custom_functions = harness_functions();
     let resolver = FsResolver {
         root: dir.to_path_buf(),
+        include_paths,
     };
 
     // Raw compile+diff outcome — an error or a byte-mismatch both mean "red".
@@ -385,7 +596,7 @@ fn run_one(less: &Path, root: &Path, passed: &AtomicUsize) -> Result<(), Failed>
     // Ratchet gate (plan §5.6): EXPECTED_PASS is the checked-in floor. A known
     // xfail staying red is fine; a floor fixture regressing or an xfail newly
     // passing both fail the suite (and must be reconciled by hand).
-    let name = trial_name(less);
+    let name = &fx.name;
     let expected_pass = EXPECTED_PASS.contains(&name.as_str());
     match (expected_pass, did_pass) {
         (true, true) | (false, false) => Ok(()),
@@ -435,8 +646,8 @@ fn main() {
     let floor = EXPECTED_PASS.len();
     let trials: Vec<Trial> = fixtures
         .into_iter()
-        .map(|less| {
-            let name = trial_name(&less);
+        .map(|fx| {
+            let name = fx.name.clone();
             // `xfail` fixtures are labelled so the milestone-1 red set is visible
             // in the libtest output rather than masquerading as a plain pass.
             let kind = if EXPECTED_PASS.contains(&name.as_str()) {
@@ -446,7 +657,7 @@ fn main() {
             };
             let passed = Arc::clone(&passed);
             let root = root.clone();
-            Trial::test(name, move || run_one(&less, &root, &passed)).with_kind(kind)
+            Trial::test(name, move || run_one(&fx, &root, &passed)).with_kind(kind)
         })
         .collect();
 
