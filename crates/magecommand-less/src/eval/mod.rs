@@ -149,11 +149,38 @@ struct EvArg {
 /// legitimate recursion. Overridable via [`LessOptions::max_eval_depth`].
 const MAX_MIXIN_DEPTH: usize = 64;
 
+/// One output selector path (post JoinSelector) with its `:extend`/visibility
+/// state (plan §2.8): `visible` = renders (false inside `(reference)` imports
+/// until an extend re-enables a graft); `has_extend` = this path carries an
+/// extend, so other extends never match it (less.js `extendList` skip).
+#[derive(Clone)]
+struct OutSel {
+    css: String,
+    visible: bool,
+    has_extend: bool,
+}
+
+impl OutSel {
+    fn plain(css: String) -> OutSel {
+        OutSel { css, visible: true, has_extend: false }
+    }
+}
+
+fn plain_sels(paths: Vec<String>) -> Vec<OutSel> {
+    paths.into_iter().map(OutSel::plain).collect()
+}
+
 /// One flattened output node (post JoinSelector). genCSS emits these at top level.
 enum Out {
     Rule {
-        selectors: Vec<String>,
+        selectors: Vec<OutSel>,
         decls: Vec<Node>,
+        /// The `:extend`s hanging off this rule's paths (plan §2.8), in
+        /// less.js finder order (path-major, then per-path clause order).
+        extends: Vec<extend::EvExtend>,
+        /// A body `&:extend(…);` was present — every path skips matching
+        /// (less.js `extendOnEveryPath`).
+        extend_on_every_path: bool,
     },
     At {
         header: String,
@@ -229,6 +256,11 @@ pub fn eval(
     }
     outs.extend(children);
     ctx.pop_frame();
+
+    // The extend pass (plan §2.8): finder → chaining fixpoint → replace, then
+    // `(reference)` visibility resolution — runs on the flattened output tree
+    // (post eval + join + visibility marking), before output ordering.
+    extend::apply(&mut outs, &mut ctx.warnings)?;
 
     // Output ordering — the less.js `Ruleset.genCSS` root splice (§2.13/§C):
     // `@charset`s go to the very top; `@import`s float up to just after any
@@ -596,6 +628,10 @@ impl<'a> Ctx<'a> {
                     let evaled = self.eval_declaration(d)?;
                     own.push(evaled);
                 }
+                // A body `&:extend(…);` — passed up through `own` (also across
+                // mixin splices) to the enclosing ruleset, which converts it
+                // (plan §2.8). At the stylesheet root it has no paths → dropped.
+                Node::ExtendRule(_) => own.push(rule.clone()),
                 Node::Ruleset(rs) => {
                     // A single bare-`&` child ruleset (`& when (…)`, `& { … }`) is
                     // **folded** into the parent: its own declarations join the
@@ -778,6 +814,7 @@ impl<'a> Ctx<'a> {
         // Evaluate selectors (guards + interpolation), collect surviving selector
         // strings, then join with the parent context.
         let mut own_sel: Vec<String> = Vec::new();
+        let mut sel_extends: Vec<Vec<crate::ast::ExtendTarget>> = Vec::new();
         for sel in selectors {
             if let Some(g) = &sel.guard {
                 if !self.eval_guard(g)? {
@@ -785,21 +822,74 @@ impl<'a> Ctx<'a> {
                 }
             }
             own_sel.push(self.render_selector(sel)?);
+            sel_extends.push(sel.extend_list.clone());
         }
         let joined = join_selectors(parent_paths, &own_sel);
 
         self.push_frame(frame_of(rules.to_vec()));
-        let (decls, children) = self.process_body(rules, Some(&joined))?;
+        let (mut decls, children) = self.process_body(rules, Some(&joined))?;
         self.pop_frame();
 
-        if has_visible(&decls) {
+        // Body `&:extend(…);` statements apply to EVERY path of this ruleset
+        // (less.js `extendOnEveryPath`); selector-attached clauses only to the
+        // paths of their own selector. Finder order: path-major, per-path the
+        // selector's own clauses first, then the body ones (plan §2.8).
+        let mut body_targets: Vec<crate::ast::ExtendTarget> = Vec::new();
+        decls.retain(|d| match d {
+            Node::ExtendRule(ts) => {
+                body_targets.extend(ts.iter().cloned());
+                false
+            }
+            _ => true,
+        });
+        let visible = self.visibility_blocks == 0;
+        let per_own = if own_sel.is_empty() { 1 } else { joined.len() / own_sel.len() };
+        let mut extends: Vec<extend::EvExtend> = Vec::new();
+        let mut osels: Vec<OutSel> = Vec::with_capacity(joined.len());
+        for (pi, path) in joined.iter().enumerate() {
+            let si = (pi / per_own.max(1)).min(sel_extends.len().saturating_sub(1));
+            let own_list = sel_extends.get(si).map(|v| v.as_slice()).unwrap_or(&[]);
+            for (j, t) in own_list.iter().chain(body_targets.iter()).enumerate() {
+                extends.push(extend::EvExtend {
+                    self_sel: path.clone(),
+                    target_css: self.render_extend_target(&t.elements)?,
+                    all: t.all,
+                    visible,
+                    first_on_path: j == 0,
+                });
+            }
+            osels.push(OutSel {
+                css: path.clone(),
+                visible: true,
+                has_extend: !body_targets.is_empty() || !own_list.is_empty(),
+            });
+        }
+
+        if has_visible(&decls) || !extends.is_empty() {
             out.push(Out::Rule {
-                selectors: joined,
+                selectors: osels,
                 decls,
+                extends,
+                extend_on_every_path: !body_targets.is_empty(),
             });
         }
         out.extend(children);
         Ok(())
+    }
+
+    /// Render one `:extend` target's elements to a matchable selector string
+    /// (interpolation evaluated, like [`Self::render_selector`]).
+    fn render_extend_target(&mut self, els: &[Element]) -> Result<String, LessError> {
+        let mut s = String::new();
+        for el in els {
+            s.push_str(&combinator_css(&el.combinator));
+            if el.value.contains("@{") || el.value.contains("${") {
+                s.push_str(&self.interpolate_css(&el.value)?);
+            } else {
+                s.push_str(&el.value);
+            }
+        }
+        Ok(s.trim_start().to_string())
     }
 
     fn eval_at_rule(
@@ -883,8 +973,10 @@ impl<'a> Ctx<'a> {
                 if has_visible(&own) {
                     body_outs.push(match parent_paths {
                         Some(paths) if wraps && !paths.is_empty() => Out::Rule {
-                            selectors: paths.to_vec(),
+                            selectors: plain_sels(paths.to_vec()),
                             decls: own,
+                            extends: Vec::new(),
+                            extend_on_every_path: false,
                         },
                         _ => Out::Decls(own),
                     });
@@ -965,8 +1057,10 @@ impl<'a> Ctx<'a> {
         if has_visible(&own) {
             body_outs.push(match parent_paths {
                 Some(paths) if !paths.is_empty() => Out::Rule {
-                    selectors: paths.to_vec(),
+                    selectors: plain_sels(paths.to_vec()),
                     decls: own,
+                    extends: Vec::new(),
+                    extend_on_every_path: false,
                 },
                 _ => Out::Decls(own),
             });
@@ -1632,7 +1726,7 @@ impl<'a> Ctx<'a> {
         let mut chosen: Vec<Candidate> = Vec::new();
         for k in 0..frames.len() {
             let def_scope: Vec<Frame> = frames[k..].to_vec();
-            let mut found = find_candidates(&frames[k].borrow(), &path, &def_scope, &self.closures, &[]);
+            let mut found = find_candidates(&frames[k].borrow(), &path, &def_scope, &self.closures, &[], false);
             // A name hit counts as "found" BEFORE the recursion filter — less.js
             // sets `isOneFound` on the frame `find` result, then `continue`s the
             // on-stack candidates, so a fully-recursive call errors "No matching
@@ -2000,6 +2094,15 @@ impl<'a> Ctx<'a> {
         }
 
         if let Some(content) = &ir.inline {
+            // Inside a ruleset the raw payload renders in the declaration
+            // block at its source position (an Anonymous rule in less.js) —
+            // hidden contexts drop it with the rest of the block's decls.
+            if self_paths.is_some() && ir.features.is_none() {
+                if !(ir.reference || self.visibility_blocks > 0) {
+                    own.push(Node::Anonymous(content.clone()));
+                }
+                return Ok(Vec::new());
+            }
             let out = match &ir.features {
                 Some(f) => {
                     let fs = self.eval_media_features(f)?.join(", ");
@@ -3107,10 +3210,17 @@ fn find_candidates(
     def_scope: &[Frame],
     closures: &[Vec<Frame>],
     path_guards: &[Node],
+    follow_imports: bool,
 ) -> Vec<Candidate> {
     let mut out = Vec::new();
     for r in rules {
         match r {
+            // An un-inlined import's top level is part of this rule list for
+            // lookup purposes (less.js peeks inside Import roots, §2.9) — the
+            // `#ns { @import (reference) "…" }` namespaced-mixin case.
+            Node::ImportResolved(ir) if !ir.skip && follow_imports => {
+                out.extend(find_candidates(&ir.rules, path, def_scope, closures, path_guards, true));
+            }
             // A scope-injected closure: resolve against the frames frozen at
             // injection (the enclosing mixin's bound params), not the caller's.
             Node::Closure { inner, scope } => {
@@ -3132,7 +3242,7 @@ fn find_candidates(
                             let mut inner_scope = vec![frame_of(def.rules.clone())];
                             inner_scope.extend(captured.iter().cloned());
                             let child = push_guard(path_guards, def.guard.as_deref());
-                            out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child));
+                            out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child, true));
                         }
                     }
                 }
@@ -3157,7 +3267,7 @@ fn find_candidates(
                         let mut inner_scope = vec![frame_of(def.rules.clone())];
                         inner_scope.extend(def_scope.iter().cloned());
                         let child = push_guard(path_guards, def.guard.as_deref());
-                        out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child));
+                        out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child, true));
                     }
                 }
             }
@@ -3185,7 +3295,7 @@ fn find_candidates(
                             let mut inner_scope = vec![frame_of(rs.rules.clone())];
                             inner_scope.extend(def_scope.iter().cloned());
                             let child = push_guard(path_guards, sel.guard.as_deref());
-                            out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope, closures, &child));
+                            out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope, closures, &child, true));
                         }
                         break; // one selector per ruleset matches the prefix
                     }
@@ -3705,12 +3815,23 @@ fn join_selectors(parent: Option<&[String]>, own: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for os in own {
         if os.contains('&') {
-            for pp in &parents {
-                // Leading-trim only: a trailing `&` replaced by an empty root
-                // keeps its descendant space (`.a &` at root → `.a `), matching
-                // less.js's element-level join (§2.2).
-                out.push(os.replace('&', pp).trim_start().to_string());
+            // EACH `&` occurrence expands over the parent paths independently —
+            // a selector with N `&`s yields parents^N combinations, leftmost
+            // `&` varying slowest (less.js `replaceParentSelector`; the
+            // extend-nest amp-test case). Leading-trim only: a trailing `&`
+            // replaced by an empty root keeps its descendant space
+            // (`.a &` at root → `.a `), matching the element-level join (§2.2).
+            let mut acc: Vec<String> = vec![os.clone()];
+            while acc.first().map(|s| s.contains('&')).unwrap_or(false) {
+                let mut next = Vec::with_capacity(acc.len() * parents.len());
+                for s in &acc {
+                    for pp in &parents {
+                        next.push(s.replacen('&', pp, 1));
+                    }
+                }
+                acc = next;
             }
+            out.extend(acc.into_iter().map(|s| s.trim_start().to_string()));
         } else {
             for pp in &parents {
                 if pp.is_empty() {
@@ -3861,11 +3982,16 @@ fn render_out(out: &Out, indent: usize, np: u8) -> Option<String> {
             }
             Some(render_decls(decls, &ind, np))
         }
-        Out::Rule { selectors, decls } => {
-            if !has_visible(decls) {
+        Out::Rule { selectors, decls, .. } => {
+            let vis: Vec<&str> = selectors
+                .iter()
+                .filter(|s| s.visible)
+                .map(|s| s.css.as_str())
+                .collect();
+            if vis.is_empty() || !has_visible(decls) {
                 return None;
             }
-            let header = selectors.join(&format!(",\n{ind}"));
+            let header = vis.join(&format!(",\n{ind}"));
             let dind = "  ".repeat(indent + 1);
             let body = render_decls(decls, &dind, np);
             Some(format!("{ind}{header} {{\n{body}\n{ind}}}"))
@@ -4671,6 +4797,11 @@ fn render_decls(decls: &[Node], dind: &str, np: u8) -> String {
                 lines.push(format!("{dind}{}: {}{};", decl.name, val, decl.important));
             }
             Node::Comment { line: false, text, .. } => {
+                lines.push(format!("{dind}{text}"));
+            }
+            // An `(inline)` import payload spliced into the block (§2.9):
+            // verbatim, first line indented, own trailing newline kept.
+            Node::Anonymous(text) => {
                 lines.push(format!("{dind}{text}"));
             }
             Node::AtRule(a) => match &a.block {

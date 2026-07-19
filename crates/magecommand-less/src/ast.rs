@@ -46,8 +46,21 @@ pub struct Selector {
     pub elements: Vec<Element>,
     /// A CSS/mixin guard condition (`when (...)`), unevaluated.
     pub guard: Option<Box<Node>>,
+    /// Trailing `:extend(target[, target…])` clauses attached to this selector
+    /// (plan §2.8). The `:extend` pseudo itself never renders.
+    pub extend_list: Vec<ExtendTarget>,
     /// Source span.
     pub span: Span,
+}
+
+/// One `:extend` target: the selector to match, plus the `all` keyword flag
+/// (fragment match anywhere vs exact whole-selector match; plan §2.8).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExtendTarget {
+    /// The target selector's elements (combinator + value, like [`Selector`]).
+    pub elements: Vec<Element>,
+    /// `all` — non-destructive fragment match (allowBefore/allowAfter).
+    pub all: bool,
 }
 
 /// A single selector element: a combinator plus a value (plan §2.2). The value
@@ -231,6 +244,9 @@ pub enum Node {
     Import { path: Box<Node>, options: Vec<String>, features: Option<Box<Node>>, span: Span },
     /// An `@import` resolved by the pre-eval import pass (eval-only, plan §2.9).
     ImportResolved(Box<ImportResolved>),
+    /// A body `&:extend(target…);` statement (less.js `Extend` rule, plan §2.8):
+    /// applies to every selector path of the enclosing ruleset.
+    ExtendRule(Vec<ExtendTarget>),
     /// A comment. `line` = a `//` comment (stripped from output; plan §2.3).
     Comment { text: String, line: bool, span: Span },
     /// The `//@magento_import` directive (only in `magento_mode`; plan §7.1).
@@ -302,6 +318,7 @@ impl Node {
             Node::VariableDecl { .. }
             | Node::MixinDefinition(_)
             | Node::Closure { .. }
+            | Node::ExtendRule(_)
             | Node::DetachedRuleset { .. } => false,
             // A bare mixin call yields nothing until evaluated; the plain-CSS
             // path never contains one, so treat it as invisible for pruning.

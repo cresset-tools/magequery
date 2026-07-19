@@ -392,7 +392,14 @@ impl<'a> ImportPass<'a> {
         let inline = has("inline");
         let multiple = has("multiple") || in_multiple;
         let optional = has("optional");
-        let reference = has("reference") || scope.reference;
+        // `own_reference` = this statement says `(reference)`; `reference`
+        // additionally inherits the enclosing file's reference-ness (for scope
+        // propagation + the resolver hint). Only the DIRECT flag goes on the
+        // node: inherited hiding is the enclosing import's visibility blanket
+        // at eval time, so a mixin replayed from a visible call site emits
+        // (less.js `_setVisibilityToReplacement`).
+        let own_reference = has("reference");
+        let reference = own_reference || scope.reference;
 
         let req = ImportRequest {
             path: raw_path.to_string(),
@@ -427,7 +434,7 @@ impl<'a> ImportPass<'a> {
                     full_path: raw_path.to_string(),
                     skip: true,
                     multiple,
-                    reference,
+                    reference: own_reference,
                     features: features.clone(),
                     current_directory: scope.current_directory.clone(),
                     rootpath: scope.rootpath.clone(),
@@ -469,7 +476,7 @@ impl<'a> ImportPass<'a> {
                     full_path,
                     skip: false,
                     multiple,
-                    reference,
+                    reference: own_reference,
                     features: features.clone(),
                     current_directory,
                     rootpath,
@@ -486,7 +493,7 @@ impl<'a> ImportPass<'a> {
                         full_path,
                         skip: true,
                         multiple,
-                        reference,
+                        reference: own_reference,
                         features: features.clone(),
                         current_directory,
                         rootpath,
@@ -512,7 +519,7 @@ impl<'a> ImportPass<'a> {
                                 rules,
                                 full_path,
                                 multiple,
-                                reference,
+                                own_reference,
                                 features.clone(),
                                 current_directory,
                                 rootpath,
@@ -548,7 +555,7 @@ impl<'a> ImportPass<'a> {
                     rules,
                     full_path,
                     multiple,
-                    reference,
+                    own_reference,
                     features.clone(),
                     current_directory,
                     rootpath,

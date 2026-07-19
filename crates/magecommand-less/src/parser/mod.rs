@@ -786,7 +786,7 @@ impl<'a> Parser<'a> {
 
     fn parse_selector_statement(&mut self) -> Result<Node, LessError> {
         let start = self.here();
-        let selectors = self.parse_selector_group()?;
+        let mut selectors = self.parse_selector_group()?;
         self.cur.skip_trivia();
         // A mixin call may carry a trailing `!important` before its terminator.
         let important = !self.parse_important().is_empty();
@@ -807,6 +807,16 @@ impl<'a> Parser<'a> {
                 }))
             }
             Some(b';') | Some(b'}') | None => {
+                // The body extend statement `&:extend(target…);` (plan §2.8):
+                // applies to every selector path of the enclosing ruleset.
+                if selectors.len() == 1
+                    && !selectors[0].extend_list.is_empty()
+                    && selectors[0].elements.len() == 1
+                    && selectors[0].elements[0].value == "&"
+                {
+                    self.cur.eat(b';');
+                    return Ok(Node::ExtendRule(selectors.remove(0).extend_list));
+                }
                 // A bare mixin call: `.mixin;` / `.mixin(args);` / `.m() !important;`.
                 self.cur.eat(b';');
                 Ok(self.as_mixin_call(selectors, important, start))
@@ -836,6 +846,7 @@ impl<'a> Parser<'a> {
     fn parse_selector(&mut self) -> Result<Selector, LessError> {
         let start = self.here();
         let mut elements = Vec::new();
+        let mut extend_list: Vec<crate::ast::ExtendTarget> = Vec::new();
         let mut first = true;
         loop {
             let ws = self.cur.skip_trivia();
@@ -845,6 +856,14 @@ impl<'a> Parser<'a> {
                 && matches!(self.cur.peek(4), Some(b) if b.is_ascii_whitespace() || b == b'(')
             {
                 break;
+            }
+            // A trailing `:extend(…)` clause — with or without a leading
+            // combinator (`.a:extend(.b)` ≡ `.a :extend(.b)`); several may
+            // chain (`:extend(.a):extend(.b)`). Plan §2.8.
+            if !first && self.cur.rest().starts_with(":extend(") {
+                self.cur.eat_str(":extend(");
+                extend_list.extend(self.parse_extend_targets()?);
+                continue;
             }
             let ws = if first { false } else { ws };
             match self.cur.cur() {
@@ -862,6 +881,10 @@ impl<'a> Parser<'a> {
                 }
                 break;
             }
+            if !extend_list.is_empty() {
+                // less.js: extend must be the last thing in the selector.
+                return Err(self.err("Extend can only be used at the end of selector"));
+            }
             elements.push(Element {
                 combinator,
                 value,
@@ -874,8 +897,70 @@ impl<'a> Parser<'a> {
         Ok(Selector {
             elements,
             guard,
+            extend_list,
             span: self.span(start),
         })
+    }
+
+    /// Parse the comma-separated target list of one `:extend(…)` clause — the
+    /// opening `(` already consumed; consumes through the closing `)`. Each
+    /// target is a selector-element run with an optional trailing `all`.
+    fn parse_extend_targets(&mut self) -> Result<Vec<crate::ast::ExtendTarget>, LessError> {
+        let mut targets = Vec::new();
+        loop {
+            self.cur.skip_trivia();
+            let mut elements: Vec<Element> = Vec::new();
+            let mut all = false;
+            let mut first = true;
+            loop {
+                let ws = self.cur.skip_trivia();
+                match self.cur.cur() {
+                    None | Some(b')') | Some(b',') => break,
+                    _ => {}
+                }
+                // The `all` option keyword — only just before `)` / `,`.
+                if self.cur.rest().starts_with("all")
+                    && matches!(
+                        self.cur.rest()[3..].trim_start().as_bytes().first(),
+                        None | Some(b')') | Some(b',')
+                    )
+                {
+                    self.cur.eat_str("all");
+                    all = true;
+                    continue;
+                }
+                let combinator = self.scan_combinator(first, if first { false } else { ws });
+                self.cur.skip_whitespace();
+                let elem_start = self.here();
+                let value = self.scan_element_value();
+                if value.is_empty() {
+                    break;
+                }
+                elements.push(Element {
+                    combinator,
+                    value,
+                    span: self.span(elem_start),
+                });
+                first = false;
+            }
+            if elements.is_empty() {
+                return Err(self.err("expected a selector in :extend"));
+            }
+            targets.push(crate::ast::ExtendTarget { elements, all });
+            self.cur.skip_trivia();
+            match self.cur.cur() {
+                Some(b',') => {
+                    self.cur.bump();
+                    continue;
+                }
+                Some(b')') => {
+                    self.cur.bump();
+                    break;
+                }
+                _ => return Err(self.err("expected ')' or ',' in :extend")),
+            }
+        }
+        Ok(targets)
     }
 
     /// A combinator preceding an element (plan §4.7 / less.js `combinator`).
@@ -937,6 +1022,9 @@ impl<'a> Parser<'a> {
                     self.cur.bump();
                     self.cur.bump();
                 }
+                // `:extend(…)` is never part of an element — it ends the
+                // compound so the selector parser can claim it (plan §2.8).
+                Some(b':') if self.cur.rest().starts_with(":extend(") => break,
                 Some(b'.') | Some(b'#') | Some(b':') | Some(b'&') | Some(b'*') | Some(b'%')
                 | Some(b'|') => {
                     self.cur.bump();
