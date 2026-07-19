@@ -218,6 +218,27 @@ pub struct ImportResolved {
     pub span: Span,
 }
 
+/// The eval context of a flattened import's spliced rules (eval-only, plan
+/// §2.9 stage 2 / X1): [`Node::FileEnter`]/[`Node::FileExit`] markers bracket
+/// the rules an `evalImports` splice inlined into the containing rule list, so
+/// the evaluator can keep error provenance (filename/source) and `(reference)`
+/// visibility per file while the scope itself stays flat (whole-scope mixin/
+/// variable visibility, like less.js's `rsRules` splice).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileCtx {
+    /// The imported file's canonical filename (error provenance).
+    pub filename: String,
+    /// The file's directory (base for its own relative imports/urls).
+    pub directory: String,
+    /// The `rootpath` in effect for urls generated from this file (§2.18).
+    pub rootpath: String,
+    /// The import statement said `(reference)` — output between the markers is
+    /// visibility-blocked (§2.8) until an `:extend` re-enables it.
+    pub reference: bool,
+    /// The file's normalized source (error excerpts, §5.5).
+    pub source: std::sync::Arc<str>,
+}
+
 /// The declaration-site file info a `url(...)` / resource-function call is
 /// stamped with (§2.18): less.js rewrites urls with the fileInfo of the file
 /// the token was WRITTEN in, not the file being evaluated (review F3/F8).
@@ -269,6 +290,12 @@ pub enum Node {
     Import { path: Box<Node>, options: Vec<String>, features: Option<Box<Node>>, error: Option<String>, span: Span },
     /// An `@import` resolved by the pre-eval import pass (eval-only, plan §2.9).
     ImportResolved(Box<ImportResolved>),
+    /// Start of a flattened import's spliced rules (eval-only, §2.9 stage 2 /
+    /// X1): the evaluator pushes the file's context (provenance + reference
+    /// visibility) while the spliced rules live flat in the containing scope.
+    FileEnter(std::sync::Arc<FileCtx>),
+    /// End of a flattened import's spliced rules (matches [`Node::FileEnter`]).
+    FileExit,
     /// A body `&:extend(target…);` statement (less.js `Extend` rule, plan §2.8):
     /// applies to every selector path of the enclosing ruleset.
     ExtendRule(Vec<ExtendTarget>),
@@ -356,7 +383,9 @@ impl Node {
             | Node::MixinDefinition(_)
             | Node::Closure { .. }
             | Node::ExtendRule(_)
-            | Node::DetachedRuleset { .. } => false,
+            | Node::DetachedRuleset { .. }
+            | Node::FileEnter(_)
+            | Node::FileExit => false,
             // A bare mixin call yields nothing until evaluated; the plain-CSS
             // path never contains one, so treat it as invisible for pruning.
             Node::MixinCall(_) | Node::VariableCall { .. } => false,

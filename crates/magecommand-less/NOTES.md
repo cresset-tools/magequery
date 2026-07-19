@@ -1354,13 +1354,23 @@ error corpus, which can only catch reject-what-should-compile):
   span) instead of citing the definition file like less.js. MixinDefinition
   carries no file tag yet; same-file guards (the overwhelmingly common case)
   are exact.
-- **X1 (CRITICAL, Phase 4B follow-up — the import splicing stopgap)**: a
-  mixin defined in a LATER-imported file is `NameError: … is undefined` at
-  the earlier import's use site (`@import "one"; @import "two";` with
-  one.less calling a mixin two.less defines). Same-file forward mixin refs
-  and cross-import forward VARIABLE refs both work; only cross-import forward
-  MIXIN lookup fails. Kills Bootstrap 3.4.1 wholesale (navbar.less:379
-  `.pull-left()`; utilities.less imported later) while lessc compiles it —
-  the full §2.9 two-stage import machinery (eval imports first, then the
-  ruleset pass over the merged tree) is the fix, deliberately NOT attempted
-  inside the Gate T0 error/compress diff.
+- **X1 — RESOLVED (Phase 5)**: cross-import forward mixin refs now work.
+  The fix is the real §2.9 stage-2 machinery: `eval_rules_inner` gained
+  **pass A (`flatten_imports`, mirroring less.js `Ruleset.evalImports`)** —
+  every featureless, non-inline, non-`layer(...)` resolved LESS import's
+  rules are spliced FLAT into the containing rule list at the import's
+  position, bracketed by eval-only `Node::FileEnter`/`Node::FileExit`
+  context markers (error provenance + `(reference)` visibility), recursing
+  into nested imports; the current frame is re-synced so pass-1 splice
+  arithmetic stays parallel. The body is then ONE scope: forward mixin refs
+  across imports (incl. mixins produced by mixin CALLS inside later
+  imports), variable last-wins across all imports, and guards seeing
+  forward variables all fall out — each pinned by an `x1_*` unit test
+  probed against less.js 4.6.7. Two behavior corrections came free, both
+  probed: the eval-time once slot-closure is claimed in evalImports order
+  (a root import beats a mixin-body import of the same file — the file
+  emits at the ROOT position), and a feature-carrying import's variables no
+  longer leak into the importing scope (the old `frame_variable` peek is
+  gated to featureless imports; `@import "x" screen` + `@fv` use is now the
+  4.6.7 NameError). Feature/inline/`layer(...)`/strict-imports cases keep
+  the pre-flatten pass-1 expand path unchanged.

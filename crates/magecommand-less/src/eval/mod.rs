@@ -587,6 +587,27 @@ impl<'a> Ctx<'a> {
         own: &mut Vec<Node>,
         children: &mut Vec<Out>,
     ) -> Result<(), LessError> {
+        // Pass A (less.js `Ruleset.evalImports`, §2.9 stage 2 — the X1 fix):
+        // splice every pre-fetched featureless LESS import's rules INTO this
+        // rule list at its position — before anything evaluates — so the body
+        // is ONE flat scope: a mixin defined in a later-imported file is
+        // callable from an earlier-imported one, variable last-wins runs
+        // across import boundaries, and guards see forward variables.
+        // FileEnter/FileExit markers keep per-file error provenance and
+        // `(reference)` visibility. The current frame (the caller's clone of
+        // `rules`) is re-synced to the flattened list so frame positions stay
+        // parallel for the pass-1 scope splices.
+        let flattened = self.flatten_imports(rules, self_paths);
+        let rules: &[Node] = match &flattened {
+            Some(flat) => {
+                if let Some(frame) = self.frames.first() {
+                    *frame.borrow_mut() = flat.clone();
+                }
+                flat
+            }
+            None => rules,
+        };
+
         // Pass 0: eagerly capture detached-ruleset literal values in the current
         // frame (less.js evaluates every declaration during `Ruleset.eval`, so a
         // DR value's `frames` snapshot is the DEFINING scope — the lazy lookup
@@ -633,6 +654,32 @@ impl<'a> Ctx<'a> {
             // the call's source position in pass 2 (`absorb_expansion_outs`) —
             // which is what keeps sibling-media output in source order.
             let expansion = match rule {
+                // Flattened-import context markers (pass A): pass 1 evaluates
+                // mixin calls INSIDE the spliced region, so the file context
+                // (error provenance) and `(reference)` visibility must be live
+                // here too — a mixin expansion inside a reference import
+                // computes its outs with `visibility_blocks` held.
+                Node::FileEnter(fc) => {
+                    self.file_stack.push(FileScope {
+                        filename: fc.filename.clone(),
+                        current_directory: fc.directory.clone(),
+                        rootpath: fc.rootpath.clone(),
+                        reference: fc.reference,
+                        source: fc.source.clone(),
+                    });
+                    if fc.reference {
+                        self.visibility_blocks += 1;
+                    }
+                    None
+                }
+                Node::FileExit => {
+                    if let Some(s) = self.file_stack.pop() {
+                        if s.reference {
+                            self.visibility_blocks -= 1;
+                        }
+                    }
+                    None
+                }
                 Node::MixinCall(call) => {
                     let saved_path = std::mem::take(&mut self.media_path);
                     let saved_blocks = self.media_blocks.take();
@@ -730,9 +777,68 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        // Pass 2: source-order output.
+        // Pass 2: source-order output. `marker_stack` tracks open flattened-
+        // import regions: (reference, own start, children start, seal) — the
+        // last two delimit the output added inside a `(reference)` region so
+        // the exit can visibility-block it (§2.8), exactly like the
+        // pre-flatten expand path wrapped an import body's outs in Hidden.
+        let mut marker_stack: Vec<(bool, usize, usize, usize)> = Vec::new();
         for (idx, rule) in rules.iter().enumerate() {
             match rule {
+                Node::FileEnter(fc) => {
+                    self.file_stack.push(FileScope {
+                        filename: fc.filename.clone(),
+                        current_directory: fc.directory.clone(),
+                        rootpath: fc.rootpath.clone(),
+                        reference: fc.reference,
+                        source: fc.source.clone(),
+                    });
+                    if fc.reference {
+                        self.visibility_blocks += 1;
+                    }
+                    // Seal the current bare-declaration run: a decl emitted
+                    // inside the region must not escape hiding by joining a
+                    // run that began before it.
+                    let seal = match children.last() {
+                        Some(Out::Decls(run)) => run.len(),
+                        _ => usize::MAX,
+                    };
+                    marker_stack.push((fc.reference, own.len(), children.len(), seal));
+                }
+                Node::FileExit => {
+                    self.file_stack.pop();
+                    if let Some((reference, own_start, children_start, seal)) =
+                        marker_stack.pop()
+                    {
+                        if reference {
+                            self.visibility_blocks -= 1;
+                            // Own declarations from a hidden import are
+                            // dropped (the pre-flatten path's sub_own.clear).
+                            own.truncate(own_start);
+                            let mut start = children_start;
+                            if seal != usize::MAX && start > 0 {
+                                if let Some(Out::Decls(run)) = children.get_mut(start - 1) {
+                                    if run.len() > seal {
+                                        let tail = run.split_off(seal);
+                                        children
+                                            .insert(start, Out::Hidden(Box::new(Out::Decls(tail))));
+                                        start += 1;
+                                    }
+                                }
+                            }
+                            // Visibility-block everything the region emitted;
+                            // an inner region's already-Hidden outs stay
+                            // single-wrapped.
+                            for o in children[start..].iter_mut() {
+                                if !matches!(o, Out::Hidden(_)) {
+                                    let inner =
+                                        std::mem::replace(o, Out::Verbatim(String::new()));
+                                    *o = Out::Hidden(Box::new(inner));
+                                }
+                            }
+                        }
+                    }
+                }
                 Node::MixinCall(_) | Node::VariableCall { .. } => {
                     if let Some((ex_own, ex_children)) = expansions[idx].take() {
                         own.extend(ex_own);
@@ -993,6 +1099,74 @@ impl<'a> Ctx<'a> {
         }
         self.drain_trims(own);
         Ok(())
+    }
+
+    /// Pass A of [`Self::eval_rules_inner`] — less.js `Ruleset.evalImports`
+    /// (§2.9 stage 2; the X1 fix). Splices every featureless, non-inline,
+    /// non-`layer(...)` resolved LESS import's rules flat into the containing
+    /// rule list at the import's position, bracketed by
+    /// [`Node::FileEnter`]/[`Node::FileExit`] context markers, recursing into
+    /// nested imports. Claims the eval-time once slot-closure here — BEFORE
+    /// any mixin call runs — so a root-level import beats a mixin-body import
+    /// of the same file to the slot (probed against less.js 4.6.7: the file
+    /// emits at the ROOT import's position, the mixin-body one skips).
+    ///
+    /// Returns `None` when nothing needed flattening (the fast path), when a
+    /// ruleset-level list runs under `strictImports` (the import must survive
+    /// to pass 1, which raises the strict-imports error), or when the current
+    /// frame doesn't mirror `rules` (defensive: the pass-1 splice arithmetic
+    /// requires frame/list parallelism — degrade to the pass-1 expand path
+    /// rather than corrupt positions).
+    fn flatten_imports(&mut self, rules: &[Node], self_paths: Option<&[String]>) -> Option<Vec<Node>> {
+        if self.opts.strict_imports && self_paths.is_some() {
+            return None;
+        }
+        fn flattenable(n: &Node) -> bool {
+            matches!(n, Node::ImportResolved(ir)
+                if ir.inline.is_none() && ir.features.is_none() && !ir.layer_css)
+        }
+        if !rules.iter().any(flattenable) {
+            return None;
+        }
+        if let Some(frame) = self.frames.first() {
+            if frame.borrow().len() != rules.len() {
+                return None;
+            }
+        }
+        let mut out = Vec::with_capacity(rules.len() + 16);
+        self.flatten_into(rules, &mut out);
+        Some(out)
+    }
+
+    /// The recursive worker of [`Self::flatten_imports`].
+    fn flatten_into(&mut self, rules: &[Node], out: &mut Vec<Node>) {
+        for node in rules {
+            match node {
+                Node::ImportResolved(ir)
+                    if ir.inline.is_none() && ir.features.is_none() && !ir.layer_css =>
+                {
+                    // Hard skip (stage-1 once-dedup / missing optional), then
+                    // the eval-time once skip-closure (first eval of a
+                    // canonical path wins).
+                    if ir.skip {
+                        continue;
+                    }
+                    if !ir.multiple && !self.once_imported.insert(ir.full_path.clone()) {
+                        continue;
+                    }
+                    out.push(Node::FileEnter(Arc::new(crate::ast::FileCtx {
+                        filename: ir.full_path.clone(),
+                        directory: ir.current_directory.clone(),
+                        rootpath: ir.rootpath.clone(),
+                        reference: ir.reference,
+                        source: ir.source.clone(),
+                    })));
+                    self.flatten_into(&ir.rules, out);
+                    out.push(Node::FileExit);
+                }
+                other => out.push(other.clone()),
+            }
+        }
     }
 
     /// Route a mixin/DR expansion's output blocks into the caller (the less.js
@@ -4316,8 +4490,16 @@ fn frame_variable(frame: &Frame, name: &str) -> Option<(Node, bool)> {
             }
             // less.js `Ruleset.variables()` peeks into a not-yet-inlined
             // import's root (§2.9) — how a variable-path import can use
-            // variables from a file imported later in source.
-            Node::ImportResolved(ir) => {
+            // variables from a file imported later in source. Only a
+            // featureless LESS import contributes scope: a feature-carrying
+            // one wraps in `@media` and its variables stay invisible
+            // (probed: `@import "x" screen` + `@fv` use errors in 4.6.7).
+            // Post-flatten (X1) featureless imports are inlined, so at eval
+            // this arm only serves RAW frames (stage-1 interpolation,
+            // namespace lookups into unevaluated ruleset bodies).
+            Node::ImportResolved(ir)
+                if !ir.skip && ir.inline.is_none() && ir.features.is_none() && !ir.layer_css =>
+            {
                 for inner in &ir.rules {
                     if let Node::VariableDecl {
                         name: n,
@@ -5678,6 +5860,133 @@ mod tests {
             .code
             .trim_end()
             .to_string()
+    }
+
+    // ------------------------------------------------------------------
+    // X1 — cross-import forward references (§2.9 stage 2, evalImports
+    // flatten). In less.js imports are fully loaded pre-eval and their rules
+    // spliced into the containing ruleset BEFORE mixin calls evaluate, so the
+    // whole flattened tree is ONE scope. Every assertion below is pinned
+    // against a live `less@4.6.7` probe (2026-07, scratchpad `lessprobe/x1`).
+    // ------------------------------------------------------------------
+
+    /// A mixin DEFINED in a later-imported file is callable from an
+    /// earlier-imported one — the Bootstrap 3.4.1 killer (navbar.less:379
+    /// calls `.pull-left()`; utilities.less is imported later).
+    #[test]
+    fn x1_mixin_forward_reference_across_imports() {
+        let out = css_with(
+            &[
+                ("one.less", ".uses {\n  .pull-left();\n}\n"),
+                ("two.less", ".pull-left() { float: left; }\n@v: green;\n"),
+            ],
+            "@import \"one\";\n@import \"two\";\n.check { color: @v; }\n",
+            &LessOptions::default(),
+        );
+        assert_eq!(
+            out,
+            ".uses {\n  float: left;\n}\n.check {\n  color: green;\n}"
+        );
+    }
+
+    /// Variable last-wins runs across ALL imports in document order — the
+    /// later file's declaration wins even for a use site before it.
+    #[test]
+    fn x1_variable_last_wins_across_imports() {
+        let out = css_with(
+            &[
+                ("vars-a.less", "@c: red;\n"),
+                ("vars-b.less", "@c: blue;\n"),
+            ],
+            "@import \"vars-a\";\n.x { color: @c; }\n@import \"vars-b\";\n",
+            &LessOptions::default(),
+        );
+        assert_eq!(out, ".x {\n  color: blue;\n}");
+    }
+
+    /// A mixin guard referencing a variable defined in a LATER import
+    /// evaluates against the flattened whole-scope value.
+    #[test]
+    fn x1_guard_sees_forward_variable_across_imports() {
+        let out = css_with(
+            &[
+                (
+                    "guard-uses.less",
+                    ".m() when (@flag = on) { ok: yes; }\n.g { .m(); }\n",
+                ),
+                ("guard-def.less", "@flag: on;\n"),
+            ],
+            "@import \"guard-uses\";\n@import \"guard-def\";\n",
+            &LessOptions::default(),
+        );
+        assert_eq!(out, ".g {\n  ok: yes;\n}");
+    }
+
+    /// A mixin PRODUCED BY A MIXIN CALL inside a later import (scope
+    /// injection) is visible to an earlier use — raw-tree peeking can't get
+    /// this; only evaluating imports before the body's mixin calls can.
+    #[test]
+    fn x1_mixin_from_call_in_later_import_is_visible() {
+        let out = css_with(
+            &[(
+                "maker.less",
+                ".maker() { .made() { color: red; } }\n.maker();\n",
+            )],
+            ".consumer { .made(); }\n@import \"maker\";\n",
+            &LessOptions::default(),
+        );
+        assert_eq!(out, ".consumer {\n  color: red;\n}");
+    }
+
+    /// The eval-time once slot-closure is claimed in evalImports order: a
+    /// root-level import beats a mixin-body import of the same file, so the
+    /// file's rules emit at the ROOT import's position (after `.mid`), not at
+    /// the mixin call's.
+    #[test]
+    fn x1_once_slot_claimed_at_root_import_position() {
+        let out = css_with(
+            &[
+                ("f.less", ".from-f { marker: here; }\n"),
+                ("mixin-imports-f.less", ".mx() { @import \"f\"; }\n"),
+            ],
+            "@import \"mixin-imports-f\";\n.mx();\n.mid { m: 1; }\n@import \"f\";\n.tail { t: 1; }\n",
+            &LessOptions::default(),
+        );
+        assert_eq!(
+            out,
+            ".mid {\n  m: 1;\n}\n.from-f {\n  marker: here;\n}\n.tail {\n  t: 1;\n}"
+        );
+    }
+
+    /// A feature-carrying import (`@import "x" screen`) wraps in `@media` and
+    /// contributes NOTHING to the importing scope — its variables stay
+    /// invisible (less.js: `variable @fv is undefined`).
+    #[test]
+    fn x1_feature_import_variables_stay_invisible() {
+        let resolver = MapResolver(vec![("featvar.less", "@fv: red;\n.feat-rule { f: 1; }\n")]);
+        let e = crate::compile(
+            "@import \"featvar\" screen;\n.x { color: @fv; }\n",
+            &LessOptions::default(),
+            &resolver,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.starts_with("NameError: variable @fv is undefined"), "got: {e}");
+    }
+
+    /// `(reference)` imports still contribute scope (mixins callable, variables
+    /// visible, both forward); only their own output is visibility-blocked.
+    #[test]
+    fn x1_reference_import_scope_visible_forward() {
+        let out = css_with(
+            &[(
+                "refmix.less",
+                ".ref-mixin() { r: 1; }\n@rv: teal;\n.bare { b: 2; }\n",
+            )],
+            ".c { .ref-mixin(); color: @rv; }\n@import (reference) \"refmix\";\n",
+            &LessOptions::default(),
+        );
+        assert_eq!(out, ".c {\n  r: 1;\n  color: teal;\n}");
     }
 
     /// §C4 compress serializer — every assertion pinned against a live
