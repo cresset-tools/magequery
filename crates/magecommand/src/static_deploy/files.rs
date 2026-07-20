@@ -619,17 +619,27 @@ fn build_theme(
         compress: opts.compress,
     };
 
+    // Render every package entry to bytes. Each entry is an independent pure
+    // function of its source (LESS compiles carry a fresh resolver; the shared
+    // `orchestrator` is immutable), so fan out across rayon — LESS compilation
+    // dominates a package's wall time and its entries are the parallelism.
+    // `collect` into an indexed Vec preserves entry order, so the deployed file
+    // order (hence `sri-hashes.json` deployment order) is identical to serial,
+    // and a `--jobs 1` run (one-thread pool) is byte-identical.
+    use rayon::prelude::*;
+    let rendered: Vec<(PlacedFile, Vec<(String, String)>)> = entries
+        .par_iter()
+        .map(|entry| {
+            let (content, kind, warns) =
+                render_entry(entry, &orchestrator, &less_opts, area, &theme_path)?;
+            Ok((PlacedFile { path: entry.deployed.clone(), content, kind }, warns))
+        })
+        .collect::<Result<Vec<_>, FilesError>>()?;
     let mut files: Vec<PlacedFile> = Vec::with_capacity(entries.len() + 16);
     let mut warnings: Vec<(String, String)> = Vec::new();
-    for entry in &entries {
-        let (content, kind, mut warns) =
-            render_entry(entry, &orchestrator, &less_opts, area, &theme_path)?;
+    for (pf, mut warns) in rendered {
+        files.push(pf);
         warnings.append(&mut warns);
-        files.push(PlacedFile {
-            path: entry.deployed.clone(),
-            content,
-            kind,
-        });
     }
 
     // The requirejs artifacts (DeployRequireJsConfig, post-package).
