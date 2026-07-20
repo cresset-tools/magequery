@@ -12,7 +12,7 @@ surface; it is a curated, grep-able set. Bare `magecommand` and bare `magecomman
 <group>` print that level's help (clap `arg_required_else_help`), never a default
 action. Global flags (`--root <path>`, `--json`) apply to every command.
 
-**The `di` group and the `static` group's LESS + requirejs pipelines are built today.** Everything
+**The `di` group and the `static` group's LESS + requirejs + bundle pipelines are built today.** Everything
 else is the planned surface — documented here so the grammar is fixed before scripts
 and muscle memory depend on it, but not yet wired in `main.rs`. New commands MUST slot
 into a group under this grammar, never appear as a bare top-level verb.
@@ -20,7 +20,7 @@ into a group under this grammar, never appear as a bare top-level verb.
 ```
 GENERATE   (static, byte-exact reproducible — a real `bin/magento` run is the oracle)
   di       compile | verify | watch | digest      # setup:di:compile              (BUILT)
-  static   less | cssdiff | requirejs             # LESS + requirejs-config.js    (BUILT)
+  static   less | cssdiff | requirejs | bundle    # LESS + JS deploy artifacts    (BUILT)
            deploy | verify | watch                # full static-content deploy    (planned)
   i18n     collect                                # i18n:collect-phrases          (planned)
 
@@ -134,6 +134,44 @@ static requirejs --theme <VENDOR/NAME> [--locale <L>] [--out <DIR>] [--stdout]
     plus the min-resolver's excludes and the mixins source, so it replaces the
     raw JS: with --json the files are still written unless --stdout is also
     given, in which case nothing is written at all.
+
+static bundle --theme <VENDOR/NAME>... [--locale <L>] [--out <DIR>]
+              [--order probe|sorted] [--probe-dir <DIR>]
+    Generate a theme's js/bundle/bundle<N>.js files (SCD JS bundling —
+    Deploy\Service\Bundle + Package\Bundle\RequireJs) from the SOURCE tree.
+    The real deploy bundles the DEPLOYED package, so the command first
+    resolves that view of the world: the js/html subset of static-deploy
+    file resolution (lib/web at the package root minus css/docs; per enabled
+    module view/base + view/<area> web files plus i18n/<locale> overlays;
+    theme chain ancestor-first — theme web/ at the root, <Vendor_Module>/web/
+    contexts, i18n overlays — later layers win), plus the two generated
+    requirejs artifacts (both are bundled on real deploys). Then Magento's
+    exact pipeline: recursive *.* glob order (files of a dir before its
+    subdirs), js→jsbuild / html→text pools, the order-dependent .min-sibling
+    drop rule, theme etc/view.xml <exclude> items (Lib:: → package root,
+    raw-prefix directory matches), Js_Bundle/bundle_size splitting (strict >,
+    fractional KB of CHARACTER count), continuous bundle numbering across
+    pools, PHP json_encode(JSON_UNESCAPED_SLASHES) maps, and the RequireJS
+    init snippet on the last file. Byte-exact against a real bundled deploy
+    (goldens gate: blank + luma, 7 bundles each).
+    --theme is repeatable and ordered: one invocation = one deploy run — the
+    .min-sibling cache is SHARED across the run's themes (upstream keeps it
+    on the service object), so bundling blank then luma drops luma's plain
+    variants whose .min siblings blank iterated first, exactly like Magento.
+    --order probe (default) reproduces the output filesystem's readdir order
+    (what PHP's GLOB_NOSORT glob yields; a pure function of each directory's
+    name set on ext4-htree-style filesystems) by probing scratch dirs —
+    --probe-dir must be on the deploy target's filesystem (default: the
+    output base). --order sorted is the portable lexicographic fallback
+    (deterministic everywhere, but not what a PHP deploy produced on a
+    hash-ordered filesystem). --out writes
+    <DIR>/<Vendor>/<name>/js/bundle/bundle<N>.js instead of pub/static;
+    existing bundle dirs are cleared first (the deploy's clear()). --json
+    prints per-theme bundle stats (pool, entries, bytes) instead of the
+    human summary.
+    Not modeled (documented limits): minified-mode bundling (dev/js/minify
+    .min naming), the compact-strategy result_map.json input branch, and
+    non-frontend areas.
 
 static cssdiff <expected.css> <actual.css> [--limit <N>]
     Semantic CSS diff (order-preserving; normalizes only non-semantic formatting:
