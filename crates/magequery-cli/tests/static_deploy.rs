@@ -353,7 +353,8 @@ fn second_locale_deploy_matches_frfr_goldens() {
 }
 
 /// Gate 3: the per-theme locale matrix places each theme only in its own
-/// locale, with the right (empty vs non-empty) dictionary.
+/// locale, with the right (empty vs non-empty) dictionary. `--no-parent`
+/// isolates the pure locale-scoping (parent auto-deploy is gate 5).
 #[test]
 fn matrix_places_each_theme_in_its_own_locale() {
     let root = reference_root();
@@ -373,6 +374,7 @@ fn matrix_places_each_theme_in_its_own_locale() {
             "--root", &root.display().to_string(),
             "--theme", "Magento/blank:en_US",
             "--theme", "Magento/luma:fr_FR",
+            "--no-parent",
             "--out", &deploy.display().to_string(),
             "--order", "sorted",
         ])
@@ -391,6 +393,86 @@ fn matrix_places_each_theme_in_its_own_locale() {
     assert_eq!(blank_en, b"[]", "en_US dictionary is empty");
     let luma_fr = std::fs::read(deploy.join("frontend/Magento/luma/fr_FR/js-translation.json")).unwrap();
     assert_ne!(luma_fr, b"[]", "fr_FR dictionary is non-empty");
+
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// Gate 5: a child `--theme` auto-deploys its parent (Magento's quick-strategy
+/// `parentCompilationRequested`), in the child's locales; `--no-parent` opts
+/// out. `Magento/luma`'s parent is `Magento/blank`. The pulled-in parent must
+/// be byte-identical to deploying blank directly (same group, blank-first).
+#[test]
+fn child_theme_auto_deploys_its_parent() {
+    let root = reference_root();
+    if !root.is_dir() {
+        println!("SKIP: reference install not present");
+        return;
+    }
+    let Some(out) = scratch_dir() else {
+        println!("SKIP: no writable scratch dir");
+        return;
+    };
+    let root_s = root.display().to_string();
+
+    // luma alone → blank (parent) AND luma both deploy.
+    let child = out.join("child");
+    let run = magecommand()
+        .args([
+            "static", "deploy", "en_US",
+            "--root", &root_s,
+            "--theme", "Magento/luma",
+            "--out", &child.display().to_string(),
+            "--order", "sorted",
+        ])
+        .output()
+        .expect("run magecommand");
+    assert!(run.status.success(), "stderr: {}", String::from_utf8_lossy(&run.stderr));
+    assert!(child.join("frontend/Magento/blank/en_US/js-translation.json").exists(),
+        "parent blank must be auto-deployed alongside child luma");
+    assert!(child.join("frontend/Magento/luma/en_US/js-translation.json").exists());
+
+    // --no-parent suppresses it.
+    let np = out.join("noparent");
+    let run = magecommand()
+        .args([
+            "static", "deploy", "en_US",
+            "--root", &root_s,
+            "--theme", "Magento/luma", "--no-parent",
+            "--out", &np.display().to_string(),
+            "--order", "sorted",
+        ])
+        .output()
+        .expect("run magecommand");
+    assert!(run.status.success(), "stderr: {}", String::from_utf8_lossy(&run.stderr));
+    assert!(!np.join("frontend/Magento/blank").exists(), "--no-parent must not deploy blank");
+    assert!(np.join("frontend/Magento/luma/en_US").exists());
+
+    // The auto-deployed parent equals a direct blank deploy, byte-for-byte
+    // (same (area, locale) group order: blank-first, then luma).
+    let direct = out.join("direct");
+    let run = magecommand()
+        .args([
+            "static", "deploy", "en_US",
+            "--root", &root_s,
+            "--theme", "Magento/blank", "--theme", "Magento/luma",
+            "--out", &direct.display().to_string(),
+            "--order", "sorted",
+        ])
+        .output()
+        .expect("run magecommand");
+    assert!(run.status.success(), "stderr: {}", String::from_utf8_lossy(&run.stderr));
+    let manifest = |base: &Path| -> BTreeMap<String, String> {
+        walk_files(base)
+            .into_iter()
+            .map(|rel| {
+                let bytes = std::fs::read(base.join(&rel)).unwrap();
+                (rel, sha256_hex(&bytes))
+            })
+            .collect()
+    };
+    let a = manifest(&child.join("frontend/Magento/blank"));
+    let b = manifest(&direct.join("frontend/Magento/blank"));
+    assert_eq!(a, b, "auto-deployed parent must match a direct blank deploy");
 
     let _ = std::fs::remove_dir_all(&out);
 }

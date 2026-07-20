@@ -76,6 +76,14 @@
 //! requested themes in order with one shared cache, exactly like one deploy
 //! run; a single-theme invocation equals a single-theme deploy.
 //!
+//! **Scope caveat.** Real Magento shares this cache across the WHOLE
+//! `setup:static-content:deploy` process — all areas AND all locales. `static
+//! deploy` scopes it per `(area, locale)` group instead (see
+//! [`super::deploy`]), so the shared-cache guarantee here holds only *within*
+//! one theme chain of one such group; across groups the cache is fresh. A
+//! combined multi-area/multi-locale run is therefore equivalent to N separate
+//! per-`(area, locale)` real deploys, not one combined `bin/magento` command.
+//!
 //! ## Bundle file format (locked byte-for-byte)
 //!
 //! `require.config({"config": {\n        "<pool>":<one-line JSON>\n}});\n`

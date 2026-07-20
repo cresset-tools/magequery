@@ -204,11 +204,15 @@ enum StaticCommand {
         /// `pub/static`.
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
-        /// Bundle-internal ordering: `probe` reproduces the output
-        /// filesystem's readdir order (byte-faithful on hash-ordered
-        /// filesystems like ext4); `sorted` is portable lexicographic order.
-        /// (Package deployment order itself follows the SOURCE tree's
-        /// readdir order — no probe involved.)
+        /// Bundle ordering: `probe` reproduces the output filesystem's readdir
+        /// order (byte-faithful on hash-ordered filesystems like ext4).
+        /// `sorted` is a portable, filesystem-independent DETERMINISM aid, not
+        /// a faithful reproduction: because `.min`-sibling exclusion is
+        /// readdir-order-dependent, sorting changes which files are bundled
+        /// (e.g. it wrongly bundles PageBuilder libs a real deploy excludes),
+        /// so its output matches no real deploy — use it only to compare two
+        /// magecommand runs. (Package deployment order itself follows the
+        /// SOURCE tree's readdir order — no probe involved.)
         #[arg(long, value_name = "probe|sorted", default_value = "probe")]
         order: String,
         /// Scratch directory for `--order probe` (must be on the same
@@ -227,14 +231,18 @@ enum StaticCommand {
         #[arg(long)]
         no_compress: bool,
     },
-    /// Reproduce a whole `setup:static-content:deploy` run: deploy the FULL
-    /// static-file package for a MATRIX of themes × locales × areas, fanning
-    /// the independent package builds out across rayon. Positional locales are
-    /// the default set; a `--theme id:loc,loc` overrides that theme's locales;
-    /// no `--theme` deploys every registered theme; `--area` restricts areas
-    /// (default: all). Everything a real quick-strategy deploy writes, byte-
-    /// faithful — including a correct non-empty `js-translation.json` per
-    /// locale — plus one run-scoped `deployed_version.txt`.
+    /// Reproduce `setup:static-content:deploy` over a MATRIX of themes ×
+    /// locales × areas, fanning the independent package builds out across
+    /// rayon. Positional locales are the default set; a `--theme id:loc,loc`
+    /// overrides that theme's locales; a child `--theme` also deploys its
+    /// parent (Magento's quick strategy; `--no-parent` opts out); no `--theme`
+    /// deploys every registered theme; `--area` restricts areas (default:
+    /// all). Everything a real quick-strategy deploy writes, byte-faithful
+    /// (incl. a correct per-locale `js-translation.json`) plus one run-scoped
+    /// `deployed_version.txt`. The `.min`-sibling bundle cache is scoped per
+    /// `(area, locale)` group, so a multi-area/multi-locale run equals N
+    /// separate `bin/magento` deploys — not one combined invocation (which
+    /// shares a single cache across the whole run); see `--order`.
     Deploy {
         /// Default locale set (repeatable positional), e.g. `en_US fr_FR`.
         /// Empty is an error — pass at least one.
@@ -253,11 +261,18 @@ enum StaticCommand {
         /// Write the packages under this static root instead of `pub/static`.
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
-        /// Bundle-internal ordering (`probe` = deployed-tree readdir order,
-        /// byte-faithful on hash-ordered filesystems; `sorted` = portable
-        /// lexicographic). Default: `probe`.
+        /// Bundle ordering. `probe` = deployed-tree readdir order, byte-
+        /// faithful on hash-ordered filesystems. `sorted` = portable
+        /// lexicographic — a determinism aid only: it changes which files are
+        /// bundled (`.min`-sibling exclusion is readdir-order-dependent), so it
+        /// is faithful to no real deploy. Default: `probe`.
         #[arg(long, value_name = "probe|sorted", default_value = "probe")]
         order: String,
+        /// Do NOT auto-deploy a `--theme`'s parent theme(s) (Magento's
+        /// `--no-parent`). By default a child theme pulls in its ancestors, as
+        /// a real quick-strategy deploy does.
+        #[arg(long)]
+        no_parent: bool,
         /// Scratch directory for `--order probe` (same filesystem as `--out`).
         #[arg(long, value_name = "DIR")]
         probe_dir: Option<PathBuf>,
@@ -503,6 +518,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 ref area,
                 ref out,
                 ref order,
+                no_parent,
                 ref probe_dir,
                 ref deployed_version,
                 jobs,
@@ -514,6 +530,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 area,
                 out.as_deref(),
                 order,
+                no_parent,
                 probe_dir.as_deref(),
                 deployed_version.as_deref(),
                 jobs,
@@ -1198,6 +1215,7 @@ fn static_deploy(
     areas: &[String],
     out: Option<&Path>,
     order: &str,
+    no_parent: bool,
     probe_dir: Option<&Path>,
     deployed_version: Option<&str>,
     jobs: Option<usize>,
@@ -1246,7 +1264,7 @@ fn static_deploy(
         .collect();
 
     let inputs = sdf::DeployInputs::prepare(&magento).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let groups = match sdd::plan(&inputs, locales, &theme_specs, areas) {
+    let groups = match sdd::plan(&inputs, locales, &theme_specs, areas, no_parent) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("error: {e}");

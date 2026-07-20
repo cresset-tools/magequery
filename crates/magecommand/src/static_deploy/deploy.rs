@@ -28,6 +28,23 @@
 //! the parallel deploy is byte-identical to a forced-serial one, and the
 //! blank-before-luma ordering is preserved WITHIN each group regardless of
 //! completion order.
+//!
+//! ## Scope of the shared cache (a deliberate divergence)
+//!
+//! Real Magento shares ONE `Bundle` `$excludedCache` across the WHOLE
+//! `setup:static-content:deploy` process — every area AND every locale — so in
+//! a single combined `bin/magento` invocation a `.min` sibling seen in the
+//! first-processed package poisons the plain name for every later package,
+//! across areas and locales alike. We scope the shared cache to the
+//! `(area, locale)` group instead. This is intentional: it makes fan-out
+//! trivially deterministic (a run-global cache would reintroduce completion-
+//! order dependence), and it matches how every golden was captured — as an
+//! independent per-`(area, locale)` `scd`. The one observable consequence is
+//! that a combined `static deploy en_US fr_FR` (or frontend+adminhtml at once)
+//! keeps a `.min`-shadowed plain file (e.g. `vimeo/player.js`) in each group's
+//! first theme, whereas one real combined `bin/magento` command keeps it in at
+//! most a single package. It equals N separate per-`(area, locale)` real
+//! deploys, NOT one combined command.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -35,6 +52,36 @@ use std::path::PathBuf;
 use rayon::prelude::*;
 
 use super::files::{self, DeployInputs, PlacementOptions, ThemePackage};
+
+/// Magento's allowed-locale set — the curated `Locale\Config::$_allowedLocales`
+/// list (`array_keys(Setup\Lists::getLocaleList())` before the ICU-availability
+/// filter, which only ever REMOVES entries, so this stays a safe superset of
+/// what any given install accepts). `setup:static-content:deploy` runs every
+/// `--language` value through `Validator\Locale::isValid` in `InputValidator`
+/// and aborts on an unknown code before doing any work; we mirror that. Sorted
+/// for `binary_search`.
+const ALLOWED_LOCALES: &[&str] = &[
+    "af_ZA",    "ar_DZ",    "ar_EG",    "ar_KW",    "ar_MA",    "ar_SA",    "az_Latn_AZ",    "be_BY",
+    "bg_BG",    "bn_BD",    "bs_Latn_BA",    "ca_ES",    "cs_CZ",    "cy_GB",    "da_DK",    "de_AT",
+    "de_CH",    "de_DE",    "de_LU",    "el_GR",    "en_AU",    "en_CA",    "en_GB",    "en_IE",
+    "en_NZ",    "en_US",    "es_AR",    "es_BO",    "es_CL",    "es_CO",    "es_CR",    "es_ES",
+    "es_MX",    "es_PA",    "es_PE",    "es_US",    "es_VE",    "et_EE",    "eu_ES",    "fa_IR",
+    "fi_FI",    "fil_PH",    "fr_BE",    "fr_CA",    "fr_CH",    "fr_FR",    "fr_LU",    "gl_ES",
+    "gu_IN",    "he_IL",    "hi_IN",    "hr_HR",    "hu_HU",    "id_ID",    "is_IS",    "it_CH",
+    "it_IT",    "ja_JP",    "ka_GE",    "km_KH",    "ko_KR",    "lo_LA",    "lt_LT",    "lv_LV",
+    "mk_MK",    "mn_Cyrl_MN",    "ms_Latn_MY",    "ms_MY",    "nb_NO",    "nl_BE",    "nl_NL",    "nn_NO",
+    "pl_PL",    "pt_BR",    "pt_PT",    "ro_RO",    "ru_RU",    "sk_SK",    "sl_SI",    "sq_AL",
+    "sr_Cyrl_RS",    "sr_Latn_RS",    "sv_FI",    "sv_SE",    "sw_KE",    "th_TH",    "tr_TR",    "uk_UA",
+    "vi_VN",    "zh_Hans_CN",    "zh_Hant_HK",    "zh_Hant_TW",
+];
+
+/// Is `loc` a locale `setup:static-content:deploy` would accept? Rejecting an
+/// unknown code here also blocks a locale carrying path separators / `..`,
+/// which [`files::package_dir`] would otherwise splice verbatim into the output
+/// path (a deploy writing outside `--out`).
+pub fn is_allowed_locale(loc: &str) -> bool {
+    ALLOWED_LOCALES.binary_search(&loc).is_ok()
+}
 
 /// One requested theme with its resolved locale set.
 #[derive(Debug, Clone)]
@@ -131,8 +178,27 @@ pub fn plan(
     default_locales: &[String],
     theme_specs: &[ThemeSpec],
     areas: &[String],
+    no_parent: bool,
 ) -> Result<Vec<Group>, DeployError> {
     let area_ok = |a: &str| areas.is_empty() || areas.iter().any(|x| x == a);
+
+    // Validate every requested locale against Magento's allowed set before any
+    // work (real SCD's InputValidator does this) — and, as a corollary, reject
+    // a locale that would escape the output root as a path segment.
+    let mut to_check: Vec<&String> = default_locales.iter().collect();
+    for spec in theme_specs {
+        if let Some(locs) = &spec.locales {
+            to_check.extend(locs.iter());
+        }
+    }
+    for loc in to_check {
+        if !is_allowed_locale(loc) {
+            return Err(err(format!(
+                "'{loc}' is not a valid locale — pass a supported code like en_US \
+                 (Magento's info:language:list)"
+            )));
+        }
+    }
 
     // Resolve the requested (theme, locales) list — preserving order.
     let resolved: Vec<(String, Vec<String>)> = if theme_specs.is_empty() {
@@ -146,7 +212,33 @@ pub fn plan(
         let mut v = Vec::with_capacity(theme_specs.len());
         for spec in theme_specs {
             let id = qualify(&spec.id, &inputs.themes)?;
-            let locales = spec.locales.clone().unwrap_or_else(|| default_locales.to_vec());
+            let locales = match &spec.locales {
+                // An explicitly-named theme resolving to no locales is a
+                // footgun (`--theme id:` with a trailing colon / shell-stripped
+                // list) — fail loudly instead of silently dropping it.
+                Some(l) if l.is_empty() => {
+                    return Err(err(format!(
+                        "theme {} has an empty locale override — nothing to deploy for it",
+                        spec.id
+                    )));
+                }
+                Some(l) => l.clone(),
+                None => default_locales.to_vec(),
+            };
+            // Real quick-strategy SCD always deploys a child theme's ancestors
+            // too (PackagePool retains the parent; QuickDeploy's
+            // `parentCompilationRequested` defaults on). `--no-parent` opts out
+            // (Magento's NO_PARENT). Emit the chain root-first so a parent
+            // poisons the child's `.min` siblings before the child is built.
+            if !no_parent {
+                if let Some(area) = area_of(&id) {
+                    let chain = super::less::theme_chain(area, &id, &inputs.themes)?;
+                    for anc in chain.iter().rev() {
+                        v.push((anc.id.clone(), locales.clone()));
+                    }
+                    continue;
+                }
+            }
             v.push((id, locales));
         }
         v
@@ -333,7 +425,7 @@ mod tests {
             "frontend/Magento/luma",
             "adminhtml/Magento/backend",
         ]);
-        let groups = plan(&inp, &["en_US".into()], &[], &[]).unwrap();
+        let groups = plan(&inp, &["en_US".into()], &[], &[], false).unwrap();
         // one frontend group (blank+luma) + one adminhtml group (backend).
         assert_eq!(groups.len(), 2);
         let fe = groups.iter().find(|g| g.area == "frontend").unwrap();
@@ -345,7 +437,7 @@ mod tests {
     #[test]
     fn area_filter_restricts() {
         let inp = inputs_with_themes(&["frontend/Magento/luma", "adminhtml/Magento/backend"]);
-        let groups = plan(&inp, &["en_US".into()], &[], &["frontend".into()]).unwrap();
+        let groups = plan(&inp, &["en_US".into()], &[], &["frontend".into()], false).unwrap();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].area, "frontend");
     }
@@ -357,8 +449,9 @@ mod tests {
             ThemeSpec { id: "Magento/blank".into(), locales: Some(vec!["en_US".into()]) },
             ThemeSpec { id: "Magento/luma".into(), locales: Some(vec!["de_DE".into()]) },
         ];
-        let groups = plan(&inp, &["en_US".into()], &specs, &[]).unwrap();
+        let groups = plan(&inp, &["en_US".into()], &specs, &[], false).unwrap();
         // Two groups: (frontend, en_US)=[blank], (frontend, de_DE)=[luma].
+        // (Fake theme dirs have no readable theme.xml, so no parent expansion.)
         assert_eq!(groups.len(), 2);
         let en = groups.iter().find(|g| g.locale == "en_US").unwrap();
         assert_eq!(en.theme_ids, vec!["frontend/Magento/blank"]);
@@ -373,7 +466,7 @@ mod tests {
             ThemeSpec { id: "Magento/blank".into(), locales: None },
             ThemeSpec { id: "Magento/luma".into(), locales: Some(vec!["fr_FR".into()]) },
         ];
-        let groups = plan(&inp, &["en_US".into(), "nl_NL".into()], &specs, &[]).unwrap();
+        let groups = plan(&inp, &["en_US".into(), "nl_NL".into()], &specs, &[], false).unwrap();
         // blank in en_US and nl_NL; luma only fr_FR → 3 groups.
         assert_eq!(groups.len(), 3);
         let en = groups.iter().find(|g| g.locale == "en_US").unwrap();
@@ -388,7 +481,7 @@ mod tests {
     fn ambiguous_bare_theme_errors() {
         let inp = inputs_with_themes(&["frontend/Vendor/x", "adminhtml/Vendor/x"]);
         let specs = vec![ThemeSpec { id: "Vendor/x".into(), locales: None }];
-        let e = plan(&inp, &["en_US".into()], &specs, &[]).unwrap_err();
+        let e = plan(&inp, &["en_US".into()], &specs, &[], false).unwrap_err();
         assert!(e.message.contains("ambiguous"), "{}", e.message);
     }
 
@@ -396,7 +489,44 @@ mod tests {
     fn unknown_theme_errors() {
         let inp = inputs_with_themes(&["frontend/Magento/luma"]);
         let specs = vec![ThemeSpec { id: "Magento/nope".into(), locales: None }];
-        let e = plan(&inp, &["en_US".into()], &specs, &[]).unwrap_err();
+        let e = plan(&inp, &["en_US".into()], &specs, &[], false).unwrap_err();
         assert!(e.message.contains("not found"), "{}", e.message);
+    }
+
+    #[test]
+    fn invalid_locale_is_rejected() {
+        let inp = inputs_with_themes(&["frontend/Magento/blank"]);
+        // Positional locale.
+        let e = plan(&inp, &["zz_ZZ".into()], &[], &[], false).unwrap_err();
+        assert!(e.message.contains("not a valid locale"), "{}", e.message);
+        // Per-theme override locale.
+        let specs = vec![ThemeSpec { id: "Magento/blank".into(), locales: Some(vec!["zz_ZZ".into()]) }];
+        let e = plan(&inp, &["en_US".into()], &specs, &[], false).unwrap_err();
+        assert!(e.message.contains("not a valid locale"), "{}", e.message);
+        // Path-traversal locale (the SM-4 escape) is rejected as invalid.
+        let e = plan(&inp, &["../../../etc".into()], &[], &[], false).unwrap_err();
+        assert!(e.message.contains("not a valid locale"), "{}", e.message);
+    }
+
+    #[test]
+    fn empty_locale_override_errors_not_drops() {
+        let inp = inputs_with_themes(&["frontend/Magento/blank", "frontend/Magento/luma"]);
+        // luma named with an empty override, blank carries the run: must error,
+        // never silently drop luma.
+        let specs = vec![
+            ThemeSpec { id: "Magento/blank".into(), locales: None },
+            ThemeSpec { id: "Magento/luma".into(), locales: Some(vec![]) },
+        ];
+        let e = plan(&inp, &["en_US".into()], &specs, &[], false).unwrap_err();
+        assert!(e.message.contains("empty locale override"), "{}", e.message);
+    }
+
+    #[test]
+    fn allowlist_is_sorted_for_binary_search() {
+        let mut sorted = ALLOWED_LOCALES.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(sorted, ALLOWED_LOCALES, "ALLOWED_LOCALES must stay sorted");
+        assert!(is_allowed_locale("en_US") && is_allowed_locale("zh_Hant_TW"));
+        assert!(!is_allowed_locale("zz_ZZ"));
     }
 }
