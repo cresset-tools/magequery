@@ -204,11 +204,15 @@ enum StaticCommand {
         /// `pub/static`.
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
-        /// Bundle-internal ordering: `probe` reproduces the output
-        /// filesystem's readdir order (byte-faithful on hash-ordered
-        /// filesystems like ext4); `sorted` is portable lexicographic order.
-        /// (Package deployment order itself follows the SOURCE tree's
-        /// readdir order — no probe involved.)
+        /// Bundle ordering: `probe` reproduces the output filesystem's readdir
+        /// order (byte-faithful on hash-ordered filesystems like ext4).
+        /// `sorted` is a portable, filesystem-independent DETERMINISM aid, not
+        /// a faithful reproduction: because `.min`-sibling exclusion is
+        /// readdir-order-dependent, sorting changes which files are bundled
+        /// (e.g. it wrongly bundles PageBuilder libs a real deploy excludes),
+        /// so its output matches no real deploy — use it only to compare two
+        /// magecommand runs. (Package deployment order itself follows the
+        /// SOURCE tree's readdir order — no probe involved.)
         #[arg(long, value_name = "probe|sorted", default_value = "probe")]
         order: String,
         /// Scratch directory for `--order probe` (must be on the same
@@ -224,6 +228,66 @@ enum StaticCommand {
         deployed_version: Option<String>,
         /// Compile LESS uncompressed (developer-mode output) instead of the
         /// default/production-mode compressed css.
+        #[arg(long)]
+        no_compress: bool,
+    },
+    /// Reproduce `setup:static-content:deploy` over a MATRIX of themes ×
+    /// locales × areas, fanning the independent package builds out across
+    /// rayon. Positional locales are the default set; a `--theme id:loc,loc`
+    /// overrides that theme's locales; a child `--theme` also deploys its
+    /// parent (Magento's quick strategy; `--no-parent` opts out); no `--theme`
+    /// deploys every registered theme; `--area` restricts areas (default:
+    /// all). Everything a real quick-strategy deploy writes, byte-faithful
+    /// (incl. a correct per-locale `js-translation.json`) plus one run-scoped
+    /// `deployed_version.txt`. The `.min`-sibling bundle cache is scoped per
+    /// `(area, locale)` group, so a multi-area/multi-locale run equals N
+    /// separate `bin/magento` deploys — not one combined invocation (which
+    /// shares a single cache across the whole run); see `--order`.
+    Deploy {
+        /// Default locale set (repeatable positional), e.g. `en_US fr_FR`.
+        /// Empty is an error — pass at least one.
+        #[arg(value_name = "LOCALE")]
+        locales: Vec<String>,
+        /// Theme to deploy, optionally with a per-theme locale override
+        /// appended as `:loc1,loc2` (`Magento/luma:de_DE,fr_FR`). Repeatable.
+        /// A bare id inherits the default locales. Omit ALL `--theme` flags to
+        /// deploy every registered physical theme (Magento's default set).
+        #[arg(long, value_name = "VENDOR/NAME[:loc,loc]")]
+        theme: Vec<String>,
+        /// Restrict to these areas (comma-separated `frontend,adminhtml`).
+        /// A theme only deploys in the area it belongs to. Default: all.
+        #[arg(long, value_name = "frontend,adminhtml", value_delimiter = ',')]
+        area: Vec<String>,
+        /// Write the packages under this static root instead of `pub/static`.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Bundle ordering. `probe` = deployed-tree readdir order, byte-
+        /// faithful on hash-ordered filesystems. `sorted` = portable
+        /// lexicographic — a determinism aid only: it changes which files are
+        /// bundled (`.min`-sibling exclusion is readdir-order-dependent), so it
+        /// is faithful to no real deploy. Default: `probe`.
+        #[arg(long, value_name = "probe|sorted", default_value = "probe")]
+        order: String,
+        /// Do NOT auto-deploy a `--theme`'s parent theme(s) (Magento's
+        /// `--no-parent`). By default a child theme pulls in its ancestors, as
+        /// a real quick-strategy deploy does.
+        #[arg(long)]
+        no_parent: bool,
+        /// Scratch directory for `--order probe` (same filesystem as `--out`).
+        #[arg(long, value_name = "DIR")]
+        probe_dir: Option<PathBuf>,
+        /// Write ONE `<static root>/deployed_version.txt` with this exact
+        /// value (the deploy's `--content-version`). Omitted = no file: the
+        /// real value is a per-run timestamp and inventing one would only
+        /// masquerade as a run that never happened.
+        #[arg(long, value_name = "VERSION")]
+        deployed_version: Option<String>,
+        /// Cap the rayon fan-out to N threads (`1` = forced serial, the
+        /// determinism baseline). Default: the rayon default (num CPUs).
+        #[arg(long, value_name = "N")]
+        jobs: Option<usize>,
+        /// Compile LESS uncompressed (developer-mode) instead of the default
+        /// production-mode compressed css.
         #[arg(long)]
         no_compress: bool,
     },
@@ -445,6 +509,31 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 order,
                 probe_dir.as_deref(),
                 deployed_version.as_deref(),
+                no_compress,
+                cli.json,
+            ),
+            StaticCommand::Deploy {
+                ref locales,
+                ref theme,
+                ref area,
+                ref out,
+                ref order,
+                no_parent,
+                ref probe_dir,
+                ref deployed_version,
+                jobs,
+                no_compress,
+            } => static_deploy(
+                cli.root,
+                locales,
+                theme,
+                area,
+                out.as_deref(),
+                order,
+                no_parent,
+                probe_dir.as_deref(),
+                deployed_version.as_deref(),
+                jobs,
                 no_compress,
                 cli.json,
             ),
@@ -1110,6 +1199,188 @@ fn static_files(
             static_root.join(sdf::DEPLOYED_VERSION_FILE_NAME).display()
         );
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `magecommand static deploy` — reproduce a whole `setup:static-content:deploy`
+/// run over a per-theme locale × area matrix, fanning the independent package
+/// builds out across rayon (grouped by `(area, locale)` so the shared
+/// `.min`-sibling bundle-cache ordering is honored). One run-scoped
+/// `deployed_version.txt`.
+#[allow(clippy::too_many_arguments)]
+fn static_deploy(
+    root: Option<PathBuf>,
+    locales: &[String],
+    theme_args: &[String],
+    areas: &[String],
+    out: Option<&Path>,
+    order: &str,
+    no_parent: bool,
+    probe_dir: Option<&Path>,
+    deployed_version: Option<&str>,
+    jobs: Option<usize>,
+    no_compress: bool,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
+    use static_deploy::bundle as sdb;
+    use static_deploy::deploy as sdd;
+    use static_deploy::files as sdf;
+
+    if locales.is_empty() {
+        anyhow::bail!("no locales given — pass at least one, e.g. `static deploy en_US`");
+    }
+    for a in areas {
+        if a != "frontend" && a != "adminhtml" {
+            anyhow::bail!("--area must be `frontend` and/or `adminhtml`, got `{a}`");
+        }
+    }
+
+    let root = root.unwrap_or_else(|| PathBuf::from("."));
+    let root = std::path::absolute(&root).unwrap_or(root);
+    let magento = magequery_core::Magento::open(&root)
+        .with_context(|| format!("not a Magento root: {}", root.display()))?;
+
+    let static_root = match out {
+        Some(dir) => dir.to_path_buf(),
+        None => root.join("pub").join("static"),
+    };
+
+    // Parse the theme matrix: `id` or `id:loc1,loc2`.
+    let theme_specs: Vec<sdd::ThemeSpec> = theme_args
+        .iter()
+        .map(|raw| match raw.split_once(':') {
+            Some((id, locs)) => sdd::ThemeSpec {
+                id: id.to_string(),
+                locales: Some(
+                    locs.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                ),
+            },
+            None => sdd::ThemeSpec { id: raw.to_string(), locales: None },
+        })
+        .collect();
+
+    let inputs = sdf::DeployInputs::prepare(&magento).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let groups = match sdd::plan(&inputs, locales, &theme_specs, areas, no_parent) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+    if groups.is_empty() {
+        eprintln!("error: nothing to deploy (no theme matches the area filter)");
+        return Ok(ExitCode::FAILURE);
+    }
+
+    let order_mode = match order {
+        "sorted" => sdb::OrderMode::Sorted,
+        "probe" => {
+            let scratch = match probe_dir {
+                Some(d) => d.to_path_buf(),
+                None => static_root.clone(),
+            };
+            std::fs::create_dir_all(&scratch)
+                .with_context(|| format!("create probe scratch {}", scratch.display()))?;
+            sdb::OrderMode::Probe(scratch)
+        }
+        other => anyhow::bail!("--order must be `probe` or `sorted`, got `{other}`"),
+    };
+    let opts = sdf::PlacementOptions { compress: !no_compress, order: order_mode };
+
+    // deployed_version.txt — ONE file at the static root, written first (only
+    // with an explicit version, never an invented timestamp).
+    if let Some(version) = deployed_version {
+        std::fs::create_dir_all(&static_root)
+            .with_context(|| format!("mkdir {}", static_root.display()))?;
+        let p = static_root.join(sdf::DEPLOYED_VERSION_FILE_NAME);
+        std::fs::write(&p, version.as_bytes())
+            .with_context(|| format!("write {}", p.display()))?;
+    }
+
+    let started = std::time::Instant::now();
+    let stats = match sdd::execute_to_disk(&inputs, &groups, &static_root, &opts, jobs) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+    let elapsed = started.elapsed();
+
+    if json {
+        let doc = serde_json::json!({
+            "deployed_version": deployed_version,
+            "jobs": jobs,
+            "elapsed_ms": elapsed.as_millis(),
+            "groups": groups.iter().map(|g| serde_json::json!({
+                "area": g.area,
+                "locale": g.locale,
+                "themes": g.theme_ids,
+            })).collect::<Vec<_>>(),
+            "packages": stats.iter().map(|s| serde_json::json!({
+                "area": s.area,
+                "theme": s.theme,
+                "locale": s.locale,
+                "output": s.output.display().to_string(),
+                "files": s.files,
+                "bytes": s.bytes,
+                "copied": s.copied,
+                "css_processed": s.css_processed,
+                "less_compiled": s.less_compiled,
+                "requirejs": s.requirejs,
+                "bundles": s.bundles,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let mut total_files = 0usize;
+    let mut total_bytes = 0usize;
+    for s in &stats {
+        for (logical, warning) in &s.warnings {
+            eprintln!("warning: {}/{} [{}]: {logical}: {warning}", s.area, s.theme, s.locale);
+        }
+        println!(
+            "{}/{} [{}]: {} file(s) ({} copied, {} css-processed, {} less-compiled, \
+             {} requirejs, {} bundle(s), js-translation + sri-hashes) {:.1} MB -> {}",
+            s.area,
+            s.theme,
+            s.locale,
+            s.files,
+            s.copied,
+            s.css_processed,
+            s.less_compiled,
+            s.requirejs,
+            s.bundles,
+            s.bytes as f64 / (1024.0 * 1024.0),
+            s.output.display()
+        );
+        total_files += s.files;
+        total_bytes += s.bytes;
+    }
+    if let Some(version) = deployed_version {
+        println!(
+            "deployed_version.txt: {version} -> {}",
+            static_root.join(sdf::DEPLOYED_VERSION_FILE_NAME).display()
+        );
+    }
+    println!(
+        "total: {} package(s), {} file(s), {:.1} MB in {:.2}s ({})",
+        stats.len(),
+        total_files,
+        total_bytes as f64 / (1024.0 * 1024.0),
+        elapsed.as_secs_f64(),
+        match jobs {
+            Some(1) => "serial".to_string(),
+            Some(n) if n > 1 => format!("{n} jobs"),
+            _ => "rayon default".to_string(),
+        }
+    );
     Ok(ExitCode::SUCCESS)
 }
 
