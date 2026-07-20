@@ -379,9 +379,15 @@ fn find_match(
     struct Potential {
         index: usize,
         matched: usize,
-        initial_comb: String,
     }
     if needle.is_empty() {
+        return Vec::new();
+    }
+    // Fast pre-scan: a match must consume the whole needle consecutively, so
+    // if no hay token can accept needle[0] the potentials machinery (and its
+    // per-token bookkeeping) can never produce one. Same predicate as the
+    // first-token acceptance below — behavior-identical, allocation-free.
+    if !hay.iter().any(|h| values_eq(&needle[0].value, &h.value)) {
         return Vec::new();
     }
     let mut potentials: Vec<Potential> = Vec::new();
@@ -391,7 +397,6 @@ fn find_match(
             potentials.push(Potential {
                 index: hi,
                 matched: 0,
-                initial_comb: h.comb.clone(),
             });
         }
         let mut i = 0usize;
@@ -414,7 +419,9 @@ fn find_match(
                 matches.push(MatchSpan {
                     index: pm.index,
                     len: needle.len(),
-                    initial_comb: pm.initial_comb.clone(),
+                    // The starting token's combinator, cloned only now that a
+                    // real match exists (it was captured eagerly before).
+                    initial_comb: hay[pm.index].comb.clone(),
                 });
                 // Matches never overlap — restart matching after this one.
                 potentials.clear();
