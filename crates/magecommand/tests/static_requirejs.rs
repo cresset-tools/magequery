@@ -1,7 +1,9 @@
-//! The byte-exact gate for `magecommand static requirejs`: assemble
-//! `requirejs-config.js` for blank and luma against a real Magento checkout
-//! and compare against goldens captured from a real
-//! `setup:static-content:deploy`.
+//! The byte-exact gate for `magecommand static requirejs`: assemble the
+//! subsystem's artifacts (`requirejs-config.js`, `requirejs-min-resolver.js`,
+//! `mage/requirejs/mixins.js`) for blank and luma against a real Magento
+//! checkout and compare against goldens captured from a real
+//! `setup:static-content:deploy` (mixins against the lib source it must be a
+//! verbatim copy of).
 //!
 //! **Environment-dependent, and SKIPPED (not failed) when the environment is
 //! absent** — CI has no Magento install. The reference root defaults to
@@ -105,6 +107,80 @@ fn blank_matches_the_deployed_golden_byte_for_byte() {
 #[test]
 fn luma_matches_the_deployed_golden_byte_for_byte() {
     gate("Magento/luma", "luma-requirejs-config.js");
+}
+
+/// `--out` emits ALL three artifacts of the subsystem at their deployed
+/// relative paths. Gate each one byte-for-byte: the min-resolver against its
+/// SCD golden, the config against its golden (locking that `--out` writes the
+/// same bytes `--stdout` prints), and mixins.js against the lib source it
+/// must be a verbatim copy of. Skips (not fails) without the environment,
+/// like [`gate`].
+fn out_gate(theme: &str, golden_prefix: &str) {
+    let root = reference_root();
+    let resolver_golden = goldens_dir().join(format!("{golden_prefix}-requirejs-min-resolver.js"));
+    let config_golden = goldens_dir().join(format!("{golden_prefix}-requirejs-config.js"));
+    let mixins_lib = root.join("lib/web/mage/requirejs/mixins.js");
+    if !root.is_dir() || !resolver_golden.is_file() || !config_golden.is_file() {
+        println!(
+            "SKIP: reference install ({}) or goldens ({}) not present",
+            root.display(),
+            goldens_dir().display()
+        );
+        return;
+    }
+
+    let out_dir = tempfile::tempdir().expect("tempdir");
+    let out = magecommand()
+        .args([
+            "static",
+            "requirejs",
+            "--root",
+            &root.display().to_string(),
+            "--theme",
+            theme,
+            "--out",
+            &out_dir.path().display().to_string(),
+        ])
+        .output()
+        .expect("run magecommand");
+    assert!(
+        out.status.success(),
+        "exit {:?}; stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // One report line per artifact.
+    let report = String::from_utf8_lossy(&out.stdout);
+    for name in ["requirejs-config.js:", "requirejs-min-resolver.js:", "mage/requirejs/mixins.js:"] {
+        assert!(report.contains(name), "no report line for {name}\n{report}");
+    }
+
+    for (rel, expected_file) in [
+        ("requirejs-min-resolver.js", &resolver_golden),
+        ("requirejs-config.js", &config_golden),
+        ("mage/requirejs/mixins.js", &mixins_lib),
+    ] {
+        let ours = std::fs::read(out_dir.path().join(rel))
+            .unwrap_or_else(|e| panic!("{theme}: read our {rel}: {e}"));
+        let expected = std::fs::read(expected_file).expect("read expected");
+        assert_eq!(
+            ours, expected,
+            "{theme}: {rel} differs from {} ({} vs {} bytes)",
+            expected_file.display(),
+            ours.len(),
+            expected.len()
+        );
+    }
+}
+
+#[test]
+fn blank_min_resolver_and_mixins_match_the_goldens_byte_for_byte() {
+    out_gate("Magento/blank", "blank");
+}
+
+#[test]
+fn luma_min_resolver_and_mixins_match_the_goldens_byte_for_byte() {
+    out_gate("Magento/luma", "luma");
 }
 
 /// `--json` renders the ordered source list: the library layer (absent on a

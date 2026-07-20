@@ -109,18 +109,31 @@ static less --file <PATH> [--out <DIR>] [--stdout] [--compress]
     compress=true, what Magento's adapter uses outside developer mode.
 
 static requirejs --theme <VENDOR/NAME> [--locale <L>] [--out <DIR>] [--stdout]
-    Assemble a theme's requirejs-config.js into
-    pub/static/<area>/<theme>/<locale>/. A TEXTUAL concatenation, not a semantic
-    JS merge (Framework\RequireJs\Config::getConfig): each collected
-    requirejs-config.js is wrapped in an IIFE and the whole thing in one outer
-    IIFE. Collector order: lib/web → module contexts (view/base then
-    view/<area>, config.php load order) → theme layers ancestor-first (each
-    theme's <Vendor_Module>/ contexts in load order, then its own file).
-    --out redirects the write; --stdout prints the JS instead of writing.
+    Emit a theme's requirejs deploy artifacts into
+    pub/static/<area>/<theme>/<locale>/ at their deployed relative paths, one
+    report line each:
+    - requirejs-config.js — a TEXTUAL concatenation, not a semantic JS merge
+      (Framework\RequireJs\Config::getConfig): each collected
+      requirejs-config.js is wrapped in an IIFE and the whole thing in one
+      outer IIFE. Collector order: lib/web → module contexts (view/base then
+      view/<area>, config.php load order) → theme layers ancestor-first (each
+      theme's <Vendor_Module>/ contexts in load order, then its own file).
+    - requirejs-min-resolver.js — Config::getMinResolverCode: the fixed IIFE
+      template whose only variable part is the exclude condition —
+      url.indexOf(baseUrl)===0 plus one !url.match(/<regex>/) per
+      dev/js/minify_exclude value (Minification::getExcludes('js'); module
+      config.xml <default> merge in load order; only / is escaped, as \/),
+      joined with &&. Unminified — the default-mode artifact.
+    - mage/requirejs/mixins.js — a verbatim byte copy of
+      lib/web/mage/requirejs/mixins.js.
+    --out redirects the writes (same relative paths under <DIR>); --stdout
+    prints ONLY requirejs-config.js and writes nothing — the sibling artifacts
+    are not emitted (backward compatible with the original config-only mode).
     The global --json claims stdout for the ordered source list (file, module,
     theme, origin) — the "which module contributed what, in what order" view —
-    so it replaces the raw JS: with --json the file is still written unless
-    --stdout is also given, in which case nothing is written at all.
+    plus the min-resolver's excludes and the mixins source, so it replaces the
+    raw JS: with --json the files are still written unless --stdout is also
+    given, in which case nothing is written at all.
 
 static cssdiff <expected.css> <actual.css> [--limit <N>]
     Semantic CSS diff (order-preserving; normalizes only non-semantic formatting:
