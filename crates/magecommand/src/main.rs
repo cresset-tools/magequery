@@ -102,6 +102,27 @@ enum StaticCommand {
         #[arg(long)]
         skip_broken_modules: bool,
     },
+    /// Assemble a theme's `requirejs-config.js` (pure Rust — no PHP, no node).
+    /// A textual concatenation, not a semantic JS merge: every collected
+    /// `requirejs-config.js` is wrapped in an IIFE, in collector order (lib →
+    /// module contexts in load order → theme layers ancestor-first).
+    Requirejs {
+        /// Theme id, e.g. `Magento/luma` (or `frontend/Magento/luma`).
+        #[arg(long, value_name = "VENDOR/NAME")]
+        theme: String,
+        /// Locale for the `pub/static` placement.
+        #[arg(long, default_value = "en_US")]
+        locale: String,
+        /// Write the config under this directory instead of `pub/static`
+        /// (as `<DIR>/requirejs-config.js`).
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Print the assembled config to stdout (no writes). Mutually
+        /// exclusive with the global `--json` (which claims stdout for the
+        /// source-list document).
+        #[arg(long, conflicts_with = "out")]
+        stdout: bool,
+    },
     /// Semantic CSS diff (plan §7.7): compare a golden `.css` (real SCD
     /// output) against ours, normalizing only non-semantic formatting
     /// (whitespace, hex case/shorthand, leading zeros, comments) —
@@ -255,6 +276,9 @@ fn main() -> anyhow::Result<ExitCode> {
                     skip_broken_modules,
                 ),
             },
+            StaticCommand::Requirejs { ref theme, ref locale, ref out, stdout } => {
+                static_requirejs(cli.root, theme, locale, out.as_deref(), stdout, cli.json)
+            }
             StaticCommand::Cssdiff { ref expected, ref actual, limit } => {
                 static_cssdiff(expected, actual, limit, cli.json)
             }
@@ -406,6 +430,93 @@ fn static_less(
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// `magecommand static requirejs` — assemble a theme's `requirejs-config.js`
+/// into `pub/static/<area>/<theme>/<locale>/` (or `--out`/`--stdout`).
+/// `--json` renders the ordered source list instead of the summary line —
+/// the "which module contributed what, in what order" view.
+fn static_requirejs(
+    root: Option<PathBuf>,
+    theme: &str,
+    locale: &str,
+    out: Option<&Path>,
+    to_stdout: bool,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
+    use static_deploy::requirejs as sdrjs;
+
+    let root = root.unwrap_or_else(|| PathBuf::from("."));
+    let root = std::path::absolute(&root).unwrap_or(root);
+    let magento = magequery_core::Magento::open(&root)
+        .with_context(|| format!("not a Magento root: {}", root.display()))?;
+    let area = "frontend";
+    let cfg = match sdrjs::build_from_magento(&magento, area, theme) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
+    eprintln!(
+        "theme fallback chain: {}",
+        cfg.chain
+            .iter()
+            .map(|t| t.id.as_str())
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    );
+
+    if to_stdout && !json {
+        print!("{}", cfg.js);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let target = if to_stdout {
+        None
+    } else {
+        let t = match out {
+            Some(dir) => dir.join(sdrjs::CONFIG_FILE_NAME),
+            None => {
+                let full = if theme.contains('/') && !theme.starts_with(area) {
+                    format!("{area}/{theme}")
+                } else {
+                    theme.to_string()
+                };
+                sdrjs::output_path(&root, area, &full, locale)
+            }
+        };
+        if let Some(parent) = t.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        std::fs::write(&t, &cfg.js)
+            .with_context(|| format!("write {}", t.display()))?;
+        Some(t)
+    };
+
+    if json {
+        let doc = serde_json::json!({
+            "theme_chain": cfg.chain.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+            "sources": cfg.sources.iter().map(|s| serde_json::json!({
+                "file":   s.file.display().to_string(),
+                "module": s.module,
+                "theme":  s.theme,
+                "origin": s.origin.tag(),
+            })).collect::<Vec<_>>(),
+            "bytes":  cfg.js.len(),
+            "output": target.as_ref().map(|t| t.display().to_string()),
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!(
+        "requirejs-config.js: {} source file(s) ({} bytes) -> {}",
+        cfg.sources.len(),
+        cfg.js.len(),
+        target.expect("non-stdout mode always writes").display()
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 /// `magecommand static cssdiff` — the §7.7 semantic differ. Exit 0 when the

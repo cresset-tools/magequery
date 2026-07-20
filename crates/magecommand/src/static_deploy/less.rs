@@ -695,7 +695,10 @@ fn entry_strip_applies(src: &str) -> bool {
 /// lowercase or dotted dir like `vendor_module` IS a module context — the
 /// earlier uppercase-first/no-dot predicate skipped dirs Magento collects
 /// (review ORD-4; no such dir exists in blank/luma).
-fn is_module_segment(s: &str) -> bool {
+///
+/// Shared with [`super::requirejs`], whose `ThemeModular` collector globs the
+/// same `<theme>/*_*/` contexts.
+pub(super) fn is_module_segment(s: &str) -> bool {
     s.contains('_') && !s.starts_with('.')
 }
 
