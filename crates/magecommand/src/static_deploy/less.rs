@@ -1082,9 +1082,12 @@ mod tests {
         let e = orch
             .compile_entry("styles-xl", &LessDeployOptions::default())
             .unwrap_err();
-        assert!(e.message.contains("entry point not found"), "{e}");
-        assert!(e.message.contains("theme-child"), "{e}");
-        assert!(e.message.contains("lib/web"), "{e}");
+        // Candidate paths render with the platform separator on Windows —
+        // normalize before matching so the assertion is separator-agnostic.
+        let msg = e.message.replace('\\', "/");
+        assert!(msg.contains("entry point not found"), "{e}");
+        assert!(msg.contains("theme-child"), "{e}");
+        assert!(msg.contains("lib/web"), "{e}");
     }
 
     #[test]
