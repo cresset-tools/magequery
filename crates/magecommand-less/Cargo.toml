@@ -1,0 +1,45 @@
+[package]
+name = "magecommand-less"
+description = "Pure-Rust LESS compiler for magecommand's static deploy (the Luma CSS path). No JS, no PHP, no node."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Hand-written front-end (lexer/parser/eval) — see plan §9. cssparser cannot
+# tokenize LESS; it is used only for CSS-side identifier/string serialization
+# helpers in genCSS.
+cssparser = "0.37"
+smallvec = "1"
+rustc-hash = "2"
+thiserror.workspace = true
+
+# The `replace()` built-in is specified as a JS-regex replace (plan §2.7).
+# `fancy-regex` (a backtracking layer over `regex`) covers the JS-only syntax
+# real stylesheets use — lookahead/lookbehind/backreferences — which plain
+# `regex` rejects into a silent passthrough (Phase 3 review F3); JS
+# replacement-pattern semantics (`$&`/`$``/`$'`/`$<name>`/out-of-range `$N`)
+# are hand-implemented over its captures (F2).
+fancy-regex = "0.14"
+
+# .min.css production minification ONLY, behind the `minify` feature — never
+# part of any diff gate (plan §9.4/§9.7). Pinned exactly per plan.
+lightningcss = { version = "=1.0.0-alpha.71", optional = true }
+
+[features]
+default = []
+# Downstream .min.css bridge (lightningcss). Not needed for the diffable .css.
+minify = ["dep:lightningcss"]
+
+[dev-dependencies]
+# Custom test harness so every vendored less.js fixture is one named test and
+# the runner prints a pass-rate summary (plan §5.5). Test-only; never in the lib.
+libtest-mimic = "0.8"
+
+# The less.js compile-fixture compat harness (plan §5.5). Its own runner
+# (harness = false) synthesizes one Trial per vendored (input, expected) pair.
+[[test]]
+name = "fixtures"
+path = "tests/fixtures.rs"
+harness = false

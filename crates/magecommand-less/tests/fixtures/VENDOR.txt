@@ -1,0 +1,98 @@
+Vendored less.js test fixtures
+==============================
+
+Upstream:  https://github.com/less/less.js
+Tag:       v4.6.7
+Commit:    8ae2cc3bfa79f0718ad6fe5f263a1d6819fe9d5c
+License:   Apache-2.0 (see less-testdata/LICENSE)
+Vendored:  by crates/magecommand-less/scripts/vendor-less-testdata.sh
+
+What is vendored (STEP 2 scope — DEFAULT-OPTION compile fixtures only)
+---------------------------------------------------------------------
+less-testdata/tests-unit/   The default-option compile+diff corpus. Each
+                            <name>.less with a sibling <name>.css is a test
+                            entry (plan §5.1); subdirectories hold import
+                            helpers. Runs under less.js's own `tests-unit`
+                            group, which sets only relativeUrls/silent/
+                            javascriptEnabled — treated as "default options"
+                            here (the harness passes LessOptions::default()).
+less-testdata/data/         Binary assets (image.jpg/.svg, data-uri-fail.png,
+                            page.html) for the data-uri/image-size fixtures
+                            (plan §C-assets), wired through the harness's
+                            filesystem ImportResolver.
+
+ALSO VENDORED (Phase 4B — the option-driven compile corpus, plan §5.2)
+----------------------------------------------------------------------
+less-testdata/tests-config/   The option-driven compile fixtures: namespacing,
+                              rewrite-urls-*/rootpath-*, static-urls, url-args,
+                              include-path(+string), strict-imports,
+                              process-imports, globalVars/modifyVars (+ their
+                              per-file .json vars), units/{strict,no-strict},
+                              math-{always,strict,parens-division} (goldens
+                              under math/<mode>/ — the upstream layout),
+                              at-rules-compressed*/compression (xfail until
+                              the §C4 compress serializer), and 3rd-party.
+                              Options from the deleted cosmiconfig
+                              `styles.config.cjs` files are transcribed into
+                              the harness's `config_options` table.
+less-testdata/node_modules/bootstrap-less-port/
+                              The npm package (0.3.0, MIT — LICENSE included)
+                              the 3rd-party/bootstrap4 fixture imports.
+
+ALSO VENDORED (Gate T0 error half — the error-message corpus, plan §5.2/§5.5)
+------------------------------------------------------------------------------
+less-testdata/tests-error/  The byte-exact error-message fixtures: each
+                            <name>.less with a sibling <name>.txt (the expected
+                            `err.toString()` output, placeholder-substituted);
+                            `imports/` subdirs hold import helpers. 74 in-scope
+                            entries (47 eval + 27 parse). The 19 OUT fixtures
+                            (plan §5.2: @plugin-error x15 = functions-* +
+                            root-func-undefined-2, plugin-config x3 =
+                            plugin-1/2/3 + the eval/plugin/ helper dir,
+                            inline-JS x1 = javascript-undefined-var) are
+                            EXCLUDED at vendor time — they assert JS-plugin /
+                            inline-JS execution behavior a pure headless
+                            compiler never reproduces. The exclusion list lives
+                            in scripts/vendor-less-testdata.sh and is pinned by
+                            the CLASSIFIED_OUT meta-test in tests/fixtures.rs.
+                            The suites' cosmiconfig options (strictMath: true →
+                            math parens, strictUnits: true, javascriptEnabled:
+                            true) are transcribed into the harness.
+
+ALSO VENDORED (Gate T0 review pass — the tests-config ERROR suites, review R4)
+------------------------------------------------------------------------------
+less-testdata/tests-config/no-js-errors/
+                            The disabled-JS ERROR fixture. Upstream runs it
+                            through lessTester.testErrors (test/index.js:160)
+                            and plan §5.2's PROSE counts disabled-JS error
+                            fixtures in-scope (§C-jserr) even though its table
+                            (74) tallied tests-error/ only. Now an IN-SCOPE
+                            error trial (config/no-js-errors/no-js-errors;
+                            error denominator 75). Its styles.config.cjs
+                            (math strict, strictUnits, javascriptEnabled
+                            false) is transcribed into `config_options`.
+less-testdata/tests-config/js-type-errors/
+                            Vendored for classification visibility but
+                            CLASSIFIED_OUT: its golden is the V8 TypeError
+                            string of a successfully EXECUTED backtick —
+                            genuine JS. (Upstream's testTypeErrors accepts two
+                            node-version variants; js-type-error-2.txt is the
+                            alternate golden, with no .less sibling.)
+
+STILL NOT VENDORED (see NOTES.md, plan §5.2/§5.4/§8)
+----------------------------------------------------
+- tests-config plugin dirs (filemanagerPlugin, postProcessorPlugin,
+  preProcessorPlugin, visitorPlugin), debug/ (dumpLineNumbers), sourcemaps*
+  — JS/plugin/source-map surface, out of scope for a pure headless compiler
+  (plan §5.2/§8).
+
+Within tests-unit, the harness additionally SKIPS the `javascript/`, `plugin/`,
+`plugin-module/`, `plugin-preeval/` sub-suites (JS/plugin — plan §5.2). The
+`plugi/` and `parser-property-interp` typo dirs stay IN (false-positive-JS,
+plan §5.2).
+
+Refreshing on a tag bump
+------------------------
+Run scripts/vendor-less-testdata.sh (edit TAG + EXPECT_SHA first). Node is not
+needed for this step; regenerating the option manifest in later phases is a
+documented Node-toolchain maintenance dependency (plan §G-node).

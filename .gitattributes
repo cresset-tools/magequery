@@ -1,0 +1,5 @@
+# The LESS fixture corpus is a byte-exact golden set (compile output and error
+# messages are diffed byte-for-byte, and assets are data-uri'd verbatim) —
+# never EOL-convert it at checkout, or Windows CI sees CRLF where the goldens
+# and every other platform see LF.
+crates/magecommand-less/tests/fixtures/less-testdata/** -text
