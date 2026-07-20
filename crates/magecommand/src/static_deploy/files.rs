@@ -600,6 +600,7 @@ fn build_theme(
     modules: &[ModuleRef],
     reg_modules: &[ModuleRef],
     min_resolver: &str,
+    js_translation: &str,
     opts: &PlacementOptions,
     min_cache: &mut MinSiblingCache,
 ) -> Result<ThemePackage, FilesError> {
@@ -645,11 +646,11 @@ fn build_theme(
     });
 
     // js-translation.json (DeployTranslationsDictionary): the merged js
-    // dictionary — empty (the literal `[]`) when no phrase translates
-    // differently, which is the en_US case (see the module docs).
+    // dictionary — precomputed per (area, locale) by [`super::jstranslation`]
+    // (theme-independent) and passed in; the constant `[]` on en_US.
     files.push(PlacedFile {
         path: DICTIONARY_FILE_NAME.to_string(),
-        content: dictionary_json(&[]).into_bytes(),
+        content: js_translation.as_bytes().to_vec(),
         kind: PlacedKind::Translation,
     });
 
@@ -728,8 +729,128 @@ fn build_theme(
     })
 }
 
+/// The run-scoped, area/locale-INDEPENDENT inputs a deploy needs, computed
+/// once from an open handle and shared across every `(area, theme, locale)`
+/// group of a `static deploy` fan-out (so the themes/modules/min-resolver
+/// aren't re-derived per group). Cheap to clone the refs; the owned data is
+/// held once by the caller.
+pub struct DeployInputs {
+    /// `root` of the checkout.
+    pub root: PathBuf,
+    /// All discovered themes as `(id, dir)` (`frontend/Vendor/name`).
+    pub themes: Vec<(String, PathBuf)>,
+    /// Enabled modules in config.php load order (di/view/less consumers).
+    pub modules: Vec<ModuleRef>,
+    /// The same set in registration (deployment) order.
+    pub reg_modules: Vec<ModuleRef>,
+    /// Every module (enabled or not) for the js/html translation scan — the
+    /// real deploy's `ComponentRegistrar` sees all installed modules.
+    pub scan_modules: Vec<super::jstranslation::ScanModule>,
+    /// The assembled `requirejs-min-resolver.js` body (theme-independent).
+    pub min_resolver: String,
+}
+
+impl DeployInputs {
+    /// Derive the shared inputs from an open handle.
+    pub fn prepare(magento: &magequery_core::Magento) -> Result<Self, FilesError> {
+        let themes = magento.themes();
+        let modules: Vec<ModuleRef> = magento
+            .modules()
+            .iter()
+            .filter(|m| m.enabled)
+            .map(|m| ModuleRef {
+                name: m.name.to_string(),
+                dir: m.path.clone(),
+            })
+            .collect();
+        let reg_modules = registration_order(magento.root(), &modules);
+        // All installed modules (enabled or not) for the phrase scan.
+        let scan_modules: Vec<super::jstranslation::ScanModule> = magento
+            .modules()
+            .iter()
+            .map(|m| super::jstranslation::ScanModule { dir: m.path.clone() })
+            .collect();
+        let excludes = requirejs::min_resolver_excludes_from_magento(magento)?;
+        let min_resolver = requirejs::min_resolver_code(&excludes);
+        Ok(DeployInputs {
+            root: magento.root().to_path_buf(),
+            themes,
+            modules,
+            reg_modules,
+            scan_modules,
+            min_resolver,
+        })
+    }
+
+    /// The theme dirs (roots) belonging to `area`, in discovery order.
+    pub fn area_theme_dirs(&self, area: &str) -> Vec<PathBuf> {
+        let prefix = format!("{area}/");
+        self.themes
+            .iter()
+            .filter(|(id, _)| id.starts_with(&prefix))
+            .map(|(_, dir)| dir.clone())
+            .collect()
+    }
+}
+
+/// The `js-translation.json` body for `(area, locale)` — theme-independent,
+/// so compute once per group. `area_phrases` is the pre-extracted phrase set
+/// for the area (locale-independent, expensive; cache across locales).
+pub fn js_translation_for(
+    inputs: &DeployInputs,
+    locale: &str,
+    theme_chain_dirs: &[PathBuf],
+    area_phrases: &std::collections::HashSet<String>,
+) -> String {
+    // The dictionary uses the ENABLED modules in config.php load order (the
+    // real `Translate::_moduleList->getNames()`), NOT the wider registration
+    // scan set — the identity-delete merge is order-sensitive.
+    let dict_modules: Vec<super::jstranslation::ScanModule> = inputs
+        .modules
+        .iter()
+        .map(|m| super::jstranslation::ScanModule { dir: m.dir.clone() })
+        .collect();
+    let dict = super::jstranslation::merged_dictionary(&dict_modules, theme_chain_dirs, locale);
+    super::jstranslation::js_translation_json(&dict, area_phrases)
+}
+
+/// Place a sequence of themes exactly like one deploy sub-run for a single
+/// `(area, locale)`: given theme order, ONE shared `.min`-sibling bundle
+/// cache (blank-before-luma poisoning honored), the shared inputs, and the
+/// precomputed `js-translation.json` for this area+locale.
+#[allow(clippy::too_many_arguments)]
+pub fn build_group(
+    inputs: &DeployInputs,
+    area: &str,
+    theme_ids: &[String],
+    locale: &str,
+    js_translation: &str,
+    opts: &PlacementOptions,
+) -> Result<Vec<ThemePackage>, FilesError> {
+    let mut min_cache = MinSiblingCache::new();
+    let mut out = Vec::with_capacity(theme_ids.len());
+    for theme_id in theme_ids {
+        out.push(build_theme(
+            &inputs.root,
+            area,
+            theme_id,
+            locale,
+            &inputs.themes,
+            &inputs.modules,
+            &inputs.reg_modules,
+            &inputs.min_resolver,
+            js_translation,
+            opts,
+            &mut min_cache,
+        )?);
+    }
+    Ok(out)
+}
+
 /// Place a sequence of themes exactly like one deploy run: given order, one
-/// shared `.min`-sibling bundle cache, one min-resolver assembly.
+/// shared `.min`-sibling bundle cache, one min-resolver assembly. The
+/// `js-translation.json` is generated faithfully for the locale (empty `[]`
+/// for locales without a dictionary, like en_US).
 pub fn build_from_magento(
     magento: &magequery_core::Magento,
     area: &str,
@@ -737,38 +858,25 @@ pub fn build_from_magento(
     locale: &str,
     opts: &PlacementOptions,
 ) -> Result<Vec<ThemePackage>, FilesError> {
-    let themes = magento.themes();
-    let modules: Vec<ModuleRef> = magento
-        .modules()
-        .iter()
-        .filter(|m| m.enabled)
-        .map(|m| ModuleRef {
-            name: m.name.to_string(),
-            dir: m.path.clone(),
+    let inputs = DeployInputs::prepare(magento)?;
+    let area_theme_dirs = inputs.area_theme_dirs(area);
+    let area_phrases =
+        super::jstranslation::extract_area_phrases(&inputs.root, area, &inputs.scan_modules, &area_theme_dirs);
+    // Theme chain dirs for the dictionary: use the first theme's chain when
+    // present, else no theme overlay. Theme i18n rarely differs; the extracted
+    // set is theme-independent regardless.
+    let chain_dirs: Vec<PathBuf> = theme_ids
+        .first()
+        .and_then(|id| theme_chain(area, id, &inputs.themes).ok())
+        .map(|chain| {
+            chain
+                .iter()
+                .filter_map(|t| inputs.themes.iter().find(|(tid, _)| tid == &t.id).map(|(_, d)| d.clone()))
+                .collect()
         })
-        .collect();
-    let reg_modules = registration_order(magento.root(), &modules);
-
-    let excludes = requirejs::min_resolver_excludes_from_magento(magento)?;
-    let min_resolver = requirejs::min_resolver_code(&excludes);
-
-    let mut min_cache = MinSiblingCache::new();
-    let mut out = Vec::with_capacity(theme_ids.len());
-    for theme_id in theme_ids {
-        out.push(build_theme(
-            magento.root(),
-            area,
-            theme_id,
-            locale,
-            &themes,
-            &modules,
-            &reg_modules,
-            &min_resolver,
-            opts,
-            &mut min_cache,
-        )?);
-    }
-    Ok(out)
+        .unwrap_or_default();
+    let js_translation = js_translation_for(&inputs, locale, &chain_dirs, &area_phrases);
+    build_group(&inputs, area, theme_ids, locale, &js_translation, opts)
 }
 
 /// The deployed package root:
@@ -986,6 +1094,7 @@ mod tests {
             &modules,
             &modules,
             "RESOLVER",
+            "[]",
             &PlacementOptions::default(),
             &mut cache,
         )

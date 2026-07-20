@@ -18,6 +18,10 @@ anyhow = "1"
 # the dependency tree transitively.
 sha2 = "0.10"
 base64 = "0.22"
+# `static deploy` — the fan-out over the (area, theme, locale) work matrix,
+# and the parallel js/html phrase scan for `js-translation.json`. Already in
+# the workspace tree via magequery-core.
+rayon = "1"
 # File-watching for `magecommand di watch` (the long-running compile server).
 # default-features on: brings the platform backend (inotify/fsevents/kqueue).
 notify = "8"
