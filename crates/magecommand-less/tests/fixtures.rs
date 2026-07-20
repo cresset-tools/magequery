@@ -464,7 +464,7 @@ impl ImportResolver for FsResolver {
             if in_node_modules {
                 tried.push(format!("npm://{}", req.path));
             } else {
-                tried.push(candidate.display().to_string());
+                tried.push(slash(&candidate));
             }
         }
         if found.is_none() {
@@ -474,16 +474,16 @@ impl ImportResolver for FsResolver {
         let candidate = found.ok_or_else(|| ImportError::NotFound(tried.join(",")))?;
 
         let bytes = fs::read_to_string(&candidate).map_err(|e| ImportError::Io {
-            path: candidate.display().to_string(),
+            path: slash(&candidate),
             message: e.to_string(),
         })?;
 
         let dir = candidate
             .parent()
-            .map(|p| format!("{}/", p.display()))
+            .map(|p| format!("{}/", slash(p)))
             .unwrap_or_default();
         let file = FileInfo {
-            filename: candidate.display().to_string(),
+            filename: slash(&candidate),
             current_directory: dir,
             ..FileInfo::default()
         };
@@ -792,22 +792,30 @@ fn escape_path(p: &str) -> String {
     s
 }
 
+/// Render a path with forward slashes regardless of platform. Every path
+/// string that reaches compiler-visible output (filenames in error messages,
+/// `Tried` lists, `{path}` substitutions) goes through this so Windows and
+/// Unix produce byte-identical text. No-op on Unix.
+fn slash(p: &std::path::Path) -> String {
+    p.display().to_string().replace('\\', "/")
+}
+
 /// Apply less.js's placeholder substitutions to an expected file, then normalize
 /// CRLF (plan §5.5). `dir` is the fixture's directory; `root` the fixture root
 /// (`lessFolder`). In-scope tests-unit fixtures use no path placeholders, so this
 /// is dominated by the `\r\n`→`\n` rule today, but the full set is implemented
 /// for the deferred suites.
 fn do_replacements(input: &str, dir: &Path, root: &Path) -> String {
-    let p = format!("{}/", dir.display());
+    let p = format!("{}/", slash(dir));
     let pathimport = format!("{p}import/");
     let pathesc = escape_path(&p);
     let pathimportesc = escape_path(&pathimport);
     let pathrel = match dir.strip_prefix(root) {
-        Ok(rel) => format!("{}/", rel.display()),
+        Ok(rel) => format!("{}/", slash(rel)),
         Err(_) => p.clone(),
     };
     let nodepath = std::env::current_dir()
-        .map(|c| format!("{}/node_modules/", c.display()))
+        .map(|c| format!("{}/node_modules/", slash(&c)))
         .unwrap_or_else(|_| "node_modules/".to_string());
 
     input
@@ -883,7 +891,7 @@ fn run_one(fx: &Fixture, root: &Path, passed: &AtomicUsize) -> Result<(), Failed
         None if fx.verify == Verify::Error => (error_options(), Vec::new()),
         None => (LessOptions::default(), Vec::new()),
     };
-    opts.filename = Some(less.display().to_string());
+    opts.filename = Some(slash(less));
     opts.custom_functions = harness_functions();
     let resolver = FsResolver {
         root: dir.to_path_buf(),
