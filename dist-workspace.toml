@@ -94,7 +94,8 @@ github-custom-job-permissions = { "sign-release" = { contents = "write", id-toke
 # What the installers print after a successful install: how to turn on shell
 # completions (the installer can't place files itself).
 install-success-msg = """
-magequery is installed!
+magequery is installed! (magecommand, the write-side companion, ships in the
+same archive and is now on PATH too.)
 
 To enable shell completions, add one line to your shell config:
 
@@ -125,8 +126,20 @@ musl-tools = '*'
 [dist.dependencies.homebrew]
 cmake = '*'
 
+# The binaries every release ships: magequery (read side) and magecommand
+# (write side), BOTH from the `magequery` package — magecommand's `[[bin]]`
+# there is a shim over the magecommand lib crate. One app on purpose: the
+# `magequery-v<version>` tag release-please creates is a PER-APP tag (the app
+# is literally named magequery), so a second app could never announce on it —
+# dist only does multi-app releases from a bare `v<version>` tag, and the
+# magequery-v tag shape is baked into the native-binary spec, the composer
+# launcher, the mirror layout, and the editor extensions. Every
+# `magequery-<target>` archive therefore carries both executables (the
+# installers drop both on PATH; the composer launchers and bougie's spec-1
+# prefetch each stage just the file they're after). The pin also keeps any
+# future binary crate out of releases until it's deliberately listed here.
 [dist.binaries]
-"*" = ["magequery"]
+"*" = ["magequery", "magecommand"]
 
 # arm64 Linux builds natively on GitHub's free arm runners (dist doesn't
 # cross-compile gnu targets by itself).

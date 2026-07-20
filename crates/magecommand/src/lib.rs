@@ -254,7 +254,11 @@ enum DiCommand {
     },
 }
 
-fn main() -> anyhow::Result<ExitCode> {
+/// The whole `magecommand` CLI. Lives in this lib crate; the actual `[[bin]]`
+/// is a shim in the `magequery` package, so both binaries ship from the one
+/// dist app (single `magequery-v<version>` release tag) without two workspace
+/// packages racing to produce a `magecommand` artifact.
+pub fn cli_main() -> anyhow::Result<ExitCode> {
     // Restore the default SIGPIPE disposition: piping into `head`/`less` and
     // quitting early should terminate us cleanly like any Unix tool. Rust
     // otherwise ignores SIGPIPE, turning a closed reader into a write error

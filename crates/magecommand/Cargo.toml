@@ -6,10 +6,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[[bin]]
-name = "magecommand"
-path = "src/main.rs"
-
 [dependencies]
 magecommand-engine = { path = "../magecommand-engine" }
 magecommand-less = { path = "../magecommand-less" }

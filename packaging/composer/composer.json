@@ -1,6 +1,6 @@
 {
     "name": "cresset/magequery",
-    "description": "A fast Magento 2 codebase inspector: DI resolution, plugins, events, cron, routes, config across scopes, and live DB introspection. Fetches a prebuilt Rust binary on demand.",
+    "description": "A fast Magento 2 codebase inspector (magequery: DI resolution, plugins, events, cron, routes, config across scopes, live DB introspection) and its write-side companion (magecommand: DI compile, static content). Fetches prebuilt Rust binaries on demand.",
     "type": "library",
     "license": "EUPL-1.2",
     "keywords": ["magento", "magento2", "cli", "developer-tools", "dependency-injection"],
@@ -15,9 +15,10 @@
         "ext-curl": "Faster, more reliable binary downloads",
         "ext-zip": "Required to install on Windows (the binary ships as a .zip)"
     },
-    "bin": ["bin/magequery"],
+    "bin": ["bin/magequery", "bin/magecommand"],
     "extra": {
         "bougie": {
+            "default-bin": "bin/magequery",
             "native-binary": {
                 "spec": 1,
                 "name": "magequery",

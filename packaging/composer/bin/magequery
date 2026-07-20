@@ -12,4 +12,4 @@ namespace Cresset\Magequery;
 
 require __DIR__ . '/../src/Launcher.php';
 
-exit(Launcher::main(array_slice($argv, 1)));
+exit(Launcher::main(array_slice($argv, 1), 'magequery'));

@@ -1330,9 +1330,11 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "libc",
+ "magecommand",
  "magequery-core",
  "magequery-lsp",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
