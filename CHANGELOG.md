@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.10.0...magequery-v0.10.1) (2026-07-19)
+
+
+### Bug Fixes
+
+* **magecommand:** compile arguments for vtypes over self-generated bases ([#48](https://github.com/cresset-tools/magequery/issues/48)) ([10a47a7](https://github.com/cresset-tools/magequery/commit/10a47a75546afff106c6c1cd72bd7f0f7217c7ef))
+
 ## [0.10.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.9.0...magequery-v0.10.0) (2026-07-18)
 
 
