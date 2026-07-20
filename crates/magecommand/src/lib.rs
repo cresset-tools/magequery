@@ -68,12 +68,18 @@ enum StaticCommand {
         /// Theme id, e.g. `Magento/luma` (or `frontend/Magento/luma`).
         #[arg(long, value_name = "VENDOR/NAME", required_unless_present = "file")]
         theme: Option<String>,
+        /// Area of the theme (`frontend` or `adminhtml`).
+        #[arg(long, default_value = "frontend",
+              value_parser = ["frontend", "adminhtml"])]
+        area: String,
         /// Locale for the `pub/static` placement.
         #[arg(long, default_value = "en_US")]
         locale: String,
-        /// Entry point(s) to compile (`styles-m`, `styles-l`, `print`,
-        /// `email`, `email-inline`, `email-fonts`). Default: every standard
-        /// entry the theme chain provides.
+        /// Entry point(s) to compile (`styles-m`, `styles`, or a logical
+        /// path like `mage/gallery/gallery`). Default: every entry the theme
+        /// chain itself provides (its top-level `web/css/*` files — blank's
+        /// `styles-m`/`styles-l`/`print`/`email` set, backend's
+        /// `styles`/`styles-old`).
         #[arg(long, value_name = "NAME")]
         entry: Vec<String>,
         /// Compile ONE materialized `.less` file instead of a theme's entry
@@ -83,7 +89,7 @@ enum StaticCommand {
         /// materialized, as in `var/view_preprocessed`). Prints the CSS to
         /// stdout unless `--out` is given.
         #[arg(long, value_name = "PATH",
-              conflicts_with_all = ["theme", "entry", "locale", "skip_broken_modules"])]
+              conflicts_with_all = ["theme", "area", "entry", "locale", "skip_broken_modules"])]
         file: Option<PathBuf>,
         /// Write compiled CSS under this directory instead of `pub/static`
         /// (with `--file`: as `<stem>.css`).
@@ -112,6 +118,10 @@ enum StaticCommand {
         /// Theme id, e.g. `Magento/luma` (or `frontend/Magento/luma`).
         #[arg(long, value_name = "VENDOR/NAME")]
         theme: String,
+        /// Area of the theme (`frontend` or `adminhtml`).
+        #[arg(long, default_value = "frontend",
+              value_parser = ["frontend", "adminhtml"])]
+        area: String,
         /// Locale for the `pub/static` placement.
         #[arg(long, default_value = "en_US")]
         locale: String,
@@ -142,6 +152,10 @@ enum StaticCommand {
         /// multi-theme `setup:static-content:deploy` run.
         #[arg(long, value_name = "VENDOR/NAME", required = true)]
         theme: Vec<String>,
+        /// Area of the theme(s) (`frontend` or `adminhtml`).
+        #[arg(long, default_value = "frontend",
+              value_parser = ["frontend", "adminhtml"])]
+        area: String,
         /// Locale of the package.
         #[arg(long, default_value = "en_US")]
         locale: String,
@@ -176,6 +190,10 @@ enum StaticCommand {
         /// `setup:static-content:deploy` run.
         #[arg(long, value_name = "VENDOR/NAME", required = true)]
         theme: Vec<String>,
+        /// Area of the theme(s) (`frontend` or `adminhtml`).
+        #[arg(long, default_value = "frontend",
+              value_parser = ["frontend", "adminhtml"])]
+        area: String,
         /// Locale of the package. (Dictionary limitation: only locales whose
         /// js dictionary is empty — no phrase translating differently, like
         /// en_US — produce a byte-faithful `js-translation.json`.)
@@ -367,6 +385,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
         Command::Static { command } => match command {
             StaticCommand::Less {
                 ref theme,
+                ref area,
                 ref locale,
                 ref entry,
                 ref file,
@@ -379,6 +398,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 None => static_less(
                     cli.root,
                     theme.as_deref().expect("clap: --theme required without --file"),
+                    area,
                     locale,
                     entry,
                     out.as_deref(),
@@ -387,11 +407,12 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                     skip_broken_modules,
                 ),
             },
-            StaticCommand::Requirejs { ref theme, ref locale, ref out, stdout } => {
-                static_requirejs(cli.root, theme, locale, out.as_deref(), stdout, cli.json)
+            StaticCommand::Requirejs { ref theme, ref area, ref locale, ref out, stdout } => {
+                static_requirejs(cli.root, theme, area, locale, out.as_deref(), stdout, cli.json)
             }
             StaticCommand::Bundle {
                 ref theme,
+                ref area,
                 ref locale,
                 ref out,
                 ref order,
@@ -399,6 +420,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
             } => static_bundle(
                 cli.root,
                 theme,
+                area,
                 locale,
                 out.as_deref(),
                 order,
@@ -407,6 +429,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
             ),
             StaticCommand::Files {
                 ref theme,
+                ref area,
                 ref locale,
                 ref out,
                 ref order,
@@ -416,6 +439,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
             } => static_files(
                 cli.root,
                 theme,
+                area,
                 locale,
                 out.as_deref(),
                 order,
@@ -552,6 +576,7 @@ fn static_minify(
 fn static_less(
     root: Option<PathBuf>,
     theme: &str,
+    area: &str,
     locale: &str,
     entries: &[String],
     out: Option<&Path>,
@@ -565,7 +590,6 @@ fn static_less(
     let root = std::path::absolute(&root).unwrap_or(root);
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
-    let area = "frontend";
     let orch = sdless::LessOrchestrator::from_magento(&magento, area, theme)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -583,11 +607,20 @@ fn static_less(
         compress,
     };
     let names: Vec<String> = if entries.is_empty() {
-        // Every standard entry the theme chain actually provides.
-        sdless::ENTRY_POINTS
-            .iter()
-            .map(|n| n.to_string())
-            .collect()
+        // Every entry the theme chain itself provides (its top-level
+        // `web/css/*` files — blank's standard six + luma's `critical.css`,
+        // backend's `styles`/`styles-old`). A chain with no discoverable
+        // entries falls back to the standard frontend list, whose members
+        // are each skipped-with-a-note when absent.
+        let discovered = sdless::discover_entries(orch.chain());
+        if discovered.is_empty() {
+            sdless::ENTRY_POINTS
+                .iter()
+                .map(|n| n.to_string())
+                .collect()
+        } else {
+            discovered
+        }
     } else {
         entries.to_vec()
     };
@@ -664,6 +697,7 @@ fn static_less(
 fn static_requirejs(
     root: Option<PathBuf>,
     theme: &str,
+    area: &str,
     locale: &str,
     out: Option<&Path>,
     to_stdout: bool,
@@ -675,7 +709,6 @@ fn static_requirejs(
     let root = std::path::absolute(&root).unwrap_or(root);
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
-    let area = "frontend";
     let cfg = match sdrjs::build_from_magento(&magento, area, theme) {
         Ok(c) => c,
         Err(e) => {
@@ -809,6 +842,7 @@ fn static_requirejs(
 fn static_bundle(
     root: Option<PathBuf>,
     themes: &[String],
+    area: &str,
     locale: &str,
     out: Option<&Path>,
     order: &str,
@@ -821,7 +855,6 @@ fn static_bundle(
     let root = std::path::absolute(&root).unwrap_or(root);
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
-    let area = "frontend";
 
     // Per-theme target dirs, decided up front so the probe can default to
     // the output filesystem (order must match what a deploy THERE produces).
@@ -940,6 +973,7 @@ fn static_bundle(
 fn static_files(
     root: Option<PathBuf>,
     themes: &[String],
+    area: &str,
     locale: &str,
     out: Option<&Path>,
     order: &str,
@@ -955,7 +989,6 @@ fn static_files(
     let root = std::path::absolute(&root).unwrap_or(root);
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
-    let area = "frontend";
 
     let static_root = match out {
         Some(dir) => dir.to_path_buf(),

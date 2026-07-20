@@ -342,7 +342,12 @@ pub fn deployed_tree(
         }
     }
 
-    // Themes, ancestor-first (the chain is child-first).
+    // Themes, ancestor-first (the chain is child-first). A module context of
+    // a NON-enabled module never deploys (Collector.php:93 skips every
+    // module-attributed file failing `Manager::isEnabled`), so the bundler's
+    // view of the deployed tree drops it too.
+    let enabled: std::collections::HashSet<&str> =
+        modules.iter().map(|m| m.name.as_str()).collect();
     for t in chain.iter().rev() {
         walk_into_ns(&mut map, &t.dir.join("web"), "", locale);
         let Ok(rd) = std::fs::read_dir(&t.dir) else {
@@ -352,7 +357,7 @@ pub fn deployed_tree(
             .flatten()
             .filter(|e| e.path().is_dir())
             .filter_map(|e| e.file_name().to_str().map(str::to_string))
-            .filter(|n| is_module_segment(n))
+            .filter(|n| is_module_segment(n) && enabled.contains(n.as_str()))
             .collect();
         contexts.sort(); // deterministic; namespaced paths cannot collide
         for ctx in contexts {

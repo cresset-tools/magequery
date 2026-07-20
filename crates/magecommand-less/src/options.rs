@@ -148,6 +148,40 @@ pub struct LessOptions {
     /// Blank/Luma-real: compressed styles-m carries `0rem`/`0px` from
     /// `.lib-font-size-value(0)` and literal `0px`. On in Magento profiles.
     pub php_zero_units: bool,
+    /// less.php synchronous import sequencing (source-read v5.5.1,
+    /// `Less_ImportVisitor::processImportNode`): a fetched file's subtree is
+    /// visited IMMEDIATELY (`$this->visitObj($root)`) — depth-first — so a
+    /// NESTED duplicate import claims the once-slot before a later import in
+    /// the outer file. less.js's async ImportSequencer instead registers all
+    /// of a file's own imports before any fetched subtree is visited (BFS),
+    /// handing the OUTER import the slot. Backend-real:
+    /// `components/_calendar-temp.less` is imported both from
+    /// `source/_components.less` (nested) and directly by `styles.less`; the
+    /// real SCD css emits the block at the NESTED (earlier) position — and
+    /// the datepicker `:extend` selectors graft in that earlier order too.
+    /// On in Magento profiles.
+    pub php_import_order: bool,
+    /// less.php interpolated-selector semantics (source-read v5.5.1): only
+    /// declaration VALUES are ever re-parsed (`Ruleset::transformDeclaration`)
+    /// — an interpolated selector stays ONE selector even when the value
+    /// carries commas, printing as a single `a, b, c { … }` line. less.js
+    /// 3.13 re-parses evaluated selectors (`Ruleset.prototype.eval` →
+    /// `parseNode(…, ["selectors"])`), splitting the comma list into a real
+    /// selector GROUP (one per line). Backend-real: `_grid-framework.less`
+    /// builds `~'.col-xs-1, .col-m-1, …'` lists and opens `@{list} { … }`.
+    /// On in Magento profiles.
+    pub php_selector_interpolation: bool,
+    /// less.php compresses combinators INSIDE a functional-selector pseudo —
+    /// `:not()`/`:is()`/`:where()`/`:has()` — because it parses the argument as
+    /// a selector list, so ` > ` → `>` there just like at the top level. less.js
+    /// 3.13 captures the pseudo's parenthetical as a raw element value and
+    /// leaves its spaces intact under compression. Only compressed output
+    /// differs; `:nth-child(2n + 1)` and attribute values stay literal under
+    /// both (not selector lists). Backend-real: `styles.less` emits
+    /// `…-link > a.option-title` inside a `:not(…)`, which the SCD css
+    /// compresses to `…-link>a.option-title`.
+    /// On in Magento profiles.
+    pub php_selector_paren_combinators: bool,
     /// Registered custom functions (the less.js `functionRegistry.add`
     /// surface, minimal form): `(lowercased name, fn)` pairs consulted before
     /// the built-in registry. `None` from the fn = not handled → the unknown-
@@ -194,6 +228,9 @@ impl Default for LessOptions {
             php_interp_rounding: false,
             php_reference_visibility: false,
             php_zero_units: false,
+            php_import_order: false,
+            php_selector_interpolation: false,
+            php_selector_paren_combinators: false,
             max_eval_depth: None,
         }
     }
@@ -219,6 +256,9 @@ impl LessOptions {
             php_interp_rounding: true,
             php_reference_visibility: true,
             php_zero_units: true,
+            php_import_order: true,
+            php_selector_interpolation: true,
+            php_selector_paren_combinators: true,
             ..LessOptions::default()
         }
     }
@@ -233,6 +273,9 @@ impl LessOptions {
             php_interp_rounding: true,
             php_reference_visibility: true,
             php_zero_units: true,
+            php_import_order: true,
+            php_selector_interpolation: true,
+            php_selector_paren_combinators: true,
             ..LessOptions::default()
         }
     }

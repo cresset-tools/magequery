@@ -457,11 +457,15 @@ impl<'a> ImportPass<'a> {
                 }));
                 if let Node::ImportResolved(ir) = node {
                     if !ir.rules.is_empty() {
-                        let mut loc = trail.clone();
-                        loc.push((idx, 0));
                         // in_multiple stays FALSE: the entries' own imports
                         // dedup normally.
-                        self.queue.push_back((loc, false, depth + 1));
+                        if self.opts.php_import_order {
+                            self.visit_subtree_now(ir, false, depth, idx, trail)?;
+                        } else {
+                            let mut loc = trail.clone();
+                            loc.push((idx, 0));
+                            self.queue.push_back((loc, false, depth + 1));
+                        }
                     }
                 }
                 continue;
@@ -477,9 +481,14 @@ impl<'a> ImportPass<'a> {
                 *node = resolved;
                 if let Node::ImportResolved(ir) = node {
                     if !ir.skip && ir.inline.is_none() && !ir.rules.is_empty() {
-                        let mut loc = trail.clone();
-                        loc.push((idx, 0));
-                        self.queue.push_back((loc, ir.multiple, depth + 1));
+                        if self.opts.php_import_order {
+                            let multiple = ir.multiple;
+                            self.visit_subtree_now(ir, multiple, depth, idx, trail)?;
+                        } else {
+                            let mut loc = trail.clone();
+                            loc.push((idx, 0));
+                            self.queue.push_back((loc, ir.multiple, depth + 1));
+                        }
                     }
                 }
                 continue;
@@ -495,6 +504,42 @@ impl<'a> ImportPass<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Visit a freshly fetched subtree IMMEDIATELY — the less.php sequencing
+    /// ([`LessOptions::php_import_order`], `Less_ImportVisitor::
+    /// processImportNode`'s synchronous `$this->visitObj($root)`): the
+    /// subtree's own imports claim their once-slots before any later import
+    /// of the CURRENT file, i.e. depth-first where less.js's sequencer is
+    /// breadth-first (F13). The scope is built from the resolved node exactly
+    /// like [`Self::drain_queue`] builds it, so the two walks differ only in
+    /// order. Under full DFS nothing is ever queued, so `trail` bookkeeping
+    /// is kept only for consistency.
+    fn visit_subtree_now(
+        &mut self,
+        ir: &mut ImportResolved,
+        in_multiple: bool,
+        depth: usize,
+        idx: usize,
+        trail: &mut Loc,
+    ) -> Result<(), LessError> {
+        if depth + 1 > self.depth_cap() {
+            return Err(LessError::new(
+                ErrorKind::Import,
+                "import recursion limit exceeded",
+            ));
+        }
+        let scope = FileScope {
+            filename: ir.full_path.clone(),
+            current_directory: ir.current_directory.clone(),
+            rootpath: ir.rootpath.clone(),
+            reference: ir.reference,
+            source: ir.source.clone(),
+        };
+        trail.push((idx, 0));
+        let res = self.visit_list(&mut ir.rules, &scope, in_multiple, depth + 1, trail);
+        trail.pop();
+        res
     }
 
     /// Drain the pending file-visit queue FIFO (the BFS of F13). Import node

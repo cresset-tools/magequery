@@ -65,7 +65,7 @@ pub fn dispatch(
         // --- string (plan §2.14) ---
         "e" => string::e(a),
         "escape" => string::escape(a),
-        "%" => string::format(a),
+        "%" => string::format(a, np, compress, keep_zero_units),
         "replace" => string::replace(a),
 
         // --- list ---
