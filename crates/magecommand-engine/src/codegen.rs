@@ -486,7 +486,7 @@ pub struct Codegen<'a> {
 impl<'a> Codegen<'a> {
     pub fn new(magento: &'a Magento, defs: &'a Definitions, root: PathBuf) -> Codegen<'a> {
         let global_vtypes = magento
-            .di_export(Area::Global)
+            .di_export_ref(Area::Global)
             .virtual_types
             .iter()
             .map(|v| v.name.as_str().to_owned())

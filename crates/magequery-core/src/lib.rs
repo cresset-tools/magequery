@@ -132,6 +132,7 @@ pub struct Magento {
 struct DiBuilt {
     index: engine::di::DiIndex,
     diagnostics: Vec<Diagnostic>,
+    exports: [OnceLock<DiExport>; Area::ALL.len()],
 }
 
 /// The four OAuth 1.0a credentials of an integration, returned only by
@@ -232,21 +233,33 @@ impl Magento {
         Self::open(root)
     }
 
+    fn di_built(&self) -> &DiBuilt {
+        self.di.get_or_init(|| {
+            let mut diagnostics = Vec::new();
+            let index = engine::di::build(
+                &self.index.root,
+                &self.index.modules,
+                &self.index.vfs,
+                &mut diagnostics,
+            );
+            DiBuilt { index, diagnostics, exports: Default::default() }
+        })
+    }
+
     /// The merged DI config, built (and its diagnostics collected) on first DI query.
     fn di_index(&self) -> &engine::di::DiIndex {
-        &self
-            .di
-            .get_or_init(|| {
-                let mut diagnostics = Vec::new();
-                let index = engine::di::build(
-                    &self.index.root,
-                    &self.index.modules,
-                    &self.index.vfs,
-                    &mut diagnostics,
-                );
-                DiBuilt { index, diagnostics }
-            })
-            .index
+        &self.di_built().index
+    }
+
+    /// The cached wholesale export of a fixed `area` — computed once (per area),
+    /// then borrowed. The compile touches each area's export from several phases
+    /// (extend_hierarchy, per-area build, interception, plugin-lists, codegen);
+    /// caching turns ~46 rebuilds into 7. Read-only callers borrow; those needing
+    /// ownership call [`di_export`](Self::di_export) (a clone of this).
+    pub fn di_export_ref(&self, area: Area) -> &DiExport {
+        let built = self.di_built();
+        let rank = Area::ALL.iter().position(|&a| a == area).unwrap_or(0);
+        built.exports[rank].get_or_init(|| built.index.config(area).export(area))
     }
 
     /// Library component paths (magento2-library composer packages — what
@@ -266,7 +279,7 @@ impl Magento {
     /// per-class, resolution-applying views. `Area::Global` exports the base
     /// config; a real area exports the base overlaid by that area's files.
     pub fn di_export(&self, area: Area) -> DiExport {
-        self.di_index().config(area).export(area)
+        self.di_export_ref(area).clone()
     }
 
     /// Cheap declaration COUNTS for `area` — preferences / virtual types /
