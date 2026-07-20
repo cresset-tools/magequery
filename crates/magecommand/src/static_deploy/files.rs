@@ -282,9 +282,16 @@ pub fn resolve_package(
     locale: &str,
 ) -> Vec<PackageEntry> {
     let mut files = OrderedFiles::default();
+    let enabled: std::collections::HashSet<&str> =
+        modules.iter().map(|m| m.name.as_str()).collect();
 
     // A theme layer: `web/**` then each `*_*` module context's `web/**`
     // (theme-dir readdir order, like the collector's `*_*/web` glob).
+    // A context for a module that is NOT enabled is dropped whole —
+    // `Collector::collect` skips every module-attributed file whose module
+    // fails `Manager::isEnabled` (Collector.php:93), theme-context files
+    // included (backend-real: the theme ships a `Magento_Analytics/` context
+    // but no such module is installed; its icon never deploys).
     // `with_i18n` selects the locale overlay (stripped path) or the plain
     // files; both passes walk the same glob stream, preserving its order.
     // `own` marks the deployed package's own files (its locale overlays).
@@ -296,6 +303,9 @@ pub fn resolve_package(
                     continue;
                 };
                 if name.starts_with('.') || !is_module_segment(&name) {
+                    continue;
+                }
+                if !enabled.contains(name.as_str()) {
                     continue;
                 }
                 let path = e.path();
@@ -676,17 +686,31 @@ fn build_theme(
 
     // sri-hashes.json (Magento_Csp Integrity + the requirejs/bundle
     // collector plugins): every deployed `.js`, full static-relative paths,
-    // in deployment order.
+    // in deployment order — EXCEPT the bundles: GenerateBundleAssetIntegrity
+    // runs after `Bundle::deploy` and lists them via
+    // `$pubStaticDir->search("<pkg>/js/bundle/*.js")`, a SORTING glob, so
+    // their entries are lexicographic (`bundle10` between `bundle1` and
+    // `bundle2`). Invisible on the frontend's 7 bundles; real on the
+    // backend's 11.
     let prefix = format!("{area}/{theme_path}/{locale}");
+    let is_js = |f: &&PlacedFile| {
+        f.path
+            .rsplit('/')
+            .next()
+            .and_then(|b| b.rsplit_once('.'))
+            .is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("js"))
+    };
+    let mut bundle_js: Vec<&PlacedFile> = files
+        .iter()
+        .filter(|f| f.kind == PlacedKind::Bundle)
+        .filter(is_js)
+        .collect();
+    bundle_js.sort_by(|a, b| a.path.cmp(&b.path));
     let sri: Vec<(String, String)> = files
         .iter()
-        .filter(|f| {
-            f.path
-                .rsplit('/')
-                .next()
-                .and_then(|b| b.rsplit_once('.'))
-                .is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("js"))
-        })
+        .filter(|f| f.kind != PlacedKind::Bundle)
+        .filter(is_js)
+        .chain(bundle_js)
         .map(|f| (format!("{prefix}/{}", f.path), sri_hash(&f.content)))
         .collect();
     files.push(PlacedFile {

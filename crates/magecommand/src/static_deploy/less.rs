@@ -58,6 +58,38 @@ pub const ENTRY_POINTS: [&str; 7] = [
     "styles-m", "styles-l", "print", "email", "email-inline", "email-fonts", "critical",
 ];
 
+/// The entry points a theme CHAIN itself provides: every top-level
+/// `web/css/*` file of any chain theme that is a non-partial `.less` (a
+/// compile entry) or a plain `.css` (a verbatim-copy entry, Luma's
+/// `critical.css`), as entry stems, deduped and sorted. This is what the
+/// entry set really is — file presence, not a fixed list: blank/luma yields
+/// the six standard entries + `critical`, Magento/backend yields
+/// `styles`/`styles-old` (the frontend names simply have no adminhtml
+/// counterpart — no area conditional exists in the deploy code). Deeper
+/// files (`css/source/**`) are imports, not entries, and other packaged
+/// `.less` sources (`lib/web`, module view dirs) are the full deploy's
+/// concern ([`super::files`] discovers those from the package itself).
+pub fn discover_entries(chain: &[ThemeRef]) -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for t in chain {
+        let Ok(rd) = std::fs::read_dir(t.dir.join("web").join("css")) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let Some(name) = e.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if name.starts_with('_') || name.starts_with('.') || !e.path().is_file() {
+                continue;
+            }
+            if let Some(stem) = name.strip_suffix(".less").or_else(|| name.strip_suffix(".css")) {
+                out.insert(stem.to_string());
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// One theme in the fallback chain.
 #[derive(Debug, Clone)]
 pub struct ThemeRef {
@@ -1104,6 +1136,31 @@ mod tests {
         let chain = theme_chain("frontend", "Acme/child", &themes(td.path())).unwrap();
         let ids: Vec<&str> = chain.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["frontend/Acme/child", "frontend/Acme/base"]);
+    }
+
+    /// Entry discovery is file presence over the chain's top-level
+    /// `web/css/*`: non-partial `.less` and plain `.css` stems, deduped
+    /// (child override = one entry), partials and nested sources excluded.
+    #[test]
+    fn discover_entries_from_chain_files() {
+        let td = synth_tree();
+        let r = td.path();
+        let w = |rel: &str, content: &str| {
+            let p = r.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        };
+        // A plain-css entry (the Luma critical.css case), a partial (never
+        // an entry), and a child override of the base entry (deduped).
+        w("vendor/acme/theme-base/web/css/critical.css", ".c{}");
+        w("vendor/acme/theme-base/web/css/_partial.less", ".p{}");
+        w("vendor/acme/theme-child/web/css/styles-m.less", ".m{}");
+
+        let chain = theme_chain("frontend", "Acme/child", &themes(r)).unwrap();
+        assert_eq!(discover_entries(&chain), ["critical", "styles-m"]);
+        // The base theme alone: same set minus nothing (styles-m is its own).
+        let base = theme_chain("frontend", "Acme/base", &themes(r)).unwrap();
+        assert_eq!(discover_entries(&base), ["critical", "styles-m"]);
     }
 
     #[test]
