@@ -265,6 +265,9 @@ pub(crate) fn eval_with_source(
     resolver: &dyn ImportResolver,
     entry_source: std::sync::Arc<str>,
 ) -> Result<Css, LessError> {
+    // A fresh compile must not see cached frame scans from a previous job on
+    // this thread (frames are dead, but an address could be reused).
+    clear_frame_caches();
     let mut rules = match root.as_ref() {
         Node::Root(r) => r.clone(),
         // A passthrough anonymous root (scaffold callers) — emit verbatim.
@@ -616,6 +619,7 @@ impl<'a> Ctx<'a> {
             Some(flat) => {
                 if let Some(frame) = self.frames.first() {
                     *frame.borrow_mut() = flat.clone();
+                    invalidate_frame_cache(frame);
                 }
                 flat
             }
@@ -650,6 +654,8 @@ impl<'a> Ctx<'a> {
                         *value = Box::new(Node::Closure { inner, scope });
                     }
                 }
+                drop(fm);
+                invalidate_frame_cache(&frame);
             }
         }
 
@@ -783,6 +789,8 @@ impl<'a> Ctx<'a> {
                             let at = (idx + inserted + 1).min(fm.len());
                             inserted += to_insert.len();
                             fm.splice(at..at, to_insert);
+                            drop(fm);
+                            invalidate_frame_cache(&frame);
                         }
                     }
                     expansions.push(Some((ex_own, ex_children)));
@@ -4545,7 +4553,101 @@ impl<'a> Ctx<'a> {
 
 /// Scan a frame's rules for the last `@name` declaration (last-wins), returning
 /// its unevaluated value + whether it was `!important`.
+// --- frame variable cache ------------------------------------------------
+// A variable lookup linear-scans the frame's whole rule list (last-wins), and
+// the X1-flattened root frame holds the entire import-spliced tree — so every
+// lookup over it was O(rules). One full scan builds a name → value map per
+// live frame instead, kept in a thread-local (eval is single-threaded per
+// job), keyed by the RefCell address and validated by a Weak + the rule
+// count; the three frame-mutation sites drop the entry explicitly.
+struct VarCacheEntry {
+    alive: std::rc::Weak<RefCell<Vec<Node>>>,
+    len:   usize,
+    map:   rustc_hash::FxHashMap<Box<str>, (Node, bool)>,
+}
+
+thread_local! {
+    static VAR_CACHE: RefCell<rustc_hash::FxHashMap<usize, VarCacheEntry>> =
+        RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+/// Drop the cached scan for a frame that is about to (or just did) mutate.
+fn invalidate_frame_cache(frame: &Frame) {
+    let key = Rc::as_ptr(frame) as usize;
+    VAR_CACHE.with(|c| {
+        c.borrow_mut().remove(&key);
+    });
+}
+
+/// Reset all per-frame caches (a new compile starts).
+fn clear_frame_caches() {
+    VAR_CACHE.with(|c| c.borrow_mut().clear());
+}
+
+/// Frames below this rule count scan linearly — a map build (which clones
+/// every declared value) only amortizes on large, long-lived frames (the
+/// flattened root); per-mixin-call frames are tiny and die after one lookup.
+const VAR_CACHE_MIN_RULES: usize = 48;
+
 fn frame_variable(frame: &Frame, name: &str) -> Option<(Node, bool)> {
+    if frame.borrow().len() < VAR_CACHE_MIN_RULES {
+        return frame_variable_scan(frame, name);
+    }
+    let key = Rc::as_ptr(frame) as usize;
+    VAR_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let valid = cache.get(&key).is_some_and(|e| {
+            e.len == frame.borrow().len()
+                && e.alive.upgrade().is_some_and(|rc| Rc::ptr_eq(&rc, frame))
+        });
+        if !valid {
+            let mut map: rustc_hash::FxHashMap<Box<str>, (Node, bool)> =
+                rustc_hash::FxHashMap::default();
+            for r in frame.borrow().iter() {
+                match r {
+                    Node::VariableDecl {
+                        name: n,
+                        value,
+                        important,
+                        ..
+                    } => {
+                        map.insert(n.as_str().into(), ((**value).clone(), !important.is_empty()));
+                    }
+                    // Mirrors the un-inlined-import peek of the scan below.
+                    Node::ImportResolved(ir)
+                        if !ir.skip
+                            && ir.inline.is_none()
+                            && ir.features.is_none()
+                            && !ir.layer_css =>
+                    {
+                        for inner in &ir.rules {
+                            if let Node::VariableDecl {
+                                name: n,
+                                value,
+                                important,
+                                ..
+                            } = inner
+                            {
+                                map.insert(
+                                    n.as_str().into(),
+                                    ((**value).clone(), !important.is_empty()),
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            cache.insert(
+                key,
+                VarCacheEntry { alive: Rc::downgrade(frame), len: frame.borrow().len(), map },
+            );
+        }
+        cache.get(&key).and_then(|e| e.map.get(name).cloned())
+    })
+}
+
+fn frame_variable_scan(frame: &Frame, name: &str) -> Option<(Node, bool)> {
     let mut result = None;
     for r in frame.borrow().iter() {
         match r {
