@@ -162,6 +162,27 @@ enum StaticCommand {
         #[arg(long, value_name = "DIR")]
         probe_dir: Option<PathBuf>,
     },
+    /// Minify ONE CSS or JS file (the `.min.*` building block of the future
+    /// `static deploy`). Deliberately NOT byte-parity with Magento's
+    /// cssmin/JShrink — semantic equivalence via lightningcss (CSS,
+    /// serialization-only: no rule merging, no downleveling) and oxc (JS,
+    /// ES5 output floor, AMD-safe). Errors exit non-zero on stderr.
+    Minify {
+        /// The CSS file to minify.
+        #[arg(long, value_name = "FILE", required_unless_present = "js",
+              conflicts_with = "js")]
+        css: Option<PathBuf>,
+        /// The JS file to minify.
+        #[arg(long, value_name = "FILE")]
+        js: Option<PathBuf>,
+        /// Write the minified output to this exact path (default: the
+        /// `.min.*` sibling of the input, Magento's `addMinifiedSign`).
+        #[arg(long, value_name = "FILE", conflicts_with = "stdout")]
+        out: Option<PathBuf>,
+        /// Print ONLY the minified content to stdout (no writes).
+        #[arg(long)]
+        stdout: bool,
+    },
     /// Semantic CSS diff (plan §7.7): compare a golden `.css` (real SCD
     /// output) against ours, normalizing only non-semantic formatting
     /// (whitespace, hex case/shorthand, leading zeros, comments) —
@@ -337,6 +358,9 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 probe_dir.as_deref(),
                 cli.json,
             ),
+            StaticCommand::Minify { ref css, ref js, ref out, stdout } => {
+                static_minify(css.as_deref(), js.as_deref(), out.as_deref(), stdout)
+            }
             StaticCommand::Cssdiff { ref expected, ref actual, limit } => {
                 static_cssdiff(expected, actual, limit, cli.json)
             }
@@ -380,6 +404,79 @@ fn static_less_file(file: &Path, out: Option<&Path>, compress: bool) -> anyhow::
         }
         None => print!("{}", compiled.css),
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `magecommand static minify` — minify one CSS or JS file. Bare content on
+/// stdout with `--stdout`; otherwise written to `--out` or the input's
+/// `.min.*` sibling ([`static_deploy::minify::min_path`]). CSS recovery
+/// warnings go to stderr; any error exits non-zero.
+fn static_minify(
+    css: Option<&Path>,
+    js: Option<&Path>,
+    out: Option<&Path>,
+    to_stdout: bool,
+) -> anyhow::Result<ExitCode> {
+    use static_deploy::minify as sdmin;
+
+    let input = css.or(js).expect("clap: --css or --js required");
+    let source = std::fs::read_to_string(input)
+        .with_context(|| format!("read {}", input.display()))?;
+    let minified = if css.is_some() {
+        match sdmin::minify_css(&source) {
+            Ok(m) => {
+                for w in &m.warnings {
+                    eprintln!("warning: {}: {w}", input.display());
+                }
+                m.css
+            }
+            Err(e) => {
+                eprintln!("error: {}: {e}", input.display());
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+    } else {
+        match sdmin::minify_js(&source, &input.display().to_string()) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+    };
+
+    if to_stdout {
+        print!("{minified}");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let target = match out {
+        Some(p) => p.to_path_buf(),
+        None => {
+            let t = sdmin::min_path(input);
+            if t == input {
+                anyhow::bail!(
+                    "{} already carries the .min sign; pass --out or --stdout",
+                    input.display()
+                );
+            }
+            t
+        }
+    };
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+    }
+    std::fs::write(&target, &minified)
+        .with_context(|| format!("write {}", target.display()))?;
+    println!(
+        "{}: {} bytes -> {} bytes -> {}",
+        input.display(),
+        source.len(),
+        minified.len(),
+        target.display()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
