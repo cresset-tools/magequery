@@ -162,6 +162,53 @@ enum StaticCommand {
         #[arg(long, value_name = "DIR")]
         probe_dir: Option<PathBuf>,
     },
+    /// Deploy a theme's FULL static-file package (everything a real
+    /// `setup:static-content:deploy` writes, quick strategy): the plain-copy
+    /// engine over the source collectors (lib/module/theme layers + i18n
+    /// overlays), LESS-compiled css (compressed — the default/production-mode
+    /// output) with the VariableNotation/ModuleNotation css processors, the
+    /// requirejs artifacts, `js-translation.json`, the js bundles and
+    /// `sri-hashes.json` — byte-faithful to a real deploy.
+    Files {
+        /// Theme id, e.g. `Magento/luma` (or `frontend/Magento/luma`).
+        /// Repeatable: themes are processed in the given order with the
+        /// deploy's shared `.min`-sibling bundle cache, like one multi-theme
+        /// `setup:static-content:deploy` run.
+        #[arg(long, value_name = "VENDOR/NAME", required = true)]
+        theme: Vec<String>,
+        /// Locale of the package. (Dictionary limitation: only locales whose
+        /// js dictionary is empty — no phrase translating differently, like
+        /// en_US — produce a byte-faithful `js-translation.json`.)
+        #[arg(long, default_value = "en_US")]
+        locale: String,
+        /// Write the packages under this static root (as
+        /// `<DIR>/<area>/<Vendor>/<name>/<locale>/…`) instead of
+        /// `pub/static`.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// Bundle-internal ordering: `probe` reproduces the output
+        /// filesystem's readdir order (byte-faithful on hash-ordered
+        /// filesystems like ext4); `sorted` is portable lexicographic order.
+        /// (Package deployment order itself follows the SOURCE tree's
+        /// readdir order — no probe involved.)
+        #[arg(long, value_name = "probe|sorted", default_value = "probe")]
+        order: String,
+        /// Scratch directory for `--order probe` (must be on the same
+        /// filesystem the deploy would write to). Default: the output base
+        /// directory.
+        #[arg(long, value_name = "DIR")]
+        probe_dir: Option<PathBuf>,
+        /// Write `<static root>/deployed_version.txt` with this exact value
+        /// (the deploy's `--content-version`). Omitted = no file: the real
+        /// value is a per-run timestamp, and inventing one here would only
+        /// masquerade as a run that never happened.
+        #[arg(long, value_name = "VERSION")]
+        deployed_version: Option<String>,
+        /// Compile LESS uncompressed (developer-mode output) instead of the
+        /// default/production-mode compressed css.
+        #[arg(long)]
+        no_compress: bool,
+    },
     /// Minify ONE CSS or JS file (the `.min.*` building block of the future
     /// `static deploy`). Deliberately NOT byte-parity with Magento's
     /// cssmin/JShrink — semantic equivalence via lightningcss (CSS,
@@ -356,6 +403,25 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 out.as_deref(),
                 order,
                 probe_dir.as_deref(),
+                cli.json,
+            ),
+            StaticCommand::Files {
+                ref theme,
+                ref locale,
+                ref out,
+                ref order,
+                ref probe_dir,
+                ref deployed_version,
+                no_compress,
+            } => static_files(
+                cli.root,
+                theme,
+                locale,
+                out.as_deref(),
+                order,
+                probe_dir.as_deref(),
+                deployed_version.as_deref(),
+                no_compress,
                 cli.json,
             ),
             StaticCommand::Minify { ref css, ref js, ref out, stdout } => {
@@ -861,6 +927,155 @@ fn static_bundle(
                 f.content.len()
             );
         }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `magecommand static files` — deploy the FULL static-file package per
+/// theme, exactly as one multi-theme quick-strategy deploy run would (shared
+/// `.min`-sibling bundle cache, theme order as given). Existing files are
+/// overwritten in place; the bundle dirs are cleared (the real deploy's
+/// `clear()`); nothing else is deleted.
+#[allow(clippy::too_many_arguments)]
+fn static_files(
+    root: Option<PathBuf>,
+    themes: &[String],
+    locale: &str,
+    out: Option<&Path>,
+    order: &str,
+    probe_dir: Option<&Path>,
+    deployed_version: Option<&str>,
+    no_compress: bool,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
+    use static_deploy::bundle as sdb;
+    use static_deploy::files as sdf;
+
+    let root = root.unwrap_or_else(|| PathBuf::from("."));
+    let root = std::path::absolute(&root).unwrap_or(root);
+    let magento = magequery_core::Magento::open(&root)
+        .with_context(|| format!("not a Magento root: {}", root.display()))?;
+    let area = "frontend";
+
+    let static_root = match out {
+        Some(dir) => dir.to_path_buf(),
+        None => root.join("pub").join("static"),
+    };
+
+    let order_mode = match order {
+        "sorted" => sdb::OrderMode::Sorted,
+        "probe" => {
+            let scratch = match probe_dir {
+                Some(d) => d.to_path_buf(),
+                None => static_root.clone(),
+            };
+            std::fs::create_dir_all(&scratch)
+                .with_context(|| format!("create probe scratch {}", scratch.display()))?;
+            sdb::OrderMode::Probe(scratch)
+        }
+        other => anyhow::bail!("--order must be `probe` or `sorted`, got `{other}`"),
+    };
+
+    let opts = sdf::PlacementOptions {
+        compress: !no_compress,
+        order: order_mode,
+    };
+    let packages = match sdf::build_from_magento(&magento, area, themes, locale, &opts) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
+    // deployed_version.txt is written FIRST on a real run — only with an
+    // explicit version (never an invented timestamp).
+    if let Some(version) = deployed_version {
+        std::fs::create_dir_all(&static_root)
+            .with_context(|| format!("mkdir {}", static_root.display()))?;
+        let p = static_root.join(sdf::DEPLOYED_VERSION_FILE_NAME);
+        std::fs::write(&p, version.as_bytes())
+            .with_context(|| format!("write {}", p.display()))?;
+    }
+
+    for pkg in &packages {
+        let target = sdf::package_dir(&static_root, area, &pkg.theme, locale);
+        // The real deploy's bundle clear().
+        let bundle_dir = target.join(sdb::BUNDLE_JS_DIR);
+        if bundle_dir.is_dir() {
+            std::fs::remove_dir_all(&bundle_dir)
+                .with_context(|| format!("clear {}", bundle_dir.display()))?;
+        }
+        for f in &pkg.files {
+            let path = target.join(&f.path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("mkdir {}", parent.display()))?;
+            }
+            std::fs::write(&path, &f.content)
+                .with_context(|| format!("write {}", path.display()))?;
+        }
+        for (logical, warning) in &pkg.warnings {
+            eprintln!("warning: {logical}: {warning}");
+        }
+    }
+
+    if json {
+        use static_deploy::files::PlacedKind as K;
+        let doc = serde_json::json!({
+            "deployed_version": deployed_version,
+            "themes": packages.iter().map(|pkg| {
+                let target = sdf::package_dir(&static_root, area, &pkg.theme, locale);
+                serde_json::json!({
+                    "theme": pkg.theme,
+                    "theme_path": pkg.theme_path,
+                    "chain": pkg.chain.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+                    "output": target.display().to_string(),
+                    "files": pkg.files.len(),
+                    "bytes": pkg.bytes(),
+                    "copied": pkg.count(K::Copy),
+                    "css_processed": pkg.count(K::CssProcessed),
+                    "less_compiled": pkg.count(K::LessCompiled),
+                    "requirejs": pkg.count(K::RequireJs),
+                    "bundles": pkg.count(K::Bundle),
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    for pkg in &packages {
+        use static_deploy::files::PlacedKind as K;
+        let target = sdf::package_dir(&static_root, area, &pkg.theme, locale);
+        eprintln!(
+            "theme fallback chain: {}",
+            pkg.chain
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>()
+                .join(" -> ")
+        );
+        println!(
+            "{}: {} file(s) ({} copied, {} css-processed, {} less-compiled, \
+             {} requirejs, {} bundle(s), js-translation + sri-hashes) \
+             {:.1} MB -> {}",
+            pkg.theme,
+            pkg.files.len(),
+            pkg.count(K::Copy),
+            pkg.count(K::CssProcessed),
+            pkg.count(K::LessCompiled),
+            pkg.count(K::RequireJs),
+            pkg.count(K::Bundle),
+            pkg.bytes() as f64 / (1024.0 * 1024.0),
+            target.display()
+        );
+    }
+    if let Some(version) = deployed_version {
+        println!(
+            "deployed_version.txt: {version} -> {}",
+            static_root.join(sdf::DEPLOYED_VERSION_FILE_NAME).display()
+        );
     }
     Ok(ExitCode::SUCCESS)
 }

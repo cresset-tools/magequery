@@ -654,26 +654,35 @@ fn is_excluded(path: &str, cfg: &BundleViewConfig) -> bool {
 /// non-ASCII code point as lowercase `\uXXXX` (surrogate pairs beyond the
 /// BMP). An empty map is the caller's business (`{}` is written verbatim).
 pub fn php_json_encode_map(entries: &[(&str, &str)]) -> String {
+    php_json_encode_map_opts(entries, false)
+}
+
+/// [`php_json_encode_map`] with the slash policy explicit: PHP's DEFAULT
+/// `json_encode` escapes `/` as `\/` (`escape_slashes = true` — what
+/// `sri-hashes.json`/`js-translation.json` are written with); the bundler
+/// passes `JSON_UNESCAPED_SLASHES` (`false`).
+pub fn php_json_encode_map_opts(entries: &[(&str, &str)], escape_slashes: bool) -> String {
     let mut out = String::with_capacity(entries.iter().map(|(k, v)| k.len() + v.len() + 8).sum());
     out.push('{');
     for (i, (k, v)) in entries.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
-        php_json_string(k, &mut out);
+        php_json_string(k, &mut out, escape_slashes);
         out.push(':');
-        php_json_string(v, &mut out);
+        php_json_string(v, &mut out, escape_slashes);
     }
     out.push('}');
     out
 }
 
-fn php_json_string(s: &str, out: &mut String) {
+fn php_json_string(s: &str, out: &mut String, escape_slashes: bool) {
     out.push('"');
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '/' if escape_slashes => out.push_str("\\/"),
             '\u{08}' => out.push_str("\\b"),
             '\u{09}' => out.push_str("\\t"),
             '\u{0a}' => out.push_str("\\n"),

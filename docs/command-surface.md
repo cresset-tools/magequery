@@ -12,7 +12,7 @@ surface; it is a curated, grep-able set. Bare `magecommand` and bare `magecomman
 <group>` print that level's help (clap `arg_required_else_help`), never a default
 action. Global flags (`--root <path>`, `--json`) apply to every command.
 
-**The `di` group and the `static` group's LESS + requirejs + bundle + minify pipelines are built today.** Everything
+**The `di` group and the `static` group's LESS + requirejs + bundle + minify + files pipelines are built today.** Everything
 else is the planned surface — documented here so the grammar is fixed before scripts
 and muscle memory depend on it, but not yet wired in `main.rs`. New commands MUST slot
 into a group under this grammar, never appear as a bare top-level verb.
@@ -20,8 +20,8 @@ into a group under this grammar, never appear as a bare top-level verb.
 ```
 GENERATE   (static, byte-exact reproducible — a real `bin/magento` run is the oracle)
   di       compile | verify | watch | digest      # setup:di:compile              (BUILT)
-  static   less | cssdiff | requirejs | bundle | minify   # LESS + JS deploy artifacts (BUILT)
-           deploy | verify | watch                # full static-content deploy    (planned)
+  static   less | cssdiff | requirejs | bundle | minify | files  # SCD artifacts + full package (BUILT)
+           deploy | verify | watch                # deploy-in-place orchestration (planned)
   i18n     collect                                # i18n:collect-phrases          (planned)
 
 SCAFFOLD   (Laravel make: — template codegen, no Magento bootstrap, no DB)         (planned)
@@ -80,7 +80,7 @@ guarding against creatuity's issue #28 (global plugins silently not firing in
 CLI/`primary` scope). Credit: the fused technique is creatuity's prior art
 (github.com/creatuity/magento2-interceptors), reimplemented clean-room.
 
-## The `static` group (LESS + requirejs + bundle + minify built)
+## The `static` group (LESS + requirejs + bundle + minify + files built)
 
 The pure-Rust half of `setup:static-content:deploy` (no PHP, no node). Global
 flags plus:
@@ -172,6 +172,52 @@ static bundle --theme <VENDOR/NAME>... [--locale <L>] [--out <DIR>]
     Not modeled (documented limits): minified-mode bundling (dev/js/minify
     .min naming), the compact-strategy result_map.json input branch, and
     non-frontend areas.
+
+static files --theme <VENDOR/NAME>... [--locale <L>] [--out <DIR>]
+             [--order probe|sorted] [--probe-dir <DIR>]
+             [--deployed-version <V>] [--no-compress]
+    Deploy a theme's FULL static-file package — everything a real
+    setup:static-content:deploy (quick strategy, the default) writes,
+    byte-faithful (whole-tree gate: blank 1590 + luma 1602 files vs fresh
+    stock-SCD goldens; the only tolerated deltas are the 6 golden-side PHP
+    float-print css artifacts). Composes the built pipelines instead of
+    duplicating them: LESS entries (every non-partial .less — the theme css/
+    entries, lib's mage/gallery/gallery.less, module less like PageBuilder's
+    hljs) compile via `static less` semantics (compressed by default — the
+    default/production-mode SCD output; --no-compress for the developer-mode
+    form); requirejs artifacts via `static requirejs`; bundles via
+    `static bundle` (one shared .min-sibling cache across the run's themes).
+    On top: the plain-copy engine (Magento's source collectors — lib/web
+    minus css/docs, per-module view/base + view/<area> web files with
+    i18n/<locale> overlays, theme chain web/ + <Vendor_Module>/ contexts +
+    i18n overlays; _*.less partials never deploy; fileId-keyed aggregation
+    where a later layer overrides the value but keeps the earliest position,
+    and the deployed theme's own i18n overlays are never overridden), the
+    css notation processors on every published css (VariableNotation — the
+    {{base_url_path}} static-path injection that closes email-inline.css —
+    then ModuleNotation Module::path → context-relative urls),
+    js-translation.json (the js dictionary; the literal 2-byte `[]` whenever
+    no phrase translates differently — the en_US case; phrase extraction for
+    locales with a non-empty dictionary is a documented gap), and
+    sri-hashes.json (Magento_Csp: sha256-base64 of every deployed .js, keys
+    in DEPLOYMENT order — package js, then the requirejs artifacts, then the
+    bundles — PHP default json_encode with escaped slashes). Deployment
+    order itself follows the SOURCE tree's readdir order with modules in
+    REGISTRATION order (composer autoload_files.php + app/code sorted — NOT
+    config.php order; only sri-hashes key order depends on it).
+    --deployed-version <V> writes <static root>/deployed_version.txt with
+    exactly V (the deploy's --content-version); omitted = no file, because
+    the real value is a per-run timestamp and inventing one would fake a run
+    that never happened. --out replaces pub/static as the static root
+    (<DIR>/<area>/<Vendor>/<name>/<locale>/…). --order/--probe-dir as in
+    `static bundle` (bundle-internal order only). --json prints per-theme
+    placement stats (files, bytes, per-kind counts).
+    Not modeled (documented limits): non-frontend areas, minified-mode
+    deploys, the compact/standard strategy artifacts (map.json /
+    requirejs-map.js / result_map.json), non-empty js dictionaries, and the
+    parent-package copy fast path (always publishes from source — byte-
+    identical here; a theme inheriting a {{base_url_path}} css it does NOT
+    recompile would differ, which no stock theme does).
 
 static minify (--css <FILE> | --js <FILE>) [--out <FILE>] [--stdout]
     Minify ONE CSS or JS file — the .min.* building block of the future

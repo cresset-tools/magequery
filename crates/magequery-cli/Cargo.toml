@@ -34,3 +34,5 @@ libc = "0.2"
 [dev-dependencies]
 # tempfile: the magecommand integration tests (moved here with the binary).
 tempfile = "3"
+# sha2: the static_fulltree gate hashes deployed files against the manifests.
+sha2 = "0.10"
