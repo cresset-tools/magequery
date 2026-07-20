@@ -367,6 +367,7 @@ pub(crate) fn eval_with_source(
         np: opts.num_precision,
         compress: opts.compress,
         keep_zero_units: opts.php_zero_units,
+        paren_combinators: opts.php_selector_paren_combinators,
     });
     Ok(Css {
         code,
@@ -1322,10 +1323,14 @@ impl<'a> Ctx<'a> {
                 .iter()
                 .any(|e| e.value.contains("@{") || e.value.contains("${"));
             let rendered = self.render_selector(sel)?;
-            if interpolated && rendered.contains(',') {
+            if interpolated && rendered.contains(',') && !self.opts.php_selector_interpolation {
                 // less.js RE-PARSES interpolated selectors — a comma list in
                 // the variable expands to a selector GROUP
-                // (`@{inputs} { … }`, parse-interpolation).
+                // (`@{inputs} { … }`, parse-interpolation). less.php never
+                // re-parses selectors (only declaration values), so under
+                // [`LessOptions::php_selector_interpolation`] the comma list
+                // stays ONE selector, printed on a single line — the backend
+                // `_grid-framework.less` `@{list} { … }` construct.
                 for part in split_top(&rendered, ',') {
                     let part = part.trim();
                     if part.is_empty() {
@@ -1339,7 +1344,17 @@ impl<'a> Ctx<'a> {
                 sel_extends.push(sel.extend_list.clone());
             }
         }
-        let joined = join_selectors(parent_paths, &own_sel);
+        // less.php marks the pseudo-parens whose SOURCE carries `&`/`(`/`@` as
+        // selector-list arguments (their combinators compress); mark BEFORE the
+        // `&`-join, while the source `&` is still visible. The marker rides the
+        // joined path down to the render (and to any child that inherits this
+        // selector as its parent), and the compress serializer consumes it.
+        let own_join: Vec<String> = if self.opts.php_selector_paren_combinators {
+            own_sel.iter().map(|s| mark_selector_parens(s)).collect()
+        } else {
+            own_sel.clone()
+        };
+        let joined = join_selectors(parent_paths, &own_join);
 
         self.push_frame(frame_of(rules.to_vec()));
         let (mut decls, children) = self.process_body(rules, Some(&joined))?;
@@ -1391,7 +1406,9 @@ impl<'a> Ctx<'a> {
                     });
                 }
                 extends.push(extend::EvExtend {
-                    self_sel: path.clone(),
+                    // Extend matches on clean selector text — the compress-only
+                    // pseudo-paren marker never participates.
+                    self_sel: strip_paren_mark(path),
                     target_css: self.render_extend_target(&t.elements)?,
                     all: t.all,
                     visible: ext_visible,
@@ -3691,13 +3708,18 @@ impl<'a> Ctx<'a> {
         }
 
         // `@arguments` — the bound values in parameter order, space-joined.
+        // PREPENDED (less.js mixin-definition.js `frame.prependRule`), so a
+        // parameter literally named `@arguments` shadows it under our
+        // last-declaration-wins frame scan — PageBuilder's
+        // `.keyframes(@name; @arguments)` mixin binds a detached ruleset to
+        // that name and calls it as `@arguments()`.
         let arg_values: Vec<Node> = evald.iter().flatten().cloned().collect();
         let arguments = if arg_values.len() == 1 {
             arg_values[0].clone()
         } else {
             Node::Expression(arg_values)
         };
-        frame.push(var_decl("arguments", arguments));
+        frame.insert(0, var_decl("arguments", arguments));
         Ok(frame)
     }
 
@@ -6018,6 +6040,9 @@ struct RenderCfg {
     compress: bool,
     /// less.php zero-unit flavor (`php_zero_units`, §C4).
     keep_zero_units: bool,
+    /// less.php combinator compression inside `:not/:is/:where/:has(…)`
+    /// (`php_selector_paren_combinators`).
+    paren_combinators: bool,
 }
 
 fn render_all(outs: &[Out], cfg: RenderCfg) -> String {
@@ -6070,11 +6095,17 @@ fn render_out(out: &Out, indent: usize, cfg: RenderCfg) -> Option<String> {
                 // Selectors join with a bare comma; the last declaration in
                 // the block drops its `;` (less.js `context.lastRule`).
                 let header: Vec<String> =
-                    vis.iter().map(|s| compress_selector(s)).collect();
+                    vis.iter().map(|s| compress_selector(s, cfg.paren_combinators)).collect();
                 let body = render_decls(decls, "", cfg, true);
                 return Some(format!("{}{{{body}}}", header.join(",")));
             }
-            let header = vis.join(&format!(",\n{ind}"));
+            // Non-compressed output leaves pseudo-paren interiors untouched, so
+            // the compress-only marker just drops out here.
+            let header = vis
+                .iter()
+                .map(|s| strip_paren_mark(s))
+                .collect::<Vec<_>>()
+                .join(&format!(",\n{ind}"));
             let dind = "  ".repeat(indent + 1);
             let body = render_decls(decls, &dind, cfg, false);
             Some(format!("{ind}{header} {{\n{body}\n{ind}}}"))
@@ -6158,29 +6189,116 @@ fn render_at_rules_c(header: &str, inner: &[Out], cfg: RenderCfg) -> Option<Stri
     Some(format!("{header}{{{}}}", parts.concat()))
 }
 
+/// The compressible-pseudo-paren marker (`\u{3}`): [`mark_selector_parens`]
+/// places it right after the `(` of a pseudo-class paren that less.php parses
+/// as a selector list (source content carrying `&`/`(`/`@`), so its interior
+/// combinators must compress. Renderers consume it; extend never sees it.
+const PAREN_SEL_MARK: char = '\u{3}';
+
+/// Strip the compressible-pseudo-paren marker ([`PAREN_SEL_MARK`]) for a
+/// non-compressed render (where nothing about the interior changes anyway).
+fn strip_paren_mark(s: &str) -> String {
+    if s.contains(PAREN_SEL_MARK) {
+        s.replace(PAREN_SEL_MARK, "")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Mark every pseudo-class paren whose SOURCE content forces less.php's
+/// selector-list parse — the fast element regex `/\G\([^&()@]+\)/`
+/// (Parser.php:2182) FAILS when the interior carries `&`, a nested `(`/`)`, or
+/// `@`, so less.php falls back to `matchChar('(') + parseSelector()`, turning
+/// the argument into real Elements whose combinators compress. A pseudo-paren
+/// with none of those stays a raw Anonymous value (`:not(.a > b)` /
+/// `:nth-child(2n + 1)` keep their spaces verbatim under compression). We
+/// insert [`PAREN_SEL_MARK`] just inside the `(` of the former so the compress
+/// serializer knows which parens to squeeze; the `&` here is the pre-join
+/// source `&`, still present. Non-pseudo function calls (`translate(`, …) never
+/// reach a selector combinator, so marking them is inert.
+fn mark_selector_parens(s: &str) -> String {
+    if !s.contains('(') {
+        return s.to_string();
+    }
+    let b = s.as_bytes();
+    // Byte buffer keeps multi-byte UTF-8 intact (only ASCII bytes are ever
+    // inspected/inserted; every other byte is copied verbatim).
+    let mut out: Vec<u8> = Vec::with_capacity(s.len() + 4);
+    let mut i = 0;
+    while i < b.len() {
+        out.push(b[i]);
+        if b[i] == b'(' {
+            // Does the balanced interior of this paren carry `&`/`(`/`@`?
+            let mut depth = 1i32;
+            let mut j = i + 1;
+            let mut trigger = false;
+            while j < b.len() && depth > 0 {
+                match b[j] {
+                    b'(' => {
+                        depth += 1;
+                        trigger = true;
+                    }
+                    b')' => depth -= 1,
+                    b'&' | b'@' if depth == 1 => trigger = true,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if trigger {
+                out.extend_from_slice(PAREN_SEL_MARK.to_string().as_bytes());
+            }
+        }
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
 /// Compress a joined selector path (§C4): drop the spaces around every
 /// non-descendant combinator (less.js `Combinator.genCSS` with compress) —
 /// ` > ` → `>`, ` + ` → `+`, ` ~ ` → `~`, ` ^ `/` ^^ ` → `^`/`^^`, and the
-/// slashed form ` /deep/ ` → `/deep/`. Quoted strings and paren/bracket
+/// slashed form ` /deep/ ` → `/deep/`. Quoted strings and most paren/bracket
 /// groups are untouched (`[title="x > y"]`, `:nth-child(2n + 1)` — less.js
 /// keeps both expanded, since those spaces live inside an element's value,
-/// not a combinator). Safe textually because these paths were BUILT by
-/// [`combinator_css`], which always spaces a combinator on both sides.
-fn compress_selector(s: &str) -> String {
+/// not a combinator). The exception: the **functional-selector pseudos**
+/// `:not()`/`:is()`/`:where()`/`:has()` — less.php parses their argument as a
+/// real selector list, so its combinators compress exactly like the top level
+/// (backend-real: `styles.less` emits `…-link > a.option-title` inside a
+/// `:not(…)`, which the SCD css compresses to `…-link>a.option-title` while
+/// `:nth-child(2n + 1)` beside it stays expanded). Safe textually because
+/// these paths were BUILT by [`combinator_css`], which always spaces a
+/// combinator on both sides.
+fn compress_selector(s: &str, paren_combinators: bool) -> String {
     let b = s.as_bytes();
     let mut out = String::with_capacity(s.len());
-    let mut depth = 0usize;
+    // Per-group flag: does a combinator compress inside this paren/bracket?
+    // Top level (empty stack) always compresses; a paren carrying the
+    // compressible marker (`\u{3}`, [`mark_selector_parens`] under
+    // `paren_combinators`) parses as a selector list in less.php so it
+    // compresses too; every other group (raw `:not(.a > b)`, `:nth-child(`,
+    // attribute `[`, …) keeps its spaces literal. The marker is consumed here.
+    let mut stack: Vec<bool> = Vec::new();
+    let compress_here = |st: &[bool]| st.last().copied().unwrap_or(true);
     let mut i = 0;
     while i < b.len() {
         let c = b[i];
         match c {
-            b'(' | b'[' => {
-                depth += 1;
+            0x03 => {
+                // The compressible-pseudo-paren marker — consumed, never emitted.
+                i += 1;
+            }
+            b'(' => {
+                let marked = paren_combinators && b.get(i + 1) == Some(&0x03);
+                stack.push(marked);
+                out.push('(');
+                i += 1;
+            }
+            b'[' => {
+                stack.push(false);
                 out.push(c as char);
                 i += 1;
             }
             b')' | b']' => {
-                depth = depth.saturating_sub(1);
+                stack.pop();
                 out.push(c as char);
                 i += 1;
             }
@@ -6193,7 +6311,7 @@ fn compress_selector(s: &str) -> String {
                 i = (i + 1).min(b.len());
                 out.push_str(&s[start..i]);
             }
-            b' ' if depth == 0 => {
+            b' ' if compress_here(&stack) => {
                 let mut j = i;
                 while j < b.len() && b[j] == b' ' {
                     j += 1;
@@ -6316,6 +6434,42 @@ mod tests {
             .code
             .trim_end()
             .to_string()
+    }
+
+    /// less.php once-slot sequencing ([`LessOptions::php_import_order`]): a
+    /// duplicate import nested inside an earlier-imported file claims the
+    /// once-slot depth-first, so the block emits at the NESTED position (the
+    /// backend styles.less `_calendar-temp.less` shape); the default less.js
+    /// sequencer registers the outer file's own imports first (BFS), handing
+    /// the slot to the LATER root-level import.
+    #[test]
+    fn php_import_order_nested_duplicate_wins_once_slot() {
+        let files: &[(&'static str, &'static str)] = &[
+            ("outer.less", "@import \"dup\";\n.outer { o: 1; }\n"),
+            ("dup.less", ".dup { d: 1; }\n"),
+        ];
+        let src = "@import \"outer\";\n.mid { m: 1; }\n@import \"dup\";\n";
+        let out = css_with(files, src, &LessOptions::default());
+        assert_eq!(out, ".outer {\n  o: 1;\n}\n.mid {\n  m: 1;\n}\n.dup {\n  d: 1;\n}");
+        let mut opts = LessOptions::default();
+        opts.php_import_order = true;
+        let out = css_with(files, src, &opts);
+        assert_eq!(out, ".dup {\n  d: 1;\n}\n.outer {\n  o: 1;\n}\n.mid {\n  m: 1;\n}");
+    }
+
+    /// less.php interpolated-selector semantics
+    /// ([`LessOptions::php_selector_interpolation`]): a comma-carrying
+    /// interpolated selector stays ONE selector (single output line — the
+    /// backend `_grid-framework.less` `@{list} { … }` construct); less.js
+    /// re-parses it into a selector group (one per line).
+    #[test]
+    fn php_selector_interpolation_keeps_comma_list_single() {
+        let src = "@list: ~'.a, .b';\n@{list} { c: 1; }";
+        assert_eq!(css(src), ".a,\n.b {\n  c: 1;\n}");
+        let mut opts = LessOptions::default();
+        opts.php_selector_interpolation = true;
+        let out = crate::compile(src, &opts, &NoopResolver).unwrap().code;
+        assert_eq!(out.trim_end(), ".a, .b {\n  c: 1;\n}");
     }
 
     // ------------------------------------------------------------------
@@ -6653,6 +6807,27 @@ mod tests {
         // Root: parts join with nothing, `@charset` splices first, and the
         // output carries no trailing newline (less.js `parse-tree` trim).
         assert_eq!(c("a{b:c}\n@charset \"UTF-8\";"), "@charset \"UTF-8\";a{b:c}");
+    }
+
+    /// less.php compresses combinators INSIDE `:not/:is/:where/:has(…)` —
+    /// `php_selector_paren_combinators`. less.js keeps them expanded (the
+    /// pseudo's parenthetical is a raw element value), while `:nth-child(2n +
+    /// 1)` and attribute values stay literal under BOTH.
+    #[test]
+    fn php_selector_paren_combinators_compress_functional_pseudos() {
+        let src = "a:not(.x > b:nth-child(2n + 1)) + [t=\" > \"] { c: d; }";
+        let mut js = LessOptions::default();
+        js.compress = true;
+        assert_eq!(
+            crate::compile(src, &js, &NoopResolver).unwrap().code,
+            "a:not(.x > b:nth-child(2n + 1))+[t=\" > \"]{c:d}"
+        );
+        let mut php = js.clone();
+        php.php_selector_paren_combinators = true;
+        assert_eq!(
+            crate::compile(src, &php, &NoopResolver).unwrap().code,
+            "a:not(.x>b:nth-child(2n + 1))+[t=\" > \"]{c:d}"
+        );
     }
 
     #[test]
@@ -7073,6 +7248,26 @@ mod tests {
         // `@arguments` is the full flattened list, incl. variadic-captured args.
         let out = css(".m(@a, @rest...) { a: @a; r: @rest; args: @arguments; }\n.z { .m(1, 2, 3); }");
         assert_eq!(out, ".z {\n  a: 1;\n  r: 2 3;\n  args: 1 2 3;\n}");
+    }
+
+    #[test]
+    fn mixin_param_named_arguments_shadows_implicit() {
+        // A parameter literally named `@arguments` SHADOWS the implicit all-args
+        // variable (less.js prepends the implicit decl, and later declarations
+        // win) — PageBuilder's `.keyframes(@name; @arguments)` binds a detached
+        // ruleset to it and calls `@arguments()` inside an interpolated-name
+        // at-rule.
+        let out = css(
+            ".keyframes(@name; @arguments) { @keyframes @name { @arguments(); } }\n\
+             .z { .keyframes(fade; { 0% { opacity: 0; } }); }",
+        );
+        assert_eq!(
+            out,
+            "@keyframes fade {\n  0% {\n    opacity: 0;\n  }\n}"
+        );
+        // A scalar bound to the shadowing param behaves like any variable.
+        let out2 = css(".m(@arguments) { v: @arguments; }\n.z { .m(7); }");
+        assert_eq!(out2, ".z {\n  v: 7;\n}");
     }
 
     #[test]
