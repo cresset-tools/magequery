@@ -594,37 +594,16 @@ impl AreaFile {
     /// The complete `<area>.php` content: the four sections in Magento's
     /// write order, var_export-exact.
     pub fn render(&self) -> String {
-        let pairs = |entries: &[(String, String)]| {
-            PhpValue::Array(
-                entries
-                    .iter()
-                    .map(|(k, v)| (PhpKey::str(k.clone()), PhpValue::str(v.clone())))
-                    .collect(),
-            )
-        };
-        let file = PhpValue::Array(vec![
-            (
-                PhpKey::str("arguments"),
-                PhpValue::Array(
-                    self.arguments
-                        .iter()
-                        .map(|(k, v)| (PhpKey::str(k.clone()), v.clone()))
-                        .collect(),
-                ),
-            ),
-            (PhpKey::str("preferences"), pairs(&self.preferences)),
-            (PhpKey::str("instanceTypes"), pairs(&self.instance_types)),
-            (
-                PhpKey::str("nonLazyTypes"),
-                PhpValue::Array(
-                    self.non_lazy
-                        .iter()
-                        .map(|k| (PhpKey::str(k.clone()), PhpValue::Bool(true)))
-                        .collect(),
-                ),
-            ),
-        ]);
-        crate::phpexport::to_php_file(&file)
+        // Serialize the four sections straight from their borrowed storage —
+        // `area_file_to_php` writes each argument value in place, avoiding a deep
+        // clone (and drop) of the whole argument tree that a `PhpValue::Array`
+        // wrapper + `to_php_file` would incur (~40 ms/area on a real install).
+        crate::phpexport::area_file_to_php(
+            &self.arguments,
+            &self.preferences,
+            &self.instance_types,
+            &self.non_lazy,
+        )
     }
 }
 
