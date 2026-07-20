@@ -590,8 +590,30 @@ fn render_entry(
 /// run-scoped `.min`-sibling bundle cache (share across themes);
 /// `min_resolver` the assembled `requirejs-min-resolver.js` body
 /// (theme-independent).
+/// A package rendered up to — but not including — the bundle + sri step: the
+/// theme-INDEPENDENT work (source resolution, per-file render/LESS, requirejs,
+/// js-translation). This is the expensive part (LESS compilation dominates)
+/// and it shares no state between a group's themes, so it fans out across
+/// rayon. Only the bundle step reads/mutates the ordered `.min`-sibling cache
+/// and must run serially, in theme order — that's [`finalize_theme`].
+struct PrebuiltPackage {
+    theme_id: String,
+    theme_path: String,
+    chain: Vec<ThemeRef>,
+    /// Package files + the two requirejs artifacts + js-translation.json, in
+    /// deployment order (no bundles, no sri yet).
+    files: Vec<PlacedFile>,
+    warnings: Vec<(String, String)>,
+    /// The generated requirejs artifacts the bundler consumes as package files.
+    generated: Vec<(String, String)>,
+}
+
+/// The theme-independent render (source resolution + per-file pipeline +
+/// requirejs + js-translation). Pure w.r.t. other themes, so a group's themes
+/// run this concurrently; the bundle step ([`finalize_theme`]) is the only
+/// part that must stay ordered.
 #[allow(clippy::too_many_arguments)]
-fn build_theme(
+fn build_theme_prebundle(
     root: &Path,
     area: &str,
     theme_id: &str,
@@ -602,8 +624,7 @@ fn build_theme(
     min_resolver: &str,
     js_translation: &str,
     opts: &PlacementOptions,
-    min_cache: &mut MinSiblingCache,
-) -> Result<ThemePackage, FilesError> {
+) -> Result<PrebuiltPackage, FilesError> {
     let chain = theme_chain(area, theme_id, themes)?;
     let theme_path = chain[0]
         .id
@@ -664,9 +685,7 @@ fn build_theme(
         kind: PlacedKind::Translation,
     });
 
-    // js/bundle/bundle<N>.js (Service\Bundle) — the bundler resolves its own
-    // js/html view of the package (proven byte-exact by its own gate) and
-    // needs the generated requirejs artifacts as package files.
+    // The generated requirejs artifacts the bundler needs as package files.
     let rjs_config = files
         .iter()
         .find(|f| f.path == requirejs::CONFIG_FILE_NAME)
@@ -676,10 +695,47 @@ fn build_theme(
         (requirejs::CONFIG_FILE_NAME.to_string(), rjs_config),
         (requirejs::MIN_RESOLVER_FILE_NAME.to_string(), min_resolver.to_string()),
     ];
+
+    Ok(PrebuiltPackage {
+        theme_id: theme_id.to_string(),
+        theme_path,
+        chain,
+        files,
+        warnings,
+        generated,
+    })
+}
+
+/// Finish a [`PrebuiltPackage`]: the JS bundles (Service\Bundle) followed by
+/// `sri-hashes.json`. The bundler shares the ordered `.min`-sibling cache, so
+/// this runs serially in a group's theme order (blank-before-luma poisoning),
+/// while [`build_theme_prebundle`] already ran in parallel.
+fn finalize_theme(
+    pre: PrebuiltPackage,
+    root: &Path,
+    area: &str,
+    locale: &str,
+    themes: &[(String, PathBuf)],
+    modules: &[ModuleRef],
+    opts: &PlacementOptions,
+    min_cache: &mut MinSiblingCache,
+) -> Result<ThemePackage, FilesError> {
+    let PrebuiltPackage {
+        theme_id,
+        theme_path,
+        chain,
+        mut files,
+        warnings,
+        generated,
+    } = pre;
+
+    // js/bundle/bundle<N>.js (Service\Bundle) — the bundler resolves its own
+    // js/html view of the package (proven byte-exact by its own gate) and
+    // needs the generated requirejs artifacts as package files.
     let bundles = bundle::build_theme(
         root,
         area,
-        theme_id,
+        &theme_id,
         locale,
         themes,
         modules,
@@ -731,12 +787,36 @@ fn build_theme(
     });
 
     Ok(ThemePackage {
-        theme: theme_id.to_string(),
+        theme: theme_id,
         theme_path,
         chain,
         files,
         warnings,
     })
+}
+
+/// Place one theme's full package: [`build_theme_prebundle`] then
+/// [`finalize_theme`]. The two-phase form exists so a group's themes can render
+/// in parallel and bundle in order (see [`build_group`]); this wrapper keeps
+/// the single-theme path (`build_from_magento`, tests) one call.
+#[allow(clippy::too_many_arguments)]
+fn build_theme(
+    root: &Path,
+    area: &str,
+    theme_id: &str,
+    locale: &str,
+    themes: &[(String, PathBuf)],
+    modules: &[ModuleRef],
+    reg_modules: &[ModuleRef],
+    min_resolver: &str,
+    js_translation: &str,
+    opts: &PlacementOptions,
+    min_cache: &mut MinSiblingCache,
+) -> Result<ThemePackage, FilesError> {
+    let pre = build_theme_prebundle(
+        root, area, theme_id, locale, themes, modules, reg_modules, min_resolver, js_translation, opts,
+    )?;
+    finalize_theme(pre, root, area, locale, themes, modules, opts, min_cache)
 }
 
 /// The run-scoped, area/locale-INDEPENDENT inputs a deploy needs, computed
@@ -837,19 +917,43 @@ pub fn build_group(
     js_translation: &str,
     opts: &PlacementOptions,
 ) -> Result<Vec<ThemePackage>, FilesError> {
+    use rayon::prelude::*;
+    // Phase A — the theme-independent render (source resolution + per-file
+    // pipeline + requirejs + js-translation), where LESS compilation dominates.
+    // A group's themes share no state here, so fan them out; `collect` keeps
+    // theme order for the ordered phase B below.
+    let prebuilt: Vec<PrebuiltPackage> = theme_ids
+        .par_iter()
+        .map(|theme_id| {
+            build_theme_prebundle(
+                &inputs.root,
+                area,
+                theme_id,
+                locale,
+                &inputs.themes,
+                &inputs.modules,
+                &inputs.reg_modules,
+                &inputs.min_resolver,
+                js_translation,
+                opts,
+            )
+        })
+        .collect::<Result<Vec<_>, FilesError>>()?;
+
+    // Phase B — the bundle step reads and mutates the ordered `.min`-sibling
+    // cache, so finalize the themes serially in their given order on ONE fresh
+    // cache (blank-before-luma poisoning preserved). Cheap relative to phase A,
+    // and identical whether phase A ran parallel or serial.
     let mut min_cache = MinSiblingCache::new();
-    let mut out = Vec::with_capacity(theme_ids.len());
-    for theme_id in theme_ids {
-        out.push(build_theme(
+    let mut out = Vec::with_capacity(prebuilt.len());
+    for pre in prebuilt {
+        out.push(finalize_theme(
+            pre,
             &inputs.root,
             area,
-            theme_id,
             locale,
             &inputs.themes,
             &inputs.modules,
-            &inputs.reg_modules,
-            &inputs.min_resolver,
-            js_translation,
             opts,
             &mut min_cache,
         )?);
