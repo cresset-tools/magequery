@@ -107,9 +107,15 @@ pub const DEPLOYED_VERSION_FILE_NAME: &str = "deployed_version.txt";
 /// is NOT the registration order — the golden `sri-hashes.json` proves the
 /// deployment iterates modules in registration order.
 pub fn registration_order(root: &Path, modules: &[ModuleRef]) -> Vec<ModuleRef> {
+    use rayon::prelude::*;
     let autoload = root.join("vendor").join("composer").join("autoload_files.php");
     let vendor = root.join("vendor");
-    let mut reg_dirs: Vec<PathBuf> = Vec::new();
+    // Collect the raw registration dirs first, then canonicalize them in
+    // parallel: `canonicalize` is a per-path syscall walk and there are ~700 of
+    // them plus one per module — a serial storm on the deploy's serial prepare
+    // step. `par_iter().collect()` preserves order, so `reg_dirs` keeps its
+    // autoload (deployment) order — the order that drives `out` below.
+    let mut reg_raw: Vec<PathBuf> = Vec::new();
     if let Ok(src) = std::fs::read_to_string(&autoload) {
         // Lines look like: `'<hash>' => $vendorDir . '/pkg/path/registration.php',`
         let mut rest = src.as_str();
@@ -119,13 +125,16 @@ pub fn registration_order(root: &Path, modules: &[ModuleRef]) -> Vec<ModuleRef> 
             let rel = &rest[..end];
             rest = &rest[end..];
             if let Some(dir) = rel.strip_suffix("/registration.php") {
-                let p = vendor.join(dir.trim_start_matches('/'));
-                reg_dirs.push(std::fs::canonicalize(&p).unwrap_or(p));
+                reg_raw.push(vendor.join(dir.trim_start_matches('/')));
             }
         }
     }
+    let reg_dirs: Vec<PathBuf> = reg_raw
+        .par_iter()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
     let canon: Vec<(PathBuf, usize)> = modules
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, m)| (std::fs::canonicalize(&m.dir).unwrap_or_else(|_| m.dir.clone()), i))
         .collect();
