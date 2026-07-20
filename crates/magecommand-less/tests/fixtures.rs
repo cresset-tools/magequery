@@ -693,9 +693,7 @@ fn config_options(first_dir: &str, less: &Path) -> (LessOptions, Vec<PathBuf>) {
         "modifyVars" => opts.modify_vars = read_vars_json(less),
         "units" => {
             opts.math = MathMode::Always;
-            opts.strict_units = less
-                .to_string_lossy()
-                .contains("/strict/");
+            opts.strict_units = slash(less).contains("/strict/");
         }
         "math-always" => opts.math = MathMode::Always,
         "math-parens-division" => opts.math = MathMode::ParensDivision,
