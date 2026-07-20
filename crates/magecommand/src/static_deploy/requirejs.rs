@@ -387,11 +387,14 @@ mod tests {
             .map(|s| {
                 (
                     s.origin.tag(),
+                    // Windows renders native separators — normalize so the
+                    // assertion is separator-agnostic.
                     s.file
                         .strip_prefix(td.path())
                         .unwrap()
                         .display()
-                        .to_string(),
+                        .to_string()
+                        .replace('\\', "/"),
                 )
             })
             .collect();
