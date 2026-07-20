@@ -140,6 +140,14 @@ pub struct LessOptions {
     /// `toCSS($env)` mechanism and is rounded under the flag too (no corpus
     /// construct exercises it).
     pub php_interp_rounding: bool,
+    /// less.php compress zero-length units (§C4, source-read v5.5 + probed):
+    /// `Dimension::genCSS` guards the "zero drops its unit" branch with a
+    /// STRICT `$value === 0`, but the constructor stores `floatval($value)` —
+    /// the float `0.0` never matches the int `0`, so less.php keeps the unit
+    /// under compress (`margin-top:0rem`, `top:0px`) where less.js emits `0`.
+    /// Blank/Luma-real: compressed styles-m carries `0rem`/`0px` from
+    /// `.lib-font-size-value(0)` and literal `0px`. On in Magento profiles.
+    pub php_zero_units: bool,
     /// Registered custom functions (the less.js `functionRegistry.add`
     /// surface, minimal form): `(lowercased name, fn)` pairs consulted before
     /// the built-in registry. `None` from the fn = not handled → the unknown-
@@ -185,6 +193,7 @@ impl Default for LessOptions {
             php_encoding_shim: false,
             php_interp_rounding: false,
             php_reference_visibility: false,
+            php_zero_units: false,
             max_eval_depth: None,
         }
     }
@@ -209,6 +218,7 @@ impl LessOptions {
             magento_mode: true,
             php_interp_rounding: true,
             php_reference_visibility: true,
+            php_zero_units: true,
             ..LessOptions::default()
         }
     }
@@ -222,6 +232,7 @@ impl LessOptions {
             magento_mode: true,
             php_interp_rounding: true,
             php_reference_visibility: true,
+            php_zero_units: true,
             ..LessOptions::default()
         }
     }

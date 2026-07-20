@@ -30,7 +30,7 @@ use std::sync::Arc;
 use crate::ast::{AtRuleBlock, Declaration, Element, MixinArg, MixinParam, Node, Selector, Span};
 use self::import::FileScope;
 use crate::color::Color;
-use crate::css::{render_value, render_value_c, Css, Warning};
+use crate::css::{render_value, render_value_cz, Css, Warning};
 use crate::error::{ErrorKind, LessError};
 use crate::functions;
 use crate::options::{LessOptions, MathMode};
@@ -363,6 +363,7 @@ pub(crate) fn eval_with_source(
     let code = render_all(&outs, RenderCfg {
         np: opts.num_precision,
         compress: opts.compress,
+        keep_zero_units: opts.php_zero_units,
     });
     Ok(Css {
         code,
@@ -1097,7 +1098,12 @@ impl<'a> Ctx<'a> {
                     // Anonymous verbatim, so compress must keep it even when
                     // the text LOOKS like a comment (css-escapes' root
                     // `e('/* anything to unquote */');`, §C4).
-                    let text = render_value_c(&v, self.opts.num_precision, self.opts.compress);
+                    let text = render_value_cz(
+                        &v,
+                        self.opts.num_precision,
+                        self.opts.compress,
+                        self.opts.php_zero_units,
+                    );
                     if !text.is_empty() {
                         if self_paths.is_none() {
                             children.push(Out::Verbatim(text));
@@ -1724,7 +1730,12 @@ impl<'a> Ctx<'a> {
                     } else {
                         v
                     };
-                    render_value_c(&v, self.opts.num_precision, self.opts.compress)
+                    render_value_cz(
+                        &v,
+                        self.opts.num_precision,
+                        self.opts.compress,
+                        self.opts.php_zero_units,
+                    )
                 }
             };
             return Ok(Node::Declaration(Declaration {
@@ -2385,7 +2396,13 @@ impl<'a> Ctx<'a> {
                     }
                 }
             }
-            if let Some(result) = functions::dispatch(&lname, &filtered, self.opts.num_precision, self.opts.compress)? {
+            if let Some(result) = functions::dispatch(
+                &lname,
+                &filtered,
+                self.opts.num_precision,
+                self.opts.compress,
+                self.opts.php_zero_units,
+            )? {
                 return Ok(result);
             }
         }
@@ -4164,7 +4181,12 @@ impl<'a> Ctx<'a> {
             let value = match crate::parser::parse_value_fragment(rhs, self.opts) {
                 Ok(v) => {
                     let ev = self.eval_value(&v)?;
-                    render_value_c(&ev, self.opts.num_precision, self.opts.compress)
+                    render_value_cz(
+                        &ev,
+                        self.opts.num_precision,
+                        self.opts.compress,
+                        self.opts.php_zero_units,
+                    )
                 }
                 Err(_) => rhs.to_string(),
             };
@@ -4243,7 +4265,12 @@ impl<'a> Ctx<'a> {
                         if let Ok(v @ Node::Dimension(_)) =
                             crate::parser::parse_value_fragment(tok, self.opts)
                         {
-                            let t = render_value_c(&v, self.opts.num_precision, true);
+                            let t = render_value_cz(
+                                &v,
+                                self.opts.num_precision,
+                                true,
+                                self.opts.php_zero_units,
+                            );
                             push_tok(&mut out, &t, &mut pending_space);
                             continue;
                         }
@@ -4380,6 +4407,7 @@ impl<'a> Ctx<'a> {
                                     &v,
                                     self.interp_precision(),
                                     self.opts.compress,
+                                    self.opts.php_zero_units,
                                 ));
                                 i = k;
                                 continue;
@@ -4392,6 +4420,7 @@ impl<'a> Ctx<'a> {
                                 &v,
                                 self.interp_precision(),
                                 self.opts.compress,
+                                self.opts.php_zero_units,
                             ));
                             i = j;
                             continue;
@@ -4507,16 +4536,18 @@ impl<'a> Ctx<'a> {
                         })?;
                         out.push_str(&rest[..start]);
                         if css {
-                            out.push_str(&render_value_c(
+                            out.push_str(&render_value_cz(
                                 &val,
                                 self.interp_precision(),
                                 self.opts.compress,
+                                self.opts.php_zero_units,
                             ));
                         } else {
                             out.push_str(&value_to_plain_string_p(
                                 &val,
                                 self.interp_precision(),
                                 self.opts.compress,
+                                self.opts.php_zero_units,
                             ));
                         }
                         rest = &after[e + 1..];
@@ -5180,19 +5211,26 @@ fn value_to_plain_string(node: &Node) -> String {
 /// with a bare comma under compress (§C4). Internal identity uses (guards,
 /// lookup keys) stay on the expanded form.
 fn value_to_plain_string_c(node: &Node, compress: bool) -> String {
-    value_to_plain_string_p(node, 0, compress)
+    value_to_plain_string_p(node, 0, compress, false)
 }
 
 /// [`value_to_plain_string_c`] with a print precision (D-interp, §3): less.php
 /// renders interpolated values through `toCSS($env)` whose env carries
 /// `numPrecision` — the php profiles pass `num_precision` here
 /// (`php_interp_rounding`); less.js renders context-free (0 = full digits).
-fn value_to_plain_string_p(node: &Node, num_precision: u8, compress: bool) -> String {
+/// `keep_zero_units` threads the less.php zero-unit flavor (`php_zero_units`)
+/// into the dimension case.
+fn value_to_plain_string_p(
+    node: &Node,
+    num_precision: u8,
+    compress: bool,
+    keep_zero_units: bool,
+) -> String {
     match node {
         Node::Quoted { value, .. } => value.clone(),
         Node::Keyword(k) => k.clone(),
         Node::Anonymous(s) => s.clone(),
-        other => render_value_c(other, num_precision, compress),
+        other => render_value_cz(other, num_precision, compress, keep_zero_units),
     }
 }
 
@@ -5705,6 +5743,8 @@ fn bang_comment(text: &str) -> bool {
 struct RenderCfg {
     np: u8,
     compress: bool,
+    /// less.php zero-unit flavor (`php_zero_units`, §C4).
+    keep_zero_units: bool,
 }
 
 fn render_all(outs: &[Out], cfg: RenderCfg) -> String {
@@ -7766,7 +7806,12 @@ fn render_decls(decls: &[Node], dind: &str, cfg: RenderCfg, omit_last_semi: bool
             Node::Declaration(decl) => {
                 let val = if cfg.compress {
                     // the toCSSVisitor comment strip (see `strip_value_comments`)
-                    render_value_c(&crate::css::strip_value_comments(&decl.value), np, true)
+                    render_value_cz(
+                        &crate::css::strip_value_comments(&decl.value),
+                        np,
+                        true,
+                        cfg.keep_zero_units,
+                    )
                 } else {
                     render_value(&decl.value, np)
                 };
