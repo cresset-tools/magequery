@@ -10,7 +10,15 @@ repository.workspace = true
 name = "magequery"
 path = "src/main.rs"
 
+# The write-side binary, shimmed from the magecommand lib crate. It ships
+# from THIS package so the magequery-v release tag (a per-app tag) carries
+# both binaries in one app — see dist-workspace.toml [dist.binaries].
+[[bin]]
+name = "magecommand"
+path = "src/bin/magecommand.rs"
+
 [dependencies]
+magecommand = { path = "../magecommand" }
 magequery-core = { path = "../magequery-core", features = ["db"] }
 magequery-lsp = { path = "../magequery-lsp" }
 clap = { version = "4", features = ["derive"] }
@@ -22,3 +30,7 @@ anstyle = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+# tempfile: the magecommand integration tests (moved here with the binary).
+tempfile = "3"

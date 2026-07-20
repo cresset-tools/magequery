@@ -9,12 +9,18 @@ use RuntimeException;
 require __DIR__ . '/version.php';
 
 /**
- * Locates — downloading on first use — the prebuilt `magequery` binary that
- * matches this package's version, and execs it. The Rust source never ships
- * in the Composer package; only this launcher does. The binary is fetched
- * from the magequery GitHub release (cresset mirror first), SHA-256-verified
- * against the `.sha256` sidecar, cached per-version, and exec'd. Mirrors
- * `uv format` and Mago's `composer/bin/mago`.
+ * Locates — downloading on first use — the prebuilt binary that matches this
+ * package's version, and execs it. The Rust source never ships in the
+ * Composer package; only this launcher does. The binary is fetched from the
+ * magequery GitHub release (cresset mirror first), SHA-256-verified against
+ * the `.sha256` sidecar, cached per-version, and exec'd. Mirrors `uv format`
+ * and Mago's `composer/bin/mago`.
+ *
+ * The package ships two bin shims over this one launcher: `bin/magequery`
+ * (read side, the `extra.bougie.default-bin`) and `bin/magecommand` (write
+ * side). Both binaries release on the same `magequery-v<version>` tag inside
+ * the ONE `magequery-{target}` archive (see dist-workspace.toml
+ * [dist.binaries]); only the file staged out of it differs per tool.
  *
  * The same download layout (URL bases, tag prefix, targets, cache path)
  * is declared machine-readably in composer.json under
@@ -29,13 +35,17 @@ final class Launcher
     private const GITHUB_BASE = 'https://github.com/cresset-tools/magequery/releases/download';
     private const USER_AGENT = 'cresset/magequery composer installer';
 
+    /** Binary stem this launcher fetches: 'magequery' or 'magecommand'. */
+    private static string $tool = 'magequery';
+
     /** @param list<string> $args */
-    public static function main(array $args): int
+    public static function main(array $args, string $tool = 'magequery'): int
     {
+        self::$tool = $tool;
         try {
             $binary = self::ensureBinary();
         } catch (RuntimeException $e) {
-            fwrite(STDERR, 'magequery: ' . $e->getMessage() . "\n");
+            fwrite(STDERR, self::$tool . ': ' . $e->getMessage() . "\n");
             return 1;
         }
 
@@ -51,6 +61,8 @@ final class Launcher
             return $cached;
         }
 
+        // Both tools ship in the one magequery archive per target; only the
+        // file staged out of it differs.
         $tag = 'magequery-v' . MAGEQUERY_VERSION;
         $archive = 'magequery-' . $target . (self::isWindows() ? '.zip' : '.tar.gz');
 
@@ -62,7 +74,7 @@ final class Launcher
             self::fetch(self::urls($tag, $archive . '.sha256'), $shaPath);
             $expected = self::parseSidecar($shaPath);
 
-            fwrite(STDERR, 'magequery: fetching magequery ' . MAGEQUERY_VERSION . " ($target)\n");
+            fwrite(STDERR, self::$tool . ': fetching ' . self::$tool . ' ' . MAGEQUERY_VERSION . " ($target)\n");
             self::fetch(self::urls($tag, $archive), $archivePath);
             self::verifySha256($archivePath, $expected);
 
@@ -80,14 +92,14 @@ final class Launcher
             // the target so a concurrent run never sees a half-written file.
             $partial = $cached . '.partial';
             if (!@copy($staged, $partial)) {
-                throw new RuntimeException('failed to stage magequery binary into the cache');
+                throw new RuntimeException('failed to stage ' . self::$tool . ' binary into the cache');
             }
             if (!self::isWindows()) {
                 @chmod($partial, 0o755);
             }
             if (!@rename($partial, $cached)) {
                 @unlink($partial);
-                throw new RuntimeException('failed to install magequery binary into the cache');
+                throw new RuntimeException('failed to install ' . self::$tool . ' binary into the cache');
             }
         } finally {
             self::rmrf($tmp);
@@ -107,17 +119,17 @@ final class Launcher
                 if ($isX64) {
                     return self::isMusl() ? 'x86_64-unknown-linux-musl' : 'x86_64-unknown-linux-gnu';
                 }
-                throw new RuntimeException("no prebuilt magequery binary for Linux/$machine (x86_64 only)");
+                throw new RuntimeException('no prebuilt ' . self::$tool . " binary for Linux/$machine (x86_64 only)");
             case 'Darwin':
                 if ($isArm) {
                     return 'aarch64-apple-darwin';
                 }
-                throw new RuntimeException('no prebuilt magequery binary for Intel macOS (Apple Silicon only)');
+                throw new RuntimeException('no prebuilt ' . self::$tool . ' binary for Intel macOS (Apple Silicon only)');
             case 'Windows':
                 if ($isX64) {
                     return 'x86_64-pc-windows-msvc';
                 }
-                throw new RuntimeException("no prebuilt magequery binary for Windows/$machine (x64 only)");
+                throw new RuntimeException('no prebuilt ' . self::$tool . " binary for Windows/$machine (x64 only)");
             default:
                 throw new RuntimeException('unsupported OS: ' . PHP_OS_FAMILY);
         }
@@ -141,7 +153,7 @@ final class Launcher
 
     private static function binaryName(): string
     {
-        return self::isWindows() ? 'magequery.exe' : 'magequery';
+        return self::isWindows() ? self::$tool . '.exe' : self::$tool;
     }
 
     private static function cacheDir(): string
@@ -156,7 +168,9 @@ final class Launcher
             }
         }
 
-        return $base . DIRECTORY_SEPARATOR . 'magequery' . DIRECTORY_SEPARATOR . MAGEQUERY_VERSION;
+        // Per-tool slot, matching what a native-binary prefetch would derive
+        // from the tool's name (`<cache>/{name}/{version}/{name}`).
+        return $base . DIRECTORY_SEPARATOR . self::$tool . DIRECTORY_SEPARATOR . MAGEQUERY_VERSION;
     }
 
     /**
@@ -256,7 +270,7 @@ final class Launcher
     {
         if (self::isWindows()) {
             if (!class_exists(\ZipArchive::class)) {
-                throw new RuntimeException('ext-zip is required to install magequery on Windows');
+                throw new RuntimeException('ext-zip is required to install ' . self::$tool . ' on Windows');
             }
             $zip = new \ZipArchive();
             if ($zip->open($archive) !== true) {
@@ -295,7 +309,7 @@ final class Launcher
             $pipes
         );
         if (!is_resource($proc)) {
-            fwrite(STDERR, "magequery: failed to execute $binary\n");
+            fwrite(STDERR, self::$tool . ": failed to execute $binary\n");
 
             return 1;
         }
