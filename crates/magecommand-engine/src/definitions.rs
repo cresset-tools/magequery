@@ -100,12 +100,22 @@ impl Definitions {
             roots.push((generated_code.to_path_buf(), PathKind::Generated));
         }
 
-        let mut files: Vec<(PathBuf, PathKind)> = Vec::new();
-        for (base, kind) in &roots {
-            let mut batch = Vec::new();
-            collect_included(base, base, *kind, &mut batch);
-            files.extend(batch.into_iter().map(|f| (f, *kind)));
-        }
+        // Walk each root in parallel (rayon over roots), then concatenate the
+        // per-root batches in ROOT ORDER — byte-identical to a sequential walk:
+        // the cross-root last-wins collision order (module load order → libs →
+        // setup → generated) is preserved by the ordered collect, and each
+        // root's within-root readdir order is untouched (still one sequential
+        // `collect_included` per root, just on its own thread). The directory
+        // traversal, not the read+parse, dominated the scan.
+        let batches: Vec<Vec<(PathBuf, PathKind)>> = roots
+            .par_iter()
+            .map(|(base, kind)| {
+                let mut batch = Vec::new();
+                collect_included(base, base, *kind, &mut batch);
+                batch.into_iter().map(|f| (f, *kind)).collect()
+            })
+            .collect();
+        let files: Vec<(PathBuf, PathKind)> = batches.into_iter().flatten().collect();
 
         let parsed: Vec<(PathBuf, PathKind, ClassMeta)> = files
             .par_iter()
@@ -754,6 +764,7 @@ fn collect_included(base: &Path, dir: &Path, kind: PathKind, out: &mut Vec<PathB
 /// compile ignores) only causes an unnecessary recompile; UNDER-covering would
 /// serve a stale result. Returned sorted + deduped for a stable digest.
 pub fn compile_input_files(magento: &Magento, root: &Path) -> Vec<PathBuf> {
+    use rayon::prelude::*;
     let mut roots: Vec<(PathBuf, PathKind)> = Vec::new();
     for module in magento.modules() {
         if module.enabled {
@@ -767,16 +778,22 @@ pub fn compile_input_files(magento: &Magento, root: &Path) -> Vec<PathBuf> {
     if setup.is_dir() {
         roots.push((setup, PathKind::Setup));
     }
+    // Deployment inputs: app/etc holds the primary di glob (`{*di.xml,*/*di.xml}`)
+    // + config.php, which have no module base to exclude against — walk it as a
+    // Module root (equivalent to the direct call it replaces).
+    roots.push((root.join("app/etc"), PathKind::Module));
 
-    let mut files: Vec<PathBuf> = Vec::new();
-    for (base, kind) in &roots {
-        collect_input_files(base, base, *kind, &mut files);
-    }
-    // Deployment + composer inputs; app/etc holds the primary di glob
-    // (`{*di.xml,*/*di.xml}`) + config.php, which have no module base to
-    // exclude against — collect them directly.
-    let app_etc = root.join("app/etc");
-    collect_input_files(&app_etc, &app_etc, PathKind::Module, &mut files);
+    // Walk every root in parallel; the result is sorted+deduped below, so the
+    // gather order is irrelevant to the digest. The recursive per-root walk was
+    // the whole cost of the input-digest phase (stat+hash is ~3 ms).
+    let mut files: Vec<PathBuf> = roots
+        .par_iter()
+        .flat_map_iter(|(base, kind)| {
+            let mut out = Vec::new();
+            collect_input_files(base, base, *kind, &mut out);
+            out
+        })
+        .collect();
     for rel in [
         "app/etc/config.php",
         "app/etc/env.php",
