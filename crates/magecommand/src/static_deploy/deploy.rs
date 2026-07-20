@@ -276,30 +276,16 @@ pub fn plan(
         .collect())
 }
 
-/// Pre-extract the (locale-independent) js/html phrase set for every distinct
-/// area in the plan — the expensive scan, done once and shared read-only.
-fn extract_all_area_phrases(
-    inputs: &DeployInputs,
-    groups: &[Group],
-) -> BTreeMap<String, HashSet<String>> {
-    let mut area_phrases: BTreeMap<String, HashSet<String>> = BTreeMap::new();
-    for g in groups {
-        area_phrases.entry(g.area.clone()).or_insert_with(|| {
-            let dirs = inputs.area_theme_dirs(&g.area);
-            super::jstranslation::extract_area_phrases(&inputs.root, &g.area, &inputs.scan_modules, &dirs)
-        });
-    }
-    area_phrases
-}
-
 /// Build ONE group's packages (all themes, in order, sharing a fresh cache).
+/// The `js-translation.json` (its js/html phrase scan is the expensive part) is
+/// computed here inside the parallel group task — [`files::js_translation_for`]
+/// skips the scan when the locale's dictionary is empty (en_US), and otherwise
+/// it overlaps across groups.
 fn build_group_packages(
     inputs: &DeployInputs,
     g: &Group,
-    area_phrases: &BTreeMap<String, HashSet<String>>,
     opts: &PlacementOptions,
 ) -> Result<Vec<ThemePackage>, DeployError> {
-    let phrases = area_phrases.get(&g.area).expect("area phrases pre-extracted");
     // Theme-chain i18n for the dictionary (extraction is theme-independent,
     // but a theme's own i18n csv could add entries — use the first theme's
     // chain, as the group's themes share an area).
@@ -314,7 +300,7 @@ fn build_group_packages(
                 .collect()
         })
         .unwrap_or_default();
-    let js_translation = files::js_translation_for(inputs, &g.locale, &chain_dirs, phrases);
+    let js_translation = files::js_translation_for(inputs, &g.area, &g.locale, &chain_dirs);
     files::build_group(inputs, &g.area, &g.theme_ids, &g.locale, &js_translation, opts)
 }
 
@@ -349,13 +335,12 @@ pub fn execute_to_disk(
     jobs: Option<usize>,
 ) -> Result<Vec<TupleStat>, DeployError> {
     use files::PlacedKind as K;
-    let area_phrases = extract_all_area_phrases(inputs, groups);
 
     let stats: Vec<Vec<TupleStat>> = with_pool(jobs, || {
         groups
             .par_iter()
             .map(|g| {
-                let packages = build_group_packages(inputs, g, &area_phrases, opts)?;
+                let packages = build_group_packages(inputs, g, opts)?;
                 let mut rows = Vec::with_capacity(packages.len());
                 for pkg in &packages {
                     let target = files::package_dir(static_root, &g.area, &pkg.theme, &g.locale);

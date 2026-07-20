@@ -892,14 +892,21 @@ impl DeployInputs {
     }
 }
 
-/// The `js-translation.json` body for `(area, locale)` — theme-independent,
-/// so compute once per group. `area_phrases` is the pre-extracted phrase set
-/// for the area (locale-independent, expensive; cache across locales).
+/// The `js-translation.json` body for `(area, locale)` — theme-independent, so
+/// compute once per group.
+///
+/// The js/html phrase scan (`extract_area_phrases`) is the expensive half, but
+/// it only ever FILTERS the dictionary: with an empty dictionary the result is
+/// `[]` no matter what the phrases are (the en_US case — no `i18n/en_US.csv`
+/// ships). So build the dictionary FIRST (a cheap `i18n/<locale>.csv` stat
+/// storm) and scan phrases only when it is non-empty. This skips the scan
+/// outright for source-locale deploys, and — because this runs inside the
+/// parallel group task — overlaps it across areas/groups when it is needed.
 pub fn js_translation_for(
     inputs: &DeployInputs,
+    area: &str,
     locale: &str,
     theme_chain_dirs: &[PathBuf],
-    area_phrases: &std::collections::HashSet<String>,
 ) -> String {
     // The dictionary uses the ENABLED modules in config.php load order (the
     // real `Translate::_moduleList->getNames()`), NOT the wider registration
@@ -910,7 +917,13 @@ pub fn js_translation_for(
         .map(|m| super::jstranslation::ScanModule { dir: m.dir.clone() })
         .collect();
     let dict = super::jstranslation::merged_dictionary(&dict_modules, theme_chain_dirs, locale);
-    super::jstranslation::js_translation_json(&dict, area_phrases)
+    if dict.is_empty() {
+        // No translations for this locale ⇒ `[]`, no phrase scan needed.
+        return dictionary_json(&[]);
+    }
+    let area_phrases =
+        super::jstranslation::extract_area_phrases(&inputs.root, area, &inputs.scan_modules, &inputs.area_theme_dirs(area));
+    super::jstranslation::js_translation_json(&dict, &area_phrases)
 }
 
 /// Place a sequence of themes exactly like one deploy sub-run for a single
@@ -982,9 +995,6 @@ pub fn build_from_magento(
     opts: &PlacementOptions,
 ) -> Result<Vec<ThemePackage>, FilesError> {
     let inputs = DeployInputs::prepare(magento)?;
-    let area_theme_dirs = inputs.area_theme_dirs(area);
-    let area_phrases =
-        super::jstranslation::extract_area_phrases(&inputs.root, area, &inputs.scan_modules, &area_theme_dirs);
     // Theme chain dirs for the dictionary: use the first theme's chain when
     // present, else no theme overlay. Theme i18n rarely differs; the extracted
     // set is theme-independent regardless.
@@ -998,7 +1008,7 @@ pub fn build_from_magento(
                 .collect()
         })
         .unwrap_or_default();
-    let js_translation = js_translation_for(&inputs, locale, &chain_dirs, &area_phrases);
+    let js_translation = js_translation_for(&inputs, area, locale, &chain_dirs);
     build_group(&inputs, area, theme_ids, locale, &js_translation, opts)
 }
 
