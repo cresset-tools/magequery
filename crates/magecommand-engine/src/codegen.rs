@@ -803,7 +803,32 @@ impl<'a> Codegen<'a> {
             })
             .collect();
         names.sort();
-        for name in names {
+        // Pass 1 (parallel, pure): the factory/proxy constructor-parameter
+        // candidates per class. `constructor_of` (an inheritance walk) +
+        // `factory_param_candidate`/`proxy_param_candidate` are read-only over the
+        // immutable `defs`, so they run in parallel; results stay in `names` order
+        // so Pass 2's order-sensitive `ensure` sequence is byte-identical.
+        use rayon::prelude::*;
+        let ctor_candidates: Vec<Vec<String>> = names
+            .par_iter()
+            .map(|name| {
+                if let Ok(Some(ctor)) = defs.constructor_of(name) {
+                    let types: Vec<&str> =
+                        ctor.params.iter().filter_map(|p| p.ty.as_deref()).collect();
+                    types
+                        .iter()
+                        .filter_map(|ty| factory_param_candidate(ty))
+                        .chain(types.iter().filter_map(|ty| proxy_param_candidate(ty)))
+                        .map(str::to_owned)
+                        .collect()
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        // Pass 2 (sequential, order-sensitive): `ensure` mutates the shared emitted
+        // state, so it must run in the exact prior order.
+        for (name, candidates) in names.into_iter().zip(ctor_candidates) {
             // Factories AND proxies from constructor parameters (reflection
             // walks to the nearest inherited constructor, as constructor_of
             // does). A `…Factory` param is caught by PhpScanner's
@@ -815,17 +840,8 @@ impl<'a> Codegen<'a> {
             // __construct(Foo $foo)`), with no di.xml `<argument>` at all, is
             // still generated. Verified on the oracle: a synthetic class with
             // such a parameter and no di.xml reference produces the proxy.
-            if let Ok(Some(ctor)) = defs.constructor_of(name) {
-                let types: Vec<&str> = ctor.params.iter().filter_map(|p| p.ty.as_deref()).collect();
-                let candidates: Vec<String> = types
-                    .iter()
-                    .filter_map(|ty| factory_param_candidate(ty))
-                    .chain(types.iter().filter_map(|ty| proxy_param_candidate(ty)))
-                    .map(str::to_owned)
-                    .collect();
-                for cand in candidates {
-                    self.ensure(&cand);
-                }
+            for cand in candidates {
+                self.ensure(&cand);
             }
             // The extension-attributes sweep: interfaces declaring (or
             // inheriting) getExtensionAttributes.
