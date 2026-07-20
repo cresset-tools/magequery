@@ -12,7 +12,7 @@ surface; it is a curated, grep-able set. Bare `magecommand` and bare `magecomman
 <group>` print that level's help (clap `arg_required_else_help`), never a default
 action. Global flags (`--root <path>`, `--json`) apply to every command.
 
-**The `di` group and the `static` group's LESS pipeline are built today.** Everything
+**The `di` group and the `static` group's LESS + requirejs pipelines are built today.** Everything
 else is the planned surface — documented here so the grammar is fixed before scripts
 and muscle memory depend on it, but not yet wired in `main.rs`. New commands MUST slot
 into a group under this grammar, never appear as a bare top-level verb.
@@ -20,7 +20,7 @@ into a group under this grammar, never appear as a bare top-level verb.
 ```
 GENERATE   (static, byte-exact reproducible — a real `bin/magento` run is the oracle)
   di       compile | verify | watch | digest      # setup:di:compile              (BUILT)
-  static   less | cssdiff                         # the LESS pipeline             (BUILT)
+  static   less | cssdiff | requirejs             # LESS + requirejs-config.js    (BUILT)
            deploy | verify | watch                # full static-content deploy    (planned)
   i18n     collect                                # i18n:collect-phrases          (planned)
 
@@ -80,9 +80,9 @@ guarding against creatuity's issue #28 (global plugins silently not firing in
 CLI/`primary` scope). Credit: the fused technique is creatuity's prior art
 (github.com/creatuity/magento2-interceptors), reimplemented clean-room.
 
-## The `static` group (LESS pipeline built)
+## The `static` group (LESS + requirejs pipelines built)
 
-The pure-Rust LESS half of `setup:static-content:deploy` (no PHP, no node). Global
+The pure-Rust half of `setup:static-content:deploy` (no PHP, no node). Global
 flags plus:
 
 ```
@@ -107,6 +107,20 @@ static less --file <PATH> [--out <DIR>] [--stdout] [--compress]
 
     --compress (both modes) sets the compress serializer — Less_Parser
     compress=true, what Magento's adapter uses outside developer mode.
+
+static requirejs --theme <VENDOR/NAME> [--locale <L>] [--out <DIR>] [--stdout]
+    Assemble a theme's requirejs-config.js into
+    pub/static/<area>/<theme>/<locale>/. A TEXTUAL concatenation, not a semantic
+    JS merge (Framework\RequireJs\Config::getConfig): each collected
+    requirejs-config.js is wrapped in an IIFE and the whole thing in one outer
+    IIFE. Collector order: lib/web → module contexts (view/base then
+    view/<area>, config.php load order) → theme layers ancestor-first (each
+    theme's <Vendor_Module>/ contexts in load order, then its own file).
+    --out redirects the write; --stdout prints the JS instead of writing.
+    The global --json claims stdout for the ordered source list (file, module,
+    theme, origin) — the "which module contributed what, in what order" view —
+    so it replaces the raw JS: with --json the file is still written unless
+    --stdout is also given, in which case nothing is written at all.
 
 static cssdiff <expected.css> <actual.css> [--limit <N>]
     Semantic CSS diff (order-preserving; normalizes only non-semantic formatting:
