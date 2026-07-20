@@ -265,6 +265,9 @@ pub(crate) fn eval_with_source(
     resolver: &dyn ImportResolver,
     entry_source: std::sync::Arc<str>,
 ) -> Result<Css, LessError> {
+    // A fresh compile must not see cached frame scans from a previous job on
+    // this thread (frames are dead, but an address could be reused).
+    clear_frame_caches();
     let mut rules = match root.as_ref() {
         Node::Root(r) => r.clone(),
         // A passthrough anonymous root (scaffold callers) — emit verbatim.
@@ -616,6 +619,7 @@ impl<'a> Ctx<'a> {
             Some(flat) => {
                 if let Some(frame) = self.frames.first() {
                     *frame.borrow_mut() = flat.clone();
+                    invalidate_frame_cache(frame);
                 }
                 flat
             }
@@ -650,6 +654,8 @@ impl<'a> Ctx<'a> {
                         *value = Box::new(Node::Closure { inner, scope });
                     }
                 }
+                drop(fm);
+                invalidate_frame_cache(&frame);
             }
         }
 
@@ -783,6 +789,8 @@ impl<'a> Ctx<'a> {
                             let at = (idx + inserted + 1).min(fm.len());
                             inserted += to_insert.len();
                             fm.splice(at..at, to_insert);
+                            drop(fm);
+                            invalidate_frame_cache(&frame);
                         }
                     }
                     expansions.push(Some((ex_own, ex_children)));
@@ -2600,7 +2608,7 @@ impl<'a> Ctx<'a> {
         let mut chosen: Vec<Candidate> = Vec::new();
         for k in 0..frames.len() {
             let def_scope: Vec<Frame> = frames[k..].to_vec();
-            let mut found = find_candidates(&frames[k].borrow(), &path, &def_scope, &self.closures, &[], false, false);
+            let mut found = find_candidates_top(&frames[k], &path, &def_scope, &self.closures);
             // A name hit counts as "found" BEFORE the recursion filter — less.js
             // sets `isOneFound` on the frame `find` result, then `continue`s the
             // on-stack candidates, so a fully-recursive call errors "No matching
@@ -3785,7 +3793,7 @@ impl<'a> Ctx<'a> {
     /// `or`-separated sub-conditions (OR — less.js `condition`'s `or` keyword).
     fn eval_guard_or(&mut self, s: &str) -> Result<bool, LessError> {
         for part in split_word(s, "or") {
-            if self.eval_guard_and(&part)? {
+            if self.eval_guard_and(part)? {
                 return Ok(true);
             }
         }
@@ -4545,7 +4553,105 @@ impl<'a> Ctx<'a> {
 
 /// Scan a frame's rules for the last `@name` declaration (last-wins), returning
 /// its unevaluated value + whether it was `!important`.
+// --- frame variable cache ------------------------------------------------
+// A variable lookup linear-scans the frame's whole rule list (last-wins), and
+// the X1-flattened root frame holds the entire import-spliced tree — so every
+// lookup over it was O(rules). One full scan builds a name → value map per
+// live frame instead, kept in a thread-local (eval is single-threaded per
+// job), keyed by the RefCell address and validated by a Weak + the rule
+// count; the three frame-mutation sites drop the entry explicitly.
+struct VarCacheEntry {
+    alive: std::rc::Weak<RefCell<Vec<Node>>>,
+    len:   usize,
+    map:   rustc_hash::FxHashMap<Box<str>, (Node, bool)>,
+}
+
+thread_local! {
+    static VAR_CACHE: RefCell<rustc_hash::FxHashMap<usize, VarCacheEntry>> =
+        RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+/// Drop the cached scan for a frame that is about to (or just did) mutate.
+fn invalidate_frame_cache(frame: &Frame) {
+    let key = Rc::as_ptr(frame) as usize;
+    VAR_CACHE.with(|c| {
+        c.borrow_mut().remove(&key);
+    });
+    MIXIN_CACHE.with(|c| {
+        c.borrow_mut().remove(&key);
+    });
+}
+
+/// Reset all per-frame caches (a new compile starts).
+fn clear_frame_caches() {
+    VAR_CACHE.with(|c| c.borrow_mut().clear());
+    MIXIN_CACHE.with(|c| c.borrow_mut().clear());
+}
+
+/// Frames below this rule count scan linearly — a map build (which clones
+/// every declared value) only amortizes on large, long-lived frames (the
+/// flattened root); per-mixin-call frames are tiny and die after one lookup.
+const VAR_CACHE_MIN_RULES: usize = 48;
+
 fn frame_variable(frame: &Frame, name: &str) -> Option<(Node, bool)> {
+    if frame.borrow().len() < VAR_CACHE_MIN_RULES {
+        return frame_variable_scan(frame, name);
+    }
+    let key = Rc::as_ptr(frame) as usize;
+    VAR_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let valid = cache.get(&key).is_some_and(|e| {
+            e.len == frame.borrow().len()
+                && e.alive.upgrade().is_some_and(|rc| Rc::ptr_eq(&rc, frame))
+        });
+        if !valid {
+            let mut map: rustc_hash::FxHashMap<Box<str>, (Node, bool)> =
+                rustc_hash::FxHashMap::default();
+            for r in frame.borrow().iter() {
+                match r {
+                    Node::VariableDecl {
+                        name: n,
+                        value,
+                        important,
+                        ..
+                    } => {
+                        map.insert(n.as_str().into(), ((**value).clone(), !important.is_empty()));
+                    }
+                    // Mirrors the un-inlined-import peek of the scan below.
+                    Node::ImportResolved(ir)
+                        if !ir.skip
+                            && ir.inline.is_none()
+                            && ir.features.is_none()
+                            && !ir.layer_css =>
+                    {
+                        for inner in &ir.rules {
+                            if let Node::VariableDecl {
+                                name: n,
+                                value,
+                                important,
+                                ..
+                            } = inner
+                            {
+                                map.insert(
+                                    n.as_str().into(),
+                                    ((**value).clone(), !important.is_empty()),
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            cache.insert(
+                key,
+                VarCacheEntry { alive: Rc::downgrade(frame), len: frame.borrow().len(), map },
+            );
+        }
+        cache.get(&key).and_then(|e| e.map.get(name).cloned())
+    })
+}
+
+fn frame_variable_scan(frame: &Frame, name: &str) -> Option<(Node, bool)> {
     let mut result = None;
     for r in frame.borrow().iter() {
         match r {
@@ -4721,107 +4827,44 @@ fn find_candidates(
                     ref_depth -= 1;
                 }
             }
-            // An un-inlined import's top level is part of this rule list for
-            // lookup purposes (less.js peeks inside Import roots, §2.9) — the
-            // `#ns { @import (reference) "…" }` namespaced-mixin case.
-            Node::ImportResolved(ir) if !ir.skip && follow_imports => {
-                out.extend(find_candidates(&ir.rules, path, def_scope, closures, path_guards, true, here || ir.reference));
-            }
-            // A scope-injected closure: resolve against the frames frozen at
-            // injection (the enclosing mixin's bound params), not the caller's.
-            Node::Closure { inner, scope } => {
-                if let Node::Ruleset(rs) = inner.as_ref() {
-                    let captured = &closures[*scope as usize];
-                    for sel in &rs.selectors {
-                        let mut joined = String::new();
-                        for e in &sel.elements {
-                            joined.push_str(&e.combinator);
-                            joined.push_str(&e.value);
-                        }
-                        let joined = interp_name(&joined, captured);
-                        let mut names = extract_mixin_tokens(&joined);
-                        if names.first().map(|s| s == "&").unwrap_or(false) {
-                            names.remove(0);
-                        }
-                        if let Some(m) = match_prefix(path, &names) {
-                            if m == path.len() {
-                                out.push(Candidate {
-                                    name: joined.clone(),
-                                    params: Vec::new(),
-                                    guard: sel.guard.as_deref().cloned(),
-                                    rules: rs.rules.clone(),
-                                    def_scope: captured.to_vec(),
-                                    path_guards: path_guards.to_vec(),
-                                    ruleset_span: Some(rs.span),
-                                    def_in_reference: here,
-                                });
-                            } else {
-                                let mut inner_scope = vec![frame_of(rs.rules.clone())];
-                                inner_scope.extend(captured.iter().cloned());
-                                let child = push_guard(path_guards, sel.guard.as_deref());
-                                out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope, closures, &child, true, here));
-                            }
-                            break;
-                        }
-                    }
-                }
-                if let Node::MixinDefinition(def) = inner.as_ref() {
-                    let captured = &closures[*scope as usize];
-                    let names = extract_names_dropamp(&interp_name(&def.name, captured));
-                    if let Some(m) = match_prefix(path, &names) {
-                        if m == path.len() {
-                            out.push(Candidate {
-                                name: def.name.clone(),
-                                params: def.params.clone(),
-                                guard: def.guard.as_deref().cloned(),
-                                rules: def.rules.clone(),
-                                def_scope: captured.to_vec(),
-                                path_guards: path_guards.to_vec(),
-                                ruleset_span: None,
-                                def_in_reference: here,
-                            });
-                        } else if accepts_zero_args(&def.params) {
-                            let mut inner_scope = vec![frame_of(def.rules.clone())];
-                            inner_scope.extend(captured.iter().cloned());
-                            let child = push_guard(path_guards, def.guard.as_deref());
-                            out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child, true, here));
-                        }
-                    }
-                }
-            }
-            Node::MixinDefinition(def) => {
-                let names = extract_names_dropamp(&interp_name(&def.name, def_scope));
-                if let Some(m) = match_prefix(path, &names) {
-                    if m == path.len() {
-                        out.push(Candidate {
-                            name: def.name.clone(),
-                            params: def.params.clone(),
-                            guard: def.guard.as_deref().cloned(),
-                            rules: def.rules.clone(),
-                            def_scope: def_scope.to_vec(),
-                            path_guards: path_guards.to_vec(),
-                            ruleset_span: None,
-                            def_in_reference: here,
-                        });
-                    } else if accepts_zero_args(&def.params) {
-                        // A parametric namespace is only entered with zero args
-                        // (its args aren't the call's args); its guard joins the
-                        // path guards.
-                        let mut inner_scope = vec![frame_of(def.rules.clone())];
-                        inner_scope.extend(def_scope.iter().cloned());
-                        let child = push_guard(path_guards, def.guard.as_deref());
-                        out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child, true, here));
-                    }
-                }
-            }
-            Node::Ruleset(rs) => {
+            _ => candidate_rule(r, here, path, def_scope, closures, path_guards, follow_imports, &mut out),
+        }
+    }
+    out
+}
+
+/// One rule's contribution to a candidate search — the per-arm logic shared
+/// verbatim by the linear walk above and the indexed top-level lookup below.
+#[allow(clippy::too_many_arguments)]
+fn candidate_rule(
+    r: &Node,
+    here: bool,
+    path: &[String],
+    def_scope: &[Frame],
+    closures: &[Vec<Frame>],
+    path_guards: &[Node],
+    follow_imports: bool,
+    out: &mut Vec<Candidate>,
+) {
+    match r {
+        // An un-inlined import's top level is part of this rule list for
+        // lookup purposes (less.js peeks inside Import roots, §2.9) — the
+        // `#ns { @import (reference) "…" }` namespaced-mixin case.
+        Node::ImportResolved(ir) if !ir.skip && follow_imports => {
+            out.extend(find_candidates(&ir.rules, path, def_scope, closures, path_guards, true, here || ir.reference));
+        }
+        // A scope-injected closure: resolve against the frames frozen at
+        // injection (the enclosing mixin's bound params), not the caller's.
+        Node::Closure { inner, scope } => {
+            if let Node::Ruleset(rs) = inner.as_ref() {
+                let captured = &closures[*scope as usize];
                 for sel in &rs.selectors {
                     let mut joined = String::new();
                     for e in &sel.elements {
                         joined.push_str(&e.combinator);
                         joined.push_str(&e.value);
                     }
-                    let joined = interp_name(&joined, def_scope);
+                    let joined = interp_name(&joined, captured);
                     let mut names = extract_mixin_tokens(&joined);
                     if names.first().map(|s| s == "&").unwrap_or(false) {
                         names.remove(0);
@@ -4829,33 +4872,263 @@ fn find_candidates(
                     if let Some(m) = match_prefix(path, &names) {
                         if m == path.len() {
                             out.push(Candidate {
-                                name: rs.selectors[0]
-                                    .elements
-                                    .first()
-                                    .map(|e| e.value.clone())
-                                    .unwrap_or_default(),
+                                name: joined.clone(),
                                 params: Vec::new(),
                                 guard: sel.guard.as_deref().cloned(),
                                 rules: rs.rules.clone(),
-                                def_scope: def_scope.to_vec(),
+                                def_scope: captured.to_vec(),
                                 path_guards: path_guards.to_vec(),
                                 ruleset_span: Some(rs.span),
                                 def_in_reference: here,
                             });
                         } else {
-                            // A ruleset namespace has no params (always zero-arg);
-                            // its selector guard joins the path guards.
                             let mut inner_scope = vec![frame_of(rs.rules.clone())];
-                            inner_scope.extend(def_scope.iter().cloned());
+                            inner_scope.extend(captured.iter().cloned());
                             let child = push_guard(path_guards, sel.guard.as_deref());
                             out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope, closures, &child, true, here));
                         }
-                        break; // one selector per ruleset matches the prefix
+                        break;
+                    }
+                }
+            }
+            if let Node::MixinDefinition(def) = inner.as_ref() {
+                let captured = &closures[*scope as usize];
+                let names = extract_names_dropamp(&interp_name(&def.name, captured));
+                if let Some(m) = match_prefix(path, &names) {
+                    if m == path.len() {
+                        out.push(Candidate {
+                            name: def.name.clone(),
+                            params: def.params.clone(),
+                            guard: def.guard.as_deref().cloned(),
+                            rules: def.rules.clone(),
+                            def_scope: captured.to_vec(),
+                            path_guards: path_guards.to_vec(),
+                            ruleset_span: None,
+                            def_in_reference: here,
+                        });
+                    } else if accepts_zero_args(&def.params) {
+                        let mut inner_scope = vec![frame_of(def.rules.clone())];
+                        inner_scope.extend(captured.iter().cloned());
+                        let child = push_guard(path_guards, def.guard.as_deref());
+                        out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child, true, here));
+                    }
+                }
+            }
+        }
+        Node::MixinDefinition(def) => {
+            let names = extract_names_dropamp(&interp_name(&def.name, def_scope));
+            if let Some(m) = match_prefix(path, &names) {
+                if m == path.len() {
+                    out.push(Candidate {
+                        name: def.name.clone(),
+                        params: def.params.clone(),
+                        guard: def.guard.as_deref().cloned(),
+                        rules: def.rules.clone(),
+                        def_scope: def_scope.to_vec(),
+                        path_guards: path_guards.to_vec(),
+                        ruleset_span: None,
+                        def_in_reference: here,
+                    });
+                } else if accepts_zero_args(&def.params) {
+                    // A parametric namespace is only entered with zero args
+                    // (its args aren't the call's args); its guard joins the
+                    // path guards.
+                    let mut inner_scope = vec![frame_of(def.rules.clone())];
+                    inner_scope.extend(def_scope.iter().cloned());
+                    let child = push_guard(path_guards, def.guard.as_deref());
+                    out.extend(find_candidates(&def.rules, &path[m..], &inner_scope, closures, &child, true, here));
+                }
+            }
+        }
+        Node::Ruleset(rs) => {
+            for sel in &rs.selectors {
+                let mut joined = String::new();
+                for e in &sel.elements {
+                    joined.push_str(&e.combinator);
+                    joined.push_str(&e.value);
+                }
+                let joined = interp_name(&joined, def_scope);
+                let mut names = extract_mixin_tokens(&joined);
+                if names.first().map(|s| s == "&").unwrap_or(false) {
+                    names.remove(0);
+                }
+                if let Some(m) = match_prefix(path, &names) {
+                    if m == path.len() {
+                        out.push(Candidate {
+                            name: rs.selectors[0]
+                                .elements
+                                .first()
+                                .map(|e| e.value.clone())
+                                .unwrap_or_default(),
+                            params: Vec::new(),
+                            guard: sel.guard.as_deref().cloned(),
+                            rules: rs.rules.clone(),
+                            def_scope: def_scope.to_vec(),
+                            path_guards: path_guards.to_vec(),
+                            ruleset_span: Some(rs.span),
+                            def_in_reference: here,
+                        });
+                    } else {
+                        // A ruleset namespace has no params (always zero-arg);
+                        // its selector guard joins the path guards.
+                        let mut inner_scope = vec![frame_of(rs.rules.clone())];
+                        inner_scope.extend(def_scope.iter().cloned());
+                        let child = push_guard(path_guards, sel.guard.as_deref());
+                        out.extend(find_candidates(&rs.rules, &path[m..], &inner_scope, closures, &child, true, here));
+                    }
+                    break; // one selector per ruleset matches the prefix
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+// --- top-level mixin candidate index --------------------------------------
+// Every mixin call re-walked each scope frame's whole rule list, re-joining
+// and re-tokenizing every ruleset selector (`extract_mixin_tokens`) — on the
+// X1-flattened root frame that made each of Luma's thousands of `.lib-*()`
+// calls O(rules). `match_prefix` can only succeed when a definition's FIRST
+// extracted name equals `path[0]`, so large frames get a one-scan index:
+// first-name -> rule indices, plus an always-visit list for entries whose
+// names cannot be pre-resolved (`@{` interpolation, closures, imports) and
+// the per-rule `(reference)` flag. Query = replay `candidate_rule` over the
+// merged index hits in source order — byte-identical candidate streams.
+struct MixinIndexEntry {
+    alive:    std::rc::Weak<RefCell<Vec<Node>>>,
+    len:      usize,
+    by_name:  rustc_hash::FxHashMap<Box<str>, Vec<u32>>,
+    always:   Vec<u32>,
+    ref_here: Vec<bool>,
+}
+
+thread_local! {
+    static MIXIN_CACHE: RefCell<rustc_hash::FxHashMap<usize, MixinIndexEntry>> =
+        RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+/// Frames below this rule count walk linearly (index build never amortizes).
+const MIXIN_INDEX_MIN_RULES: usize = 48;
+
+fn build_mixin_index(
+    rules: &[Node],
+) -> (rustc_hash::FxHashMap<Box<str>, Vec<u32>>, Vec<u32>, Vec<bool>) {
+    let mut by_name: rustc_hash::FxHashMap<Box<str>, Vec<u32>> = rustc_hash::FxHashMap::default();
+    let mut always: Vec<u32> = Vec::new();
+    let mut ref_here = vec![false; rules.len()];
+    let mut ref_stack: Vec<bool> = Vec::new();
+    let mut ref_depth = 0usize;
+    for (i, r) in rules.iter().enumerate() {
+        ref_here[i] = ref_depth > 0;
+        match r {
+            Node::FileEnter(fc) => {
+                ref_stack.push(fc.reference);
+                if fc.reference {
+                    ref_depth += 1;
+                }
+            }
+            Node::FileExit => {
+                if ref_stack.pop() == Some(true) {
+                    ref_depth -= 1;
+                }
+            }
+            Node::ImportResolved(_) | Node::Closure { .. } => always.push(i as u32),
+            Node::MixinDefinition(def) => {
+                if def.name.contains("@{") {
+                    always.push(i as u32);
+                } else if let Some(first) = extract_names_dropamp(&def.name).into_iter().next() {
+                    by_name.entry(first.into_boxed_str()).or_default().push(i as u32);
+                }
+            }
+            Node::Ruleset(rs) => {
+                // Classify the whole rule first: any `@{` selector makes its
+                // names call-time-dynamic, so the rule goes to always-visit
+                // ONLY (never also indexed — a double entry would replay it
+                // twice). Otherwise index it under every selector's first
+                // extracted name (deduped).
+                let mut firsts: Vec<String> = Vec::new();
+                let mut dynamic = false;
+                for sel in &rs.selectors {
+                    let mut joined = String::new();
+                    for e in &sel.elements {
+                        joined.push_str(&e.combinator);
+                        joined.push_str(&e.value);
+                    }
+                    if joined.contains("@{") {
+                        dynamic = true;
+                        break;
+                    }
+                    let mut names = extract_mixin_tokens(&joined);
+                    if names.first().map(|s| s == "&").unwrap_or(false) {
+                        names.remove(0);
+                    }
+                    if let Some(first) = names.into_iter().next() {
+                        if !firsts.contains(&first) {
+                            firsts.push(first);
+                        }
+                    }
+                }
+                if dynamic {
+                    always.push(i as u32);
+                } else {
+                    for first in firsts {
+                        by_name.entry(first.into_boxed_str()).or_default().push(i as u32);
                     }
                 }
             }
             _ => {}
         }
+    }
+    (by_name, always, ref_here)
+}
+
+/// Top-level candidate search over one scope frame (the `MixinCall.eval`
+/// per-frame walk): indexed on large frames, the plain linear walk otherwise.
+fn find_candidates_top(
+    frame: &Frame,
+    path: &[String],
+    def_scope: &[Frame],
+    closures: &[Vec<Frame>],
+) -> Vec<Candidate> {
+    let n = frame.borrow().len();
+    if n < MIXIN_INDEX_MIN_RULES || path.is_empty() {
+        return find_candidates(&frame.borrow(), path, def_scope, closures, &[], false, false);
+    }
+    let key = Rc::as_ptr(frame) as usize;
+    // Copy the visit plan out of the cache before replaying rules, so no
+    // thread-local stays borrowed across `candidate_rule`.
+    let plan: Vec<(u32, bool)> = MIXIN_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let valid = cache.get(&key).is_some_and(|e| {
+            e.len == n && e.alive.upgrade().is_some_and(|rc| Rc::ptr_eq(&rc, frame))
+        });
+        if !valid {
+            let rules = frame.borrow();
+            let (by_name, always, ref_here) = build_mixin_index(&rules);
+            drop(rules);
+            cache.insert(
+                key,
+                MixinIndexEntry { alive: Rc::downgrade(frame), len: n, by_name, always, ref_here },
+            );
+        }
+        let e = cache.get(&key).unwrap();
+        let mut idxs: Vec<u32> = match e.by_name.get(path[0].as_str()) {
+            Some(v) => {
+                let mut m = Vec::with_capacity(v.len() + e.always.len());
+                m.extend_from_slice(&e.always);
+                m.extend_from_slice(v);
+                m.sort_unstable();
+                m
+            }
+            None => e.always.clone(),
+        };
+        idxs.dedup();
+        idxs.iter().map(|&i| (i, e.ref_here[i as usize])).collect()
+    });
+    let rules = frame.borrow();
+    let mut out = Vec::new();
+    for (i, here) in plan {
+        candidate_rule(&rules[i as usize], here, path, def_scope, closures, &[], false, &mut out);
     }
     out
 }
@@ -5622,7 +5895,7 @@ fn split_top(s: &str, sep: char) -> Vec<String> {
 }
 
 /// Split on a whole-word separator (`and`) at top nesting level.
-fn split_word(s: &str, word: &str) -> Vec<String> {
+fn split_word<'a>(s: &'a str, word: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let bytes = s.as_bytes();
@@ -5638,7 +5911,7 @@ fn split_word(s: &str, word: &str) -> Vec<String> {
                 let after =
                     after_idx >= bytes.len() || !bytes[after_idx].is_ascii_alphanumeric();
                 if before && after {
-                    out.push(s[start..i].to_string());
+                    out.push(&s[start..i]);
                     i = after_idx;
                     start = i;
                     continue;
@@ -5648,7 +5921,7 @@ fn split_word(s: &str, word: &str) -> Vec<String> {
         }
         i += 1;
     }
-    out.push(s[start..].to_string());
+    out.push(&s[start..]);
     out
 }
 
