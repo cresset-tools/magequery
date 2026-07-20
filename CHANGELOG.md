@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.11.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.10.1...magequery-v0.11.0) (2026-07-20)
+
+
+### Features
+
+* **magecommand-less:** pure-Rust LESS compiler + Magento theme CSS deploy (static less) ([#50](https://github.com/cresset-tools/magequery/issues/50)) ([7c19716](https://github.com/cresset-tools/magequery/commit/7c19716c0d08473c7a24ca070bf85dc42a4a9d34))
+* **magecommand:** static bundle — byte-exact SCD JS bundling from source ([#57](https://github.com/cresset-tools/magequery/issues/57)) ([ef8e3a8](https://github.com/cresset-tools/magequery/commit/ef8e3a8387a1d6e6066a38832b7e924ac77d8661))
+* **magecommand:** static less --file/--compress + Cresset_MagecommandLess bridge module ([#53](https://github.com/cresset-tools/magequery/issues/53)) ([606b2eb](https://github.com/cresset-tools/magequery/commit/606b2eb597c78129b843da7d7cc6997ce0d588d2))
+* **magecommand:** static requirejs — byte-exact requirejs-config.js aggregation ([#54](https://github.com/cresset-tools/magequery/issues/54)) ([a7e322d](https://github.com/cresset-tools/magequery/commit/a7e322d393943a6674f2b433b3e26fd001fe73a7))
+* **magecommand:** static requirejs — min-resolver + mixins siblings, byte-exact ([#56](https://github.com/cresset-tools/magequery/issues/56)) ([f30dabc](https://github.com/cresset-tools/magequery/commit/f30dabc3fb69f5abd5f51d879fbc29adf7397c57))
+* ship magecommand in releases; magequery stays the bgx default-bin ([#55](https://github.com/cresset-tools/magequery/issues/55)) ([0d1fed3](https://github.com/cresset-tools/magequery/commit/0d1fed3388a8d7964581de3e463f99aea8873013))
+
+
+### Performance Improvements
+
+* **magecommand-less:** mixin candidate index, frame variable cache, extend prescan — 2.2x faster ([#52](https://github.com/cresset-tools/magequery/issues/52)) ([7193f85](https://github.com/cresset-tools/magequery/commit/7193f857fe63ef13634aedba2cab0833f09e3c34))
+
 ## [0.10.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.10.0...magequery-v0.10.1) (2026-07-19)
 
 
