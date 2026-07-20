@@ -393,14 +393,26 @@ fn write_package(pkg: &ThemePackage, target: &std::path::Path) -> Result<(), Dep
         std::fs::remove_dir_all(&bundle_dir)
             .map_err(|e| err(format!("clear {}: {e}", bundle_dir.display())))?;
     }
+    // Create every distinct parent directory ONCE up front (a package's ~1600
+    // files share ~100 dirs — a per-file `create_dir_all` re-walked each path).
+    // Then the writes themselves are independent (distinct paths) and I/O-bound,
+    // so fan them out: writing a package is otherwise a serial syscall storm
+    // (`openat`/`write`/`mkdir`) on the deploy's critical path.
+    let mut dirs: HashSet<PathBuf> = HashSet::new();
     for f in &pkg.files {
-        let path = target.join(&f.path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| err(format!("mkdir {}: {e}", parent.display())))?;
+        if let Some(parent) = std::path::Path::new(&f.path).parent() {
+            if !parent.as_os_str().is_empty() {
+                dirs.insert(target.join(parent));
+            }
         }
-        std::fs::write(&path, &f.content).map_err(|e| err(format!("write {}: {e}", path.display())))?;
     }
-    Ok(())
+    for dir in &dirs {
+        std::fs::create_dir_all(dir).map_err(|e| err(format!("mkdir {}: {e}", dir.display())))?;
+    }
+    pkg.files.par_iter().try_for_each(|f| {
+        let path = target.join(&f.path);
+        std::fs::write(&path, &f.content).map_err(|e| err(format!("write {}: {e}", path.display())))
+    })
 }
 
 #[cfg(test)]
