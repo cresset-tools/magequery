@@ -12,7 +12,7 @@ surface; it is a curated, grep-able set. Bare `magecommand` and bare `magecomman
 <group>` print that level's help (clap `arg_required_else_help`), never a default
 action. Global flags (`--root <path>`, `--json`) apply to every command.
 
-**The `di` group and the `static` group's LESS + requirejs + bundle pipelines are built today.** Everything
+**The `di` group and the `static` group's LESS + requirejs + bundle + minify pipelines are built today.** Everything
 else is the planned surface — documented here so the grammar is fixed before scripts
 and muscle memory depend on it, but not yet wired in `main.rs`. New commands MUST slot
 into a group under this grammar, never appear as a bare top-level verb.
@@ -20,7 +20,7 @@ into a group under this grammar, never appear as a bare top-level verb.
 ```
 GENERATE   (static, byte-exact reproducible — a real `bin/magento` run is the oracle)
   di       compile | verify | watch | digest      # setup:di:compile              (BUILT)
-  static   less | cssdiff | requirejs | bundle    # LESS + JS deploy artifacts    (BUILT)
+  static   less | cssdiff | requirejs | bundle | minify   # LESS + JS deploy artifacts (BUILT)
            deploy | verify | watch                # full static-content deploy    (planned)
   i18n     collect                                # i18n:collect-phrases          (planned)
 
@@ -80,7 +80,7 @@ guarding against creatuity's issue #28 (global plugins silently not firing in
 CLI/`primary` scope). Credit: the fused technique is creatuity's prior art
 (github.com/creatuity/magento2-interceptors), reimplemented clean-room.
 
-## The `static` group (LESS + requirejs pipelines built)
+## The `static` group (LESS + requirejs + bundle + minify built)
 
 The pure-Rust half of `setup:static-content:deploy` (no PHP, no node). Global
 flags plus:
@@ -172,6 +172,33 @@ static bundle --theme <VENDOR/NAME>... [--locale <L>] [--out <DIR>]
     Not modeled (documented limits): minified-mode bundling (dev/js/minify
     .min naming), the compact-strategy result_map.json input branch, and
     non-frontend areas.
+
+static minify (--css <FILE> | --js <FILE>) [--out <FILE>] [--stdout]
+    Minify ONE CSS or JS file — the .min.* building block of the future
+    `static deploy`, and the ONE pipeline piece that deliberately does NOT
+    chase byte-parity with Magento (which uses tubalmartin/cssmin v4.1.1 and
+    JShrink): a .min artifact's only contract is semantic equivalence, gated
+    semantically (see static_deploy/minify.rs — the gates and the pinned
+    tool versions live there).
+    - CSS: lightningcss, serialization-only — StyleSheet::minify (the
+      rule-merging/downleveling optimizer) is never called, targets stay
+      empty (no prefix add/strip), error_recovery is ON with every recovery
+      surfaced as a warning on stderr, output iterated to the printer's own
+      fixpoint (re-minifying a .min.css is a no-op). Leading /*! license
+      comments are kept.
+    - JS: the oxc suite (parse → compress+mangle → codegen) pinned to an ES5
+      output floor (no `??`/`?.`/template-literal injection into the AMD
+      corpus), require/exports/module reserved from mangling (RequireJS
+      CJS-sugar scans factory.toString() for literal require("…") calls),
+      /*! and @license/@preserve comments kept, `debugger;` kept, and a
+      span-precise output fixup that (a) rewrites codegen's backtick string
+      quoting back to plain quotes and (b) re-expands oxc's
+      `"a.b".split(".")` array substitution inside define(/require( calls so
+      dependency arrays stay literally scannable.
+    Default output: the input's .min.* sibling (Minification::addMinifiedSign
+    naming — already-.min names are refused); --out writes an exact path;
+    --stdout prints only the minified content. Parse errors exit non-zero
+    with the file name on stderr.
 
 static cssdiff <expected.css> <actual.css> [--limit <N>]
     Semantic CSS diff (order-preserving; normalizes only non-semantic formatting:

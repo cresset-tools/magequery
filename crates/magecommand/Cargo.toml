@@ -16,6 +16,28 @@ anyhow = "1"
 # File-watching for `magecommand di watch` (the long-running compile server).
 # default-features on: brings the platform backend (inotify/fsevents/kqueue).
 notify = "8"
+# `static minify` — the ONE deliberately non-byte-parity pipeline piece (see
+# static_deploy/minify.rs for the rationale + semantic gates). Both
+# ecosystems churn, so versions are pinned EXACTLY; bump deliberately,
+# re-running the gates. lightningcss without default features drops the
+# bundler/sourcemap/nodejs weight; the pin MUST equal magecommand-less's
+# (cargo cannot lock two 1.0.0-alpha prereleases at once). The oxc crates
+# release in lockstep and must share one version.
+lightningcss = { version = "=1.0.0-alpha.71", default-features = false }
+oxc_allocator = "=0.140.0"
+oxc_parser = { version = "=0.140.0", default-features = false }
+oxc_minifier = "=0.140.0"
+oxc_codegen = { version = "=0.140.0", default-features = false }
+oxc_span = "=0.140.0"
+# The detemplate post-pass (minify.rs): oxc's minify codegen prints strings
+# as backtick template literals (ES2015) with no opt-out; the pass needs the
+# AST types + visitor to rewrite them span-precisely. Both already compile
+# as part of oxc_minifier's own tree (oxc_ast_visit is tiny).
+oxc_ast = "=0.140.0"
+oxc_ast_visit = "=0.140.0"
+# Only to name `EngineTargets`/`Engine`/`Version` for the ES5 output floor
+# (oxc_minifier doesn't re-export them); already in oxc_minifier's own tree.
+oxc_compat = "=0.140.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
