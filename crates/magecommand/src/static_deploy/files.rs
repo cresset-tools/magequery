@@ -107,9 +107,15 @@ pub const DEPLOYED_VERSION_FILE_NAME: &str = "deployed_version.txt";
 /// is NOT the registration order — the golden `sri-hashes.json` proves the
 /// deployment iterates modules in registration order.
 pub fn registration_order(root: &Path, modules: &[ModuleRef]) -> Vec<ModuleRef> {
+    use rayon::prelude::*;
     let autoload = root.join("vendor").join("composer").join("autoload_files.php");
     let vendor = root.join("vendor");
-    let mut reg_dirs: Vec<PathBuf> = Vec::new();
+    // Collect the raw registration dirs first, then canonicalize them in
+    // parallel: `canonicalize` is a per-path syscall walk and there are ~700 of
+    // them plus one per module — a serial storm on the deploy's serial prepare
+    // step. `par_iter().collect()` preserves order, so `reg_dirs` keeps its
+    // autoload (deployment) order — the order that drives `out` below.
+    let mut reg_raw: Vec<PathBuf> = Vec::new();
     if let Ok(src) = std::fs::read_to_string(&autoload) {
         // Lines look like: `'<hash>' => $vendorDir . '/pkg/path/registration.php',`
         let mut rest = src.as_str();
@@ -119,13 +125,16 @@ pub fn registration_order(root: &Path, modules: &[ModuleRef]) -> Vec<ModuleRef> 
             let rel = &rest[..end];
             rest = &rest[end..];
             if let Some(dir) = rel.strip_suffix("/registration.php") {
-                let p = vendor.join(dir.trim_start_matches('/'));
-                reg_dirs.push(std::fs::canonicalize(&p).unwrap_or(p));
+                reg_raw.push(vendor.join(dir.trim_start_matches('/')));
             }
         }
     }
+    let reg_dirs: Vec<PathBuf> = reg_raw
+        .par_iter()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
     let canon: Vec<(PathBuf, usize)> = modules
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(i, m)| (std::fs::canonicalize(&m.dir).unwrap_or_else(|_| m.dir.clone()), i))
         .collect();
@@ -590,8 +599,30 @@ fn render_entry(
 /// run-scoped `.min`-sibling bundle cache (share across themes);
 /// `min_resolver` the assembled `requirejs-min-resolver.js` body
 /// (theme-independent).
+/// A package rendered up to — but not including — the bundle + sri step: the
+/// theme-INDEPENDENT work (source resolution, per-file render/LESS, requirejs,
+/// js-translation). This is the expensive part (LESS compilation dominates)
+/// and it shares no state between a group's themes, so it fans out across
+/// rayon. Only the bundle step reads/mutates the ordered `.min`-sibling cache
+/// and must run serially, in theme order — that's [`finalize_theme`].
+struct PrebuiltPackage {
+    theme_id: String,
+    theme_path: String,
+    chain: Vec<ThemeRef>,
+    /// Package files + the two requirejs artifacts + js-translation.json, in
+    /// deployment order (no bundles, no sri yet).
+    files: Vec<PlacedFile>,
+    warnings: Vec<(String, String)>,
+    /// The generated requirejs artifacts the bundler consumes as package files.
+    generated: Vec<(String, String)>,
+}
+
+/// The theme-independent render (source resolution + per-file pipeline +
+/// requirejs + js-translation). Pure w.r.t. other themes, so a group's themes
+/// run this concurrently; the bundle step ([`finalize_theme`]) is the only
+/// part that must stay ordered.
 #[allow(clippy::too_many_arguments)]
-fn build_theme(
+fn build_theme_prebundle(
     root: &Path,
     area: &str,
     theme_id: &str,
@@ -602,8 +633,7 @@ fn build_theme(
     min_resolver: &str,
     js_translation: &str,
     opts: &PlacementOptions,
-    min_cache: &mut MinSiblingCache,
-) -> Result<ThemePackage, FilesError> {
+) -> Result<PrebuiltPackage, FilesError> {
     let chain = theme_chain(area, theme_id, themes)?;
     let theme_path = chain[0]
         .id
@@ -619,17 +649,27 @@ fn build_theme(
         compress: opts.compress,
     };
 
+    // Render every package entry to bytes. Each entry is an independent pure
+    // function of its source (LESS compiles carry a fresh resolver; the shared
+    // `orchestrator` is immutable), so fan out across rayon — LESS compilation
+    // dominates a package's wall time and its entries are the parallelism.
+    // `collect` into an indexed Vec preserves entry order, so the deployed file
+    // order (hence `sri-hashes.json` deployment order) is identical to serial,
+    // and a `--jobs 1` run (one-thread pool) is byte-identical.
+    use rayon::prelude::*;
+    let rendered: Vec<(PlacedFile, Vec<(String, String)>)> = entries
+        .par_iter()
+        .map(|entry| {
+            let (content, kind, warns) =
+                render_entry(entry, &orchestrator, &less_opts, area, &theme_path)?;
+            Ok((PlacedFile { path: entry.deployed.clone(), content, kind }, warns))
+        })
+        .collect::<Result<Vec<_>, FilesError>>()?;
     let mut files: Vec<PlacedFile> = Vec::with_capacity(entries.len() + 16);
     let mut warnings: Vec<(String, String)> = Vec::new();
-    for entry in &entries {
-        let (content, kind, mut warns) =
-            render_entry(entry, &orchestrator, &less_opts, area, &theme_path)?;
+    for (pf, mut warns) in rendered {
+        files.push(pf);
         warnings.append(&mut warns);
-        files.push(PlacedFile {
-            path: entry.deployed.clone(),
-            content,
-            kind,
-        });
     }
 
     // The requirejs artifacts (DeployRequireJsConfig, post-package).
@@ -654,9 +694,7 @@ fn build_theme(
         kind: PlacedKind::Translation,
     });
 
-    // js/bundle/bundle<N>.js (Service\Bundle) — the bundler resolves its own
-    // js/html view of the package (proven byte-exact by its own gate) and
-    // needs the generated requirejs artifacts as package files.
+    // The generated requirejs artifacts the bundler needs as package files.
     let rjs_config = files
         .iter()
         .find(|f| f.path == requirejs::CONFIG_FILE_NAME)
@@ -666,10 +704,47 @@ fn build_theme(
         (requirejs::CONFIG_FILE_NAME.to_string(), rjs_config),
         (requirejs::MIN_RESOLVER_FILE_NAME.to_string(), min_resolver.to_string()),
     ];
+
+    Ok(PrebuiltPackage {
+        theme_id: theme_id.to_string(),
+        theme_path,
+        chain,
+        files,
+        warnings,
+        generated,
+    })
+}
+
+/// Finish a [`PrebuiltPackage`]: the JS bundles (Service\Bundle) followed by
+/// `sri-hashes.json`. The bundler shares the ordered `.min`-sibling cache, so
+/// this runs serially in a group's theme order (blank-before-luma poisoning),
+/// while [`build_theme_prebundle`] already ran in parallel.
+fn finalize_theme(
+    pre: PrebuiltPackage,
+    root: &Path,
+    area: &str,
+    locale: &str,
+    themes: &[(String, PathBuf)],
+    modules: &[ModuleRef],
+    opts: &PlacementOptions,
+    min_cache: &mut MinSiblingCache,
+) -> Result<ThemePackage, FilesError> {
+    let PrebuiltPackage {
+        theme_id,
+        theme_path,
+        chain,
+        mut files,
+        warnings,
+        generated,
+    } = pre;
+
+    // js/bundle/bundle<N>.js (Service\Bundle) — the bundler resolves its own
+    // js/html view of the package (proven byte-exact by its own gate) and
+    // needs the generated requirejs artifacts as package files.
     let bundles = bundle::build_theme(
         root,
         area,
-        theme_id,
+        &theme_id,
         locale,
         themes,
         modules,
@@ -721,12 +796,36 @@ fn build_theme(
     });
 
     Ok(ThemePackage {
-        theme: theme_id.to_string(),
+        theme: theme_id,
         theme_path,
         chain,
         files,
         warnings,
     })
+}
+
+/// Place one theme's full package: [`build_theme_prebundle`] then
+/// [`finalize_theme`]. The two-phase form exists so a group's themes can render
+/// in parallel and bundle in order (see [`build_group`]); this wrapper keeps
+/// the single-theme path (`build_from_magento`, tests) one call.
+#[allow(clippy::too_many_arguments)]
+fn build_theme(
+    root: &Path,
+    area: &str,
+    theme_id: &str,
+    locale: &str,
+    themes: &[(String, PathBuf)],
+    modules: &[ModuleRef],
+    reg_modules: &[ModuleRef],
+    min_resolver: &str,
+    js_translation: &str,
+    opts: &PlacementOptions,
+    min_cache: &mut MinSiblingCache,
+) -> Result<ThemePackage, FilesError> {
+    let pre = build_theme_prebundle(
+        root, area, theme_id, locale, themes, modules, reg_modules, min_resolver, js_translation, opts,
+    )?;
+    finalize_theme(pre, root, area, locale, themes, modules, opts, min_cache)
 }
 
 /// The run-scoped, area/locale-INDEPENDENT inputs a deploy needs, computed
@@ -793,14 +892,21 @@ impl DeployInputs {
     }
 }
 
-/// The `js-translation.json` body for `(area, locale)` — theme-independent,
-/// so compute once per group. `area_phrases` is the pre-extracted phrase set
-/// for the area (locale-independent, expensive; cache across locales).
+/// The `js-translation.json` body for `(area, locale)` — theme-independent, so
+/// compute once per group.
+///
+/// The js/html phrase scan (`extract_area_phrases`) is the expensive half, but
+/// it only ever FILTERS the dictionary: with an empty dictionary the result is
+/// `[]` no matter what the phrases are (the en_US case — no `i18n/en_US.csv`
+/// ships). So build the dictionary FIRST (a cheap `i18n/<locale>.csv` stat
+/// storm) and scan phrases only when it is non-empty. This skips the scan
+/// outright for source-locale deploys, and — because this runs inside the
+/// parallel group task — overlaps it across areas/groups when it is needed.
 pub fn js_translation_for(
     inputs: &DeployInputs,
+    area: &str,
     locale: &str,
     theme_chain_dirs: &[PathBuf],
-    area_phrases: &std::collections::HashSet<String>,
 ) -> String {
     // The dictionary uses the ENABLED modules in config.php load order (the
     // real `Translate::_moduleList->getNames()`), NOT the wider registration
@@ -811,7 +917,13 @@ pub fn js_translation_for(
         .map(|m| super::jstranslation::ScanModule { dir: m.dir.clone() })
         .collect();
     let dict = super::jstranslation::merged_dictionary(&dict_modules, theme_chain_dirs, locale);
-    super::jstranslation::js_translation_json(&dict, area_phrases)
+    if dict.is_empty() {
+        // No translations for this locale ⇒ `[]`, no phrase scan needed.
+        return dictionary_json(&[]);
+    }
+    let area_phrases =
+        super::jstranslation::extract_area_phrases(&inputs.root, area, &inputs.scan_modules, &inputs.area_theme_dirs(area));
+    super::jstranslation::js_translation_json(&dict, &area_phrases)
 }
 
 /// Place a sequence of themes exactly like one deploy sub-run for a single
@@ -827,19 +939,43 @@ pub fn build_group(
     js_translation: &str,
     opts: &PlacementOptions,
 ) -> Result<Vec<ThemePackage>, FilesError> {
+    use rayon::prelude::*;
+    // Phase A — the theme-independent render (source resolution + per-file
+    // pipeline + requirejs + js-translation), where LESS compilation dominates.
+    // A group's themes share no state here, so fan them out; `collect` keeps
+    // theme order for the ordered phase B below.
+    let prebuilt: Vec<PrebuiltPackage> = theme_ids
+        .par_iter()
+        .map(|theme_id| {
+            build_theme_prebundle(
+                &inputs.root,
+                area,
+                theme_id,
+                locale,
+                &inputs.themes,
+                &inputs.modules,
+                &inputs.reg_modules,
+                &inputs.min_resolver,
+                js_translation,
+                opts,
+            )
+        })
+        .collect::<Result<Vec<_>, FilesError>>()?;
+
+    // Phase B — the bundle step reads and mutates the ordered `.min`-sibling
+    // cache, so finalize the themes serially in their given order on ONE fresh
+    // cache (blank-before-luma poisoning preserved). Cheap relative to phase A,
+    // and identical whether phase A ran parallel or serial.
     let mut min_cache = MinSiblingCache::new();
-    let mut out = Vec::with_capacity(theme_ids.len());
-    for theme_id in theme_ids {
-        out.push(build_theme(
+    let mut out = Vec::with_capacity(prebuilt.len());
+    for pre in prebuilt {
+        out.push(finalize_theme(
+            pre,
             &inputs.root,
             area,
-            theme_id,
             locale,
             &inputs.themes,
             &inputs.modules,
-            &inputs.reg_modules,
-            &inputs.min_resolver,
-            js_translation,
             opts,
             &mut min_cache,
         )?);
@@ -859,9 +995,6 @@ pub fn build_from_magento(
     opts: &PlacementOptions,
 ) -> Result<Vec<ThemePackage>, FilesError> {
     let inputs = DeployInputs::prepare(magento)?;
-    let area_theme_dirs = inputs.area_theme_dirs(area);
-    let area_phrases =
-        super::jstranslation::extract_area_phrases(&inputs.root, area, &inputs.scan_modules, &area_theme_dirs);
     // Theme chain dirs for the dictionary: use the first theme's chain when
     // present, else no theme overlay. Theme i18n rarely differs; the extracted
     // set is theme-independent regardless.
@@ -875,7 +1008,7 @@ pub fn build_from_magento(
                 .collect()
         })
         .unwrap_or_default();
-    let js_translation = js_translation_for(&inputs, locale, &chain_dirs, &area_phrases);
+    let js_translation = js_translation_for(&inputs, area, locale, &chain_dirs);
     build_group(&inputs, area, theme_ids, locale, &js_translation, opts)
 }
 

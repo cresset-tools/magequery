@@ -276,30 +276,16 @@ pub fn plan(
         .collect())
 }
 
-/// Pre-extract the (locale-independent) js/html phrase set for every distinct
-/// area in the plan — the expensive scan, done once and shared read-only.
-fn extract_all_area_phrases(
-    inputs: &DeployInputs,
-    groups: &[Group],
-) -> BTreeMap<String, HashSet<String>> {
-    let mut area_phrases: BTreeMap<String, HashSet<String>> = BTreeMap::new();
-    for g in groups {
-        area_phrases.entry(g.area.clone()).or_insert_with(|| {
-            let dirs = inputs.area_theme_dirs(&g.area);
-            super::jstranslation::extract_area_phrases(&inputs.root, &g.area, &inputs.scan_modules, &dirs)
-        });
-    }
-    area_phrases
-}
-
 /// Build ONE group's packages (all themes, in order, sharing a fresh cache).
+/// The `js-translation.json` (its js/html phrase scan is the expensive part) is
+/// computed here inside the parallel group task — [`files::js_translation_for`]
+/// skips the scan when the locale's dictionary is empty (en_US), and otherwise
+/// it overlaps across groups.
 fn build_group_packages(
     inputs: &DeployInputs,
     g: &Group,
-    area_phrases: &BTreeMap<String, HashSet<String>>,
     opts: &PlacementOptions,
 ) -> Result<Vec<ThemePackage>, DeployError> {
-    let phrases = area_phrases.get(&g.area).expect("area phrases pre-extracted");
     // Theme-chain i18n for the dictionary (extraction is theme-independent,
     // but a theme's own i18n csv could add entries — use the first theme's
     // chain, as the group's themes share an area).
@@ -314,7 +300,7 @@ fn build_group_packages(
                 .collect()
         })
         .unwrap_or_default();
-    let js_translation = files::js_translation_for(inputs, &g.locale, &chain_dirs, phrases);
+    let js_translation = files::js_translation_for(inputs, &g.area, &g.locale, &chain_dirs);
     files::build_group(inputs, &g.area, &g.theme_ids, &g.locale, &js_translation, opts)
 }
 
@@ -349,13 +335,12 @@ pub fn execute_to_disk(
     jobs: Option<usize>,
 ) -> Result<Vec<TupleStat>, DeployError> {
     use files::PlacedKind as K;
-    let area_phrases = extract_all_area_phrases(inputs, groups);
 
     let stats: Vec<Vec<TupleStat>> = with_pool(jobs, || {
         groups
             .par_iter()
             .map(|g| {
-                let packages = build_group_packages(inputs, g, &area_phrases, opts)?;
+                let packages = build_group_packages(inputs, g, opts)?;
                 let mut rows = Vec::with_capacity(packages.len());
                 for pkg in &packages {
                     let target = files::package_dir(static_root, &g.area, &pkg.theme, &g.locale);
@@ -393,14 +378,26 @@ fn write_package(pkg: &ThemePackage, target: &std::path::Path) -> Result<(), Dep
         std::fs::remove_dir_all(&bundle_dir)
             .map_err(|e| err(format!("clear {}: {e}", bundle_dir.display())))?;
     }
+    // Create every distinct parent directory ONCE up front (a package's ~1600
+    // files share ~100 dirs — a per-file `create_dir_all` re-walked each path).
+    // Then the writes themselves are independent (distinct paths) and I/O-bound,
+    // so fan them out: writing a package is otherwise a serial syscall storm
+    // (`openat`/`write`/`mkdir`) on the deploy's critical path.
+    let mut dirs: HashSet<PathBuf> = HashSet::new();
     for f in &pkg.files {
-        let path = target.join(&f.path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| err(format!("mkdir {}: {e}", parent.display())))?;
+        if let Some(parent) = std::path::Path::new(&f.path).parent() {
+            if !parent.as_os_str().is_empty() {
+                dirs.insert(target.join(parent));
+            }
         }
-        std::fs::write(&path, &f.content).map_err(|e| err(format!("write {}: {e}", path.display())))?;
     }
-    Ok(())
+    for dir in &dirs {
+        std::fs::create_dir_all(dir).map_err(|e| err(format!("mkdir {}: {e}", dir.display())))?;
+    }
+    pkg.files.par_iter().try_for_each(|f| {
+        let path = target.join(&f.path);
+        std::fs::write(&path, &f.content).map_err(|e| err(format!("write {}: {e}", path.display())))
+    })
 }
 
 #[cfg(test)]
