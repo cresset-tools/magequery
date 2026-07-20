@@ -3793,7 +3793,7 @@ impl<'a> Ctx<'a> {
     /// `or`-separated sub-conditions (OR — less.js `condition`'s `or` keyword).
     fn eval_guard_or(&mut self, s: &str) -> Result<bool, LessError> {
         for part in split_word(s, "or") {
-            if self.eval_guard_and(&part)? {
+            if self.eval_guard_and(part)? {
                 return Ok(true);
             }
         }
@@ -5895,7 +5895,7 @@ fn split_top(s: &str, sep: char) -> Vec<String> {
 }
 
 /// Split on a whole-word separator (`and`) at top nesting level.
-fn split_word(s: &str, word: &str) -> Vec<String> {
+fn split_word<'a>(s: &'a str, word: &str) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let bytes = s.as_bytes();
@@ -5911,7 +5911,7 @@ fn split_word(s: &str, word: &str) -> Vec<String> {
                 let after =
                     after_idx >= bytes.len() || !bytes[after_idx].is_ascii_alphanumeric();
                 if before && after {
-                    out.push(s[start..i].to_string());
+                    out.push(&s[start..i]);
                     i = after_idx;
                     start = i;
                     continue;
@@ -5921,7 +5921,7 @@ fn split_word(s: &str, word: &str) -> Vec<String> {
         }
         i += 1;
     }
-    out.push(s[start..].to_string());
+    out.push(&s[start..]);
     out
 }
 
