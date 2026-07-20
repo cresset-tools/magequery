@@ -102,10 +102,12 @@ enum StaticCommand {
         #[arg(long)]
         skip_broken_modules: bool,
     },
-    /// Assemble a theme's `requirejs-config.js` (pure Rust — no PHP, no node).
-    /// A textual concatenation, not a semantic JS merge: every collected
-    /// `requirejs-config.js` is wrapped in an IIFE, in collector order (lib →
-    /// module contexts in load order → theme layers ancestor-first).
+    /// Emit a theme's requirejs deploy artifacts (pure Rust — no PHP, no
+    /// node): `requirejs-config.js` (textual IIFE concatenation in collector
+    /// order — lib → module contexts in load order → theme layers
+    /// ancestor-first), `requirejs-min-resolver.js` (the fixed template with
+    /// the `dev/js/minify_exclude` condition), and `mage/requirejs/mixins.js`
+    /// (a verbatim copy of the lib source).
     Requirejs {
         /// Theme id, e.g. `Magento/luma` (or `frontend/Magento/luma`).
         #[arg(long, value_name = "VENDOR/NAME")]
@@ -113,12 +115,16 @@ enum StaticCommand {
         /// Locale for the `pub/static` placement.
         #[arg(long, default_value = "en_US")]
         locale: String,
-        /// Write the config under this directory instead of `pub/static`
-        /// (as `<DIR>/requirejs-config.js`).
+        /// Write the artifacts under this directory instead of `pub/static`,
+        /// at their deployed relative paths (`<DIR>/requirejs-config.js`,
+        /// `<DIR>/requirejs-min-resolver.js`,
+        /// `<DIR>/mage/requirejs/mixins.js`).
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
-        /// Print the assembled config to stdout (no writes). Mutually
-        /// exclusive with the global `--json` (which claims stdout for the
+        /// Print ONLY the assembled `requirejs-config.js` to stdout (no
+        /// writes; the two sibling artifacts are not emitted — backward
+        /// compatible with the config-only behavior). Mutually exclusive
+        /// with the global `--json` (which claims stdout for the
         /// source-list document).
         #[arg(long, conflicts_with = "out")]
         stdout: bool,
@@ -432,10 +438,14 @@ fn static_less(
     })
 }
 
-/// `magecommand static requirejs` — assemble a theme's `requirejs-config.js`
-/// into `pub/static/<area>/<theme>/<locale>/` (or `--out`/`--stdout`).
-/// `--json` renders the ordered source list instead of the summary line —
-/// the "which module contributed what, in what order" view.
+/// `magecommand static requirejs` — emit a theme's requirejs deploy artifacts
+/// into `pub/static/<area>/<theme>/<locale>/` (or `--out`): the assembled
+/// `requirejs-config.js`, the generated `requirejs-min-resolver.js`, and the
+/// verbatim `mage/requirejs/mixins.js` copy, each at its deployed relative
+/// path. `--stdout` prints ONLY the config (no writes, config-only — the
+/// original behavior). `--json` renders the ordered source list plus the
+/// sibling artifacts instead of the summary lines — the "which module
+/// contributed what, in what order" view.
 fn static_requirejs(
     root: Option<PathBuf>,
     theme: &str,
@@ -472,11 +482,29 @@ fn static_requirejs(
         print!("{}", cfg.js);
         return Ok(ExitCode::SUCCESS);
     }
-    let target = if to_stdout {
+
+    // The two sibling artifacts (write modes and --json only; plain --stdout
+    // above stays config-only). The excludes come from the static ConfigSet.
+    let excludes = match sdrjs::min_resolver_excludes_from_magento(&magento) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+    let resolver = sdrjs::min_resolver_code(&excludes);
+    let mixins_src = sdrjs::mixins_source_path(&root);
+    // Required to write; merely reported (null bytes) in `--json --stdout`.
+    let mixins = std::fs::read(&mixins_src).ok();
+
+    let targets = if to_stdout {
         None
     } else {
-        let t = match out {
-            Some(dir) => dir.join(sdrjs::CONFIG_FILE_NAME),
+        let mixins = mixins
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("read {}", mixins_src.display()))?;
+        let base = match out {
+            Some(dir) => dir.to_path_buf(),
             None => {
                 let full = if theme.contains('/') && !theme.starts_with(area) {
                     format!("{area}/{theme}")
@@ -484,18 +512,34 @@ fn static_requirejs(
                     theme.to_string()
                 };
                 sdrjs::output_path(&root, area, &full, locale)
+                    .parent()
+                    .expect("output path has a parent")
+                    .to_path_buf()
             }
         };
-        if let Some(parent) = t.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("mkdir {}", parent.display()))?;
+        let config_t = base.join(sdrjs::CONFIG_FILE_NAME);
+        let resolver_t = base.join(sdrjs::MIN_RESOLVER_FILE_NAME);
+        let mixins_t = base.join(sdrjs::MIXINS_FILE_NAME);
+        for (t, bytes) in [
+            (&config_t, cfg.js.as_bytes()),
+            (&resolver_t, resolver.as_bytes()),
+            (&mixins_t, mixins),
+        ] {
+            if let Some(parent) = t.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("mkdir {}", parent.display()))?;
+            }
+            std::fs::write(t, bytes)
+                .with_context(|| format!("write {}", t.display()))?;
         }
-        std::fs::write(&t, &cfg.js)
-            .with_context(|| format!("write {}", t.display()))?;
-        Some(t)
+        Some((config_t, resolver_t, mixins_t))
     };
 
     if json {
+        let (config_t, resolver_t, mixins_t) = match &targets {
+            Some((c, r, m)) => (Some(c), Some(r), Some(m)),
+            None => (None, None, None),
+        };
         let doc = serde_json::json!({
             "theme_chain": cfg.chain.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
             "sources": cfg.sources.iter().map(|s| serde_json::json!({
@@ -505,16 +549,39 @@ fn static_requirejs(
                 "origin": s.origin.tag(),
             })).collect::<Vec<_>>(),
             "bytes":  cfg.js.len(),
-            "output": target.as_ref().map(|t| t.display().to_string()),
+            "output": config_t.map(|t| t.display().to_string()),
+            "min_resolver": {
+                "excludes": excludes,
+                "bytes":    resolver.len(),
+                "output":   resolver_t.map(|t| t.display().to_string()),
+            },
+            "mixins": {
+                "source": mixins_src.display().to_string(),
+                "bytes":  mixins.as_ref().map(|m| m.len()),
+                "output": mixins_t.map(|t| t.display().to_string()),
+            },
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
         return Ok(ExitCode::SUCCESS);
     }
+    let (config_t, resolver_t, mixins_t) =
+        targets.expect("non-stdout mode always writes");
     println!(
         "requirejs-config.js: {} source file(s) ({} bytes) -> {}",
         cfg.sources.len(),
         cfg.js.len(),
-        target.expect("non-stdout mode always writes").display()
+        config_t.display()
+    );
+    println!(
+        "requirejs-min-resolver.js: {} exclude(s) ({} bytes) -> {}",
+        excludes.len(),
+        resolver.len(),
+        resolver_t.display()
+    );
+    println!(
+        "mage/requirejs/mixins.js: verbatim copy ({} bytes) -> {}",
+        mixins.map(|m| m.len()).expect("write mode read the mixins source"),
+        mixins_t.display()
     );
     Ok(ExitCode::SUCCESS)
 }

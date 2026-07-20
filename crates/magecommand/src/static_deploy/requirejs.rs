@@ -58,18 +58,43 @@
 //! `view/frontend/web/requirejs-config.js` is NOT collected (one core module
 //! ships exactly that and it is correctly absent from the deployed output).
 //!
+//! ## The sibling artifacts (same deploy step, same subsystem)
+//!
+//! Alongside the config, the real deploy places two more files per theme
+//! package, both produced here:
+//!
+//! - **`requirejs-min-resolver.js`** — `Config::getMinResolverCode()`: a fixed
+//!   IIFE template whose ONLY variable part is the exclude condition. It
+//!   starts as `url.indexOf(baseUrl)===0` and appends one
+//!   `!url.match(/<regex>/)` per exclude from
+//!   `Minification::getExcludes('js')` (config path `dev/js/minify_exclude`),
+//!   joined with `&&`. Each exclude value becomes a JS regex literal with only
+//!   `/` escaped to `\/` (`str_replace('/', '\/', $expression)`) — nothing
+//!   else is escaped. The PHP's `empty($excludes) ? 'true'` fallback is DEAD
+//!   CODE (the `indexOf` entry is always present); [`min_resolver_code`]
+//!   reproduces the live branch only. See [`min_resolver_excludes`] for where
+//!   the exclude values come from.
+//! - **`mage/requirejs/mixins.js`** — a verbatim byte copy of
+//!   `lib/web/mage/requirejs/mixins.js` into the theme package
+//!   (`Config::MIXINS_FILE_NAME`; the deploy pipeline treats it as a plain
+//!   static file, no processing). [`mixins_source_path`] names the source.
+//!
 //! ## Out of scope here
 //!
-//! `Config::getConfig()` runs the result through the JS minifier when
-//! `Minification::isEnabled('js')` (production mode, `.min.js` naming). This
-//! module always emits the unminified form — the default-mode artifact, and
-//! the one the goldens capture.
+//! `Config::getConfig()` (and `getMinResolverCode()`) run the result through
+//! the JS minifier when `Minification::isEnabled('js')` (production mode,
+//! `.min.js` naming). This module always emits the unminified form — the
+//! default-mode artifact, and the one the goldens capture.
 //!
 //! Everything is pure file inspection over a plain Magento source tree; the
 //! theme fallback chain and the enabled-module load order are reused from
-//! [`super::less`] (`theme_chain`, `ThemeRef`, `ModuleRef`).
+//! [`super::less`] (`theme_chain`, `ThemeRef`, `ModuleRef`), and the
+//! `dev/js/minify_exclude` values from `magequery-core`'s [`ConfigSet`]
+//! (module `config.xml` `<default>` merge — no new config reader).
 
 use std::path::{Path, PathBuf};
+
+use magequery_core::ConfigSet;
 
 use super::less::{is_module_segment, theme_chain, ModuleRef, ThemeRef};
 
@@ -79,6 +104,36 @@ pub type RequireJsError = super::less::LessDeployError;
 
 /// The collected file name — `RequireJs\Config::CONFIG_FILE_NAME`.
 pub const CONFIG_FILE_NAME: &str = "requirejs-config.js";
+
+/// The min-resolver's file name — `RequireJs\Config::MIN_RESOLVER_FILENAME`.
+/// Deployed as a sibling of [`CONFIG_FILE_NAME`] in the theme package.
+pub const MIN_RESOLVER_FILE_NAME: &str = "requirejs-min-resolver.js";
+
+/// The mixins file's deployed RELATIVE path within the theme package —
+/// `RequireJs\Config::MIXINS_FILE_NAME`.
+pub const MIXINS_FILE_NAME: &str = "mage/requirejs/mixins.js";
+
+/// The config path whose values become the min-resolver's exclude regexes —
+/// `Minification::XML_PATH_MINIFICATION_EXCLUDES` with `%s` = `js`.
+pub const MINIFY_EXCLUDE_PATH: &str = "dev/js/minify_exclude";
+
+/// `Config::getMinResolverCode()`'s heredoc, verbatim: 4-space base indent
+/// (it sits inside a PHP method), NO trailing newline (heredocs drop the
+/// newline before the closing identifier). `%excludes%` stands in for the
+/// PHP's `{$excludesCode}` interpolation.
+pub const MIN_RESOLVER_TEMPLATE: &str = r"    (function () {
+        var ctx = require.s.contexts._,
+            origNameToUrl = ctx.nameToUrl,
+            baseUrl = ctx.config.baseUrl;
+
+        ctx.nameToUrl = function() {
+            var url = origNameToUrl.apply(ctx, arguments);
+            if (%excludes%) {
+                url = url.replace(/(\.min)?\.js$/, '.min.js');
+            }
+            return url;
+        };
+    })();";
 
 /// `RequireJs\Config::PARTIAL_CONFIG_TEMPLATE` — wraps EACH source file's raw
 /// content. The heredoc's trailing blank line contributes the final `\n`.
@@ -305,6 +360,104 @@ pub fn output_path(root: &Path, area: &str, theme_id: &str, locale: &str) -> Pat
         .join(CONFIG_FILE_NAME)
 }
 
+/// The `dev/js/minify_exclude` values, in Magento's merged order — the input
+/// to [`min_resolver_code`]. Mirrors `Minification::getExcludes('js')` +
+/// `getMinificationExcludeValues` over the STATIC config sources:
+///
+/// - **Array form** (how every module declares it): each child of
+///   `<minify_exclude>` in a module's `config.xml` `<default>` section is one
+///   exclude, keyed by its element name (the key is only a merge identity —
+///   the VALUE is the regex). Magento's DOM merge orders keys by first
+///   declaration across module load order; the flattened [`ConfigSet`] loses
+///   insertion order, so the order is reconstructed as (declaring module's
+///   load-order position, line). Identical for distinct keys — the normal
+///   case. (Known limitation: a later module OVERRIDING another module's key
+///   would move it to the overrider's position, where Magento keeps the
+///   original slot. Values not declared by any module file — env.php
+///   `system`, `CONFIG__*` — sort last, by path.)
+/// - **Legacy string form**: the value used to be ONE newline-separated
+///   string; `getMinificationExcludeValues` still splits such a value. A
+///   scalar at the exact path (e.g. from env.php's `system` node, which
+///   `array_replace_recursive`s over the array wholesale) takes that branch.
+///
+/// Every value is trimmed; empties dropped — both PHP loops do exactly that.
+pub fn min_resolver_excludes(config: &ConfigSet, modules: &[ModuleRef]) -> Vec<String> {
+    let leaves = config.section("default", MINIFY_EXCLUDE_PATH);
+
+    if let Some(legacy) = leaves.iter().find(|v| v.path == MINIFY_EXCLUDE_PATH) {
+        return legacy
+            .value
+            .split('\n')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+
+    let mut ordered: Vec<(usize, u32, &str, &str)> = leaves
+        .iter()
+        .map(|v| {
+            let pos = v
+                .file
+                .as_deref()
+                .and_then(|f| modules.iter().position(|m| f.starts_with(&m.dir)))
+                .unwrap_or(usize::MAX);
+            (pos, v.line, v.path.as_str(), v.value.as_str())
+        })
+        .collect();
+    ordered.sort_unstable();
+    ordered
+        .into_iter()
+        .map(|(_, _, _, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect()
+}
+
+/// `Config::getMinResolverCode()`, unminified branch: the fixed template with
+/// the exclude condition interpolated. The condition is
+/// `url.indexOf(baseUrl)===0` plus one `!url.match(/<regex>/)` per exclude
+/// (only `/` escaped, as `\/`), all joined with `&&`.
+pub fn min_resolver_code(excludes: &[String]) -> String {
+    let mut cond = String::from("url.indexOf(baseUrl)===0");
+    for e in excludes {
+        cond.push_str("&&!url.match(/");
+        cond.push_str(&e.replace('/', "\\/"));
+        cond.push_str("/)");
+    }
+    MIN_RESOLVER_TEMPLATE.replace("%excludes%", &cond)
+}
+
+/// The excludes from an open `magequery-core` handle: the static [`ConfigSet`]
+/// (config.xml defaults + config.php/env.php `system` + `CONFIG__*` — no DB)
+/// against the enabled modules in `config.php` load order.
+pub fn min_resolver_excludes_from_magento(
+    magento: &magequery_core::Magento,
+) -> Result<Vec<String>, RequireJsError> {
+    let config = magento.config(false).map_err(|e| RequireJsError {
+        entry: Some(MIN_RESOLVER_FILE_NAME.to_string()),
+        module: None,
+        file: None,
+        message: format!("system config unreadable: {e}"),
+    })?;
+    let modules: Vec<ModuleRef> = magento
+        .modules()
+        .iter()
+        .filter(|m| m.enabled)
+        .map(|m| ModuleRef {
+            name: m.name.to_string(),
+            dir: m.path.clone(),
+        })
+        .collect();
+    Ok(min_resolver_excludes(&config, &modules))
+}
+
+/// Where the verbatim [`MIXINS_FILE_NAME`] copy comes FROM:
+/// `lib/web/mage/requirejs/mixins.js` under the Magento root. (The deploy
+/// copies it unchanged; there is deliberately no transform to call.)
+pub fn mixins_source_path(root: &Path) -> PathBuf {
+    root.join("lib").join("web").join("mage").join("requirejs").join("mixins.js")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,6 +665,137 @@ mod tests {
         assert_eq!(
             output_path(Path::new("/srv/m2"), "frontend", "frontend/Magento/luma", "en_US"),
             p
+        );
+    }
+
+    fn excl(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Zero excludes: the whole artifact is the fixed template with the
+    /// always-present `indexOf` condition — locked byte for byte (4-space
+    /// base indent, blank line, NO trailing newline: the heredoc's shape).
+    #[test]
+    fn min_resolver_with_no_excludes_is_the_bare_template() {
+        assert_eq!(
+            min_resolver_code(&[]),
+            "    (function () {\n\
+             \x20       var ctx = require.s.contexts._,\n\
+             \x20           origNameToUrl = ctx.nameToUrl,\n\
+             \x20           baseUrl = ctx.config.baseUrl;\n\
+             \n\
+             \x20       ctx.nameToUrl = function() {\n\
+             \x20           var url = origNameToUrl.apply(ctx, arguments);\n\
+             \x20           if (url.indexOf(baseUrl)===0) {\n\
+             \x20               url = url.replace(/(\\.min)?\\.js$/, '.min.js');\n\
+             \x20           }\n\
+             \x20           return url;\n\
+             \x20       };\n\
+             \x20   })();"
+        );
+    }
+
+    /// One exclude: `/` (and ONLY `/`) is escaped to `\/` in the regex
+    /// literal, appended as `&&!url.match(/…/)`.
+    #[test]
+    fn min_resolver_escapes_slashes_in_one_exclude() {
+        let code = min_resolver_code(&excl(&["/hugerte/"]));
+        assert!(
+            code.contains("if (url.indexOf(baseUrl)===0&&!url.match(/\\/hugerte\\//)) {"),
+            "{code}"
+        );
+        // Regex metacharacters other than `/` pass through untouched.
+        let dot = min_resolver_code(&excl(&["\\.min\\.js"]));
+        assert!(dot.contains("&&!url.match(/\\.min\\.js/)"), "{dot}");
+    }
+
+    /// Two excludes reproduce the reference install's exact condition line.
+    #[test]
+    fn min_resolver_joins_two_excludes_with_and() {
+        let code = min_resolver_code(&excl(&["/hugerte/", "/v1/songbird"]));
+        assert!(
+            code.contains(
+                "if (url.indexOf(baseUrl)===0&&!url.match(/\\/hugerte\\//)&&!url.match(/\\/v1\\/songbird/)) {"
+            ),
+            "{code}"
+        );
+    }
+
+    /// A minimal openable Magento root: `app/etc/config.php` + two app/code
+    /// modules with `module.xml` and a `config.xml` `<default>` each. Module
+    /// LOAD order (config.php) deliberately disagrees with the alphabetical
+    /// order of both the module names and the exclude keys, so an
+    /// order-by-the-wrong-thing bug cannot pass.
+    fn synth_config_root(env_php: Option<&str>) -> tempfile::TempDir {
+        let td = tempfile::tempdir().expect("tempdir");
+        let r = td.path();
+        let w = |rel: &str, content: &str| {
+            let p = r.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        };
+        w(
+            "app/etc/config.php",
+            "<?php\nreturn [\n    'modules' => [\n        'Acme_Zeta' => 1,\n        'Acme_Alpha' => 1,\n    ]\n];\n",
+        );
+        // Loads FIRST, declares key `zebra` (alphabetically last).
+        w(
+            "app/code/Acme/Zeta/etc/module.xml",
+            "<?xml version=\"1.0\"?><config><module name=\"Acme_Zeta\"/></config>\n",
+        );
+        w(
+            "app/code/Acme/Zeta/etc/config.xml",
+            "<?xml version=\"1.0\"?><config><default><dev><js><minify_exclude>\
+             <zebra>/first/</zebra>\
+             </minify_exclude></js></dev></default></config>\n",
+        );
+        // Loads SECOND — the "later module adds an exclude" case — key `alpha`.
+        w(
+            "app/code/Acme/Alpha/etc/module.xml",
+            "<?xml version=\"1.0\"?><config><module name=\"Acme_Alpha\"/></config>\n",
+        );
+        w(
+            "app/code/Acme/Alpha/etc/config.xml",
+            "<?xml version=\"1.0\"?><config><default><dev><js><minify_exclude>\
+             <alpha>/second/</alpha>\
+             </minify_exclude></js></dev></default></config>\n",
+        );
+        if let Some(env) = env_php {
+            w("app/etc/env.php", env);
+        }
+        td
+    }
+
+    /// The exclude pipeline end to end over the real ConfigSet: a later
+    /// module's added exclude is picked up, and the order is module LOAD
+    /// order (then line), not key order.
+    #[test]
+    fn excludes_merge_across_modules_in_load_order() {
+        let td = synth_config_root(None);
+        let magento = magequery_core::Magento::open(td.path()).expect("open synthetic root");
+        let excludes = min_resolver_excludes_from_magento(&magento).expect("excludes");
+        // Alphabetical (by key OR by module name) would say /second/ first.
+        assert_eq!(excludes, vec!["/first/".to_string(), "/second/".to_string()]);
+    }
+
+    /// The legacy string form: a scalar at the exact path (here from env.php's
+    /// `system` node, which replaces the array wholesale) splits on newlines,
+    /// trimmed, empties dropped — `getMinificationExcludeValues`'s conversion.
+    #[test]
+    fn legacy_string_exclude_splits_on_newlines() {
+        let td = synth_config_root(Some(
+            "<?php\nreturn [\n    'system' => [\n        'default' => [\n            'dev' => ['js' => ['minify_exclude' => \"/a/\\n\\n  /b/  \\n\"]]\n        ]\n    ]\n];\n",
+        ));
+        let magento = magequery_core::Magento::open(td.path()).expect("open synthetic root");
+        let excludes = min_resolver_excludes_from_magento(&magento).expect("excludes");
+        assert_eq!(excludes, vec!["/a/".to_string(), "/b/".to_string()]);
+    }
+
+    #[test]
+    fn mixins_source_is_the_lib_file() {
+        assert_eq!(
+            mixins_source_path(Path::new("/srv/m2")),
+            PathBuf::from("/srv/m2/lib/web/mage/requirejs/mixins.js")
         );
     }
 }
