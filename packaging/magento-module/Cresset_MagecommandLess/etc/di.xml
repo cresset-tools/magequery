@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<!--
+/**
+ * Copyright © Cresset. All rights reserved.
+ * See COPYING.txt for license details.
+ */
+-->
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+    <preference for="Magento\Framework\Css\PreProcessor\Adapter\Less\Processor"
+                type="Cresset\MagecommandLess\Adapter\Processor"/>
+    <!--
+    To point the adapter at a specific binary instead of resolving
+    `magecommand` on PATH (the MAGECOMMAND_BIN environment variable
+    overrides either):
+
+    <type name="Cresset\MagecommandLess\Adapter\Processor">
+        <arguments>
+            <argument name="magecommandBin" xsi:type="string">/usr/local/bin/magecommand</argument>
+        </arguments>
+    </type>
+    -->
+</config>
