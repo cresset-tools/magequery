@@ -12,15 +12,16 @@ surface; it is a curated, grep-able set. Bare `magecommand` and bare `magecomman
 <group>` print that level's help (clap `arg_required_else_help`), never a default
 action. Global flags (`--root <path>`, `--json`) apply to every command.
 
-**Only the `di` group is built today.** Everything below `di` is the planned surface —
-documented here so the grammar is fixed before scripts and muscle memory depend on it,
-but not yet wired in `main.rs`. New commands MUST slot into a group under this grammar,
-never appear as a bare top-level verb.
+**The `di` group and the `static` group's LESS pipeline are built today.** Everything
+else is the planned surface — documented here so the grammar is fixed before scripts
+and muscle memory depend on it, but not yet wired in `main.rs`. New commands MUST slot
+into a group under this grammar, never appear as a bare top-level verb.
 
 ```
 GENERATE   (static, byte-exact reproducible — a real `bin/magento` run is the oracle)
   di       compile | verify | watch | digest      # setup:di:compile              (BUILT)
-  static   deploy  | verify | watch               # setup:static-content:deploy   (planned)
+  static   less | cssdiff                         # the LESS pipeline             (BUILT)
+           deploy | verify | watch                # full static-content deploy    (planned)
   i18n     collect                                # i18n:collect-phrases          (planned)
 
 SCAFFOLD   (Laravel make: — template codegen, no Magento bootstrap, no DB)         (planned)
@@ -78,6 +79,40 @@ interceptors, every edge case). The `default` switch branch runs the **global** 
 guarding against creatuity's issue #28 (global plugins silently not firing in
 CLI/`primary` scope). Credit: the fused technique is creatuity's prior art
 (github.com/creatuity/magento2-interceptors), reimplemented clean-room.
+
+## The `static` group (LESS pipeline built)
+
+The pure-Rust LESS half of `setup:static-content:deploy` (no PHP, no node). Global
+flags plus:
+
+```
+static less --theme <VENDOR/NAME> [--locale <L>] [--entry <NAME>…] [--out <DIR>]
+            [--stdout] [--compress] [--skip-broken-modules]
+    Assemble and compile a theme's LESS entry points (theme fallback chain,
+    //@magento_import expansion, Vendor_Module:: resolution) into
+    pub/static/<area>/<theme>/<locale>/css/. --out redirects the writes;
+    --stdout prints a single --entry's CSS instead. --skip-broken-modules drops a
+    broken module's partial and re-splices instead of failing the entry point.
+
+static less --file <PATH> [--out <DIR>] [--stdout] [--compress]
+    Per-file mode — the interface the Magento bridge adapter shells out to
+    (Css\PreProcessor\Adapter\Less\Processor parity): compile ONE materialized
+    .less file (var/view_preprocessed — //@magento_import and module notation
+    already expanded), relative imports resolved from its directory, under the
+    Magento production profile (relativeUrls=false, parens-division math).
+    Prints to stdout unless --out (written as <stem>.css). Mutually exclusive
+    with --theme/--entry. A compile error exits non-zero with the compiler's
+    rendering (file, line, column, source excerpt) verbatim on stderr — the PHP
+    adapter shows that message as-is.
+
+    --compress (both modes) sets the compress serializer — Less_Parser
+    compress=true, what Magento's adapter uses outside developer mode.
+
+static cssdiff <expected.css> <actual.css> [--limit <N>]
+    Semantic CSS diff (order-preserving; normalizes only non-semantic formatting:
+    whitespace, hex case/shorthand, leading zeros, comments). Exit 0 when
+    semantically identical — every remaining finding is a real residual.
+```
 
 ## Which groups earn their keep, and in what order
 

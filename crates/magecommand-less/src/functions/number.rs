@@ -6,7 +6,7 @@
 
 use super::{dim_node, js_arg_num, undef_err, FnResult};
 use crate::ast::Node;
-use crate::css::render_value_c;
+use crate::css::render_value_cz;
 use crate::error::{ErrorKind, LessError};
 use crate::unit::Unit;
 use crate::value::Dimension;
@@ -74,7 +74,13 @@ pub(super) fn pow(args: &[Node]) -> FnResult {
 /// less.js `minMax(isMin, args)` — a faithful port including the `values['']`
 /// bookkeeping and the arg-flattening of list arguments (plan §4.8). `None` =
 /// the caught `throw` → literal passthrough.
-pub(super) fn min_max(args: &[Node], is_min: bool, np: u8, compress: bool) -> Option<Node> {
+pub(super) fn min_max(
+    args: &[Node],
+    is_min: bool,
+    np: u8,
+    compress: bool,
+    keep_zero_units: bool,
+) -> Option<Node> {
     let mut queue: Vec<Node> = args.to_vec();
     let mut order: Vec<Dimension> = Vec::new();
     // key "" is the unitless slot, like the JS `values` object.
@@ -164,7 +170,7 @@ pub(super) fn min_max(args: &[Node], is_min: bool, np: u8, compress: bool) -> Op
     // less.js `minMax` uses `context.compress ? ',' : ', '` (§C4).
     let rendered: Vec<String> = order
         .iter()
-        .map(|d| render_value_c(&Node::Dimension(d.clone()), np, compress))
+        .map(|d| render_value_cz(&Node::Dimension(d.clone()), np, compress, keep_zero_units))
         .collect();
     Some(Node::Anonymous(format!(
         "{}({})",
@@ -183,7 +189,7 @@ mod tests {
 
     #[test]
     fn min_reduces_compatible_units() {
-        let out = min_max(&[dim(1.0, "cm"), dim(3.0, "mm")], true, 8, false).unwrap();
+        let out = min_max(&[dim(1.0, "cm"), dim(3.0, "mm")], true, 8, false, false).unwrap();
         let Node::Dimension(d) = out else { panic!() };
         assert_eq!(d.value, 3.0);
         assert_eq!(d.unit.to_unit_string(), "mm");
@@ -196,6 +202,7 @@ mod tests {
             &[dim(6.0, "em"), dim(5.0, ""), dim(4.0, "ex"), dim(3.0, ""), dim(2.0, "pt"), dim(1.0, "")],
             true,
             8,
+            false,
             false,
         )
         .unwrap();
@@ -211,6 +218,7 @@ mod tests {
             false,
             8,
             false,
+            false,
         )
         .unwrap();
         let Node::Anonymous(s) = out else { panic!() };
@@ -224,6 +232,6 @@ mod tests {
             args: vec![dim(1.0, "")],
             span: Default::default(),
         };
-        assert!(min_max(&[call, dim(1.0, "")], true, 8, false).is_none());
+        assert!(min_max(&[call, dim(1.0, "")], true, 8, false, false).is_none());
     }
 }

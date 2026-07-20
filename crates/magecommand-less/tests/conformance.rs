@@ -557,3 +557,53 @@ fn php_interp_rounding_quadrants() {
     // The Magento profile carries the flag.
     assert!(LessOptions::magento_production().php_interp_rounding);
 }
+
+/// Probed less.js-vs-less.php compress divergence (Gate T2 follow-up RT-4):
+/// zero-length units under `compress`.
+///
+/// - less.js 4.x (npm probe v4.6.7): `Dimension.genCSS` compress branch drops
+///   the unit of an EVALUATED zero length (`unit((0 / 10), rem)` → `0`,
+///   `@z: 0px; left: @z` → `0`). A literal `top: 0px;` is untouched — the
+///   declaration parser's anonymous-value fast path stores it as `Anonymous`
+///   text that never reaches `Dimension.genCSS` (our engine ports that path).
+/// - less.php 5.5 (source-read + bougie probe, oracle copy): the same genCSS
+///   branch guards with a STRICT `$value === 0`, but the constructor stores
+///   `floatval($value)` — the float `0.0` never matches the int `0`, so the
+///   unit is ALWAYS kept (`0rem`, `0px`, `0em`), evaluated or not.
+///
+/// Blank/Luma-real: compressed styles-m carries `margin-top:0rem` (from
+/// `.lib-font-size-value(0)`'s `unit((0/10), rem)`) and `top:0px` — byte
+/// parity with the default-mode SCD output needs the less.php flavor.
+/// Non-length zeros (`0%`, plain `0`) keep their spelling in both engines.
+#[test]
+fn php_zero_units_compress_quadrants() {
+    let src = "@v: 0;\n@z: 0px;\n.a {\n  margin-top: unit((@v / 10), rem);\n  left: @z;\n  top: 0px;\n  width: 0%;\n  line-height: 0;\n}\n";
+    let resolver = MapResolver(Vec::new());
+
+    // less.js semantics (default profile): evaluated zero lengths drop their
+    // unit; the literal `top: 0px` rides the anonymous-value fast path.
+    let js_opts = LessOptions {
+        compress: true,
+        ..LessOptions::default()
+    };
+    let js = magecommand_less::compile(src, &js_opts, &resolver)
+        .expect("must compile")
+        .code;
+    assert_eq!(js, ".a{margin-top:0;left:0;top:0px;width:0%;line-height:0}");
+
+    // less.php semantics (`php_zero_units`, on in Magento profiles): the
+    // strict-comparison accident keeps every unit.
+    let php_opts = LessOptions {
+        compress: true,
+        php_zero_units: true,
+        ..LessOptions::default()
+    };
+    let php = magecommand_less::compile(src, &php_opts, &resolver)
+        .expect("must compile")
+        .code;
+    assert_eq!(php, ".a{margin-top:0rem;left:0px;top:0px;width:0%;line-height:0}");
+
+    // Both Magento profiles carry the flag.
+    assert!(LessOptions::magento_production().php_zero_units);
+    assert!(LessOptions::magento_developer().php_zero_units);
+}

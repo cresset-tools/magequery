@@ -63,6 +63,9 @@ pub struct GenContext {
     pub tab_level: usize,
     /// less.js `numPrecision` (default 8) for dimension `fround`.
     pub num_precision: u8,
+    /// less.php flavor (`php_zero_units`, §C4): keep the unit on a zero
+    /// length under compress — less.php's strict `0.0 === 0` never strips.
+    pub keep_zero_units: bool,
 }
 
 /// Render a parsed [`Node::Root`] to expanded CSS (the `firstRoot`/`root=true`
@@ -73,6 +76,7 @@ pub fn render_root(root: &Node) -> String {
         compress: false,
         tab_level: 0,
         num_precision: 8,
+        keep_zero_units: false,
     };
     if let Node::Root(rules) = root {
         gen_root_rules(rules, &mut ctx, &mut out);
@@ -86,17 +90,25 @@ pub fn render_root(root: &Node) -> String {
 /// evaluator's flat serializer reuses this so value spacing/number formatting
 /// lives in one place (plan §4.7).
 pub(crate) fn render_value(node: &Node, num_precision: u8) -> String {
-    render_value_c(node, num_precision, false)
+    render_value_cz(node, num_precision, false, false)
 }
 
-/// [`render_value`] with an explicit compress flag (§C4) — the evaluator's
-/// FINAL-output sites use this; internal comparisons (mixin pattern matching,
-/// declaration dedup) stay on the expanded form so identities never shift.
-pub(crate) fn render_value_c(node: &Node, num_precision: u8, compress: bool) -> String {
+/// [`render_value`] with explicit compress + less.php zero-unit flavor flags
+/// (§C4) — the evaluator's FINAL-output sites use this; internal comparisons
+/// (mixin pattern matching, declaration dedup) stay on the expanded form so
+/// identities never shift. `keep_zero_units` (`php_zero_units`) disables the
+/// compress "zero length drops its unit" strip.
+pub(crate) fn render_value_cz(
+    node: &Node,
+    num_precision: u8,
+    compress: bool,
+    keep_zero_units: bool,
+) -> String {
     let mut ctx = GenContext {
         compress,
         tab_level: 0,
         num_precision,
+        keep_zero_units,
     };
     let mut out = String::new();
     gen(node, &mut ctx, &mut out);
@@ -189,8 +201,11 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
             // less.js `Dimension.genCSS` compress branch (§2.18), decided on
             // the FROUNDED value (which `format_number` already applied): a
             // zero length drops its unit; `0 < v < 1` drops the leading zero.
+            // less.php never takes the zero branch (`php_zero_units`): its
+            // strict `$value === 0` compares a floatval'd 0.0 to int 0.
             let s = format_number(d.value, ctx.num_precision);
-            let zero_length = ctx.compress && s == "0" && d.unit.is_length();
+            let zero_length =
+                ctx.compress && !ctx.keep_zero_units && s == "0" && d.unit.is_length();
             if ctx.compress && s.starts_with("0.") {
                 out.push_str(&s[1..]);
             } else {

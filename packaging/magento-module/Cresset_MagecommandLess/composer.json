@@ -1,0 +1,19 @@
+{
+    "name": "cresset/module-magecommand-less",
+    "description": "Magento 2 bridge: compile LESS during setup:static-content:deploy with the magecommand pure-Rust LESS compiler instead of less.php",
+    "type": "magento2-module",
+    "license": "MIT",
+    "require": {
+        "php": "~8.1.0||~8.2.0||~8.3.0||~8.4.0||~8.5.0",
+        "magento/framework": "*",
+        "symfony/process": "*"
+    },
+    "autoload": {
+        "files": [
+            "registration.php"
+        ],
+        "psr-4": {
+            "Cresset\\MagecommandLess\\": ""
+        }
+    }
+}
