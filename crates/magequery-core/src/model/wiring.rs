@@ -479,6 +479,21 @@ pub struct TypeNodePosition {
 ///
 /// [`Magento::preference`]: crate::Magento::preference
 /// [`Magento::plugins`]: crate::Magento::plugins
+/// Cheap declaration counts for one area — what a work-plan/summary view needs,
+/// without materializing (and sorting) the full [`DiExport`]. Produced by
+/// [`Magento::di_summary`](crate::Magento::di_summary).
+#[derive(Debug, Clone, Copy, Default)]
+#[derive(serde::Serialize)]
+#[non_exhaustive]
+pub struct DiSummary {
+    pub preferences: usize,
+    pub virtual_types: usize,
+    pub plugin_declarations: usize,
+    /// Distinct targets with at least one non-disabled plugin.
+    pub plugged_targets: usize,
+    pub arguments: usize,
+}
+
 #[derive(Debug, Clone)]
 #[derive(serde::Serialize)]
 #[non_exhaustive]

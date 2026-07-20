@@ -43,8 +43,8 @@ pub mod laminas_alias;
 pub use error::{Diagnostic, Error, Result, Severity};
 pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
-    DiExport, ObjectRef, PluginDecl, PreferenceDecl, TypeArgDecl, TypeNodePosition, TypeSharedDecl,
-    VirtualTypeDecl,
+    DiExport, DiSummary, ObjectRef, PluginDecl, PreferenceDecl, TypeArgDecl, TypeNodePosition,
+    TypeSharedDecl, VirtualTypeDecl,
 };
 pub use model::{
     AclResource, AdminRole, AdminRule, AdminUser, ArgItem, ArgValue, Argument, ByArea,
@@ -267,6 +267,15 @@ impl Magento {
     /// config; a real area exports the base overlaid by that area's files.
     pub fn di_export(&self, area: Area) -> DiExport {
         self.di_index().config(area).export(area)
+    }
+
+    /// Cheap declaration COUNTS for `area` — preferences / virtual types /
+    /// plugin declarations / plugged targets / arguments — for a work-plan or
+    /// summary view that needs the sizes, not the data. Avoids the full
+    /// [`di_export`](Self::di_export) clone + multi-key sort (each ~a few ms on a
+    /// real install; a `di compile` summary alone would pay it seven times).
+    pub fn di_summary(&self, area: Area) -> DiSummary {
+        self.di_index().config(area).summary()
     }
 
     /// Like [`di_export`](Self::di_export), but ONLY the area's own files —
