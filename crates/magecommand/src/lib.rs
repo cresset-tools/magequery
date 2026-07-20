@@ -129,6 +129,39 @@ enum StaticCommand {
         #[arg(long, conflicts_with = "out")]
         stdout: bool,
     },
+    /// Generate a theme's `js/bundle/bundle<N>.js` files (SCD JS bundling,
+    /// pure Rust): resolves the deployed package's js/html view from the
+    /// SOURCE tree (theme fallback + module/i18n layers + the generated
+    /// requirejs artifacts), applies the theme `view.xml` excludes and the
+    /// `.min`-sibling rule, and splits into `bundle_size`-capped RequireJS
+    /// config maps — byte-faithful to a real deploy (see `--order`).
+    Bundle {
+        /// Theme id, e.g. `Magento/luma` (or `frontend/Magento/luma`).
+        /// Repeatable: themes are processed in the given order with the
+        /// deploy's shared `.min`-sibling cache, exactly like one
+        /// multi-theme `setup:static-content:deploy` run.
+        #[arg(long, value_name = "VENDOR/NAME", required = true)]
+        theme: Vec<String>,
+        /// Locale of the package.
+        #[arg(long, default_value = "en_US")]
+        locale: String,
+        /// Write bundles under this directory (as
+        /// `<DIR>/<Vendor>/<name>/js/bundle/bundle<N>.js`) instead of
+        /// `pub/static/<area>/<theme>/<locale>/js/bundle`.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+        /// In-bundle ordering: `probe` reproduces the output filesystem's
+        /// readdir order (what PHP's `GLOB_NOSORT` glob over the deployed
+        /// tree yields — byte-faithful on hash-ordered filesystems like
+        /// ext4); `sorted` is portable lexicographic order.
+        #[arg(long, value_name = "probe|sorted", default_value = "probe")]
+        order: String,
+        /// Scratch directory for `--order probe` (must be on the same
+        /// filesystem the deploy would write to). Default: the output base
+        /// directory.
+        #[arg(long, value_name = "DIR")]
+        probe_dir: Option<PathBuf>,
+    },
     /// Semantic CSS diff (plan §7.7): compare a golden `.css` (real SCD
     /// output) against ours, normalizing only non-semantic formatting
     /// (whitespace, hex case/shorthand, leading zeros, comments) —
@@ -289,6 +322,21 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
             StaticCommand::Requirejs { ref theme, ref locale, ref out, stdout } => {
                 static_requirejs(cli.root, theme, locale, out.as_deref(), stdout, cli.json)
             }
+            StaticCommand::Bundle {
+                ref theme,
+                ref locale,
+                ref out,
+                ref order,
+                ref probe_dir,
+            } => static_bundle(
+                cli.root,
+                theme,
+                locale,
+                out.as_deref(),
+                order,
+                probe_dir.as_deref(),
+                cli.json,
+            ),
             StaticCommand::Cssdiff { ref expected, ref actual, limit } => {
                 static_cssdiff(expected, actual, limit, cli.json)
             }
@@ -587,6 +635,136 @@ fn static_requirejs(
         mixins.map(|m| m.len()).expect("write mode read the mixins source"),
         mixins_t.display()
     );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `magecommand static bundle` — generate `js/bundle/bundle<N>.js` per theme,
+/// exactly as one multi-theme deploy run would (shared `.min`-sibling cache,
+/// theme order as given). Existing bundle dirs are cleared first (the real
+/// deploy's `clear()`).
+#[allow(clippy::too_many_arguments)]
+fn static_bundle(
+    root: Option<PathBuf>,
+    themes: &[String],
+    locale: &str,
+    out: Option<&Path>,
+    order: &str,
+    probe_dir: Option<&Path>,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
+    use static_deploy::bundle as sdb;
+
+    let root = root.unwrap_or_else(|| PathBuf::from("."));
+    let root = std::path::absolute(&root).unwrap_or(root);
+    let magento = magequery_core::Magento::open(&root)
+        .with_context(|| format!("not a Magento root: {}", root.display()))?;
+    let area = "frontend";
+
+    // Per-theme target dirs, decided up front so the probe can default to
+    // the output filesystem (order must match what a deploy THERE produces).
+    let targets: Vec<PathBuf> = themes
+        .iter()
+        .map(|t| match out {
+            Some(dir) => {
+                let theme_path = t.strip_prefix(&format!("{area}/")).unwrap_or(t);
+                dir.join(theme_path).join(sdb::BUNDLE_JS_DIR)
+            }
+            None => sdb::output_dir(&root, area, t, locale),
+        })
+        .collect();
+
+    let order_mode = match order {
+        "sorted" => sdb::OrderMode::Sorted,
+        "probe" => {
+            let scratch = match probe_dir {
+                Some(d) => d.to_path_buf(),
+                None => match out {
+                    Some(dir) => dir.to_path_buf(),
+                    None => root.join("pub").join("static"),
+                },
+            };
+            std::fs::create_dir_all(&scratch)
+                .with_context(|| format!("create probe scratch {}", scratch.display()))?;
+            sdb::OrderMode::Probe(scratch)
+        }
+        other => anyhow::bail!("--order must be `probe` or `sorted`, got `{other}`"),
+    };
+
+    let bundles = match sdb::build_from_magento(&magento, area, themes, locale, &order_mode) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
+    for (tb, target) in bundles.iter().zip(&targets) {
+        // The real deploy's clear(): delete the bundle dir before writing.
+        if target.is_dir() {
+            std::fs::remove_dir_all(target)
+                .with_context(|| format!("clear {}", target.display()))?;
+        }
+        std::fs::create_dir_all(target)
+            .with_context(|| format!("mkdir {}", target.display()))?;
+        for f in &tb.files {
+            std::fs::write(target.join(&f.name), f.content.as_bytes())
+                .with_context(|| format!("write {}", target.join(&f.name).display()))?;
+        }
+    }
+
+    if json {
+        let doc = serde_json::json!({
+            "themes": bundles.iter().zip(&targets).map(|(tb, target)| {
+                serde_json::json!({
+                    "theme": tb.theme,
+                    "chain": tb.chain.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+                    "max_size_kb": tb.max_size_kb,
+                    "tree_files": tb.tree_files,
+                    "pooled": { "jsbuild": tb.pooled.0, "text": tb.pooled.1 },
+                    "output": target.display().to_string(),
+                    "bundles": tb.files.iter().map(|f| serde_json::json!({
+                        "name": f.name,
+                        "pool": f.pool,
+                        "entries": f.keys.len(),
+                        "bytes": f.content.len(),
+                    })).collect::<Vec<_>>(),
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    for (tb, target) in bundles.iter().zip(&targets) {
+        eprintln!(
+            "theme fallback chain: {}",
+            tb.chain
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>()
+                .join(" -> ")
+        );
+        println!(
+            "{}: {} js/html file(s) -> {} jsbuild + {} text -> {} bundle(s) (max {} KB) -> {}",
+            tb.theme,
+            tb.tree_files,
+            tb.pooled.0,
+            tb.pooled.1,
+            tb.files.len(),
+            tb.max_size_kb,
+            target.display()
+        );
+        for f in &tb.files {
+            println!(
+                "  {}  {}  {} entr{}  {} bytes",
+                f.name,
+                f.pool,
+                f.keys.len(),
+                if f.keys.len() == 1 { "y" } else { "ies" },
+                f.content.len()
+            );
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 
