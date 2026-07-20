@@ -66,8 +66,8 @@ enum StaticCommand {
     /// resolution handled by the orchestration layer).
     Less {
         /// Theme id, e.g. `Magento/luma` (or `frontend/Magento/luma`).
-        #[arg(long, value_name = "VENDOR/NAME")]
-        theme: String,
+        #[arg(long, value_name = "VENDOR/NAME", required_unless_present = "file")]
+        theme: Option<String>,
         /// Locale for the `pub/static` placement.
         #[arg(long, default_value = "en_US")]
         locale: String,
@@ -76,12 +76,27 @@ enum StaticCommand {
         /// entry the theme chain provides.
         #[arg(long, value_name = "NAME")]
         entry: Vec<String>,
-        /// Write compiled CSS under this directory instead of `pub/static`.
+        /// Compile ONE materialized `.less` file instead of a theme's entry
+        /// points — the per-file mode the Magento bridge adapter shells out
+        /// to. Relative imports resolve from the file's directory (the
+        /// `//@magento_import`/module-notation expansion is assumed already
+        /// materialized, as in `var/view_preprocessed`). Prints the CSS to
+        /// stdout unless `--out` is given.
+        #[arg(long, value_name = "PATH",
+              conflicts_with_all = ["theme", "entry", "locale", "skip_broken_modules"])]
+        file: Option<PathBuf>,
+        /// Write compiled CSS under this directory instead of `pub/static`
+        /// (with `--file`: as `<stem>.css`).
         #[arg(long, value_name = "DIR")]
         out: Option<PathBuf>,
-        /// Print the compiled CSS of a single --entry to stdout (no writes).
+        /// Print the compiled CSS to stdout (no writes). Theme mode needs
+        /// exactly one --entry; the default with `--file`.
         #[arg(long, conflicts_with = "out")]
         stdout: bool,
+        /// Compress the output CSS (`Less_Parser` `compress=true` — what
+        /// Magento's PHP adapter sets outside developer mode).
+        #[arg(long)]
+        compress: bool,
         /// Drop a broken module's LESS partial and re-splice instead of
         /// failing the entry point (default: fail loudly naming the module).
         #[arg(long)]
@@ -222,18 +237,24 @@ fn main() -> anyhow::Result<ExitCode> {
                 ref theme,
                 ref locale,
                 ref entry,
+                ref file,
                 ref out,
                 stdout,
+                compress,
                 skip_broken_modules,
-            } => static_less(
-                cli.root,
-                theme,
-                locale,
-                entry,
-                out.as_deref(),
-                stdout,
-                skip_broken_modules,
-            ),
+            } => match file {
+                Some(f) => static_less_file(f, out.as_deref(), compress),
+                None => static_less(
+                    cli.root,
+                    theme.as_deref().expect("clap: --theme required without --file"),
+                    locale,
+                    entry,
+                    out.as_deref(),
+                    stdout,
+                    compress,
+                    skip_broken_modules,
+                ),
+            },
             StaticCommand::Cssdiff { ref expected, ref actual, limit } => {
                 static_cssdiff(expected, actual, limit, cli.json)
             }
@@ -241,8 +262,48 @@ fn main() -> anyhow::Result<ExitCode> {
     }
 }
 
+/// `magecommand static less --file` — compile ONE materialized `.less` file
+/// (the interface the Magento bridge adapter shells out to). Relative imports
+/// resolve from the file's directory; output goes to `--out <DIR>/<stem>.css`
+/// or stdout. A compile error exits non-zero with the compiler's rendering
+/// (file, line, column, source excerpt) VERBATIM on stderr — the PHP adapter
+/// shows that message as-is.
+fn static_less_file(file: &Path, out: Option<&Path>, compress: bool) -> anyhow::Result<ExitCode> {
+    use static_deploy::less as sdless;
+
+    let compiled = match sdless::compile_file(file, compress) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+    for w in &compiled.warnings {
+        eprintln!("warning: {}: {w}", compiled.file.display());
+    }
+    match out {
+        Some(dir) => {
+            let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+            let target = dir.join(format!("{stem}.css"));
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("mkdir {}", dir.display()))?;
+            std::fs::write(&target, &compiled.css)
+                .with_context(|| format!("write {}", target.display()))?;
+            println!(
+                "{}: {} bytes -> {}",
+                compiled.file.display(),
+                compiled.css.len(),
+                target.display()
+            );
+        }
+        None => print!("{}", compiled.css),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 /// `magecommand static less` — compile a theme's LESS entry points into
 /// `pub/static/<area>/<theme>/<locale>/css/` (or `--out`/`--stdout`).
+#[allow(clippy::too_many_arguments)]
 fn static_less(
     root: Option<PathBuf>,
     theme: &str,
@@ -250,6 +311,7 @@ fn static_less(
     entries: &[String],
     out: Option<&Path>,
     to_stdout: bool,
+    compress: bool,
     skip_broken_modules: bool,
 ) -> anyhow::Result<ExitCode> {
     use static_deploy::less as sdless;
@@ -273,6 +335,7 @@ fn static_less(
 
     let opts = sdless::LessDeployOptions {
         skip_broken_modules,
+        compress,
     };
     let names: Vec<String> = if entries.is_empty() {
         // Every standard entry the theme chain actually provides.

@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "magecommand-less"
-version = "0.10.0"
+version = "0.10.1"
 dependencies = [
  "cssparser 0.37.0",
  "fancy-regex",

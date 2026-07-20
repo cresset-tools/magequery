@@ -114,6 +114,10 @@ pub struct LessDeployOptions {
     /// Drop a broken module's `//@magento_import` partial and re-splice
     /// instead of failing the entry point (§7.5). Default OFF: fail loudly.
     pub skip_broken_modules: bool,
+    /// Compress the output CSS (`Less_Parser` `compress=true` — what
+    /// Magento's PHP adapter sets outside developer mode). Default OFF:
+    /// the plain non-compressed `.css`.
+    pub compress: bool,
 }
 
 /// A compiled entry point.
@@ -389,6 +393,7 @@ impl LessOrchestrator {
         };
 
         let mut less_opts = LessOptions::magento_production();
+        less_opts.compress = opts.compress;
         less_opts.filename = Some(logical.clone());
 
         let mut skipped: Vec<(String, String)> = Vec::new();
@@ -860,6 +865,130 @@ pub fn output_path(root: &Path, area: &str, theme_id: &str, locale: &str, entry:
         .join(format!("{name}.css"))
 }
 
+/// A single materialized `.less` file compiled in place (`--file` mode).
+#[derive(Debug)]
+pub struct CompiledFile {
+    /// The input file.
+    pub file: PathBuf,
+    /// The compiled CSS.
+    pub css: String,
+    /// Compiler warnings.
+    pub warnings: Vec<String>,
+}
+
+/// Compile ONE materialized `.less` file — the per-file mode the Magento
+/// bridge adapter shells out to, mirroring `Css\PreProcessor\Adapter\Less\
+/// Processor::processContent`: the input is a preprocessor-chain-materialized
+/// entry (`var/view_preprocessed`), so `//@magento_import` and
+/// `Vendor_Module::` notation are already expanded — only plain relative
+/// `@import`s remain, resolved from the importing file's directory
+/// ([`FileResolver`]). Options are the Magento production profile
+/// (`relativeUrls=false`, parens-division math, …) plus the caller's
+/// `compress` (the PHP adapter passes `mode !== developer`).
+pub fn compile_file(path: &Path, compress: bool) -> Result<CompiledFile, LessDeployError> {
+    let source = std::fs::read_to_string(path).map_err(|e| LessDeployError {
+        entry: None,
+        module: None,
+        file: Some(path.to_path_buf()),
+        message: format!("read failed: {e}"),
+    })?;
+    let mut opts = LessOptions::magento_production();
+    opts.compress = compress;
+    opts.filename = Some(path.display().to_string());
+    let resolver = FileResolver {
+        root: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+    };
+    match magecommand_less::compile(&source, &opts, &resolver) {
+        Ok(css) => Ok(CompiledFile {
+            file: path.to_path_buf(),
+            css: css.code,
+            warnings: css.warnings.iter().map(|w| w.message.clone()).collect(),
+        }),
+        // Surface the compiler's own rendering VERBATIM (it names file,
+        // line, column and a source excerpt) — the PHP adapter shows this
+        // message as-is, so no prefix is layered on top.
+        Err(e) => Err(LessDeployError {
+            entry: None,
+            module: None,
+            file: None,
+            message: e.to_string().trim_end().to_string(),
+        }),
+    }
+}
+
+/// Plain-filesystem import resolution for [`compile_file`]: the importing
+/// file's directory first (relative imports), then the entry root — the
+/// less.js file-manager search order — with `.less` appended to
+/// extension-less paths. This is the core of the `lessc` example's harness
+/// resolver without its fixture-tree mappings; the example lives in the
+/// compiler crate (which never touches the filesystem by design) and cannot
+/// depend on this one, so the production copy lives here.
+pub struct FileResolver {
+    /// The entry file's directory.
+    pub root: PathBuf,
+}
+
+impl ImportResolver for FileResolver {
+    fn resolve(&self, req: &ImportRequest) -> Result<ResolvedImport, ImportError> {
+        let raw = req.path.as_str();
+        let force_css = req.options.css == Some(true);
+        let force_less = req.options.css == Some(false);
+        let is_css = force_css || (!force_less && raw.ends_with(".css"));
+
+        // The importing file's directory first (relative imports), then the
+        // entry root — matching the less.js file-manager search order.
+        let from_dir = req.from.current_directory.trim_end_matches('/');
+        let mut candidate = if from_dir.is_empty() {
+            self.root.join(raw)
+        } else {
+            let c = PathBuf::from(from_dir).join(raw);
+            let mut with_ext = c.clone();
+            if with_ext.extension().is_none() && !is_css {
+                with_ext.set_extension("less");
+            }
+            if with_ext.is_file() {
+                c
+            } else {
+                self.root.join(raw)
+            }
+        };
+        if candidate.extension().is_none() && !is_css {
+            candidate.set_extension("less");
+        }
+
+        let source = std::fs::read_to_string(&candidate).map_err(|e| ImportError::Io {
+            path: candidate.display().to_string(),
+            message: e.to_string(),
+        })?;
+        let dir = candidate
+            .parent()
+            .map(|p| format!("{}/", p.display()))
+            .unwrap_or_default();
+        let file = FileInfo {
+            filename: candidate.display().to_string(),
+            current_directory: dir,
+            ..FileInfo::default()
+        };
+        let payload = if req.options.inline {
+            ImportPayload::Inline(source.into())
+        } else if is_css {
+            ImportPayload::Css(source.into())
+        } else {
+            ImportPayload::Less(source.into())
+        };
+        Ok(ResolvedImport { file, payload })
+    }
+
+    fn load_binary(&self, path: &str, current_directory: &str) -> Option<Vec<u8>> {
+        let base = if current_directory.is_empty() {
+            self.root.clone()
+        } else {
+            PathBuf::from(current_directory)
+        };
+        std::fs::read(base.join(path)).ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1066,6 +1195,7 @@ mod tests {
                 "styles-m",
                 &LessDeployOptions {
                     skip_broken_modules: true,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -1123,6 +1253,64 @@ mod tests {
         assert!(!entry_strip_applies(
             "/**\n * banner\n */\n@import 'source/lib/_lib.less';\n@import (reference) 'source/_email-base.less';\n"
         ));
+    }
+
+    /// A tiny materialized-style tree for the `--file` per-file mode: the
+    /// entry imports relatively (extension-less and extensioned), and a
+    /// partial imports relative to ITS OWN directory — the property that
+    /// makes nested `var/view_preprocessed` imports resolve.
+    fn file_tree() -> tempfile::TempDir {
+        let td = tempfile::tempdir().expect("tempdir");
+        let r = td.path();
+        let w = |rel: &str, content: &str| {
+            let p = r.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        };
+        w(
+            "css/entry.less",
+            "@import 'source/vars';\n\
+             @import 'source/mixins.less';\n\
+             .a { color: @c; .m(); }\n",
+        );
+        w("css/source/vars.less", "@c: red;\n");
+        w(
+            "css/source/mixins.less",
+            "@import 'nested/deep.less';\n.m() { border: 1px solid; }\n",
+        );
+        w("css/source/nested/deep.less", ".deep { z: 1; }\n");
+        td
+    }
+
+    #[test]
+    fn compile_file_resolves_relative_imports_from_each_files_dir() {
+        let td = file_tree();
+        let out = compile_file(&td.path().join("css/entry.less"), false).unwrap();
+        assert!(out.css.contains(".a {\n  color: red;\n  border: 1px solid;\n}"), "css:\n{}", out.css);
+        // `nested/deep.less` resolved relative to mixins.less, not the entry.
+        assert!(out.css.contains(".deep"), "css:\n{}", out.css);
+        assert!(out.warnings.is_empty(), "warnings: {:?}", out.warnings);
+    }
+
+    #[test]
+    fn compile_file_compress_flag() {
+        let td = file_tree();
+        let out = compile_file(&td.path().join("css/entry.less"), true).unwrap();
+        assert!(out.css.contains(".a{color:red;border:1px solid}"), "css:\n{}", out.css);
+    }
+
+    /// Errors surface the compiler's rendering verbatim: file + line named,
+    /// nothing prefixed on top (the PHP adapter shows the message as-is).
+    #[test]
+    fn compile_file_error_names_file_and_line() {
+        let td = file_tree();
+        let bad = td.path().join("css/broken.less");
+        std::fs::write(&bad, ".b { color: @missing; }\n").unwrap();
+        let e = compile_file(&bad, false).unwrap_err();
+        assert!(e.file.is_none() && e.module.is_none() && e.entry.is_none());
+        assert!(e.message.contains("broken.less"), "{e}");
+        assert!(e.message.contains("line 1"), "{e}");
+        assert!(e.message.contains("@missing"), "{e}");
     }
 
     #[test]
