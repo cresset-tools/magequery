@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.2](https://github.com/cresset-tools/magequery/compare/magequery-v0.12.1...magequery-v0.12.2) (2026-07-21)
+
+
+### Bug Fixes
+
+* **engine:** fold generated classes into the from-empty scan universe ([#69](https://github.com/cresset-tools/magequery/issues/69)) ([bb7bd01](https://github.com/cresset-tools/magequery/commit/bb7bd018f4ab8c2b40adf803d8b451c2d594bc68)), closes [#67](https://github.com/cresset-tools/magequery/issues/67)
+
 ## [0.12.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.12.0...magequery-v0.12.1) (2026-07-21)
 
 
