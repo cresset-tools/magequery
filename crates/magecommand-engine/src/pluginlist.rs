@@ -193,7 +193,7 @@ pub fn plugin_instances_across_scopes(
     defs: &Definitions,
     seeds: &std::collections::HashSet<String>,
 ) -> std::collections::HashMap<String, ClassPlugins> {
-    let global_export = magento.di_export(Area::Global);
+    let global_export = magento.di_export_ref(Area::Global);
     let global_vtypes: HashMap<String, String> = global_export
         .virtual_types
         .iter()
@@ -211,13 +211,7 @@ pub fn plugin_instances_across_scopes(
     let per_area: Vec<Vec<(String, Vec<String>)>> = AREA_CODES
         .par_iter()
         .map(|(area, _)| {
-            let export_owned;
-            let export = if *area == Area::Global {
-                &global_export
-            } else {
-                export_owned = magento.di_export(*area);
-                &export_owned
-            };
+            let export = magento.di_export_ref(*area);
             let plugin_data = plugin_data_of(export);
             let mut state = Inherit {
                 defs,
@@ -296,7 +290,7 @@ pub fn plugin_instances_across_scopes(
 }
 
 pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
-    let global_export = magento.di_export(Area::Global);
+    let global_export = magento.di_export_ref(Area::Global);
     let global_vtypes: HashMap<String, String> = global_export
         .virtual_types
         .iter()
@@ -314,12 +308,9 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
         // AFTER frontend starts from an EMPTY base and contains only its own
         // overlay — a genuine Magento bug the archive faithfully records.
         let export_owned;
-        let export = match area {
-            Area::Global => &global_export,
-            Area::Frontend => {
-                export_owned = magento.di_export(area);
-                &export_owned
-            }
+        let export: &DiExport = match area {
+            Area::Global => global_export,
+            Area::Frontend => magento.di_export_ref(area),
             _ => {
                 export_owned = magento.di_export_overlay(area);
                 &export_owned
@@ -518,7 +509,7 @@ pub fn plugin_chains(
     area: Area,
     extra: &[String],
 ) -> GlobalChains {
-    let global_export = magento.di_export(area);
+    let global_export = magento.di_export_ref(area);
     let global_vtypes: HashMap<String, String> = global_export
         .virtual_types
         .iter()

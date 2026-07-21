@@ -231,6 +231,29 @@ impl DiIndex {
     }
 }
 
+impl AreaConfig {
+    /// Cheap declaration counts for a work-plan/summary view — the counts
+    /// [`export`](Self::export) would produce, without the full clone + multi-key
+    /// sort. `plugged_targets` = distinct targets with at least one non-disabled
+    /// plugin (matching the CLI's `filter(|p| !p.disabled)` over the export).
+    pub(crate) fn summary(&self) -> crate::model::DiSummary {
+        let plugin_declarations = self.plugins.values().map(HashMap::len).sum();
+        let plugged_targets = self
+            .plugins
+            .values()
+            .filter(|by_name| by_name.values().any(|p| !p.disabled.unwrap_or(false)))
+            .count();
+        let arguments = self.type_args.values().map(HashMap::len).sum();
+        crate::model::DiSummary {
+            preferences: self.preferences.len(),
+            virtual_types: self.virtual_types.len(),
+            plugin_declarations,
+            plugged_targets,
+            arguments,
+        }
+    }
+}
+
 /// The non-global areas that overlay the global config, in canonical order.
 const REAL_AREAS: [Area; 6] = [
     Area::Frontend,

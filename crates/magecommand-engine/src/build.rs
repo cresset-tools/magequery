@@ -66,7 +66,7 @@ pub fn compute_outputs_opts(
     // when its file sits in a scan-excluded path).
     let mut resolve_keys: Vec<String> = Vec::new();
     for (area, _) in AREA_CODES {
-        let export = magento.di_export(area);
+        let export = magento.di_export_ref(area);
         resolve_keys.extend(export.preferences.iter().map(|p| p.for_type.as_str().to_owned()));
         resolve_keys.extend(
             export.plugins.iter().filter_map(|p| p.class.as_ref()).map(|c| c.as_str().to_owned()),

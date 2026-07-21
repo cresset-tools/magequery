@@ -52,18 +52,96 @@ pub fn to_php_file(value: &PhpValue) -> String {
     out
 }
 
+/// Emit a `var_export` single-quoted string literal (only `\` and `'` are
+/// escaped) — the [`PhpValue::Str`] rendering, factored out so a borrowed `&str`
+/// can be serialized without wrapping it in an owned `PhpValue` first.
+fn push_php_str(out: &mut String, s: &str) {
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\\' || ch == '\'' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+}
+
+/// Serialize a compiled **area file** (`global.php`, `frontend.php`, …) directly
+/// from its four borrowed sections — byte-identical to building a
+/// `PhpValue::Array` of `arguments`/`preferences`/`instanceTypes`/`nonLazyTypes`
+/// and calling [`to_php_file`], but WITHOUT deep-cloning the (large) argument
+/// tree only to serialize and drop it. Each argument value is written in place by
+/// reference. Locked byte-for-byte against the old path by `render_matches_clone`
+/// below (and, end-to-end, by `di verify`).
+pub fn area_file_to_php(
+    arguments: &std::collections::BTreeMap<String, PhpValue>,
+    preferences: &[(String, String)],
+    instance_types: &[(String, String)],
+    non_lazy: &[String],
+) -> String {
+    // Each section renders as `  '<name>' => \n  array (\n <entries@indent 4> \n
+    // ),\n` — the enclosing PhpValue::Array places its four (array) values each on
+    // its own line at indent 2, exactly as var_export does.
+    fn open(out: &mut String, name: &str) {
+        out.push_str("  ");
+        push_php_str(out, name);
+        out.push_str(" => \n  array (\n");
+    }
+    fn close(out: &mut String) {
+        out.push_str("  ),\n");
+    }
+    fn str_entries(out: &mut String, entries: &[(String, String)]) {
+        for (k, v) in entries {
+            out.push_str("    ");
+            push_php_str(out, k);
+            out.push_str(" => ");
+            push_php_str(out, v);
+            out.push_str(",\n");
+        }
+    }
+
+    // ~64 bytes/entry is a rough capacity hint (a re-alloc if wrong, never a
+    // correctness issue); the argument section dominates.
+    let mut out = String::with_capacity(64 * arguments.len() + 4096);
+    out.push_str("<?php return array (\n");
+
+    open(&mut out, "arguments");
+    for (k, v) in arguments {
+        out.push_str("    ");
+        push_php_str(&mut out, k);
+        out.push_str(" => ");
+        // var_export puts an array/object value on its own line at the key indent.
+        if matches!(v, PhpValue::Array(_) | PhpValue::Raw(_)) {
+            out.push_str("\n    ");
+        }
+        export(v, 4, &mut out);
+        out.push_str(",\n");
+    }
+    close(&mut out);
+
+    open(&mut out, "preferences");
+    str_entries(&mut out, preferences);
+    close(&mut out);
+
+    open(&mut out, "instanceTypes");
+    str_entries(&mut out, instance_types);
+    close(&mut out);
+
+    open(&mut out, "nonLazyTypes");
+    for k in non_lazy {
+        out.push_str("    ");
+        push_php_str(&mut out, k);
+        out.push_str(" => true,\n");
+    }
+    close(&mut out);
+
+    out.push_str(");");
+    out
+}
+
 fn export(value: &PhpValue, indent: usize, out: &mut String) {
     match value {
-        PhpValue::Str(s) => {
-            out.push('\'');
-            for ch in s.chars() {
-                if ch == '\\' || ch == '\'' {
-                    out.push('\\');
-                }
-                out.push(ch);
-            }
-            out.push('\'');
-        }
+        PhpValue::Str(s) => push_php_str(out, s),
         PhpValue::Int(i) => out.push_str(&i.to_string()),
         PhpValue::Float(f) => {
             if f.fract() == 0.0 && f.is_finite() && f.abs() < 1e15 {
@@ -163,6 +241,61 @@ mod tests {
         assert_eq!(
             to_php_file(&v),
             "<?php return array (\n  'k' => 'it\\'s',\n);"
+        );
+    }
+
+    #[test]
+    fn area_file_to_php_matches_wrapper_path() {
+        // Lock the reference-based area serializer byte-for-byte against the old
+        // "wrap in PhpValue::Array + to_php_file" path, across every value shape:
+        // a nested-array argument, a Raw (enum-case) argument, a scalar argument,
+        // an empty section, and strings needing escaping.
+        use std::collections::BTreeMap;
+        let mut arguments: BTreeMap<String, PhpValue> = BTreeMap::new();
+        arguments.insert(
+            "Magento\\A\\B".to_owned(),
+            PhpValue::Array(vec![(
+                PhpKey::str("fileName"),
+                PhpValue::Array(vec![(PhpKey::str("_v_"), PhpValue::str("x.xml"))]),
+            )]),
+        );
+        arguments.insert(
+            "It's\\Odd".to_owned(),
+            PhpValue::Raw("\\Vendor\\Enum::CASE".to_owned()),
+        );
+        arguments.insert("plain".to_owned(), PhpValue::str("scalar"));
+        let preferences =
+            vec![("IfaceA".to_owned(), "ImplA".to_owned()), ("IfaceB".to_owned(), "ImplB".to_owned())];
+        let instance_types: Vec<(String, String)> = Vec::new(); // empty section
+        let non_lazy = vec!["Cls\\One".to_owned(), "Cls\\Two".to_owned()];
+
+        let pairs = |entries: &[(String, String)]| {
+            PhpValue::Array(
+                entries
+                    .iter()
+                    .map(|(k, v)| (PhpKey::str(k.clone()), PhpValue::str(v.clone())))
+                    .collect(),
+            )
+        };
+        let wrapper = PhpValue::Array(vec![
+            (
+                PhpKey::str("arguments"),
+                PhpValue::Array(
+                    arguments.iter().map(|(k, v)| (PhpKey::str(k.clone()), v.clone())).collect(),
+                ),
+            ),
+            (PhpKey::str("preferences"), pairs(&preferences)),
+            (PhpKey::str("instanceTypes"), pairs(&instance_types)),
+            (
+                PhpKey::str("nonLazyTypes"),
+                PhpValue::Array(
+                    non_lazy.iter().map(|k| (PhpKey::str(k.clone()), PhpValue::Bool(true))).collect(),
+                ),
+            ),
+        ]);
+        assert_eq!(
+            area_file_to_php(&arguments, &preferences, &instance_types, &non_lazy),
+            to_php_file(&wrapper)
         );
     }
 

@@ -1525,9 +1525,13 @@ fn compile(
         Area::WebapiSoap,
         Area::Graphql,
     ];
-    let exports: Vec<_> = AREAS.iter().map(|&a| magento.di_export(a)).collect();
+    // The work-plan summary needs only declaration COUNTS, so it uses the cheap
+    // `di_summary` (counts straight off the merged config) rather than seven full
+    // `di_export`s (clone + multi-key sort of the whole config, ~40 ms wall here).
+    // The real exports are materialized — and memoized — inside `compute_outputs`.
+    let summaries: Vec<_> = AREAS.iter().map(|&a| (a, magento.di_summary(a))).collect();
     let extended_types = magento.extension_attributes(None).len();
-    lap!("di_export x7 (work plan)");
+    lap!("di_summary x7 (work plan)");
 
     if json {
         let plan = serde_json::json!({
@@ -1535,16 +1539,14 @@ fn compile(
             "modules": modules.len(),
             "enabled": enabled,
             "extension_attribute_types": extended_types,
-            "areas": exports.iter().map(|e| {
-                let targets: std::collections::BTreeSet<_> =
-                    e.plugins.iter().filter(|p| !p.disabled).map(|p| &p.target).collect();
+            "areas": summaries.iter().map(|(area, s)| {
                 serde_json::json!({
-                    "area": e.area,
-                    "preferences": e.preferences.len(),
-                    "virtual_types": e.virtual_types.len(),
-                    "plugin_declarations": e.plugins.len(),
-                    "plugged_targets": targets.len(),
-                    "argument_declarations": e.arguments.len(),
+                    "area": area,
+                    "preferences": s.preferences,
+                    "virtual_types": s.virtual_types,
+                    "plugin_declarations": s.plugin_declarations,
+                    "plugged_targets": s.plugged_targets,
+                    "argument_declarations": s.arguments,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -1557,21 +1559,15 @@ fn compile(
             enabled
         );
         println!("work plan (config-derived; PHP-scan half lands with the extractor):");
-        for e in &exports {
-            let targets: std::collections::BTreeSet<_> = e
-                .plugins
-                .iter()
-                .filter(|p| !p.disabled)
-                .map(|p| &p.target)
-                .collect();
+        for (area, s) in &summaries {
             println!(
                 "  {:<12} {:>4} preferences · {:>3} virtual types · {:>4} plugin decls on {:>3} targets · {:>4} argument decls",
-                format!("{:?}", e.area).to_lowercase(),
-                e.preferences.len(),
-                e.virtual_types.len(),
-                e.plugins.len(),
-                targets.len(),
-                e.arguments.len()
+                format!("{:?}", area).to_lowercase(),
+                s.preferences,
+                s.virtual_types,
+                s.plugin_declarations,
+                s.plugged_targets,
+                s.arguments
             );
         }
         println!("  extension-attribute types: {extended_types}");

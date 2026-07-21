@@ -12,9 +12,9 @@ use crate::definitions::Definitions;
 use crate::phpexport::{PhpKey, PhpValue};
 
 pub fn interception_map(magento: &Magento, defs: &Definitions) -> BTreeMap<String, bool> {
-    let exports: Vec<DiExport> = AREA_CODES
+    let exports: Vec<&DiExport> = AREA_CODES
         .iter()
-        .map(|(area, _)| magento.di_export(*area))
+        .map(|(area, _)| magento.di_export_ref(*area))
         .collect();
 
     // getOriginalInstanceType consults the object manager's config — the

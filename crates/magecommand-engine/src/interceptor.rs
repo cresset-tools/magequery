@@ -64,7 +64,7 @@ pub fn plan(
     // Deref map for turning a plugin instance (possibly a virtual type) into
     // the concrete plugin class whose methods define the interception.
     let global_vtypes: HashMap<String, String> = magento
-        .di_export(Area::Global)
+        .di_export_ref(Area::Global)
         .virtual_types
         .iter()
         .map(|v| (v.name.as_str().to_owned(), v.base.as_str().to_owned()))

@@ -41,7 +41,7 @@ pub fn custom_area_codes(magento: &Magento) -> Vec<String> {
         "webapi_soap",
         "graphql",
     ];
-    let export = magento.di_export(Area::Global);
+    let export = magento.di_export_ref(Area::Global);
     let mut codes: Vec<String> = Vec::new();
     for decl in &export.arguments {
         if decl.type_name.as_str() == "Magento\\Framework\\App\\AreaList" && decl.arg == "areas" {
@@ -80,7 +80,7 @@ pub fn interceptors_map(defs: &Definitions) -> BTreeMap<String, String> {
 }
 
 pub fn area_sections(magento: &Magento, defs: &Definitions, area: Area) -> AreaSections {
-    let export = magento.di_export(area);
+    let export = magento.di_export_ref(area);
     let pref_map: HashMap<&str, &str> = export
         .preferences
         .iter()
@@ -197,7 +197,7 @@ pub fn build_area_file(
     root: &std::path::Path,
     fused: bool,
 ) -> AreaFile {
-    build_area_file_from_export(magento, defs, magento.di_export(area), root, fused)
+    build_area_file_from_export(magento, defs, magento.di_export_ref(area), root, fused)
 }
 
 /// Like [`build_area_file`] but driven by a caller-supplied [`DiExport`] — used
@@ -208,16 +208,16 @@ pub fn build_area_file(
 pub fn build_area_file_from_export(
     magento: &Magento,
     defs: &Definitions,
-    export: magequery_core::DiExport,
+    export: &magequery_core::DiExport,
     root: &std::path::Path,
     fused: bool,
 ) -> AreaFile {
     let overrides = crate::arguments::setup_overrides(magento, root);
-    let ctx = ArgsCtx::new(defs, &defs.scanned, &export, overrides, Some(magento), Some(root));
+    let ctx = ArgsCtx::new(defs, &defs.scanned, export, overrides, Some(magento), Some(root));
 
     // Reader.
     let mut arguments = build_arguments(&ctx, magento);
-    let sections = area_sections_reader(defs, &export);
+    let sections = area_sections_reader(defs, export);
     let mut preferences = sections.0;
     let mut instance_types = sections.1;
 
@@ -293,7 +293,7 @@ pub fn build_area_file_from_export(
     // the lazy-INeligible.
     let non_lazy = non_lazy_types(
         defs,
-        &export,
+        export,
         &arguments,
         &instance_types,
         &preferences,
@@ -347,7 +347,7 @@ pub fn build_all_area_files(
         .par_iter()
         .map(|code| {
             let export = magento.di_export_custom_area(code);
-            let file = build_area_file_from_export(magento, defs, export, root, fused);
+            let file = build_area_file_from_export(magento, defs, &export, root, fused);
             let rendered = file.render();
             CompiledArea { code: code.clone(), file, rendered }
         })
@@ -594,37 +594,16 @@ impl AreaFile {
     /// The complete `<area>.php` content: the four sections in Magento's
     /// write order, var_export-exact.
     pub fn render(&self) -> String {
-        let pairs = |entries: &[(String, String)]| {
-            PhpValue::Array(
-                entries
-                    .iter()
-                    .map(|(k, v)| (PhpKey::str(k.clone()), PhpValue::str(v.clone())))
-                    .collect(),
-            )
-        };
-        let file = PhpValue::Array(vec![
-            (
-                PhpKey::str("arguments"),
-                PhpValue::Array(
-                    self.arguments
-                        .iter()
-                        .map(|(k, v)| (PhpKey::str(k.clone()), v.clone()))
-                        .collect(),
-                ),
-            ),
-            (PhpKey::str("preferences"), pairs(&self.preferences)),
-            (PhpKey::str("instanceTypes"), pairs(&self.instance_types)),
-            (
-                PhpKey::str("nonLazyTypes"),
-                PhpValue::Array(
-                    self.non_lazy
-                        .iter()
-                        .map(|k| (PhpKey::str(k.clone()), PhpValue::Bool(true)))
-                        .collect(),
-                ),
-            ),
-        ]);
-        crate::phpexport::to_php_file(&file)
+        // Serialize the four sections straight from their borrowed storage —
+        // `area_file_to_php` writes each argument value in place, avoiding a deep
+        // clone (and drop) of the whole argument tree that a `PhpValue::Array`
+        // wrapper + `to_php_file` would incur (~40 ms/area on a real install).
+        crate::phpexport::area_file_to_php(
+            &self.arguments,
+            &self.preferences,
+            &self.instance_types,
+            &self.non_lazy,
+        )
     }
 }
 
