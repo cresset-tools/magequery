@@ -1175,6 +1175,65 @@ mod handle_tests {
         assert!(!names.iter().any(|n| n.contains("Interceptor")), "{names:?}");
     }
 
+    /// A theme package can bundle its `theme.xml`/`registration.php` under a
+    /// subdir (Hyvä's admin theme `adminhtml/Hyva/commerce` lives at
+    /// `src/theme/`); discovery must follow the `autoload.files` registration
+    /// path there — and a normal root-level theme is still found exactly once
+    /// (the root and its `registration.php` dir coincide, so no double-count).
+    #[test]
+    fn themes_discovers_src_bundled_and_root_level_once() {
+        let tree = TempTree::new("themes-src-bundled");
+        let write = |rel: &str, content: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write("app/etc/config.php", "<?php\nreturn ['modules' => []];\n");
+        write(
+            "vendor/composer/installed.json",
+            r#"{"packages":[
+                {"name":"hyva-themes/commerce-theme-adminhtml",
+                 "install-path":"../hyva-themes/commerce-theme-adminhtml",
+                 "autoload":{"files":["src/theme/registration.php"]}},
+                {"name":"magento/theme-frontend-luma",
+                 "install-path":"../magento/theme-frontend-luma",
+                 "autoload":{"files":["registration.php"]}}
+            ]}"#,
+        );
+        // The Hyvä admin theme, bundled under src/theme/.
+        write(
+            "vendor/hyva-themes/commerce-theme-adminhtml/src/theme/theme.xml",
+            "<theme><title>Hyva Commerce</title></theme>",
+        );
+        write(
+            "vendor/hyva-themes/commerce-theme-adminhtml/src/theme/registration.php",
+            "<?php\nComponentRegistrar::register(ComponentRegistrar::THEME, 'adminhtml/Hyva/commerce', __DIR__);\n",
+        );
+        // A conventional root-level theme.
+        write(
+            "vendor/magento/theme-frontend-luma/theme.xml",
+            "<theme><title>Luma</title></theme>",
+        );
+        write(
+            "vendor/magento/theme-frontend-luma/registration.php",
+            "<?php\nComponentRegistrar::register(ComponentRegistrar::THEME, 'frontend/Magento/luma', __DIR__);\n",
+        );
+
+        let magento = super::Magento::open(&tree.0).unwrap();
+        let themes = magento.themes();
+        let admin: Vec<_> =
+            themes.iter().filter(|(id, _)| id.as_str() == "adminhtml/Hyva/commerce").collect();
+        assert_eq!(admin.len(), 1, "src/-bundled admin theme discovered once: {themes:?}");
+        assert!(
+            admin[0].1.ends_with("commerce-theme-adminhtml/src/theme"),
+            "theme dir points at the bundled subdir, not the package root: {:?}",
+            admin[0].1
+        );
+        let luma =
+            themes.iter().filter(|(id, _)| id.as_str() == "frontend/Magento/luma").count();
+        assert_eq!(luma, 1, "root-level theme not double-discovered: {themes:?}");
+    }
+
     /// The two per-file lints fire: a layout template no file provides, and a plugin
     /// name declared twice for one type in one file.
     #[test]
