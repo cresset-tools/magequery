@@ -347,6 +347,45 @@ impl Definitions {
         unresolved
     }
 
+    /// Inject freshly-generated `generated/code` declarations (interceptors,
+    /// proxies, factories, …) into the scan universe. Magento generates these
+    /// classes and its `ClassesScanner` picks them up BEFORE the config Reader
+    /// aggregates — so their `\Interceptor`/`\Proxy`/`…Factory` names enter the
+    /// `arguments` universe and, through it, InterceptorSubstitution. A
+    /// from-empty compile clears `generated/code` before scanning (like
+    /// `setup:di:compile`), so without this the config never sees the classes
+    /// it is about to emit and the interceptor/proxy/factory mappings vanish
+    /// (interception goes globally dead at runtime).
+    ///
+    /// `files` are the codegen outputs — `(rel_path, php_source)`, `rel_path`
+    /// relative to `generated/code`. Only names not already known are added, so
+    /// a reproduction/warm run whose scan already read an archived
+    /// `generated/code` is a no-op here (that path stays byte-identical, no
+    /// second area build). Returns the number of declarations added.
+    pub fn add_generated_code(&mut self, files: &[(String, String)], root: &Path) -> usize {
+        let code_root = root.join("generated/code");
+        let mut added = 0;
+        for (rel, content) in files {
+            let file = code_root.join(rel);
+            for decl in magecommand_php::parse_file(content.as_bytes()).declarations {
+                if self.classes.contains_key(&decl.fqcn) {
+                    continue;
+                }
+                self.canonical.insert(decl.fqcn.to_ascii_lowercase(), decl.fqcn.clone());
+                self.generated_classes.insert(decl.fqcn.clone());
+                if !decl.conditional {
+                    self.from_scan.insert(decl.fqcn.clone());
+                    if matches!(decl.kind, ClassKind::Class | ClassKind::Trait) {
+                        self.scanned.insert(decl.fqcn.clone());
+                    }
+                }
+                self.classes.insert(decl.fqcn.clone(), ClassRecord { meta: decl, file: file.clone() });
+                added += 1;
+            }
+        }
+        added
+    }
+
     /// All interfaces of `fqcn`, transitive, in PHP's `class_implements`
     /// order (verified empirically): the class's DECLARED interfaces in
     /// order, then each declared interface's ancestor table — where a
@@ -851,6 +890,42 @@ mod tests {
         let names: Vec<&str> = ctor.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["b", "c"], "trait ctor forwarded, not the parent's");
         assert_eq!(ctor.definer_fqcn, "T", "definer is the trait (its use-context)");
+    }
+
+    #[test]
+    fn add_generated_code_folds_artifacts_into_scan_universe_idempotently() {
+        let mut d = defs([record(
+            "<?php namespace Acme; class Widget { public function __construct($a) {} }",
+        )]);
+        // The just-generated interceptor + factory, as codegen emits them.
+        let files = vec![
+            (
+                "Acme/Widget/Interceptor.php".to_owned(),
+                "<?php namespace Acme\\Widget; class Interceptor extends \\Acme\\Widget {}"
+                    .to_owned(),
+            ),
+            (
+                "Acme/WidgetFactory.php".to_owned(),
+                "<?php namespace Acme; class WidgetFactory {}".to_owned(),
+            ),
+        ];
+        let root = std::path::Path::new("/nonexistent");
+        assert_eq!(d.add_generated_code(&files, root), 2, "both are new");
+
+        // In the class map AND the scanned/from_scan/generated sets — so
+        // `build_arguments` (over `scanned`) emits an `arguments` entry for the
+        // interceptor, which is what InterceptorSubstitution keys on. Without
+        // this a from-empty compile never maps the type to its interceptor.
+        for name in ["Acme\\Widget\\Interceptor", "Acme\\WidgetFactory"] {
+            assert!(d.classes.contains_key(name), "{name} in classes");
+            assert!(d.scanned.contains(name), "{name} in scanned");
+            assert!(d.from_scan.contains(name), "{name} in from_scan");
+            assert!(d.generated_classes.contains(name), "{name} in generated_classes");
+        }
+
+        // Idempotent: a warm/reproduction run whose scan already read an
+        // archived generated/code adds nothing — that path stays byte-identical.
+        assert_eq!(d.add_generated_code(&files, root), 0, "second fold is a no-op");
     }
 
     #[test]
