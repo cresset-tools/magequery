@@ -618,19 +618,37 @@ impl Magento {
     fn discover_themes(&self) -> Vec<(String, std::path::PathBuf)> {
         let mut out = Vec::new();
         for p in &self.index.packages {
-            if !p.root.join("theme.xml").is_file() {
-                continue;
+            // A theme package's `theme.xml` + `registration.php` usually sit at
+            // the package root, but some bundle them under a subdir (Hyvä's
+            // admin theme `adminhtml/Hyva/commerce` lives at `src/theme/`). The
+            // `autoload.files` (registration.php) entries pinpoint those roots —
+            // the same trick vendor module discovery uses for `src/`-bundled
+            // modules. Probe the root plus each registration-file directory,
+            // deduped so a normal root-level theme isn't discovered twice.
+            let mut candidates: Vec<std::path::PathBuf> = vec![p.root.clone()];
+            for f in &p.autoload_files {
+                if let Some(dir) = p.root.join(f).parent() {
+                    let dir = dir.to_path_buf();
+                    if !candidates.contains(&dir) {
+                        candidates.push(dir);
+                    }
+                }
             }
-            let Ok(reg) = self.index.vfs.read_to_string(&p.root.join("registration.php")) else {
-                continue;
-            };
-            // ComponentRegistrar::register(THEME, 'frontend/Vendor/name', __DIR__)
-            if let Some(id) = reg
-                .split('\'')
-                .chain(reg.split('"'))
-                .find(|s| s.starts_with("frontend/") || s.starts_with("adminhtml/"))
-            {
-                out.push((id.to_string(), p.root.clone()));
+            for dir in candidates {
+                if !dir.join("theme.xml").is_file() {
+                    continue;
+                }
+                let Ok(reg) = self.index.vfs.read_to_string(&dir.join("registration.php")) else {
+                    continue;
+                };
+                // ComponentRegistrar::register(THEME, 'frontend/Vendor/name', __DIR__)
+                if let Some(id) = reg
+                    .split('\'')
+                    .chain(reg.split('"'))
+                    .find(|s| s.starts_with("frontend/") || s.starts_with("adminhtml/"))
+                {
+                    out.push((id.to_string(), dir.clone()));
+                }
             }
         }
         for area in ["frontend", "adminhtml"] {
@@ -651,6 +669,7 @@ impl Magento {
             }
         }
         out.sort();
+        out.dedup();
         out
     }
 

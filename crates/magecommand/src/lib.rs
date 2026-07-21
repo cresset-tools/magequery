@@ -1264,13 +1264,20 @@ fn static_deploy(
         .collect();
 
     let inputs = sdf::DeployInputs::prepare(&magento).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let groups = match sdd::plan(&inputs, locales, &theme_specs, areas, no_parent) {
-        Ok(g) => g,
+    let plan = match sdd::plan(&inputs, locales, &theme_specs, areas, no_parent) {
+        Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
             return Ok(ExitCode::FAILURE);
         }
     };
+    // A discovered theme with a dangling `<parent>` is dropped from the default
+    // all-themes run (not fatal) — surface each so the exclusion is never
+    // silent; name the theme with `--theme` to force it (and fail loud).
+    for s in &plan.skipped {
+        eprintln!("warning: skipping theme {} — {} (use --theme {} to force)", s.id, s.reason, s.id);
+    }
+    let groups = plan.groups;
     if groups.is_empty() {
         eprintln!("error: nothing to deploy (no theme matches the area filter)");
         return Ok(ExitCode::FAILURE);
@@ -1320,6 +1327,10 @@ fn static_deploy(
                 "area": g.area,
                 "locale": g.locale,
                 "themes": g.theme_ids,
+            })).collect::<Vec<_>>(),
+            "skipped": plan.skipped.iter().map(|s| serde_json::json!({
+                "theme": s.id,
+                "reason": s.reason,
             })).collect::<Vec<_>>(),
             "packages": stats.iter().map(|s| serde_json::json!({
                 "area": s.area,

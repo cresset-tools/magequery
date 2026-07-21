@@ -102,6 +102,28 @@ pub struct Group {
     pub theme_ids: Vec<String>,
 }
 
+/// A discovered theme dropped from the **default** (all-themes) deploy because
+/// its `theme.xml` `<parent>` fallback chain dangles — an ancestor is absent on
+/// disk (e.g. a project theme inheriting from a Hyvä/vendor theme that isn't
+/// installed). Per the project's Error-vs-Diagnostic split, a single broken
+/// theme is a diagnostic, not a fatal error: the rest of the run proceeds. An
+/// explicitly-named `--theme` still fails loud (you named it).
+#[derive(Debug, Clone)]
+pub struct SkippedTheme {
+    /// Area-qualified id (`adminhtml/Vendor/theme`).
+    pub id: String,
+    /// Why it was skipped (the theme-chain error message).
+    pub reason: String,
+}
+
+/// The output of [`plan`]: the deployable `(area, locale)` groups plus any
+/// discovered themes skipped for a dangling parent chain.
+#[derive(Debug, Clone)]
+pub struct Plan {
+    pub groups: Vec<Group>,
+    pub skipped: Vec<SkippedTheme>,
+}
+
 /// Per-package placement stats (the deploy summary rows) — no bytes retained,
 /// so a large matrix stays memory-bounded when [`execute_to_disk`] writes each
 /// group as it finishes.
@@ -179,8 +201,9 @@ pub fn plan(
     theme_specs: &[ThemeSpec],
     areas: &[String],
     no_parent: bool,
-) -> Result<Vec<Group>, DeployError> {
+) -> Result<Plan, DeployError> {
     let area_ok = |a: &str| areas.is_empty() || areas.iter().any(|x| x == a);
+    let mut skipped: Vec<SkippedTheme> = Vec::new();
 
     // Validate every requested locale against Magento's allowed set before any
     // work (real SCD's InputValidator does this) — and, as a corollary, reject
@@ -203,11 +226,23 @@ pub fn plan(
     // Resolve the requested (theme, locales) list — preserving order.
     let resolved: Vec<(String, Vec<String>)> = if theme_specs.is_empty() {
         // Default deployable set: every discovered theme, default locales.
-        inputs
-            .themes
-            .iter()
-            .map(|(id, _)| (id.clone(), default_locales.to_vec()))
-            .collect()
+        // A discovered theme whose `<parent>` chain dangles (an ancestor absent
+        // on disk) would abort the entire multi-theme/locale run when its
+        // package is built — so validate the chain here and skip the broken
+        // theme with a diagnostic instead, mirroring Magento (an unresolvable
+        // parent is left unlinked; the rest still deploys). Any theme reaching a
+        // missing ancestor is dropped, so no child is left orphaned.
+        let mut v = Vec::with_capacity(inputs.themes.len());
+        for (id, _) in &inputs.themes {
+            if let Some(area) = area_of(id) {
+                if let Err(e) = super::less::theme_chain(area, id, &inputs.themes) {
+                    skipped.push(SkippedTheme { id: id.clone(), reason: e.message });
+                    continue;
+                }
+            }
+            v.push((id.clone(), default_locales.to_vec()));
+        }
+        v
     } else {
         let mut v = Vec::with_capacity(theme_specs.len());
         for spec in theme_specs {
@@ -266,14 +301,15 @@ pub fn plan(
         }
     }
 
-    Ok(groups
+    let groups = groups
         .into_iter()
         .map(|((area, locale), theme_ids)| Group {
             area,
             locale,
             theme_ids,
         })
-        .collect())
+        .collect();
+    Ok(Plan { groups, skipped })
 }
 
 /// Build ONE group's packages (all themes, in order, sharing a fresh cache).
@@ -422,7 +458,7 @@ mod tests {
             "frontend/Magento/luma",
             "adminhtml/Magento/backend",
         ]);
-        let groups = plan(&inp, &["en_US".into()], &[], &[], false).unwrap();
+        let groups = plan(&inp, &["en_US".into()], &[], &[], false).unwrap().groups;
         // one frontend group (blank+luma) + one adminhtml group (backend).
         assert_eq!(groups.len(), 2);
         let fe = groups.iter().find(|g| g.area == "frontend").unwrap();
@@ -432,9 +468,47 @@ mod tests {
     }
 
     #[test]
+    fn default_skips_theme_with_dangling_parent() {
+        // A discovered theme whose theme.xml `<parent>` points at a theme that
+        // isn't on disk (a project theme inheriting from a vendor theme that
+        // isn't installed) must NOT abort the whole default run: it's dropped
+        // with a reason, and the healthy siblings still deploy.
+        let td = tempfile::tempdir().unwrap();
+        let child = td.path().join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("theme.xml"), "<theme><parent>Vendor/gone</parent></theme>").unwrap();
+        let ok = td.path().join("ok");
+        std::fs::create_dir_all(&ok).unwrap();
+        std::fs::write(ok.join("theme.xml"), "<theme><title>OK</title></theme>").unwrap();
+
+        let inp = DeployInputs {
+            root: td.path().to_path_buf(),
+            themes: vec![
+                ("frontend/Vendor/child".into(), child),
+                ("frontend/Vendor/ok".into(), ok),
+            ],
+            modules: Vec::new(),
+            reg_modules: Vec::new(),
+            scan_modules: Vec::new(),
+            min_resolver: String::new(),
+        };
+        let p = plan(&inp, &["en_US".into()], &[], &[], false).unwrap();
+        assert_eq!(p.skipped.len(), 1);
+        assert_eq!(p.skipped[0].id, "frontend/Vendor/child");
+        assert!(
+            p.skipped[0].reason.contains("parent theme 'frontend/Vendor/gone'"),
+            "{}",
+            p.skipped[0].reason
+        );
+        // The healthy theme still deploys — one broken theme never blinds the run.
+        assert_eq!(p.groups.len(), 1);
+        assert_eq!(p.groups[0].theme_ids, vec!["frontend/Vendor/ok"]);
+    }
+
+    #[test]
     fn area_filter_restricts() {
         let inp = inputs_with_themes(&["frontend/Magento/luma", "adminhtml/Magento/backend"]);
-        let groups = plan(&inp, &["en_US".into()], &[], &["frontend".into()], false).unwrap();
+        let groups = plan(&inp, &["en_US".into()], &[], &["frontend".into()], false).unwrap().groups;
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].area, "frontend");
     }
@@ -446,7 +520,7 @@ mod tests {
             ThemeSpec { id: "Magento/blank".into(), locales: Some(vec!["en_US".into()]) },
             ThemeSpec { id: "Magento/luma".into(), locales: Some(vec!["de_DE".into()]) },
         ];
-        let groups = plan(&inp, &["en_US".into()], &specs, &[], false).unwrap();
+        let groups = plan(&inp, &["en_US".into()], &specs, &[], false).unwrap().groups;
         // Two groups: (frontend, en_US)=[blank], (frontend, de_DE)=[luma].
         // (Fake theme dirs have no readable theme.xml, so no parent expansion.)
         assert_eq!(groups.len(), 2);
@@ -463,7 +537,7 @@ mod tests {
             ThemeSpec { id: "Magento/blank".into(), locales: None },
             ThemeSpec { id: "Magento/luma".into(), locales: Some(vec!["fr_FR".into()]) },
         ];
-        let groups = plan(&inp, &["en_US".into(), "nl_NL".into()], &specs, &[], false).unwrap();
+        let groups = plan(&inp, &["en_US".into(), "nl_NL".into()], &specs, &[], false).unwrap().groups;
         // blank in en_US and nl_NL; luma only fr_FR → 3 groups.
         assert_eq!(groups.len(), 3);
         let en = groups.iter().find(|g| g.locale == "en_US").unwrap();

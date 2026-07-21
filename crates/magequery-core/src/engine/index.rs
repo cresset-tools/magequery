@@ -37,6 +37,11 @@ pub(crate) struct PackageMeta {
     pub version: Option<String>,
     pub root: PathBuf,
     pub require: Vec<String>,
+    /// `autoload.files` entries (registration.php paths, relative to `root`).
+    /// Pinpoint components bundled under a subdir (e.g. Hyvä's admin theme at
+    /// `src/theme/`) that `root/theme.xml` alone would miss — same trick vendor
+    /// module discovery uses for `src/`-bundled modules.
+    pub autoload_files: Vec<String>,
 }
 
 struct Discovered {
@@ -165,6 +170,7 @@ impl Index {
                     version: p.version,
                     root: p.root,
                     require: p.require,
+                    autoload_files: p.autoload_files,
                 })
             })
             .collect();

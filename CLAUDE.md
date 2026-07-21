@@ -1017,8 +1017,12 @@ what they do to the page: the "where does this block come from" question. A `Lay
 in `breadth.rs` over **two layers**: every enabled module's `view/{base,frontend,
 adminhtml}/layout/*.xml` (base applies to both areas; merged in load order — Magento's
 real base merge) and every **theme**'s `<theme>/<Vendor_Module>/layout/*.xml`. Themes are
-discovered statically (`discover_themes`): composer packages whose root holds `theme.xml`
-(id read from `registration.php`'s `'frontend/Vendor/name'` literal) plus
+discovered statically (`discover_themes`): composer packages holding a `theme.xml` — probed
+at the package **root and each `autoload.files` (registration.php) directory**, so a theme
+bundled under a subdir (Hyvä's admin theme `adminhtml/Hyva/commerce` at `src/theme/`) is
+found, not just root-level ones; the recorded dir is the theme's real dir, deduped so a
+normal root-level theme isn't double-counted — same `src/`-bundling trick vendor **module**
+discovery uses (id read from `registration.php`'s `'frontend/Vendor/name'` literal) plus
 `app/design/<area>/<Vendor>/<theme>`. Theme files are listed after modules tagged
 `theme <id>` — theme *application* order depends on the active theme's ancestry (runtime
 state), so it's reported, not resolved. Handle = file stem; all files parsed in parallel.
