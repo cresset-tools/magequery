@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.12.0...magequery-v0.12.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* **magecommand:** static deploy — discover src/-bundled themes (Hyvä admin) ([#65](https://github.com/cresset-tools/magequery/issues/65)) ([b1ea416](https://github.com/cresset-tools/magequery/commit/b1ea416a4309cc014b5244e6e8ed7d04a01a5a86))
+
 ## [0.12.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.11.0...magequery-v0.12.0) (2026-07-21)
 
 
