@@ -85,9 +85,15 @@ fn build(chains: &GlobalChains, ty: &str, method: &str, prev: &str, insts: &[(St
 /// Emit the unrolled body of one layer at `tabs` nesting (0 = the method body,
 /// +1 per enclosing `around` closure). Lines carry only the tab indent; the
 /// 8-space method indent is applied by the caller.
-fn emit(node: &Node, method: &str, tabs: usize, out: &mut Vec<String>) {
+fn emit(node: &Node, method: &str, tabs: usize, out: &mut Vec<String>, void: bool, top_level: bool) {
     let ti = "\t".repeat(tabs);
     let m = ucfirst(method);
+    // A `: void` intercepted method must not `return` a value (PHP fatal). Drop
+    // the `return` only at the method's OWN top level, though: the `$proceed`
+    // closures are untyped `function(...$arguments)`, so their
+    // `return parent::…()` — the void call evaluates to null — stays valid and
+    // is how the inner layer hands control back to `around`.
+    let ret_kw = if void && top_level { "" } else { "return " };
     out.push(format!("{ti}$arguments = \\func_get_args();"));
     for p in &node.before {
         out.push(format!(
@@ -100,14 +106,14 @@ fn emit(node: &Node, method: &str, tabs: usize, out: &mut Vec<String>) {
     if !node.before.is_empty() {
         out.push(ti.clone());
     }
-    let assign = if has_after { "$result = " } else { "return " };
+    let assign = if has_after { "$result = " } else { ret_kw };
     if let Some(a) = &node.around {
         out.push(format!(
             "{ti}{assign}$this->____plugin_{}()->around{m}($this, function(...$arguments){{",
             a.clean
         ));
         if let Some(child) = &node.child {
-            emit(child, method, tabs + 1, out);
+            emit(child, method, tabs + 1, out, void, false);
         }
         out.push(format!("{ti}}}, ...\\array_values($arguments));"));
     } else {
@@ -119,7 +125,7 @@ fn emit(node: &Node, method: &str, tabs: usize, out: &mut Vec<String>) {
         let n = node.after.len();
         for (i, p) in node.after.iter().enumerate() {
             out.push(ti.clone());
-            let kw = if i == n - 1 { "return " } else { "$result = " };
+            let kw = if i == n - 1 { ret_kw } else { "$result = " };
             out.push(format!(
                 "{ti}{kw}$this->____plugin_{}()->after{m}($this, $result, ...\\array_values($arguments));",
                 p.clean
@@ -208,6 +214,7 @@ fn render_method_body(
     per_scope: &[Option<Node>],
     default_idx: usize,
     method: &str,
+    void: bool,
 ) -> Vec<String> {
     let parent = Node { before: Vec::new(), around: None, after: Vec::new(), child: None };
     let node_of = |o: &Option<Node>| o.clone().unwrap_or_else(|| parent.clone());
@@ -228,18 +235,21 @@ fn render_method_body(
     }
 
     let mut lines = Vec::new();
+    // The switch cases/default ARE the method's top level (not inside a closure),
+    // so every method-body emit passes `top_level = true`; only `emit`'s own
+    // recursion into an `around` closure flips it off.
     if groups.is_empty() {
-        emit(&node_of(default), method, 0, &mut lines);
+        emit(&node_of(default), method, 0, &mut lines, void, true);
     } else {
         lines.push("switch ($this->____scope->getCurrentScope()) {".to_owned());
         for (names, conf) in &groups {
             for n in names {
                 lines.push(format!("\tcase '{n}':"));
             }
-            emit(&node_of(conf), method, 2, &mut lines);
+            emit(&node_of(conf), method, 2, &mut lines, void, true);
         }
         lines.push("\tdefault:".to_owned());
-        emit(&node_of(default), method, 2, &mut lines);
+        emit(&node_of(default), method, 2, &mut lines, void, true);
         lines.push("}".to_owned());
     }
     lines
@@ -311,7 +321,8 @@ pub fn fused_interceptor_bytes(
         for node in per_scope.iter().flatten() {
             collect(node, &mut plugins, &mut seen);
         }
-        let body = render_method_body(&scope_names, &per_scope, default_idx, &rm.name);
+        let void = rm.return_type.as_deref() == Some("void");
+        let body = render_method_body(&scope_names, &per_scope, default_idx, &rm.name, void);
         method_bodies.push((rm, body));
     }
 
@@ -426,7 +437,7 @@ mod tests {
             child: Some(Box::new(inner)),
         };
         let mut out = Vec::new();
-        emit(&root, "process", 0, &mut out);
+        emit(&root, "process", 0, &mut out, false, true);
         let expected = "\
 $arguments = \\func_get_args();
 $beforeResult = $this->____plugin_low()->beforeProcess($this, ...\\array_values($arguments));
@@ -449,13 +460,46 @@ return $this->____plugin_low()->afterProcess($this, $result, ...\\array_values($
         assert_eq!(out.join("\n"), expected);
     }
 
+    /// A `: void` intercepted method (e.g. CsrfValidator::validate with an
+    /// around plugin) must NOT `return` at its own top level — PHP fatals with
+    /// "A void method must not return a value" — but the untyped `$proceed`
+    /// closure KEEPS `return parent::…()` (the void call evaluates to null).
+    #[test]
+    fn emit_void_drops_top_level_return_keeps_closure_return() {
+        let leaf = Node { before: vec![], around: None, after: vec![], child: None };
+        let root = Node {
+            before: vec![],
+            around: Some(pref("skip")),
+            after: vec![],
+            child: Some(Box::new(leaf)),
+        };
+        let mut out = Vec::new();
+        emit(&root, "validate", 0, &mut out, true, true);
+        let body = out.join("\n");
+        // No line at the method's top level starts with `return `.
+        assert!(
+            !body.lines().any(|l| l.starts_with("return ")),
+            "void top level must not return, got:\n{body}"
+        );
+        // The around dispatch is a bare statement, no `return `/`$result = `.
+        assert!(
+            body.contains("\n$this->____plugin_skip()->aroundValidate($this, function"),
+            "around dispatch not bare, got:\n{body}"
+        );
+        // The inner closure still hands control back with a `return`.
+        assert!(
+            body.contains("\treturn parent::validate(...\\array_values($arguments));"),
+            "closure must keep its return, got:\n{body}"
+        );
+    }
+
     /// The after-only global case (ProbeGlobalOnly): parent call, then a single
     /// `return`-ed after.
     #[test]
     fn emit_after_only_calls_parent_then_after() {
         let node = Node { before: vec![], around: None, after: vec![pref("g")], child: None };
         let mut out = Vec::new();
-        emit(&node, "greet", 0, &mut out);
+        emit(&node, "greet", 0, &mut out, false, true);
         assert_eq!(
             out.join("\n"),
             "$arguments = \\func_get_args();\n\
@@ -473,7 +517,7 @@ return $this->____plugin_low()->afterProcess($this, $result, ...\\array_values($
         let node =
             Node { before: vec![], around: None, after: vec![pref("g"), pref("a")], child: None };
         let mut out = Vec::new();
-        emit(&node, "greet", 0, &mut out);
+        emit(&node, "greet", 0, &mut out, false, true);
         assert_eq!(
             out.join("\n"),
             "$arguments = \\func_get_args();\n\
@@ -495,7 +539,7 @@ return $this->____plugin_low()->afterProcess($this, $result, ...\\array_values($
             Node { before: vec![], around: None, after: vec![pref("g"), pref("a")], child: None };
         let names = ["primary", "global", "adminhtml"];
         let per_scope = vec![Some(g.clone()), Some(g), Some(ga)];
-        let lines = render_method_body(&names, &per_scope, 1, "greet");
+        let lines = render_method_body(&names, &per_scope, 1, "greet", false);
 
         assert_eq!(lines[0], "switch ($this->____scope->getCurrentScope()) {");
         assert_eq!(lines[1], "\tcase 'adminhtml':");
@@ -513,7 +557,7 @@ return $this->____plugin_low()->afterProcess($this, $result, ...\\array_values($
         let g = Node { before: vec![], around: None, after: vec![pref("g")], child: None };
         let names = ["primary", "global", "adminhtml"];
         let per_scope = vec![Some(g.clone()), Some(g.clone()), Some(g)];
-        let lines = render_method_body(&names, &per_scope, 1, "greet");
+        let lines = render_method_body(&names, &per_scope, 1, "greet", false);
         assert!(!lines.iter().any(|l| l.contains("switch (")), "no switch when all == global");
         assert_eq!(lines[0], "$arguments = \\func_get_args();");
     }
