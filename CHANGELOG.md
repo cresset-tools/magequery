@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.12.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.11.0...magequery-v0.12.0) (2026-07-21)
+
+
+### Features
+
+* **magecommand:** adminhtml area support (--area) across the static commands ([#61](https://github.com/cresset-tools/magequery/issues/61)) ([9887802](https://github.com/cresset-tools/magequery/commit/988780210457030824045fda68d3c210c481e845))
+* **magecommand:** static deploy — the no-PHP setup:static-content:deploy finale ([#62](https://github.com/cresset-tools/magequery/issues/62)) ([501b56f](https://github.com/cresset-tools/magequery/commit/501b56f69899bd138aac0423fdeb9fd049e8ea6a))
+* **magecommand:** static files — full byte-exact static-file placement ([#60](https://github.com/cresset-tools/magequery/issues/60)) ([b890b5b](https://github.com/cresset-tools/magequery/commit/b890b5ba553658e5df9ea9b1f7c44ce116c1e455))
+* **magecommand:** static minify — .min.css/.min.js via lightningcss + oxc ([#58](https://github.com/cresset-tools/magequery/issues/58)) ([3984279](https://github.com/cresset-tools/magequery/commit/398427951c33e97cc85632704e88a579df76753d))
+
+
+### Performance Improvements
+
+* **magecommand:** di compile ~24% faster — parallelize input walks, borrow-not-clone ([#64](https://github.com/cresset-tools/magequery/issues/64)) ([8708408](https://github.com/cresset-tools/magequery/commit/8708408aa821b8f27b62a4942ce93b0deff7c28a))
+* **magecommand:** static deploy 2.1x faster — parallelize render/write, fix nested-rayon scaling ([#63](https://github.com/cresset-tools/magequery/issues/63)) ([48ad6a2](https://github.com/cresset-tools/magequery/commit/48ad6a224152f8a0f5244f73457ac48040cd3695))
+
 ## [0.11.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.10.1...magequery-v0.11.0) (2026-07-20)
 
 
