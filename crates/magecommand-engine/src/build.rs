@@ -82,21 +82,54 @@ pub fn compute_outputs_opts(
     let list = metadata::app_action_list(magento);
     files.push(("metadata/app_action_list.php".to_owned(), phpexport::to_php_file(&list)));
 
-    // The seven (plus any custom) area config files — the compile's most
-    // expensive computation, built once and shared with codegen below.
-    let area_files = areaconfig::build_all_area_files(magento, defs, root, fused);
+    // Magento generates code and aggregates the config in a specific order that
+    // is really a fixpoint: it emits factories/proxies, then INTERCEPTORS that
+    // may target them, then its ClassesScanner picks the whole `generated/code`
+    // tree up before the config Reader runs — so every generated name lands in
+    // the `arguments` universe (and thus interception.php's has-plugins map and
+    // InterceptorSubstitution). A from-empty compile clears `generated/code`
+    // before scanning (like `setup:di:compile`), so a single pass is blind to
+    // the classes it is about to emit — leaving interception globally dead at
+    // runtime. We reach the same fixpoint by folding each round's output back
+    // into the scan universe and recomputing until it stops growing: round 1
+    // sees the source classes, round 2 the generated factories/proxies (so
+    // second-order interceptors on them are emitted), round 3 confirms closure.
+    //
+    // A reproduction/warm run whose scan already read an archived
+    // `generated/code` has every generated class from the start, so
+    // `add_generated_code` adds nothing and the loop body never runs — that path
+    // stays byte-identical with zero extra work.
+    let mut interception = interception::interception_map(magento, defs);
+    let mut area_files = areaconfig::build_all_area_files(magento, defs, root, fused);
+    let mut code =
+        codegen::generate_code(magento, defs, root.to_path_buf(), &area_files, &interception, fused);
+    ilap!(_it, "areas + code (round 1)");
+    // Bounded: the generated universe is finite and each round only adds classes,
+    // so this converges in a couple of rounds; the cap is a runaway backstop.
+    for _round in 0..8 {
+        if defs.add_generated_code(&code.files, root) == 0 {
+            break;
+        }
+        interception = interception::interception_map(magento, defs);
+        area_files = areaconfig::build_all_area_files(magento, defs, root, fused);
+        code = codegen::generate_code(
+            magento,
+            defs,
+            root.to_path_buf(),
+            &area_files,
+            &interception,
+            fused,
+        );
+        ilap!(_it, "areas + code (fold round)");
+    }
+
     for ca in &area_files {
         findings.extend(ca.file.findings.iter().cloned());
         files.push((format!("metadata/{}.php", ca.code), ca.rendered.clone()));
     }
-    ilap!(_it, "build + render areas");
-
-    // interception.php (the has-plugins map), reused as codegen's plugin gate.
-    let interception = interception::interception_map(magento, defs);
     files.push(("metadata/interception.php".to_owned(), interception::render(&interception)));
-    ilap!(_it, "interception");
 
-    // plugin-list metadata files.
+    // plugin-list metadata files (over the now-complete universe).
     let plugin_lists = pluginlist::generate(magento, defs);
     for (name, content) in &plugin_lists.files {
         files.push((format!("metadata/{name}"), content.clone()));
@@ -104,14 +137,10 @@ pub fn compute_outputs_opts(
     findings.extend(plugin_lists.findings);
     ilap!(_it, "plugin-lists");
 
-    // generated/code: factories, proxies, interceptors, … .
-    let code =
-        codegen::generate_code(magento, defs, root.to_path_buf(), &area_files, &interception, fused);
     for (rel, content) in code.files {
         files.push((format!("code/{rel}"), content));
     }
     findings.extend(code.findings);
-    ilap!(_it, "generate_code");
 
     CompileOutputs { files, findings, unresolved }
 }
