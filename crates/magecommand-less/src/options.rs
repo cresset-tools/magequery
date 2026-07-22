@@ -182,6 +182,18 @@ pub struct LessOptions {
     /// compresses to `…-link>a.option-title`.
     /// On in Magento profiles.
     pub php_selector_paren_combinators: bool,
+    /// less.php widens the `@import` CSS-passthrough test (source-read v5.5.1,
+    /// `Less_Tree_Import::__construct`): a path is left as a literal `@import`
+    /// (never fetched) when EITHER `/[#.&?\/]css([?;].*)?$/` matches — note the
+    /// **forward slash** added to less.js's `/[#.&?]css([?;].*)?$/` class, so a
+    /// URL segment like `…/css?family=…` counts — OR the path is a remote
+    /// resource, `/^(https?:)?\/\//i` (`http://`, `https://`, or protocol-
+    /// relative `//host`), regardless of extension. less.js has neither rule:
+    /// it would try to FETCH `@import url('https://fonts.googleapis.com/css?…')`
+    /// as a `.less` file and fail. Real Magento themes (e.g. Yotpo_Reviews'
+    /// `_module.less`) import Google-Fonts URLs this way, expecting them to
+    /// survive into the compiled CSS. On in Magento profiles.
+    pub php_css_url_passthrough: bool,
     /// Registered custom functions (the less.js `functionRegistry.add`
     /// surface, minimal form): `(lowercased name, fn)` pairs consulted before
     /// the built-in registry. `None` from the fn = not handled → the unknown-
@@ -231,6 +243,7 @@ impl Default for LessOptions {
             php_import_order: false,
             php_selector_interpolation: false,
             php_selector_paren_combinators: false,
+            php_css_url_passthrough: false,
             max_eval_depth: None,
         }
     }
@@ -259,6 +272,7 @@ impl LessOptions {
             php_import_order: true,
             php_selector_interpolation: true,
             php_selector_paren_combinators: true,
+            php_css_url_passthrough: true,
             ..LessOptions::default()
         }
     }
@@ -276,6 +290,7 @@ impl LessOptions {
             php_import_order: true,
             php_selector_interpolation: true,
             php_selector_paren_combinators: true,
+            php_css_url_passthrough: true,
             ..LessOptions::default()
         }
     }
