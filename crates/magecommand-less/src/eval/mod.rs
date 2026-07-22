@@ -920,7 +920,9 @@ impl<'a> Ctx<'a> {
                         let has = |o: &str| options.iter().any(|x| x == o);
                         let raw = import_path_text(path);
                         let is_css = has("css")
-                            || (!has("less") && !has("inline") && import_path_is_css(&raw));
+                            || (!has("less")
+                                && !has("inline")
+                                && import_path_is_css(&raw, self.opts.php_css_url_passthrough));
                         if !is_css {
                             continue;
                         }
@@ -938,7 +940,7 @@ impl<'a> Ctx<'a> {
                         let p = render_value(&evaled, self.opts.num_precision)
                             .trim_matches(|c| c == '"' || c == '\'')
                             .to_string();
-                        if !import_path_is_css(&p) {
+                        if !import_path_is_css(&p, self.opts.php_css_url_passthrough) {
                             return Err(self.err(ErrorKind::Name, err.clone()));
                         }
                     }
@@ -5675,21 +5677,13 @@ fn import_path_text(path: &Node) -> String {
     }
 }
 
-/// less.js `Import` css-path test: `/[#.&?]css([?;].*)?$/`.
-fn import_path_is_css(path: &str) -> bool {
-    for (i, _) in path.match_indices("css") {
-        if i == 0 {
-            continue;
-        }
-        if !matches!(path.as_bytes()[i - 1], b'#' | b'.' | b'&' | b'?') {
-            continue;
-        }
-        let rest = &path[i + 3..];
-        if rest.is_empty() || rest.starts_with('?') || rest.starts_with(';') {
-            return true;
-        }
-    }
-    false
+/// less.js `Import` css-path test: `/[#.&?]css([?;].*)?$/`. Under `php`
+/// (less.php), the class widens to include `/` and the remote-URL rule
+/// `/^(https?:)?\/\//i` applies — see
+/// [`crate::eval::import::path_is_css_passthrough`], which this mirrors for
+/// stage 2's literal re-emit path.
+fn import_path_is_css(path: &str, php: bool) -> bool {
+    crate::eval::import::path_is_css_passthrough(path, php)
 }
 
 fn is_path_relative(path: &str) -> bool {

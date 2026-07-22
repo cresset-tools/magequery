@@ -119,7 +119,7 @@ pub(crate) fn resolve_imports(
     // variable-path imports must fail like less.js).
     let mut root_snapshot: Option<Vec<Node>> = None;
     loop {
-        let Some(loc) = find_var_import(rules, &mut Vec::new()) else {
+        let Some(loc) = find_var_import(rules, opts.php_css_url_passthrough, &mut Vec::new()) else {
             break;
         };
         if root_snapshot.is_none() {
@@ -289,13 +289,17 @@ fn is_variable_import(path: &Node) -> bool {
     }
 }
 
-/// less.js's css-path test: `/[#.&?]css([?;].*)?$/`.
-pub(crate) fn is_css_path(p: &str) -> bool {
+/// less.js's css-path test: `/[#.&?]css([?;].*)?$/`. Under `php` (less.php,
+/// wikimedia/less.php), the character class additionally includes `/`
+/// (`/[#.&?/]css([?;].*)?$/`) — so a URL path segment like `…/css?family=…`
+/// counts as a CSS import too ([`crate::options::LessOptions::php_css_url_passthrough`]).
+pub(crate) fn is_css_path_with(p: &str, php: bool) -> bool {
     let bytes = p.as_bytes();
     let mut i = 0usize;
     while let Some(off) = p[i..].find("css") {
         let at = i + off;
-        let pre_ok = at > 0 && matches!(bytes[at - 1], b'#' | b'.' | b'&' | b'?');
+        let pre_ok = at > 0
+            && (matches!(bytes[at - 1], b'#' | b'.' | b'&' | b'?') || (php && bytes[at - 1] == b'/'));
         let after = at + 3;
         let post_ok = after == p.len() || matches!(bytes[after], b'?' | b';');
         if pre_ok && post_ok {
@@ -306,9 +310,27 @@ pub(crate) fn is_css_path(p: &str) -> bool {
     false
 }
 
+/// less.php's remote-resource passthrough (wikimedia/less.php `Import.php`,
+/// source-read v5.5.1): a path matching `/^(https?:)?\/\//i` — `http://`,
+/// `https://`, or a protocol-relative `//host` — is left as a literal
+/// `@import` regardless of extension. less.js has no such rule.
+pub(crate) fn is_remote_url(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.starts_with(b"//")
+        || (b.len() >= 7 && b[..7].eq_ignore_ascii_case(b"http://"))
+        || (b.len() >= 8 && b[..8].eq_ignore_ascii_case(b"https://"))
+}
+
+/// The path-decides CSS-passthrough test: less.js's css-path regex, widened
+/// (under `php`) with less.php's `/`-in-class rule and its remote-URL rule.
+pub(crate) fn path_is_css_passthrough(p: &str, php: bool) -> bool {
+    is_css_path_with(p, php) || (php && is_remote_url(p))
+}
+
 /// Whether an import statement is a CSS passthrough (never fetched):
-/// `(css)` forces it, `(less)`/`(inline)` forbid it, else the path decides.
-pub(crate) fn import_is_css(path: &Node, options: &[String]) -> bool {
+/// `(css)` forces it, `(less)`/`(inline)` forbid it, else the path decides
+/// (`php` = the less.php-widened path test, see [`path_is_css_passthrough`]).
+pub(crate) fn import_is_css(path: &Node, options: &[String], php: bool) -> bool {
     if options.iter().any(|o| o == "inline") {
         return false;
     }
@@ -319,7 +341,7 @@ pub(crate) fn import_is_css(path: &Node, options: &[String]) -> bool {
         return true;
     }
     match import_path_string(path) {
-        Some(p) => is_css_path(&p),
+        Some(p) => path_is_css_passthrough(&p, php),
         None => false,
     }
 }
@@ -330,10 +352,10 @@ type Loc = Vec<(usize, usize)>;
 
 /// Find the first still-unresolved variable-path `@import` in document order.
 /// `trail` accumulates `(node_idx, list_idx)` hops.
-fn find_var_import(rules: &[Node], trail: &mut Vec<(usize, usize)>) -> Option<Loc> {
+fn find_var_import(rules: &[Node], php: bool, trail: &mut Vec<(usize, usize)>) -> Option<Loc> {
     for (idx, node) in rules.iter().enumerate() {
         if let Node::Import { path, options, .. } = node {
-            if !import_is_css(path, options) && is_variable_import(path) {
+            if !import_is_css(path, options, php) && is_variable_import(path) {
                 let mut loc = trail.clone();
                 loc.push((idx, usize::MAX));
                 return Some(loc);
@@ -341,7 +363,7 @@ fn find_var_import(rules: &[Node], trail: &mut Vec<(usize, usize)>) -> Option<Lo
         }
         for (li, list) in child_lists(node).into_iter().enumerate() {
             trail.push((idx, li));
-            if let Some(found) = find_var_import(list, trail) {
+            if let Some(found) = find_var_import(list, php, trail) {
                 trail.pop();
                 return Some(found);
             }
@@ -471,7 +493,9 @@ impl<'a> ImportPass<'a> {
                 continue;
             }
             if let Node::Import { path, options, .. } = node {
-                if import_is_css(path, options) || is_variable_import(path) {
+                if import_is_css(path, options, self.opts.php_css_url_passthrough)
+                    || is_variable_import(path)
+                {
                     continue;
                 }
                 let Some(p) = import_path_string(path) else {
@@ -648,7 +672,9 @@ impl<'a> ImportPass<'a> {
                 return Ok(());
             }
         };
-        if is_css_path(&p) && !options.iter().any(|o| o == "less" || o == "inline") {
+        if path_is_css_passthrough(&p, self.opts.php_css_url_passthrough)
+            && !options.iter().any(|o| o == "less" || o == "inline")
+        {
             // Interpolated into a css path: literal re-emit (keep as Import,
             // stage 2 interpolates again for output).
             let mut opts2 = options.clone();
@@ -1057,15 +1083,94 @@ mod tests {
 
     #[test]
     fn css_path_regex_matches_less_js() {
-        assert!(is_css_path("foo.css"));
-        assert!(is_css_path("foo.css?query"));
-        assert!(is_css_path("foo.css;jsessionid=x"));
-        assert!(is_css_path("foo?css"));
-        assert!(is_css_path("foo#css"));
-        assert!(!is_css_path("foo.css.less"));
-        assert!(!is_css_path("foo.less"));
-        assert!(!is_css_path("css"));
-        assert!(!is_css_path("foocss"));
+        // less.js base class (php = false): `/[#.&?]css([?;].*)?$/`.
+        assert!(is_css_path_with("foo.css", false));
+        assert!(is_css_path_with("foo.css?query", false));
+        assert!(is_css_path_with("foo.css;jsessionid=x", false));
+        assert!(is_css_path_with("foo?css", false));
+        assert!(is_css_path_with("foo#css", false));
+        assert!(!is_css_path_with("foo.css.less", false));
+        assert!(!is_css_path_with("foo.less", false));
+        assert!(!is_css_path_with("css", false));
+        assert!(!is_css_path_with("foocss", false));
+    }
+
+    #[test]
+    fn php_css_path_widens_class_and_adds_url_rule() {
+        let url = "https://fonts.googleapis.com/css?family=Work+Sans:400,700";
+        // less.js: the `/` before `css` isn't in the class → NOT css → less.js
+        // would try to fetch the URL as a `.less` file (the reported bug).
+        assert!(!is_css_path_with(url, false));
+        assert!(!path_is_css_passthrough(url, false));
+        // less.php: the widened `[#.&?/]css…` class matches `…/css?…`, and the
+        // remote-URL rule fires independently.
+        assert!(is_css_path_with(url, true));
+        assert!(path_is_css_passthrough(url, true));
+
+        // A remote URL with no css-ish path: only the URL rule catches it.
+        assert!(!is_css_path_with("https://example.com/font/loader", true));
+        assert!(path_is_css_passthrough("https://example.com/font/loader", true));
+
+        // Remote-URL matcher: schemes are case-insensitive; `//` is protocol-
+        // relative; a non-URL local path (or a `https` mid-string) is not one.
+        assert!(is_remote_url("//fonts.example.com/x"));
+        assert!(is_remote_url("HTTP://example.com/x"));
+        assert!(is_remote_url("HttpS://example.com/x"));
+        assert!(!is_remote_url("/local/css/x.less"));
+        assert!(!is_remote_url("foo/https/bar.less"));
+
+        // The widened slash must NOT reclassify a normal `…/css/foo.less` dir
+        // (post-`css` char is `/`, not end/`?`/`;`).
+        assert!(!is_css_path_with("theme/css/widgets.less", true));
+        assert!(!path_is_css_passthrough("theme/css/widgets.less", true));
+
+        // `import_is_css` over a real `url('…')` node.
+        let node = Node::Url(Box::new(Node::Quoted {
+            escaped: false,
+            quote: '\'',
+            value: url.to_string(),
+        }));
+        assert!(import_is_css(&node, &[], true));
+        assert!(!import_is_css(&node, &[], false));
+        // An explicit `(less)` forces a fetch even under php.
+        assert!(!import_is_css(&node, &["less".to_string()], true));
+    }
+
+    #[test]
+    fn google_font_url_import_passes_through_under_php() {
+        use crate::options::LessOptions;
+        use crate::resolver::NoopResolver;
+        let src = ".x { color: red; }\n\
+             @import url('https://fonts.googleapis.com/css?family=Work+Sans:400,700');\n";
+
+        // Magento (less.php) profile: the URL survives as a literal @import; the
+        // resolver is never consulted (so NoopResolver's error never fires).
+        let mut opts = LessOptions::default();
+        opts.php_css_url_passthrough = true;
+        let out = crate::compile(src, &opts, &NoopResolver).expect("URL import is a passthrough");
+        assert!(out.code.contains("@import"), "got: {}", out.code);
+        assert!(
+            out.code
+                .contains("fonts.googleapis.com/css?family=Work+Sans:400,700"),
+            "got: {}",
+            out.code
+        );
+
+        // less.js profile (flag off): the same import is fetched → NoopResolver
+        // reports it missing → compile errors. This is the pre-fix behavior.
+        let opts_js = LessOptions::default();
+        assert!(crate::compile(src, &opts_js, &NoopResolver).is_err());
+
+        // The real Magento production profile (what `static deploy` uses) carries
+        // the flag, so the whole profile→passthrough chain is proven end to end.
+        let out = crate::compile(src, &LessOptions::magento_production(), &NoopResolver)
+            .expect("magento profile passes the URL import through");
+        assert!(
+            out.code
+                .contains("fonts.googleapis.com/css?family=Work+Sans:400,700"),
+            "got: {}",
+            out.code
+        );
     }
 
     #[test]
