@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.13.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.12.4...magequery-v0.13.0) (2026-07-22)
+
+
+### Features
+
+* **static-deploy:** expose an in-process deploy_to_disk API ([3b3f966](https://github.com/cresset-tools/magequery/commit/3b3f966ea85d4b3267a8c4dee4f87666b874dbbb))
+
+
+### Bug Fixes
+
+* **magecommand-less:** static deploy — pass remote/[@import](https://github.com/import) url() CSS through (less.php parity) ([#77](https://github.com/cresset-tools/magequery/issues/77)) ([5f31bf3](https://github.com/cresset-tools/magequery/commit/5f31bf3dd5d69847128244b115896961fa3df7ad))
+* **magecommand:** static deploy — a broken LESS entry warns instead of sinking the run ([#78](https://github.com/cresset-tools/magequery/issues/78)) ([2d2e505](https://github.com/cresset-tools/magequery/commit/2d2e50508126c153570512bcfb6dabfe00aca03f))
+
 ## [0.12.4](https://github.com/cresset-tools/magequery/compare/magequery-v0.12.3...magequery-v0.12.4) (2026-07-22)
 
 
