@@ -545,9 +545,9 @@ impl Default for PlacementOptions {
     }
 }
 
-/// A rendered entry: content, how it was produced, LESS warnings
-/// (`(logical path, message)`).
-type RenderedEntry = (Vec<u8>, PlacedKind, Vec<(String, String)>);
+/// A rendered entry: its content and how it was produced (`None` = the entry
+/// deploys no file), plus LESS warnings (`(logical path, message)`).
+type RenderedEntry = (Option<(Vec<u8>, PlacedKind)>, Vec<(String, String)>);
 
 /// Render ONE package entry to bytes — a pure per-file function (fan-out
 /// friendly): LESS entries compile through `orchestrator` (which applies the
@@ -561,14 +561,25 @@ fn render_entry(
     theme_path: &str,
 ) -> Result<RenderedEntry, FilesError> {
     if entry.less {
-        let compiled = orchestrator.compile_entry(&entry.logical, less_opts)?;
+        // A LESS entry that will not compile is a per-file diagnostic, not a
+        // fatal run: `DeployPackage` catches the `ContentProcessorException`,
+        // logs it and deploys the rest of the package, leaving no file behind.
+        // Third-party stylesheets that compile on no install are common
+        // (Hyva_Email's `email-inline.less` imports a lib path that resolves
+        // in no fallback layer, and is absent from every real deploy on this
+        // machine's stores), so a hard error here would let one of them sink
+        // an otherwise complete deploy.
+        let compiled = match orchestrator.compile_entry(&entry.logical, less_opts) {
+            Ok(c) => c,
+            Err(e) => return Ok((None, vec![(entry.logical.clone(), format!("{e}"))])),
+        };
         let css = cssnotation::module_notation(&compiled.css, &entry.deployed);
         let warnings = compiled
             .warnings
             .into_iter()
             .map(|w| (entry.logical.clone(), w))
             .collect();
-        return Ok((css.into_bytes(), PlacedKind::LessCompiled, warnings));
+        return Ok((Some((css.into_bytes(), PlacedKind::LessCompiled)), warnings));
     }
     let bytes = std::fs::read(&entry.source).map_err(|e| FilesError {
         entry: Some(entry.logical.clone()),
@@ -584,11 +595,11 @@ fn render_entry(
             let processed = cssnotation::variable_notation(css, area, theme_path);
             let processed = cssnotation::module_notation(&processed, &entry.deployed);
             if processed.as_bytes() != bytes.as_slice() {
-                return Ok((processed.into_bytes(), PlacedKind::CssProcessed, Vec::new()));
+                return Ok((Some((processed.into_bytes(), PlacedKind::CssProcessed)), Vec::new()));
             }
         }
     }
-    Ok((bytes, PlacedKind::Copy, Vec::new()))
+    Ok((Some((bytes, PlacedKind::Copy)), Vec::new()))
 }
 
 /// Place one theme's full package. `modules` is the enabled set in
@@ -657,18 +668,24 @@ fn build_theme_prebundle(
     // order (hence `sri-hashes.json` deployment order) is identical to serial,
     // and a `--jobs 1` run (one-thread pool) is byte-identical.
     use rayon::prelude::*;
-    let rendered: Vec<(PlacedFile, Vec<(String, String)>)> = entries
+    let rendered: Vec<(Option<PlacedFile>, Vec<(String, String)>)> = entries
         .par_iter()
         .map(|entry| {
-            let (content, kind, warns) =
+            let (rendered, warns) =
                 render_entry(entry, &orchestrator, &less_opts, area, &theme_path)?;
-            Ok((PlacedFile { path: entry.deployed.clone(), content, kind }, warns))
+            let placed = rendered
+                .map(|(content, kind)| PlacedFile { path: entry.deployed.clone(), content, kind });
+            Ok((placed, warns))
         })
         .collect::<Result<Vec<_>, FilesError>>()?;
     let mut files: Vec<PlacedFile> = Vec::with_capacity(entries.len() + 16);
     let mut warnings: Vec<(String, String)> = Vec::new();
     for (pf, mut warns) in rendered {
-        files.push(pf);
+        // `None` = the entry deploys no file (a LESS entry that would not
+        // compile); its diagnostic rides along in `warns`.
+        if let Some(pf) = pf {
+            files.push(pf);
+        }
         warnings.append(&mut warns);
     }
 
@@ -1262,6 +1279,51 @@ mod tests {
         let a = sri.find("legacy-build.min.js").unwrap();
         let b = sri.find("requirejs-config.js").unwrap();
         assert!(a < b);
+    }
+
+    /// A LESS entry that will not compile must not sink the package: a real
+    /// `setup:static-content:deploy` logs the `ContentProcessorException` and
+    /// deploys everything else, leaving no file for it. Third-party stylesheets
+    /// that compile on no install exist in the wild (Hyva_Email's
+    /// `email-inline.less`), so the failure has to be a per-entry warning.
+    #[test]
+    fn broken_less_entry_warns_and_deploys_the_rest() {
+        let td = synth_root();
+        let r = td.path();
+        std::fs::write(
+            r.join("app/code/Acme/Widgets/view/frontend/web/css/broken.less"),
+            "@import 'no/such/_partial.less';\n",
+        )
+        .unwrap();
+        let (themes, modules) = refs(r);
+        let mut cache = MinSiblingCache::new();
+        let pkg = build_theme(
+            r,
+            "frontend",
+            "Acme/base",
+            "en_US",
+            &themes,
+            &modules,
+            &modules,
+            "RESOLVER",
+            "[]",
+            &PlacementOptions::default(),
+            &mut cache,
+        )
+        .expect("a broken LESS entry must not fail the build");
+
+        // No file for the entry that would not compile...
+        assert!(!pkg.files.iter().any(|f| f.path == "Acme_Widgets/css/broken.css"));
+        // ...but a warning naming it, carrying the compiler's diagnostic.
+        let warn = pkg
+            .warnings
+            .iter()
+            .find(|(logical, _)| logical.contains("broken"))
+            .expect("the failure is reported as a warning");
+        assert!(warn.1.contains("no/such/_partial.less"), "diagnostic kept: {}", warn.1);
+        // ...and the rest of the package is untouched.
+        assert!(pkg.files.iter().any(|f| f.path == "spacer.gif"));
+        assert!(pkg.files.iter().any(|f| f.path == SRI_HASHES_FILE_NAME));
     }
 
     #[test]
