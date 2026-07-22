@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.3](https://github.com/cresset-tools/magequery/compare/magequery-v0.12.2...magequery-v0.12.3) (2026-07-21)
+
+
+### Bug Fixes
+
+* **engine:** fused interceptor must not `return` in `: void` methods ([#72](https://github.com/cresset-tools/magequery/issues/72)) ([d9d7928](https://github.com/cresset-tools/magequery/commit/d9d7928ee41afcabc98b7437b92c423337976a32)), closes [#71](https://github.com/cresset-tools/magequery/issues/71)
+
 ## [0.12.2](https://github.com/cresset-tools/magequery/compare/magequery-v0.12.1...magequery-v0.12.2) (2026-07-21)
 
 
