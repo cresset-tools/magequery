@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.4](https://github.com/cresset-tools/magequery/compare/magequery-v0.12.3...magequery-v0.12.4) (2026-07-22)
+
+
+### Bug Fixes
+
+* **engine:** fused interceptor gets the ObjectManager from the singleton, not the constructor ([#74](https://github.com/cresset-tools/magequery/issues/74)) ([3011df4](https://github.com/cresset-tools/magequery/commit/3011df46fc2890310386ac523aa34bf0b59a38e2))
+
 ## [0.12.3](https://github.com/cresset-tools/magequery/compare/magequery-v0.12.2...magequery-v0.12.3) (2026-07-21)
 
 
