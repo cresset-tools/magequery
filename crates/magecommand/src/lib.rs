@@ -290,6 +290,13 @@ enum StaticCommand {
         /// production-mode compressed css.
         #[arg(long)]
         no_compress: bool,
+        /// Print per-entry LESS compiler diagnostics ("extend has no matches",
+        /// complex-selector notes) and any un-compilable entry that was skipped.
+        /// Off by default: a real `setup:static-content:deploy` prints none of
+        /// these to the console (they only reach var/log), so silence is the
+        /// parity default.
+        #[arg(long, short = 'v')]
+        verbose: bool,
     },
     /// Minify ONE CSS or JS file (the `.min.*` building block of the future
     /// `static deploy`). Deliberately NOT byte-parity with Magento's
@@ -523,6 +530,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 ref deployed_version,
                 jobs,
                 no_compress,
+                verbose,
             } => static_deploy(
                 cli.root,
                 locales,
@@ -535,6 +543,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 deployed_version.as_deref(),
                 jobs,
                 no_compress,
+                verbose,
                 cli.json,
             ),
             StaticCommand::Minify { ref css, ref js, ref out, stdout } => {
@@ -1220,6 +1229,7 @@ fn static_deploy(
     deployed_version: Option<&str>,
     jobs: Option<usize>,
     no_compress: bool,
+    verbose: bool,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
     use static_deploy::deploy as sdd;
@@ -1301,8 +1311,13 @@ fn static_deploy(
     let mut total_files = 0usize;
     let mut total_bytes = 0usize;
     for s in &stats {
-        for (logical, warning) in &s.warnings {
-            eprintln!("warning: {}/{} [{}]: {logical}: {warning}", s.area, s.theme, s.locale);
+        // A real `setup:static-content:deploy` prints no per-entry LESS
+        // diagnostics to the console (they only reach var/log), so stay silent
+        // for parity unless `--verbose` asks for them.
+        if verbose {
+            for (logical, warning) in &s.warnings {
+                eprintln!("warning: {}/{} [{}]: {logical}: {warning}", s.area, s.theme, s.locale);
+            }
         }
         println!(
             "{}/{} [{}]: {} file(s) ({} copied, {} css-processed, {} less-compiled, \
