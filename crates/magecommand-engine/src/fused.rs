@@ -3,7 +3,7 @@
 //!
 //! Instead of Magento's runtime `pluginList->getNext` + `___callPlugins`
 //! dispatch, the plugin chain is resolved at compile time and unrolled into the
-//! method body: plugins come lazily from `$this->____om->get()` accessors, and
+//! method body: plugins come lazily from `$this->____om()->get()` accessors (the OM itself from the `ObjectManager::getInstance()` singleton), and
 //! the before/around/after listeners are inlined. This module renders the
 //! GLOBAL-ONLY case (a class with no per-area plugin differences → a flat body,
 //! no `switch (getCurrentScope())`). The per-area switch is a later increment.
@@ -21,9 +21,6 @@ use crate::definitions::Definitions;
 use crate::laminas::render_type;
 use crate::pluginlist::{GlobalChains, ScopeChains};
 use crate::reflect::{self, RMethod, RParam};
-
-const OM_TYPE: &str = "\\Magento\\Framework\\ObjectManagerInterface";
-const SCOPE_TYPE: &str = "\\Magento\\Framework\\Config\\ScopeInterface";
 
 /// di.xml plugin name → the property/accessor suffix: `[^A-Za-z0-9_] → _`.
 fn clean(name: &str) -> String {
@@ -241,7 +238,7 @@ fn render_method_body(
     if groups.is_empty() {
         emit(&node_of(default), method, 0, &mut lines, void, true);
     } else {
-        lines.push("switch ($this->____scope->getCurrentScope()) {".to_owned());
+        lines.push("switch ($this->____scope()->getCurrentScope()) {".to_owned());
         for (names, conf) in &groups {
             for n in names {
                 lines.push(format!("\tcase '{n}':"));
@@ -340,30 +337,35 @@ pub fn fused_interceptor_bytes(
         ));
     }
 
-    // constructor
-    let ctor = defs.constructor_of(source).ok().flatten();
-    let mut params = vec![format!("{OM_TYPE} $____om"), format!("{SCOPE_TYPE} $____scope")];
-    let mut ctor_body = vec![
-        "        $this->____om = $____om;".to_owned(),
-        "        $this->____scope = $____scope;".to_owned(),
-    ];
-    if let Some(info) = ctor {
+    // The ObjectManager and scope are NOT constructor-injected. A subject with
+    // no compiled `arguments` entry (e.g. CsrfValidator — no di.xml config) gives
+    // Magento's Compiled factory nothing to key the interceptor's ctor args off,
+    // so extra ctor deps fatal at runtime ("Argument #1 ($____om) not passed").
+    // Instead the interceptor keeps the subject's OWN constructor (a plain
+    // forward to parent, or inherited when the subject has none), so the factory
+    // builds it exactly like the subject; the OM is pulled from the global
+    // singleton lazily (____om()/____scope() below) — creatuity's __wakeup
+    // fallback, promoted to the only path.
+    if let Some(info) = defs.constructor_of(source).ok().flatten() {
         let subject_params = reflect::resolve_params(defs, info.definer_fqcn, info.params);
-        for p in &subject_params {
-            params.push(render_param(p));
-        }
+        let params: Vec<String> = subject_params.iter().map(render_param).collect();
         let forwarded: Vec<String> = subject_params
             .iter()
             .map(|p| if p.variadic { format!("... ${}", p.name) } else { format!("${}", p.name) })
             .collect();
-        ctor_body.push(format!("        parent::__construct({});", forwarded.join(", ")));
+        members.push(format!(
+            "{}\n    public function __construct({})\n    {{\n        parent::__construct({});\n    }}",
+            docblock(&["{@inheritdoc}".into()]),
+            params.join(", "),
+            forwarded.join(", "),
+        ));
     }
-    members.push(format!(
-        "{}\n    public function __construct({})\n    {{\n{}\n    }}",
-        docblock(&["{@inheritdoc}".into()]),
-        params.join(", "),
-        ctor_body.join("\n"),
-    ));
+    members.push(
+        "    private function ____om()\n    {\n        if ($this->____om === null) {\n        \t$this->____om = \\Magento\\Framework\\App\\ObjectManager::getInstance();\n        }\n        return $this->____om;\n    }".to_owned(),
+    );
+    members.push(
+        "    private function ____scope()\n    {\n        if ($this->____scope === null) {\n        \t$this->____scope = $this->____om()->get(\\Magento\\Framework\\Config\\ScopeInterface::class);\n        }\n        return $this->____scope;\n    }".to_owned(),
+    );
 
     // intercepted methods
     for (rm, body_lines) in &method_bodies {
@@ -380,7 +382,7 @@ pub fn fused_interceptor_bytes(
         // di.xml name for the docblock `plugin "<name>"`: recover from insts.
         let name = insts.iter().find(|(n, _)| clean(n) == p.clean).map(|(n, _)| n.clone()).unwrap_or_else(|| p.clean.clone());
         let body = format!(
-            "        if ($this->____plugin_{c} === null) {{\n        \t$this->____plugin_{c} = $this->____om->get(\\{i}::class);\n        }}\n        return $this->____plugin_{c};",
+            "        if ($this->____plugin_{c} === null) {{\n        \t$this->____plugin_{c} = $this->____om()->get(\\{i}::class);\n        }}\n        return $this->____plugin_{c};",
             c = p.clean,
             i = p.instance,
         );
@@ -541,7 +543,7 @@ return $this->____plugin_low()->afterProcess($this, $result, ...\\array_values($
         let per_scope = vec![Some(g.clone()), Some(g), Some(ga)];
         let lines = render_method_body(&names, &per_scope, 1, "greet", false);
 
-        assert_eq!(lines[0], "switch ($this->____scope->getCurrentScope()) {");
+        assert_eq!(lines[0], "switch ($this->____scope()->getCurrentScope()) {");
         assert_eq!(lines[1], "\tcase 'adminhtml':");
         assert!(lines.iter().any(|l| l == "\tdefault:"), "default branch present");
         assert!(!lines.iter().any(|l| l.contains("'primary'")), "primary collapses into default");

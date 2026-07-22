@@ -100,7 +100,7 @@ pub fn compute_outputs_opts(
     // `add_generated_code` adds nothing and the loop body never runs — that path
     // stays byte-identical with zero extra work.
     let mut interception = interception::interception_map(magento, defs);
-    let mut area_files = areaconfig::build_all_area_files(magento, defs, root, fused);
+    let mut area_files = areaconfig::build_all_area_files(magento, defs, root);
     let mut code =
         codegen::generate_code(magento, defs, root.to_path_buf(), &area_files, &interception, fused);
     ilap!(_it, "areas + code (round 1)");
@@ -111,7 +111,7 @@ pub fn compute_outputs_opts(
             break;
         }
         interception = interception::interception_map(magento, defs);
-        area_files = areaconfig::build_all_area_files(magento, defs, root, fused);
+        area_files = areaconfig::build_all_area_files(magento, defs, root);
         code = codegen::generate_code(
             magento,
             defs,
