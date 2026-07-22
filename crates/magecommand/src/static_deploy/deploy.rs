@@ -47,7 +47,7 @@
 //! deploys, NOT one combined command.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
@@ -81,6 +81,156 @@ const ALLOWED_LOCALES: &[&str] = &[
 /// path (a deploy writing outside `--out`).
 pub fn is_allowed_locale(loc: &str) -> bool {
     ALLOWED_LOCALES.binary_search(&loc).is_ok()
+}
+
+/// How the shared bundle-cache `.min`-sibling ordering is resolved — the
+/// `magecommand static deploy --order` choice, as a typed value for in-process
+/// callers.
+#[derive(Debug, Clone)]
+pub enum Order {
+    /// Deterministic byte-sorted ordering (no minification probe).
+    Sorted,
+    /// Probe real minification, using the given scratch dir (`None` = the static
+    /// root itself).
+    Probe(Option<PathBuf>),
+}
+
+/// A whole `setup:static-content:deploy` run as a linkable request. Mirrors the
+/// `magecommand static deploy` CLI arguments so an in-process caller (e.g.
+/// magebuild) gets byte-identical matrix orchestration without shelling out.
+#[derive(Debug, Clone)]
+pub struct DeployRequest {
+    /// The positional/default locale set — at least one required.
+    pub locales: Vec<String>,
+    /// Theme matrix entries: a bare/area-qualified `id`, or `id:loc1,loc2` to
+    /// override that theme's locales. Empty ⇒ every discovered theme with the
+    /// default locales.
+    pub themes: Vec<String>,
+    /// Area include filter (`frontend` / `adminhtml`); empty ⇒ both.
+    pub areas: Vec<String>,
+    /// Static-root override; `None` ⇒ `<root>/pub/static`.
+    pub out: Option<PathBuf>,
+    /// Bundle `.min`-sibling ordering strategy.
+    pub order: Order,
+    /// Don't walk theme `<parent>` fallbacks when discovering the default set.
+    pub no_parent: bool,
+    /// `deployed_version.txt` contents written once at the static root; `None` ⇒
+    /// don't write it (never an invented timestamp).
+    pub deployed_version: Option<String>,
+    /// rayon job cap: `None` ⇒ rayon default, `Some(1)` ⇒ serial.
+    pub jobs: Option<usize>,
+    /// Skip gzip/brotli pre-compression of text assets.
+    pub no_compress: bool,
+}
+
+/// The result of [`deploy_to_disk`] — everything the CLI renders, so an
+/// in-process caller can report identically.
+#[derive(Debug, Clone)]
+pub struct DeploySummary {
+    /// The static root everything was written under.
+    pub static_root: PathBuf,
+    /// The planned `(area, locale)` groups, in build order.
+    pub groups: Vec<Group>,
+    /// Themes dropped for a dangling `<parent>` chain (non-fatal diagnostics).
+    pub skipped: Vec<SkippedTheme>,
+    /// Per-`(area, theme, locale)` placement stats.
+    pub stats: Vec<TupleStat>,
+    /// Wall-clock of the execute (write-to-disk) phase.
+    pub elapsed: std::time::Duration,
+}
+
+/// Reproduce a whole `setup:static-content:deploy` run over the
+/// theme × locale × area matrix, writing every package under the static root.
+/// This is the one in-process entry point: `magecommand static deploy` and
+/// magebuild both call it, and the CLI adds only argument parsing and result
+/// rendering on top. Fatal problems (bad root, invalid locale/area, an empty
+/// plan, a write failure) return `Err`; a theme skipped for a dangling parent
+/// chain is a non-fatal [`DeploySummary::skipped`] entry.
+pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<DeploySummary> {
+    use anyhow::Context as _;
+
+    if req.locales.is_empty() {
+        anyhow::bail!("no locales given — pass at least one, e.g. `static deploy en_US`");
+    }
+    for a in &req.areas {
+        if a != "frontend" && a != "adminhtml" {
+            anyhow::bail!("--area must be `frontend` and/or `adminhtml`, got `{a}`");
+        }
+    }
+
+    let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let magento = magequery_core::Magento::open(&root)
+        .with_context(|| format!("not a Magento root: {}", root.display()))?;
+
+    let static_root = match &req.out {
+        Some(dir) => dir.clone(),
+        None => root.join("pub").join("static"),
+    };
+
+    // Parse the theme matrix: `id` or `id:loc1,loc2`.
+    let theme_specs: Vec<ThemeSpec> = req
+        .themes
+        .iter()
+        .map(|raw| match raw.split_once(':') {
+            Some((id, locs)) => ThemeSpec {
+                id: id.to_string(),
+                locales: Some(
+                    locs.split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect(),
+                ),
+            },
+            None => ThemeSpec { id: raw.to_string(), locales: None },
+        })
+        .collect();
+
+    let inputs = DeployInputs::prepare(&magento).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let Plan { groups, skipped } = plan(&inputs, &req.locales, &theme_specs, &req.areas, req.no_parent)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if groups.is_empty() {
+        // Every candidate theme was skipped (dangling parent chain) or the area
+        // filter matched nothing — fold the skip reasons into the error so the
+        // diagnostic survives even without a summary to carry it.
+        if skipped.is_empty() {
+            anyhow::bail!("nothing to deploy (no theme matches the area filter)");
+        }
+        let detail = skipped
+            .iter()
+            .map(|s| format!("{} ({})", s.id, s.reason))
+            .collect::<Vec<_>>()
+            .join("; ");
+        anyhow::bail!("nothing to deploy — every candidate theme was skipped: {detail}");
+    }
+
+    let order_mode = match &req.order {
+        Order::Sorted => super::bundle::OrderMode::Sorted,
+        Order::Probe(scratch) => {
+            let scratch = scratch.clone().unwrap_or_else(|| static_root.clone());
+            std::fs::create_dir_all(&scratch)
+                .with_context(|| format!("create probe scratch {}", scratch.display()))?;
+            super::bundle::OrderMode::Probe(scratch)
+        }
+    };
+    let opts = PlacementOptions { compress: !req.no_compress, order: order_mode };
+
+    // deployed_version.txt — ONE file at the static root, written first (only
+    // with an explicit version, never an invented timestamp).
+    if let Some(version) = &req.deployed_version {
+        std::fs::create_dir_all(&static_root)
+            .with_context(|| format!("mkdir {}", static_root.display()))?;
+        let p = static_root.join(files::DEPLOYED_VERSION_FILE_NAME);
+        std::fs::write(&p, version.as_bytes())
+            .with_context(|| format!("write {}", p.display()))?;
+    }
+
+    let started = std::time::Instant::now();
+    let stats = execute_to_disk(&inputs, &groups, &static_root, &opts, req.jobs)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let elapsed = started.elapsed();
+
+    Ok(DeploySummary { static_root, groups, skipped, stats, elapsed })
 }
 
 /// One requested theme with its resolved locale set.

@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 
-mod static_deploy;
+pub mod static_deploy;
 mod watch;
 
 #[derive(Parser)]
@@ -1222,101 +1222,49 @@ fn static_deploy(
     no_compress: bool,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
-    use static_deploy::bundle as sdb;
     use static_deploy::deploy as sdd;
     use static_deploy::files as sdf;
 
-    if locales.is_empty() {
-        anyhow::bail!("no locales given — pass at least one, e.g. `static deploy en_US`");
-    }
-    for a in areas {
-        if a != "frontend" && a != "adminhtml" {
-            anyhow::bail!("--area must be `frontend` and/or `adminhtml`, got `{a}`");
-        }
-    }
-
-    let root = root.unwrap_or_else(|| PathBuf::from("."));
-    let root = std::path::absolute(&root).unwrap_or(root);
-    let magento = magequery_core::Magento::open(&root)
-        .with_context(|| format!("not a Magento root: {}", root.display()))?;
-
-    let static_root = match out {
-        Some(dir) => dir.to_path_buf(),
-        None => root.join("pub").join("static"),
-    };
-
-    // Parse the theme matrix: `id` or `id:loc1,loc2`.
-    let theme_specs: Vec<sdd::ThemeSpec> = theme_args
-        .iter()
-        .map(|raw| match raw.split_once(':') {
-            Some((id, locs)) => sdd::ThemeSpec {
-                id: id.to_string(),
-                locales: Some(
-                    locs.split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                        .collect(),
-                ),
-            },
-            None => sdd::ThemeSpec { id: raw.to_string(), locales: None },
-        })
-        .collect();
-
-    let inputs = sdf::DeployInputs::prepare(&magento).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let plan = match sdd::plan(&inputs, locales, &theme_specs, areas, no_parent) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return Ok(ExitCode::FAILURE);
-        }
-    };
-    // A discovered theme with a dangling `<parent>` is dropped from the default
-    // all-themes run (not fatal) — surface each so the exclusion is never
-    // silent; name the theme with `--theme` to force it (and fail loud).
-    for s in &plan.skipped {
-        eprintln!("warning: skipping theme {} — {} (use --theme {} to force)", s.id, s.reason, s.id);
-    }
-    let groups = plan.groups;
-    if groups.is_empty() {
-        eprintln!("error: nothing to deploy (no theme matches the area filter)");
-        return Ok(ExitCode::FAILURE);
-    }
-
-    let order_mode = match order {
-        "sorted" => sdb::OrderMode::Sorted,
-        "probe" => {
-            let scratch = match probe_dir {
-                Some(d) => d.to_path_buf(),
-                None => static_root.clone(),
-            };
-            std::fs::create_dir_all(&scratch)
-                .with_context(|| format!("create probe scratch {}", scratch.display()))?;
-            sdb::OrderMode::Probe(scratch)
-        }
+    // Translate the CLI's `--order` string into the typed request enum (the
+    // one bit of arg validation that stays CLI-side; every other check lives in
+    // the shared `deploy_to_disk`).
+    let order = match order {
+        "sorted" => sdd::Order::Sorted,
+        "probe" => sdd::Order::Probe(probe_dir.map(|p| p.to_path_buf())),
         other => anyhow::bail!("--order must be `probe` or `sorted`, got `{other}`"),
     };
-    let opts = sdf::PlacementOptions { compress: !no_compress, order: order_mode };
 
-    // deployed_version.txt — ONE file at the static root, written first (only
-    // with an explicit version, never an invented timestamp).
-    if let Some(version) = deployed_version {
-        std::fs::create_dir_all(&static_root)
-            .with_context(|| format!("mkdir {}", static_root.display()))?;
-        let p = static_root.join(sdf::DEPLOYED_VERSION_FILE_NAME);
-        std::fs::write(&p, version.as_bytes())
-            .with_context(|| format!("write {}", p.display()))?;
-    }
+    let req = sdd::DeployRequest {
+        locales: locales.to_vec(),
+        themes: theme_args.to_vec(),
+        areas: areas.to_vec(),
+        out: out.map(|p| p.to_path_buf()),
+        order,
+        no_parent,
+        deployed_version: deployed_version.map(str::to_string),
+        jobs,
+        no_compress,
+    };
 
-    let started = std::time::Instant::now();
-    let stats = match sdd::execute_to_disk(&inputs, &groups, &static_root, &opts, jobs) {
+    // The whole matrix orchestration is now the linkable in-process engine call
+    // (magebuild uses the same entry); the CLI adds only rendering below.
+    let root = root.unwrap_or_else(|| PathBuf::from("."));
+    let summary = match sdd::deploy_to_disk(&root, &req) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("error: {e:#}");
             return Ok(ExitCode::FAILURE);
         }
     };
-    let elapsed = started.elapsed();
+
+    // A discovered theme with a dangling `<parent>` was dropped from the default
+    // all-themes run (not fatal) — surface each so the exclusion is never
+    // silent; name the theme with `--theme` to force it (and fail loud).
+    for s in &summary.skipped {
+        eprintln!("warning: skipping theme {} — {} (use --theme {} to force)", s.id, s.reason, s.id);
+    }
+
+    let sdd::DeploySummary { static_root, groups, skipped, stats, elapsed } = summary;
 
     if json {
         let doc = serde_json::json!({
@@ -1328,7 +1276,7 @@ fn static_deploy(
                 "locale": g.locale,
                 "themes": g.theme_ids,
             })).collect::<Vec<_>>(),
-            "skipped": plan.skipped.iter().map(|s| serde_json::json!({
+            "skipped": skipped.iter().map(|s| serde_json::json!({
                 "theme": s.id,
                 "reason": s.reason,
             })).collect::<Vec<_>>(),
