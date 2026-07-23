@@ -258,6 +258,11 @@ pub struct LessOrchestrator {
     modules: Vec<ModuleRef>,
     /// `<root>/lib/web`.
     lib_web: PathBuf,
+    /// Extra NON-modular fallback dirs contributed by a registered
+    /// `ModularSwitch::getPatternDirs` plugin, searched after `lib/web` (the
+    /// plugin appends). Hyva_Email adds its own `view/frontend/web` here, which
+    /// is what lets its theme-root `css/email.less` find `source/lib/_lib.less`.
+    extra_web_dirs: Vec<PathBuf>,
 }
 
 impl LessOrchestrator {
@@ -276,7 +281,15 @@ impl LessOrchestrator {
             chain,
             modules,
             lib_web: root.join("lib").join("web"),
+            extra_web_dirs: Vec::new(),
         })
+    }
+
+    /// Append extra NON-modular fallback dirs (a registered
+    /// `ModularSwitch::getPatternDirs` plugin's contribution).
+    pub fn with_extra_web_dirs(mut self, dirs: &[PathBuf]) -> Self {
+        self.extra_web_dirs = dirs.to_vec();
+        self
     }
 
     /// Build from an open `magequery-core` handle: themes from
@@ -340,6 +353,12 @@ impl LessOrchestrator {
         if p.is_file() {
             return Some((p, None));
         }
+        for d in &self.extra_web_dirs {
+            let p = d.join(logical);
+            if p.is_file() {
+                return Some((p, None));
+            }
+        }
         None
     }
 
@@ -362,6 +381,7 @@ impl LessOrchestrator {
             out.push(t.dir.join("web").join(logical));
         }
         out.push(self.lib_web.join(logical));
+        out.extend(self.extra_web_dirs.iter().map(|d| d.join(logical)));
         out
     }
 

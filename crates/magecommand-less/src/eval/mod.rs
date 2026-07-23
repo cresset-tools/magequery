@@ -367,6 +367,7 @@ pub(crate) fn eval_with_source(
         np: opts.num_precision,
         compress: opts.compress,
         keep_zero_units: opts.php_zero_units,
+        php_numbers: opts.php_number_format,
         paren_combinators: opts.php_selector_paren_combinators,
     });
     Ok(Css {
@@ -1114,6 +1115,7 @@ impl<'a> Ctx<'a> {
                         self.opts.num_precision,
                         self.opts.compress,
                         self.opts.php_zero_units,
+                        self.opts.php_number_format,
                     );
                     if !text.is_empty() {
                         if self_paths.is_none() {
@@ -1762,6 +1764,7 @@ impl<'a> Ctx<'a> {
                         self.opts.num_precision,
                         self.opts.compress,
                         self.opts.php_zero_units,
+                        self.opts.php_number_format,
                     )
                 }
             };
@@ -2429,6 +2432,7 @@ impl<'a> Ctx<'a> {
                 self.opts.num_precision,
                 self.opts.compress,
                 self.opts.php_zero_units,
+                self.opts.php_number_format,
             )? {
                 return Ok(result);
             }
@@ -4218,6 +4222,7 @@ impl<'a> Ctx<'a> {
                         self.opts.num_precision,
                         self.opts.compress,
                         self.opts.php_zero_units,
+                        self.opts.php_number_format,
                     )
                 }
                 Err(_) => rhs.to_string(),
@@ -4302,6 +4307,7 @@ impl<'a> Ctx<'a> {
                                 self.opts.num_precision,
                                 true,
                                 self.opts.php_zero_units,
+                                self.opts.php_number_format,
                             );
                             push_tok(&mut out, &t, &mut pending_space);
                             continue;
@@ -4440,6 +4446,7 @@ impl<'a> Ctx<'a> {
                                     self.interp_precision(),
                                     self.opts.compress,
                                     self.opts.php_zero_units,
+                                    self.opts.php_number_format,
                                 ));
                                 i = k;
                                 continue;
@@ -4453,6 +4460,7 @@ impl<'a> Ctx<'a> {
                                 self.interp_precision(),
                                 self.opts.compress,
                                 self.opts.php_zero_units,
+                                self.opts.php_number_format,
                             ));
                             i = j;
                             continue;
@@ -4573,6 +4581,7 @@ impl<'a> Ctx<'a> {
                                 self.interp_precision(),
                                 self.opts.compress,
                                 self.opts.php_zero_units,
+                                self.opts.php_number_format,
                             ));
                         } else {
                             out.push_str(&value_to_plain_string_p(
@@ -4580,6 +4589,7 @@ impl<'a> Ctx<'a> {
                                 self.interp_precision(),
                                 self.opts.compress,
                                 self.opts.php_zero_units,
+                                self.opts.php_number_format,
                             ));
                         }
                         rest = &after[e + 1..];
@@ -5508,7 +5518,7 @@ fn value_to_plain_string(node: &Node) -> String {
 /// with a bare comma under compress (§C4). Internal identity uses (guards,
 /// lookup keys) stay on the expanded form.
 fn value_to_plain_string_c(node: &Node, compress: bool) -> String {
-    value_to_plain_string_p(node, 0, compress, false)
+    value_to_plain_string_p(node, 0, compress, false, false)
 }
 
 /// [`value_to_plain_string_c`] with a print precision (D-interp, §3): less.php
@@ -5522,12 +5532,13 @@ fn value_to_plain_string_p(
     num_precision: u8,
     compress: bool,
     keep_zero_units: bool,
+    php_numbers: bool,
 ) -> String {
     match node {
         Node::Quoted { value, .. } => value.clone(),
         Node::Keyword(k) => k.clone(),
         Node::Anonymous(s) => s.clone(),
-        other => render_value_cz(other, num_precision, compress, keep_zero_units),
+        other => render_value_cz(other, num_precision, compress, keep_zero_units, php_numbers),
     }
 }
 
@@ -6037,6 +6048,8 @@ struct RenderCfg {
     /// less.php combinator compression inside `:not/:is/:where/:has(…)`
     /// (`php_selector_paren_combinators`).
     paren_combinators: bool,
+    /// less.php number printing (`php_number_format`).
+    php_numbers: bool,
 }
 
 fn render_all(outs: &[Out], cfg: RenderCfg) -> String {
@@ -8273,6 +8286,7 @@ fn render_decls(decls: &[Node], dind: &str, cfg: RenderCfg, omit_last_semi: bool
                         np,
                         true,
                         cfg.keep_zero_units,
+                        cfg.php_numbers,
                     )
                 } else {
                     render_value(&decl.value, np)
