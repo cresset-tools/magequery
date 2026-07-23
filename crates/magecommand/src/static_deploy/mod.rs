@@ -16,7 +16,9 @@
 //! `DataProvider` phrase scan + dictionary merge); and [`deploy`] — the
 //! finale, `static deploy`: the theme × locale × area matrix, its rayon
 //! fan-out (grouped by `(area, locale)` so the shared bundle-cache order
-//! holds), and one run-scoped `deployed_version.txt`.
+//! holds), and one run-scoped `deployed_version.txt`; and [`verify`] — the
+//! oracle harness, diffing a deployed tree against a real `scd` reference
+//! (what `di verify` is to the DI half).
 
 pub mod bundle;
 pub mod cssdiff;
@@ -27,3 +29,4 @@ pub mod jstranslation;
 pub mod less;
 pub mod minify;
 pub mod requirejs;
+pub mod verify;

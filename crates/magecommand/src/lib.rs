@@ -332,6 +332,39 @@ enum StaticCommand {
         #[arg(long, default_value_t = 40, value_name = "N")]
         limit: usize,
     },
+    /// Verify a deployed static tree against a real
+    /// `setup:static-content:deploy` reference — the oracle harness for the
+    /// static half (what `di verify` is for the DI half). Deploy with
+    /// `--out <DIR>` first, then point `--reference` at the real `pub/static`.
+    /// Differences are grouped by the deploy's own units — the
+    /// `<area>/<Vendor>/<theme>/<locale>` packages and the area-level
+    /// artifacts — because a whole-theme divergence names its bug while a flat
+    /// file list does not. `deployed_version.txt` is skipped: its value is a
+    /// per-run timestamp.
+    Verify {
+        /// The real-deploy reference static root (e.g. a store's `pub/static`).
+        #[arg(long, value_name = "DIR")]
+        reference: PathBuf,
+        /// The static root to check (what `static deploy --out` wrote).
+        #[arg(long, value_name = "DIR")]
+        output: PathBuf,
+        /// Exit non-zero unless the trees match.
+        #[arg(long)]
+        fail_on_diff: bool,
+        /// Require byte-exact css: count files that differ only in
+        /// non-semantic formatting as `changed` rather than `equivalent`.
+        #[arg(long)]
+        strict: bool,
+        /// Require FULL coverage: a package the reference has and the output
+        /// does not counts as missing. Default is to verify only the packages
+        /// the output actually contains, so checking a one-theme deploy
+        /// against a whole `pub/static` reports that theme, not every other.
+        #[arg(long)]
+        all: bool,
+        /// How many paths to list per bucket (text output).
+        #[arg(long, default_value_t = 10, value_name = "N")]
+        sample: usize,
+    },
 }
 
 /// `magecommand di <subcommand>` — the DI-compile group. `compile` generates,
@@ -552,8 +585,134 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
             StaticCommand::Cssdiff { ref expected, ref actual, limit } => {
                 static_cssdiff(expected, actual, limit, cli.json)
             }
+            StaticCommand::Verify {
+                ref reference,
+                ref output,
+                fail_on_diff,
+                strict,
+                all,
+                sample,
+            } => static_verify(reference, output, fail_on_diff, strict, all, sample, cli.json),
         },
     }
+}
+
+/// `magecommand static verify` — diff a deployed tree against a real-deploy
+/// reference and render the result. Exit code is success unless
+/// `--fail-on-diff` and the trees differ, so the command is usable both as a
+/// report and as a CI gate.
+#[allow(clippy::too_many_arguments)]
+fn static_verify(
+    reference: &Path,
+    output: &Path,
+    fail_on_diff: bool,
+    strict: bool,
+    all: bool,
+    sample: usize,
+    json: bool,
+) -> anyhow::Result<ExitCode> {
+    use static_deploy::verify as sv;
+
+    let report = match sv::verify(reference, output, strict, all) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+    let totals = report.totals();
+    let clean = report.is_clean();
+
+    if json {
+        let buckets: Vec<_> = report
+            .buckets
+            .iter()
+            .map(|(b, r)| {
+                serde_json::json!({
+                    "bucket": b.label(),
+                    "reference_files": r.reference_total(),
+                    "identical": r.identical,
+                    "changed": r.changed,
+                    "equivalent": r.equivalent,
+                    "missing": r.missing,
+                    "extra": r.extra,
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "reference": reference.display().to_string(),
+            "output": output.display().to_string(),
+            "strict": strict,
+            "full_coverage": all,
+            "clean": clean,
+            "not_deployed": report.not_deployed.iter().map(|b| b.label()).collect::<Vec<_>>(),
+            "totals": {
+                "reference_files": totals.reference_total(),
+                "identical": totals.identical,
+                "changed": totals.changed.len(),
+                "equivalent": totals.equivalent.len(),
+                "missing": totals.missing.len(),
+                "extra": totals.extra.len(),
+            },
+            "buckets": buckets,
+        });
+        println!("{}", serde_json::to_string_pretty(&doc)?);
+    } else {
+        for (bucket, r) in &report.buckets {
+            // Only name a bucket that has something to say; a clean run then
+            // prints just the totals line.
+            if r.changed.is_empty() && r.missing.is_empty() && r.extra.is_empty()
+                && r.equivalent.is_empty()
+            {
+                continue;
+            }
+            println!("{}", bucket.label());
+            let show = |label: &str, paths: &[String]| {
+                if paths.is_empty() {
+                    return;
+                }
+                println!("  {label} {}", paths.len());
+                for p in paths.iter().take(sample) {
+                    println!("      {p}");
+                }
+                if paths.len() > sample {
+                    println!("      … {} more", paths.len() - sample);
+                }
+            };
+            show("changed", &r.changed);
+            show("missing (reference only)", &r.missing);
+            show("extra (ours only)", &r.extra);
+            // Never hidden, but marked as not-a-defect outside --strict.
+            show(
+                if strict { "equivalent (counted: --strict)" } else { "equivalent (formatting only)" },
+                &r.equivalent,
+            );
+        }
+        let mut line = format!(
+            "reference: {} file(s) · identical {} · changed {} · missing {} · extra {}",
+            totals.reference_total(),
+            totals.identical,
+            totals.changed.len(),
+            totals.missing.len(),
+            totals.extra.len()
+        );
+        if !totals.equivalent.is_empty() {
+            line.push_str(&format!(" · equivalent {}", totals.equivalent.len()));
+        }
+        if !report.not_deployed.is_empty() {
+            println!(
+                "not in this deploy: {} package(s) skipped (pass --all to require full coverage)",
+                report.not_deployed.len()
+            );
+        }
+        println!("{line}");
+        println!(
+            "{}",
+            if clean { "MATCHES the reference deploy" } else { "DIFFERS from the reference deploy" }
+        );
+    }
+
+    Ok(if fail_on_diff && !clean { ExitCode::FAILURE } else { ExitCode::SUCCESS })
 }
 
 /// `magecommand static less --file` — compile ONE materialized `.less` file
