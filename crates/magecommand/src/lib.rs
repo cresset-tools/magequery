@@ -1274,14 +1274,40 @@ fn static_deploy(
     for s in &summary.skipped {
         eprintln!("warning: skipping theme {} — {} (use --theme {} to force)", s.id, s.reason, s.id);
     }
+    // A plugin on an extension point we model, whose effect we don't recognize,
+    // certainly changes the output — never silent.
+    for class in &summary.plugin_warnings {
+        eprintln!(
+            "warning: unmodelled deploy plugin {class} — it may change which files \
+             deploy, or where, in ways we cannot reproduce"
+        );
+    }
+    // Plugins on deploy-path types we model nothing of. Common and usually
+    // deploy-irrelevant, so warning unconditionally would be noise the reader
+    // learns to skip — which is how a real divergence gets missed.
+    if verbose {
+        for class in &summary.plugin_notices {
+            eprintln!("note: plugin on an unmodelled deploy extension point: {class}");
+        }
+    }
 
-    let sdd::DeploySummary { static_root, groups, skipped, stats, elapsed } = summary;
+    let sdd::DeploySummary {
+        static_root,
+        groups,
+        skipped,
+        stats,
+        elapsed,
+        plugin_warnings,
+        plugin_notices,
+    } = summary;
 
     if json {
         let doc = serde_json::json!({
             "deployed_version": deployed_version,
             "jobs": jobs,
             "elapsed_ms": elapsed.as_millis(),
+            "plugin_warnings": plugin_warnings,
+            "plugin_notices": plugin_notices,
             "groups": groups.iter().map(|g| serde_json::json!({
                 "area": g.area,
                 "locale": g.locale,

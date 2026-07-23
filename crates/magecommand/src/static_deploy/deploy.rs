@@ -137,6 +137,12 @@ pub struct DeploySummary {
     pub stats: Vec<TupleStat>,
     /// Wall-clock of the execute (write-to-disk) phase.
     pub elapsed: std::time::Duration,
+    /// Plugins on an extension point we DO model whose effect we do not
+    /// recognize — these certainly change the output, so the CLI always warns.
+    pub plugin_warnings: Vec<String>,
+    /// Plugins on a deploy-path type we do not model at all. Often
+    /// deploy-irrelevant, so the CLI surfaces them only under `--verbose`.
+    pub plugin_notices: Vec<String>,
 }
 
 /// Reproduce a whole `setup:static-content:deploy` run over the
@@ -216,12 +222,7 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
     // File-set exclusions contributed by DI plugins on `Deploy\Package\Package`
     // (Hyva's tailwind drop). Read from THIS store's di.xml, never assumed.
     let plugins = files::deploy_plugin_effects(&magento);
-    for class in &plugins.unknown {
-        eprintln!(
-            "warning: unmodelled deploy plugin {class} — it may change which files \
-             deploy, or where, in ways we cannot reproduce"
-        );
-    }
+    let (plugin_warnings, plugin_notices) = (plugins.unknown(), plugins.unmodelled_surface());
     let opts = PlacementOptions { compress: !req.no_compress, order: order_mode, plugins };
 
     // deployed_version.txt — ONE file at the static root, written first (only
@@ -239,7 +240,15 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let elapsed = started.elapsed();
 
-    Ok(DeploySummary { static_root, groups, skipped, stats, elapsed })
+    Ok(DeploySummary {
+        static_root,
+        groups,
+        skipped,
+        stats,
+        elapsed,
+        plugin_warnings,
+        plugin_notices,
+    })
 }
 
 /// One requested theme with its resolved locale set.
