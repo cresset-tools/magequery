@@ -167,10 +167,23 @@ struct EvArg {
 /// eval-side runaway guard (plan §2.5). less.js has no explicit cap — a
 /// runaway recursion there dies on the JS call stack ("Maximum call stack size
 /// exceeded", observed between depth 1000 and 2000 on node 22); we error
-/// cleanly instead. 64 stays well inside a 2 MiB test-thread native stack in
-/// debug builds (~15 KiB/level measured) and far above any fixture's
-/// legitimate recursion. Overridable via [`LessOptions::max_eval_depth`].
-const MAX_MIXIN_DEPTH: usize = 64;
+/// cleanly instead, at a comparable depth.
+///
+/// This must clear REAL recursion, not just fixtures: guarded counting loops
+/// are idiomatic LESS, and Hyva's admin dashboard runs `.loop(100)` to generate
+/// grid-row rules, which a 64-deep cap rejected outright (no `css/styles.css`
+/// in the adminhtml package at all). [`EVAL_STACK_BYTES`] is sized to hold this
+/// depth, so exceeding it is a clean error rather than a native stack overflow
+/// — which aborts the process. Overridable via [`LessOptions::max_eval_depth`],
+/// but raising it past what the eval stack holds trades a clean error for an
+/// abort.
+const MAX_MIXIN_DEPTH: usize = 1000;
+
+/// Stack for the evaluation thread: [`MAX_MIXIN_DEPTH`] levels at a generous
+/// per-level budget (~8 KiB measured in release, ~15 KiB in debug, so this is
+/// 2-4x headroom). It is a virtual reservation — only touched pages are
+/// committed — so the cost of the slack is address space, not memory.
+const EVAL_STACK_BYTES: usize = MAX_MIXIN_DEPTH * 32 * 1024;
 
 /// One output selector path (post JoinSelector) with its `:extend`/visibility
 /// state (plan §2.8): `visible` = renders (false inside `(reference)` imports
@@ -260,6 +273,33 @@ pub fn eval(
 /// [`eval`] with the entry file's NORMALIZED source, the base for error
 /// locations/excerpts in the entry file (§5.5).
 pub(crate) fn eval_with_source(
+    root: &Arc<Node>,
+    opts: &LessOptions,
+    resolver: &dyn ImportResolver,
+    entry_source: std::sync::Arc<str>,
+) -> Result<Css, LessError> {
+    // Evaluation recurses once per mixin-call level, and the caller's thread is
+    // whatever it happens to be — a rayon worker with a default stack, say. A
+    // legitimately deep sheet would then blow the native stack, which ABORTS
+    // the process with no diagnostic and takes the whole deploy with it. Run
+    // the evaluation on a thread whose stack is sized for `MAX_MIXIN_DEPTH`, so
+    // the depth cap is what stops a runaway, not the stack.
+    //
+    // `ImportResolver: Sync` makes `&dyn ImportResolver` `Send`, and the AST is
+    // an `Arc<Node>`, so a scoped thread borrows all of it without cloning.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("less-eval".to_string())
+            .stack_size(EVAL_STACK_BYTES)
+            .spawn_scoped(scope, || eval_on_this_thread(root, opts, resolver, entry_source))
+            .expect("spawn less-eval thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+/// [`eval_with_source`]'s body, already on a stack big enough for it.
+fn eval_on_this_thread(
     root: &Arc<Node>,
     opts: &LessOptions,
     resolver: &dyn ImportResolver,

@@ -843,13 +843,9 @@ pub fn build_theme(
     // to be applied here too — otherwise a Hyva theme's `web/tailwind/`
     // node_modules get bundled even though they never reach the package.
     if !exclude_prefixes.is_empty() {
-        disk.retain(|deployed, _| {
-            let file_path = match deployed.split_once('/') {
-                Some((first, rest)) if super::less::is_module_segment(first) => rest,
-                _ => deployed.as_str(),
-            };
-            !exclude_prefixes.iter().any(|p| file_path.starts_with(p.as_str()))
-        });
+        // `PackageFile::getFilePath()` keeps the `<Module>/` prefix, so these
+        // match theme-level paths only (see `files::apply_package_exclusions`).
+        disk.retain(|deployed, _| !exclude_prefixes.iter().any(|p| deployed.starts_with(p.as_str())));
     }
     let mut paths: std::collections::BTreeMap<String, Option<&PathBuf>> =
         disk.iter().map(|(k, v)| (k.clone(), Some(v))).collect();
