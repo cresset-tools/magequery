@@ -867,7 +867,8 @@ fn build_theme_prebundle(
     apply_package_exclusions(&mut entries, &plugins.exclude_prefixes);
 
     let orchestrator = LessOrchestrator::new(root, area, theme_id, themes, modules.to_vec())?
-        .with_extra_web_dirs(&plugins.extra_web_dirs);
+        .with_extra_web_dirs(&plugins.extra_web_dirs)
+        .with_compat_modules(&plugins.compat_modules, &plugins.hyva_base_themes);
     let less_opts = LessDeployOptions {
         skip_broken_modules: false,
         compress: opts.compress,
@@ -1185,6 +1186,15 @@ pub struct DeployPluginEffects {
     pub unknown: Vec<String>,
     /// Plugins on an [`UNMODELLED_TARGETS`] type (`--verbose` notices).
     pub unmodelled_surface: Vec<String>,
+    /// `Hyva\CompatModuleFallback`: `original module -> compat module dirs`, in
+    /// registry order. A compat module's copy of a modular asset SHADOWS the
+    /// original's — see [`super::less::CompatFallback`]. Empty unless the
+    /// plugin is registered for this area.
+    pub compat_modules: Vec<(String, Vec<PathBuf>)>,
+    /// Theme paths (`Vendor/name`, area stripped) that make a theme "Hyvä" —
+    /// `HyvaThemes`' `hyvaBaseThemes` argument. The compat fallback applies
+    /// only when the DEPLOYED theme's chain intersects this set.
+    pub hyva_base_themes: Vec<String>,
 }
 
 impl DeployPluginEffects {
@@ -1251,6 +1261,75 @@ impl AreaPluginEffects {
     }
 }
 
+/// The `compatModules` argument of `Hyva\CompatModuleFallback\Model\CompatModuleRegistry`:
+/// a list of `{original_module, compat_module}` pairs, which the registry folds
+/// into `original -> [compat, …]` in declaration order. Resolved to the compat
+/// modules' DIRECTORIES here, dropping any that is not installed (the plugin's
+/// own `array_filter` over `getDir`).
+fn compat_module_dirs(
+    di: &magequery_core::DiExport,
+    module_dir: &impl Fn(&str) -> Option<PathBuf>,
+) -> Vec<(String, Vec<PathBuf>)> {
+    use magequery_core::ArgValue;
+    const REGISTRY: &str = "Hyva\\CompatModuleFallback\\Model\\CompatModuleRegistry";
+
+    let mut out: Vec<(String, Vec<PathBuf>)> = Vec::new();
+    for arg in di.arguments.iter().filter(|a| {
+        a.type_name.as_str().trim_start_matches('\\') == REGISTRY && a.arg == "compatModules"
+    }) {
+        let ArgValue::Array(entries) = &arg.value else { continue };
+        for entry in entries {
+            let ArgValue::Array(fields) = &entry.value else { continue };
+            let field = |name: &str| -> Option<&str> {
+                fields.iter().find(|f| f.key == name).and_then(|f| match &f.value {
+                    ArgValue::Scalar { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+            };
+            let (Some(orig), Some(compat)) = (field("original_module"), field("compat_module"))
+            else {
+                continue;
+            };
+            let Some(dir) = module_dir(compat) else { continue };
+            match out.iter_mut().find(|(m, _)| m == orig) {
+                Some((_, dirs)) => dirs.push(dir),
+                None => out.push((orig.to_string(), vec![dir])),
+            }
+        }
+    }
+    out
+}
+
+/// The `hyvaBaseThemes` argument of `Hyva\Theme\Service\HyvaThemes` — the keys
+/// whose value is truthy (`keys(filter($hyvaBaseThemes))`).
+fn hyva_base_themes(di: &magequery_core::DiExport) -> Vec<String> {
+    use magequery_core::ArgValue;
+    const SERVICE: &str = "Hyva\\Theme\\Service\\HyvaThemes";
+
+    let mut out = Vec::new();
+    for arg in di.arguments.iter().filter(|a| {
+        a.type_name.as_str().trim_start_matches('\\') == SERVICE && a.arg == "hyvaBaseThemes"
+    }) {
+        let ArgValue::Array(items) = &arg.value else { continue };
+        for item in items {
+            let truthy = match &item.value {
+                // PHP truthiness on the values this argument ever holds.
+                ArgValue::Scalar { text, .. } => {
+                    !matches!(text.trim(), "" | "0" | "false" | "null")
+                }
+                ArgValue::Null => false,
+                _ => true,
+            };
+            if truthy {
+                out.push(item.key.clone());
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Read the store's merged di.xml — per area, so area-scoped `etc/<area>/di.xml`
 /// declarations are seen — and derive the effects.
 pub fn deploy_plugin_effects(magento: &magequery_core::Magento) -> AreaPluginEffects {
@@ -1280,6 +1359,12 @@ pub fn deploy_plugin_effects(magento: &magequery_core::Magento) -> AreaPluginEff
                 continue;
             }
             match class {
+                "Hyva\\CompatModuleFallback\\Plugin\\ViewFileOverride" => {
+                    // Both halves come from DI arguments, so a store that
+                    // registers no compat modules gets an inert effect.
+                    out.compat_modules = compat_module_dirs(&di, &module_dir);
+                    out.hyva_base_themes = hyva_base_themes(&di);
+                }
                 "Hyva\\Theme\\Plugin\\Deploy\\Package\\ExcludeTailwindPlugin" => {
                     out.exclude_prefixes.push("tailwind/".to_string());
                 }

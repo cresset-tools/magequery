@@ -263,6 +263,44 @@ pub struct LessOrchestrator {
     /// plugin appends). Hyva_Email adds its own `view/frontend/web` here, which
     /// is what lets its theme-root `css/email.less` find `source/lib/_lib.less`.
     extra_web_dirs: Vec<PathBuf>,
+    /// The MODULAR compat-module fallback, when it applies (see
+    /// [`CompatFallback`]). Empty when the plugin is unregistered or the
+    /// deployed theme is not a Hyvä theme.
+    compat: CompatFallback,
+}
+
+/// `Hyva\CompatModuleFallback\Plugin\ViewFileOverride` — for a Hyvä theme, a
+/// registered "compat module" gets to override another module's view files.
+///
+/// The plugin rewrites the MODULAR fallback: every dir belonging to the
+/// original module is replaced by the compat modules' equivalents FIRST, then
+/// the original. So for `Vendor_Module/<rest>` at module level `view/<sub>/web`
+/// the search becomes
+///
+/// ```text
+/// <compat>/view/<sub>/web/Vendor_Module/<rest>   ← compat, namespaced
+/// <compat>/view/<sub>/web/<rest>                 ← compat, flat
+/// <orig>/view/<sub>/web/<rest>                   ← the original, last
+/// ```
+///
+/// per compat module in registry order, so a compat module SHADOWS the
+/// original. Theme dirs are untouched: they do not start with the original
+/// module's directory, so the plugin's `strpos(…) === 0` test skips them.
+#[derive(Debug, Clone, Default)]
+pub struct CompatFallback {
+    /// `original module -> compat module dirs`, registry order.
+    modules: Vec<(String, Vec<PathBuf>)>,
+}
+
+impl CompatFallback {
+    /// The compat dirs for `module`, or `&[]`.
+    fn dirs_for(&self, module: &str) -> &[PathBuf] {
+        self.modules
+            .iter()
+            .find(|(m, _)| m == module)
+            .map(|(_, d)| d.as_slice())
+            .unwrap_or(&[])
+    }
 }
 
 impl LessOrchestrator {
@@ -282,6 +320,7 @@ impl LessOrchestrator {
             modules,
             lib_web: root.join("lib").join("web"),
             extra_web_dirs: Vec::new(),
+            compat: CompatFallback::default(),
         })
     }
 
@@ -290,6 +329,42 @@ impl LessOrchestrator {
     pub fn with_extra_web_dirs(mut self, dirs: &[PathBuf]) -> Self {
         self.extra_web_dirs = dirs.to_vec();
         self
+    }
+
+    /// Enable the compat-module fallback, but ONLY when this orchestrator's
+    /// theme is a Hyvä theme — the plugin's `CurrentTheme::isHyva()` gate.
+    /// `hyva_base_themes` are bare `Vendor/name` paths, matched against the
+    /// deployed theme's chain with its area stripped, exactly as
+    /// `HyvaThemes::getThemeHierarchy` does.
+    pub fn with_compat_modules(
+        mut self,
+        compat_modules: &[(String, Vec<PathBuf>)],
+        hyva_base_themes: &[String],
+    ) -> Self {
+        let is_hyva = self.chain.iter().any(|t| {
+            let bare = t.id.split_once('/').map(|(_, rest)| rest).unwrap_or(&t.id);
+            hyva_base_themes.iter().any(|b| b == bare)
+        });
+        if is_hyva {
+            self.compat = CompatFallback { modules: compat_modules.to_vec() };
+        }
+        self
+    }
+
+    /// The module-level fallback dirs for `module`, in search order: each
+    /// `view/<sub>/web` preceded by its compat-module equivalents.
+    fn module_level_dirs(&self, module_dir: &Path, module: &str) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for sub in [self.area.as_str(), "base"] {
+            for compat in self.compat.dirs_for(module) {
+                let base = compat.join("view").join(sub).join("web");
+                // `<compat>/…/web/<Orig_Module>` then `<compat>/…/web`.
+                out.push(base.join(module));
+                out.push(base);
+            }
+            out.push(module_dir.join("view").join(sub).join("web"));
+        }
+        out
     }
 
     /// Build from an open `magequery-core` handle: themes from
@@ -331,13 +406,11 @@ impl LessOrchestrator {
                     }
                 }
                 if let Some(m) = self.modules.iter().find(|m| m.name == first) {
-                    let p = m.dir.join("view").join(&self.area).join("web").join(rest);
-                    if p.is_file() {
-                        return Some((p, Some(first.to_string())));
-                    }
-                    let p = m.dir.join("view").join("base").join("web").join(rest);
-                    if p.is_file() {
-                        return Some((p, Some(first.to_string())));
+                    for dir in self.module_level_dirs(&m.dir, first) {
+                        let p = dir.join(rest);
+                        if p.is_file() {
+                            return Some((p, Some(first.to_string())));
+                        }
                     }
                 }
                 return None;
@@ -371,8 +444,9 @@ impl LessOrchestrator {
                     out.push(t.dir.join(first).join("web").join(rest));
                 }
                 if let Some(m) = self.modules.iter().find(|m| m.name == first) {
-                    out.push(m.dir.join("view").join(&self.area).join("web").join(rest));
-                    out.push(m.dir.join("view").join("base").join("web").join(rest));
+                    for dir in self.module_level_dirs(&m.dir, first) {
+                        out.push(dir.join(rest));
+                    }
                 }
                 return out;
             }
@@ -1304,6 +1378,111 @@ mod tests {
 
     fn orchestrator(root: &Path, theme: &str) -> LessOrchestrator {
         LessOrchestrator::new(root, "frontend", theme, &themes(root), modules(root)).unwrap()
+    }
+
+    // ---- the Hyva compat-module fallback -----------------------------------
+
+    /// Write a file, creating parents.
+    fn wf(root: &Path, rel: &str, body: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// `Acme_Widgets` with a compat module registered against it.
+    fn compat(root: &Path) -> Vec<(String, Vec<PathBuf>)> {
+        vec![("Acme_Widgets".to_string(), vec![root.join("vendor/acme/compat")])]
+    }
+
+    const HYVA_BASE: &[&str] = &["Acme/base"];
+
+    fn compat_orchestrator(root: &Path, theme: &str, base_themes: &[&str]) -> LessOrchestrator {
+        let bases: Vec<String> = base_themes.iter().map(|s| s.to_string()).collect();
+        orchestrator(root, theme).with_compat_modules(&compat(root), &bases)
+    }
+
+    /// A compat module SHADOWS the original module's file: the plugin puts the
+    /// compat dirs BEFORE the original in the modular fallback.
+    #[test]
+    fn compat_module_shadows_the_original_module_file() {
+        let td = synth_tree();
+        let r = td.path();
+        wf(r, "vendor/acme/module-widgets/view/frontend/web/css/w.less", "// orig");
+        wf(r, "vendor/acme/compat/view/frontend/web/css/w.less", "// compat");
+
+        let orch = compat_orchestrator(r, "Acme/child", HYVA_BASE);
+        let (hit, _) = orch.probe("Acme_Widgets/css/w.less").expect("resolves");
+        assert!(hit.ends_with("acme/compat/view/frontend/web/css/w.less"), "{hit:?}");
+
+        // Without the compat registration the original wins again.
+        let plain = orchestrator(r, "Acme/child");
+        let (hit, _) = plain.probe("Acme_Widgets/css/w.less").expect("resolves");
+        assert!(hit.ends_with("module-widgets/view/frontend/web/css/w.less"), "{hit:?}");
+    }
+
+    /// The compat dir is searched NAMESPACED first
+    /// (`<compat>/…/web/<Orig_Module>/…`), then flat.
+    #[test]
+    fn namespaced_compat_dir_wins_over_the_flat_one() {
+        let td = synth_tree();
+        let r = td.path();
+        wf(r, "vendor/acme/module-widgets/view/frontend/web/css/w.less", "// orig");
+        wf(r, "vendor/acme/compat/view/frontend/web/css/w.less", "// flat");
+        wf(r, "vendor/acme/compat/view/frontend/web/Acme_Widgets/css/w.less", "// namespaced");
+
+        let orch = compat_orchestrator(r, "Acme/child", HYVA_BASE);
+        let (hit, _) = orch.probe("Acme_Widgets/css/w.less").expect("resolves");
+        assert!(hit.ends_with("compat/view/frontend/web/Acme_Widgets/css/w.less"), "{hit:?}");
+    }
+
+    /// THEME dirs still win: the plugin only rewrites fallback entries that
+    /// start with the original module's directory, so theme overrides are
+    /// untouched and stay ahead of everything.
+    #[test]
+    fn theme_override_still_beats_a_compat_module() {
+        let td = synth_tree();
+        let r = td.path();
+        wf(r, "vendor/acme/module-widgets/view/frontend/web/css/w.less", "// orig");
+        wf(r, "vendor/acme/compat/view/frontend/web/css/w.less", "// compat");
+        wf(r, "vendor/acme/theme-child/Acme_Widgets/web/css/w.less", "// theme");
+
+        let orch = compat_orchestrator(r, "Acme/child", HYVA_BASE);
+        let (hit, _) = orch.probe("Acme_Widgets/css/w.less").expect("resolves");
+        assert!(hit.ends_with("theme-child/Acme_Widgets/web/css/w.less"), "{hit:?}");
+    }
+
+    /// The whole mechanism is gated on `CurrentTheme::isHyva()`: a theme whose
+    /// chain touches no configured Hyvä base theme ignores compat modules.
+    #[test]
+    fn a_non_hyva_theme_ignores_compat_modules() {
+        let td = synth_tree();
+        let r = td.path();
+        wf(r, "vendor/acme/module-widgets/view/frontend/web/css/w.less", "// orig");
+        wf(r, "vendor/acme/compat/view/frontend/web/css/w.less", "// compat");
+
+        let orch = compat_orchestrator(r, "Acme/child", &["Hyva/default"]);
+        let (hit, _) = orch.probe("Acme_Widgets/css/w.less").expect("resolves");
+        assert!(hit.ends_with("module-widgets/view/frontend/web/css/w.less"), "{hit:?}");
+    }
+
+    /// The rewrite applies at EVERY module level, `view/base/web` included —
+    /// and an area-level compat file still outranks the original's base one.
+    #[test]
+    fn compat_applies_to_the_base_level_too() {
+        let td = synth_tree();
+        let r = td.path();
+        wf(r, "vendor/acme/module-widgets/view/base/web/css/b.less", "// orig base");
+        wf(r, "vendor/acme/compat/view/base/web/css/b.less", "// compat base");
+
+        let orch = compat_orchestrator(r, "Acme/child", HYVA_BASE);
+        let (hit, _) = orch.probe("Acme_Widgets/css/b.less").expect("resolves");
+        assert!(hit.ends_with("compat/view/base/web/css/b.less"), "{hit:?}");
+
+        // …and the AREA level is searched before base, compat included.
+        wf(r, "vendor/acme/compat/view/frontend/web/css/b.less", "// compat area");
+        let orch = compat_orchestrator(r, "Acme/child", HYVA_BASE);
+        let (hit, _) = orch.probe("Acme_Widgets/css/b.less").expect("resolves");
+        assert!(hit.ends_with("compat/view/frontend/web/css/b.less"), "{hit:?}");
     }
 
     #[test]
