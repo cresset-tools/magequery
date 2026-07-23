@@ -74,7 +74,7 @@
 //! `deployed_version.txt` (pub/static root, run-scoped) is written only when
 //! the caller supplies a version — never an invented timestamp.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::bundle::{self, MinSiblingCache, OrderMode};
@@ -732,10 +732,10 @@ pub struct PlacementOptions {
     pub compress: bool,
     /// Bundle-internal iteration order (the deployed-tree glob simulation).
     pub order: OrderMode,
-    /// What the store's registered deploy plugins do to this run (see
-    /// [`deploy_plugin_effects`]). All-empty on a store with no such plugin —
-    /// derived from the store's own di.xml, never assumed.
-    pub plugins: DeployPluginEffects,
+    /// What the store's registered deploy plugins do to this run, PER AREA
+    /// (see [`deploy_plugin_effects`]). All-empty on a store with no such
+    /// plugin — derived from the store's own di.xml, never assumed.
+    pub plugins: AreaPluginEffects,
 }
 
 impl Default for PlacementOptions {
@@ -743,7 +743,7 @@ impl Default for PlacementOptions {
         PlacementOptions {
             compress: true,
             order: OrderMode::Sorted,
-            plugins: DeployPluginEffects::default(),
+            plugins: AreaPluginEffects::default(),
         }
     }
 }
@@ -855,18 +855,19 @@ fn build_theme_prebundle(
         .unwrap_or(&chain[0].id)
         .to_string();
 
+    let plugins = opts.plugins.for_area(area);
     let mut entries = resolve_package(
         root,
         area,
         &chain,
         reg_modules,
         locale,
-        &opts.plugins.unprefixed_modules,
+        &plugins.unprefixed_modules,
     );
-    apply_package_exclusions(&mut entries, &opts.plugins.exclude_prefixes);
+    apply_package_exclusions(&mut entries, &plugins.exclude_prefixes);
 
     let orchestrator = LessOrchestrator::new(root, area, theme_id, themes, modules.to_vec())?
-        .with_extra_web_dirs(&opts.plugins.extra_web_dirs);
+        .with_extra_web_dirs(&plugins.extra_web_dirs);
     let less_opts = LessDeployOptions {
         skip_broken_modules: false,
         compress: opts.compress,
@@ -1003,7 +1004,7 @@ fn finalize_theme(
         modules,
         &generated,
         &opts.order,
-        &opts.plugins.exclude_prefixes,
+        &opts.plugins.for_area(area).exclude_prefixes,
         min_cache,
     )?;
     for b in bundles.files {
@@ -1119,26 +1120,57 @@ pub struct DeployInputs {
     pub min_resolver: String,
 }
 
-/// Deploy-affecting DI plugins we model, as `(target type, plugin class)` pairs.
+/// Extension points whose plugins we MODEL. An unrecognized plugin on one of
+/// these certainly changes what a deploy produces, so it is a loud warning.
+const MODELLED_TARGETS: &[&str] = &[
+    "Magento\\Deploy\\Package\\Package",
+    "Magento\\Deploy\\Package\\PackageFile",
+    "Magento\\Framework\\View\\Design\\Fallback\\Rule\\ModularSwitch",
+];
+
+/// Plugins on an [`UNMODELLED_TARGETS`] type whose deploy effect we DO
+/// reproduce, just not through a generic model of that extension point. They
+/// are the `sri-hashes.json` pipeline: the per-area wipe before a CLI deploy,
+/// the per-package accumulation, and the bundle phase — all implemented in
+/// [`super::deploy`] and [`finalize_theme`]. Reporting them would train the
+/// reader to ignore the very list that is supposed to catch a real divergence.
+const RECOGNIZED_DEPLOY_PLUGINS: &[&str] = &[
+    "Magento\\Csp\\Plugin\\RemoveAllAssetIntegrityHashes",
+    "Magento\\Csp\\Plugin\\StoreAssetIntegrityHashes",
+    "Magento\\Csp\\Plugin\\GenerateAssetIntegrity",
+    "Magento\\Csp\\Plugin\\GenerateBundleAssetIntegrity",
+    "Magento\\Csp\\Plugin\\GenerateMergedAssetIntegrity",
+];
+
+/// Extension points on the deploy path that we do not model AT ALL. A plugin
+/// here MAY change the output, but plugins on these types are common and often
+/// deploy-irrelevant (Amasty hangs a runtime meta-tag plugin on
+/// `Asset\Repository`), so warning unconditionally would be noise the reader
+/// learns to skip — which is how a real divergence gets missed. These surface
+/// under `--verbose` instead.
+const UNMODELLED_TARGETS: &[&str] = &[
+    "Magento\\Deploy\\Service\\DeployStaticContent",
+    "Magento\\Deploy\\Service\\DeployPackage",
+    "Magento\\Deploy\\Service\\Bundle",
+    "Magento\\Deploy\\Collector\\Collector",
+    "Magento\\Framework\\View\\Asset\\Source",
+    "Magento\\Framework\\View\\Asset\\Repository",
+    "Magento\\Framework\\App\\Utility\\Files",
+];
+
+/// What the modelled plugins do to a deploy, derived from the store's di.xml.
 ///
 /// A third-party plugin on the deploy pipeline can change the file set, the
 /// deployed paths, or the static fallback — and a pure-static tool cannot run
 /// it. So we never assume: each effect applies only when the store's own merged
-/// di.xml actually registers that plugin, enabled. Anything else on these types
-/// is reported instead of silently diverging.
+/// di.xml actually registers that plugin, enabled.
 ///
-/// All three that matter today ship with Hyva, which is why a Hyva store's
-/// deploy diverges so visibly without them: `web/tailwind/` (node_modules and
-/// all, ~11k files per theme) is dropped from every package, and `Hyva_Email`'s
+/// The three modelled today ship with Hyvä, which is why a Hyvä store's deploy
+/// diverges so visibly without them: `web/tailwind/` (node_modules and all,
+/// ~11k files per theme) is dropped from every package, and `Hyva_Email`'s
 /// assets deploy at the THEME root rather than under `Hyva_Email/` — which in
 /// turn makes their `@import 'source/lib/…'` resolve through the non-modular
-/// fallback (lib/web) instead of the module's own tree.
-const PACKAGE_PLUGIN_TARGET: &str = "Magento\\Deploy\\Package\\Package";
-const PACKAGE_FILE_PLUGIN_TARGET: &str = "Magento\\Deploy\\Package\\PackageFile";
-const FALLBACK_RULE_PLUGIN_TARGET: &str =
-    "Magento\\Framework\\View\\Design\\Fallback\\Rule\\ModularSwitch";
-
-/// What the modelled plugins do to a deploy, derived from the store's di.xml.
+/// fallback (`lib/web`) instead of the module's own tree.
 #[derive(Debug, Clone, Default)]
 pub struct DeployPluginEffects {
     /// Package-file path prefixes dropped from every package.
@@ -1149,48 +1181,123 @@ pub struct DeployPluginEffects {
     /// Extra directories appended to the NON-modular static fallback, after
     /// `lib/web` (`ModularSwitch::getPatternDirs` `$result[] = …`).
     pub extra_web_dirs: Vec<PathBuf>,
-    /// Plugins on those types whose effect we do NOT model.
+    /// Plugins on a [`MODELLED_TARGETS`] type whose effect we do NOT model.
     pub unknown: Vec<String>,
+    /// Plugins on an [`UNMODELLED_TARGETS`] type (`--verbose` notices).
+    pub unmodelled_surface: Vec<String>,
 }
 
-/// Read the store's merged global di.xml and derive [`DeployPluginEffects`].
-pub fn deploy_plugin_effects(magento: &magequery_core::Magento) -> DeployPluginEffects {
+impl DeployPluginEffects {
+    fn tidy(&mut self) {
+        for v in [&mut self.exclude_prefixes, &mut self.unprefixed_modules] {
+            v.sort();
+            v.dedup();
+        }
+        self.extra_web_dirs.sort();
+        self.extra_web_dirs.dedup();
+        self.unknown.sort();
+        self.unknown.dedup();
+        self.unmodelled_surface.sort();
+        self.unmodelled_surface.dedup();
+    }
+}
+
+/// Plugin effects PER AREA.
+///
+/// Area matters: a deploy plugin declared in `etc/frontend/di.xml` applies to
+/// frontend packages only, and querying just the global config misses it
+/// entirely — which is how `Hyva\CompatModuleFallback`'s `ModularSwitch` plugin
+/// went unseen by both the modelling and the unmodelled-plugin warning.
+#[derive(Debug, Clone, Default)]
+pub struct AreaPluginEffects {
+    per_area: Vec<(String, DeployPluginEffects)>,
+    /// Used for an area we did not compute (never in practice — static deploy
+    /// only has two).
+    empty: DeployPluginEffects,
+}
+
+impl AreaPluginEffects {
+    /// This area's effects (global base already merged in).
+    pub fn for_area(&self, area: &str) -> &DeployPluginEffects {
+        self.per_area
+            .iter()
+            .find(|(a, _)| a == area)
+            .map(|(_, e)| e)
+            .unwrap_or(&self.empty)
+    }
+
+    /// Every unmodelled plugin on a MODELLED extension point, deduped across
+    /// areas, tagged with the areas it affects.
+    pub fn unknown(&self) -> Vec<String> {
+        self.collect(|e| &e.unknown)
+    }
+
+    /// Every plugin on a deploy-path type we do not model (`--verbose`).
+    pub fn unmodelled_surface(&self) -> Vec<String> {
+        self.collect(|e| &e.unmodelled_surface)
+    }
+
+    fn collect(&self, pick: impl Fn(&DeployPluginEffects) -> &Vec<String>) -> Vec<String> {
+        let mut by_entry: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (area, eff) in &self.per_area {
+            for entry in pick(eff) {
+                by_entry.entry(entry.as_str()).or_default().push(area.as_str());
+            }
+        }
+        by_entry
+            .into_iter()
+            .map(|(entry, areas)| format!("{entry} [{}]", areas.join(", ")))
+            .collect()
+    }
+}
+
+/// Read the store's merged di.xml — per area, so area-scoped `etc/<area>/di.xml`
+/// declarations are seen — and derive the effects.
+pub fn deploy_plugin_effects(magento: &magequery_core::Magento) -> AreaPluginEffects {
+    use magequery_core::Area;
     let module_dir = |name: &str| -> Option<PathBuf> {
         magento.modules().iter().find(|m| m.name.as_str() == name).map(|m| m.path.clone())
     };
-    let di = magento.di_export(magequery_core::Area::Global);
-    let mut out = DeployPluginEffects::default();
-    for p in di.plugins.iter().filter(|p| !p.disabled) {
-        let target = p.target.as_str().trim_start_matches('\\');
-        if !matches!(
-            target,
-            PACKAGE_PLUGIN_TARGET | PACKAGE_FILE_PLUGIN_TARGET | FALLBACK_RULE_PLUGIN_TARGET
-        ) {
-            continue;
-        }
-        let Some(class) = p.class.as_ref() else { continue };
-        match class.as_str().trim_start_matches('\\') {
-            "Hyva\\Theme\\Plugin\\Deploy\\Package\\ExcludeTailwindPlugin" => {
-                out.exclude_prefixes.push("tailwind/".to_string());
+
+    let mut per_area = Vec::new();
+    // `di_export(area)` is the base overlaid by that area's files, and is
+    // cached per area, so this costs one build each rather than a re-merge.
+    for (name, area) in [("frontend", Area::Frontend), ("adminhtml", Area::Adminhtml)] {
+        let di = magento.di_export(area);
+        let mut out = DeployPluginEffects::default();
+        for p in di.plugins.iter().filter(|p| !p.disabled) {
+            let target = p.target.as_str().trim_start_matches('\\');
+            let modelled = MODELLED_TARGETS.contains(&target);
+            if !modelled && !UNMODELLED_TARGETS.contains(&target) {
+                continue;
             }
-            "Hyva\\Email\\Plugin\\PackageFilePlugin" => {
-                out.unprefixed_modules.push("Hyva_Email".to_string());
-            }
-            "Hyva\\Email\\Plugin\\FallbackRulePlugin" => {
-                if let Some(dir) = module_dir("Hyva_Email") {
-                    out.extra_web_dirs.push(dir.join("view").join("frontend").join("web"));
+            let Some(class) = p.class.as_ref() else { continue };
+            let class = class.as_str().trim_start_matches('\\');
+            if !modelled {
+                if !RECOGNIZED_DEPLOY_PLUGINS.contains(&class) {
+                    out.unmodelled_surface.push(format!("{class} (on {target})"));
                 }
+                continue;
             }
-            other => out.unknown.push(format!("{other} (on {target})")),
+            match class {
+                "Hyva\\Theme\\Plugin\\Deploy\\Package\\ExcludeTailwindPlugin" => {
+                    out.exclude_prefixes.push("tailwind/".to_string());
+                }
+                "Hyva\\Email\\Plugin\\PackageFilePlugin" => {
+                    out.unprefixed_modules.push("Hyva_Email".to_string());
+                }
+                "Hyva\\Email\\Plugin\\FallbackRulePlugin" => {
+                    if let Some(dir) = module_dir("Hyva_Email") {
+                        out.extra_web_dirs.push(dir.join("view").join("frontend").join("web"));
+                    }
+                }
+                other => out.unknown.push(format!("{other} (on {target})")),
+            }
         }
+        out.tidy();
+        per_area.push((name.to_string(), out));
     }
-    out.exclude_prefixes.sort();
-    out.exclude_prefixes.dedup();
-    out.unprefixed_modules.sort();
-    out.unprefixed_modules.dedup();
-    out.extra_web_dirs.sort();
-    out.extra_web_dirs.dedup();
-    out
+    AreaPluginEffects { per_area, empty: DeployPluginEffects::default() }
 }
 
 impl DeployInputs {
@@ -1427,6 +1534,65 @@ mod tests {
             sri_hash(b""),
             "sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="
         );
+    }
+
+    // ---- deploy plugin effects ---------------------------------------------
+
+    fn effects(entries: &[(&str, DeployPluginEffects)]) -> AreaPluginEffects {
+        AreaPluginEffects {
+            per_area: entries.iter().map(|(a, e)| (a.to_string(), e.clone())).collect(),
+            empty: DeployPluginEffects::default(),
+        }
+    }
+
+    /// A deploy plugin declared in `etc/frontend/di.xml` applies to frontend
+    /// packages only, so effects are looked up PER AREA — reading one merged
+    /// config would either miss it or apply it everywhere.
+    #[test]
+    fn effects_are_looked_up_per_area() {
+        let front = DeployPluginEffects {
+            exclude_prefixes: vec!["tailwind/".into()],
+            ..Default::default()
+        };
+        let e = effects(&[("frontend", front), ("adminhtml", DeployPluginEffects::default())]);
+        assert_eq!(e.for_area("frontend").exclude_prefixes, vec!["tailwind/".to_string()]);
+        assert!(e.for_area("adminhtml").exclude_prefixes.is_empty());
+        // An area we never computed must be inert, never a panic.
+        assert!(e.for_area("crontab").exclude_prefixes.is_empty());
+    }
+
+    /// Diagnostics are deduped across areas and tagged with the areas they
+    /// affect, so a plugin registered globally reads as one line, not two.
+    #[test]
+    fn diagnostics_dedupe_across_areas_and_name_them() {
+        let one = DeployPluginEffects {
+            unknown: vec!["Acme\\P (on T)".into()],
+            unmodelled_surface: vec!["Acme\\Q (on U)".into()],
+            ..Default::default()
+        };
+        let two = DeployPluginEffects {
+            unknown: vec!["Acme\\P (on T)".into()],
+            ..Default::default()
+        };
+        let e = effects(&[("frontend", one), ("adminhtml", two)]);
+        assert_eq!(e.unknown(), vec!["Acme\\P (on T) [frontend, adminhtml]".to_string()]);
+        assert_eq!(e.unmodelled_surface(), vec!["Acme\\Q (on U) [frontend]".to_string()]);
+    }
+
+    /// The two tiers are distinct: an unrecognized plugin on a MODELLED
+    /// extension point is a warning, one on a deploy-path type we model nothing
+    /// of is a `--verbose` notice, and the Csp plugins whose effect we DO
+    /// reproduce are neither.
+    #[test]
+    fn target_tiers_are_classified_separately() {
+        assert!(MODELLED_TARGETS.contains(&"Magento\\Deploy\\Package\\Package"));
+        assert!(UNMODELLED_TARGETS.contains(&"Magento\\Deploy\\Service\\DeployStaticContent"));
+        // No target may sit in both tiers, or its plugins would be reported twice.
+        for t in MODELLED_TARGETS {
+            assert!(!UNMODELLED_TARGETS.contains(t), "{t} is in both tiers");
+        }
+        // The sri pipeline is reproduced, so it must not be reported at all.
+        assert!(RECOGNIZED_DEPLOY_PLUGINS.contains(&"Magento\\Csp\\Plugin\\StoreAssetIntegrityHashes"));
     }
 
     // ---- registration order ------------------------------------------------
