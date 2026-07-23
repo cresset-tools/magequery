@@ -588,20 +588,19 @@ pub fn resolve_package(
 }
 
 /// Drop the package files a registered `Deploy\Package\Package` plugin removes
-/// (see [`deploy_plugin_effects`]). The plugin matches on `getFilePath()` —
-/// the path WITHIN its module/theme context — so the `Vendor_Module/` segment a
-/// module file carries in the deployed path is not part of the comparison.
+/// (see [`deploy_plugin_effects`]).
+///
+/// The plugin matches on `PackageFile::getFilePath()`, which is
+/// `"<Module>/<fileName>"` for a module file and the bare `fileName` for a
+/// theme-level one. So a prefix like `tailwind/` matches ONLY theme files: a
+/// module that ships its own `tailwind/` directory (Hyva_CmsLiveviewEditor does,
+/// in adminhtml) keeps it, and stripping the module segment before comparing
+/// would wrongly delete it.
 fn apply_package_exclusions(entries: &mut Vec<PackageEntry>, prefixes: &[String]) {
     if prefixes.is_empty() {
         return;
     }
-    entries.retain(|e| {
-        let file_path = match e.deployed.split_once('/') {
-            Some((first, rest)) if is_module_segment(first) => rest,
-            _ => e.deployed.as_str(),
-        };
-        !prefixes.iter().any(|p| file_path.starts_with(p.as_str()))
-    });
+    entries.retain(|e| !prefixes.iter().any(|p| e.deployed.starts_with(p.as_str())));
 }
 
 // ---------------------------------------------------------------------------
