@@ -55,6 +55,7 @@ pub fn dispatch(
     np: u8,
     compress: bool,
     keep_zero_units: bool,
+    php_numbers: bool,
 ) -> Result<Option<Node>, LessError> {
     // less.js turns named-color keywords into `Color` nodes at *parse* time; we
     // keep them as keywords until an operation needs them, so the function
@@ -65,7 +66,7 @@ pub fn dispatch(
         // --- string (plan §2.14) ---
         "e" => string::e(a),
         "escape" => string::escape(a),
-        "%" => string::format(a, np, compress, keep_zero_units),
+        "%" => string::format(a, np, compress, keep_zero_units, php_numbers),
         "replace" => string::replace(a),
 
         // --- list ---
@@ -90,8 +91,8 @@ pub fn dispatch(
 
         // --- number ---
         "percentage" => number::percentage(a),
-        "min" => Ok(number::min_max(a, true, np, compress, keep_zero_units)),
-        "max" => Ok(number::min_max(a, false, np, compress, keep_zero_units)),
+        "min" => Ok(number::min_max(a, true, np, compress, keep_zero_units, php_numbers)),
+        "max" => Ok(number::min_max(a, false, np, compress, keep_zero_units, php_numbers)),
         "convert" => number::convert(a),
         "pi" => Ok(Some(Node::Dimension(Dimension::number(std::f64::consts::PI)))),
         "mod" => number::modulo(a),

@@ -160,33 +160,261 @@ fn add_data(dict: &mut BTreeMap<String, String>, rows: &[(String, String)]) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Language packs (`ComponentRegistrar::LANGUAGE`)
+// ---------------------------------------------------------------------------
+
+/// One language package: a directory holding `language.xml` plus the `*.csv`
+/// dictionaries it contributes. These are Magento's `LANGUAGE` components —
+/// NOT modules and NOT themes, so they are invisible to both other collectors.
+#[derive(Debug, Clone)]
+pub struct LanguagePack {
+    /// The package root (the directory `language.xml` lives in).
+    pub dir: PathBuf,
+    /// `<code>` — the locale this pack declares (`nl_NL`).
+    pub code: String,
+    /// `<vendor>` as declared (case-sensitive: `<use>` matches on it).
+    pub vendor: String,
+    /// `<package>` as declared.
+    pub package: String,
+    /// `<sort_order>`, 0 when absent (`Config::getSortOrder`).
+    pub sort_order: i64,
+    /// `<use vendor= package=>` parents, in declaration order.
+    pub uses: Vec<(String, String)>,
+}
+
+impl LanguagePack {
+    /// The `"vendor|package"` identity `Dictionary` keys packs by.
+    fn key(&self) -> String {
+        format!("{}|{}", self.vendor, self.package)
+    }
+}
+
+/// Pull one `<tag>value</tag>`'s text out of a `language.xml`. The file is a
+/// tiny fixed-shape config (five element kinds, no namespaces on the children,
+/// no CDATA), so a scan beats pulling in an XML parser — the same call this
+/// codebase makes for its other small config readers.
+fn xml_tag_text(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml[start..end].trim().to_string())
+}
+
+/// Parse the `<use vendor="…" package="…"/>` list, in declaration order.
+fn xml_uses(xml: &str) -> Vec<(String, String)> {
+    let attr = |s: &str, name: &str| -> Option<String> {
+        let pat = format!("{name}=\"");
+        let start = s.find(&pat)? + pat.len();
+        let end = s[start..].find('"')? + start;
+        Some(s[start..end].to_string())
+    };
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(i) = rest.find("<use ") {
+        rest = &rest[i..];
+        let Some(close) = rest.find('>') else { break };
+        let tag = &rest[..close];
+        if let (Some(v), Some(p)) = (attr(tag, "vendor"), attr(tag, "package")) {
+            out.push((v, p));
+        }
+        rest = &rest[close..];
+    }
+    out
+}
+
+/// Discover every language package under `root`. Magento finds them through
+/// `ComponentRegistrar::LANGUAGE`, which each pack's `registration.php`
+/// populates; on disk that is always `app/i18n/<vendor>/<package>` or a
+/// composer package root under `vendor/<vendor>/<package>`, so we look for
+/// `language.xml` two levels deep in both trees.
+pub fn discover_language_packs(root: &Path) -> Vec<LanguagePack> {
+    let mut out = Vec::new();
+    for base in [root.join("app").join("i18n"), root.join("vendor")] {
+        let Ok(vendors) = std::fs::read_dir(&base) else { continue };
+        for vendor in vendors.flatten().filter(|e| e.path().is_dir()) {
+            let Ok(pkgs) = std::fs::read_dir(vendor.path()) else { continue };
+            for pkg in pkgs.flatten().filter(|e| e.path().is_dir()) {
+                let dir = pkg.path();
+                let Ok(xml) = std::fs::read_to_string(dir.join("language.xml")) else { continue };
+                let (Some(code), Some(v), Some(p)) = (
+                    xml_tag_text(&xml, "code"),
+                    xml_tag_text(&xml, "vendor"),
+                    xml_tag_text(&xml, "package"),
+                ) else {
+                    continue;
+                };
+                out.push(LanguagePack {
+                    dir,
+                    code,
+                    vendor: v,
+                    package: p,
+                    sort_order: xml_tag_text(&xml, "sort_order")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0),
+                    uses: xml_uses(&xml),
+                });
+            }
+        }
+    }
+    // `getPaths()` order is registration order, which only decides packList
+    // insertion; the merge order is fully determined by sort_order + key, so a
+    // stable sort here just makes discovery deterministic across filesystems.
+    out.sort_by(|a, b| a.dir.cmp(&b.dir));
+    out
+}
+
+/// `Dictionary::readPackCsv` — every `*.csv` in the pack directory, read in
+/// alphabetical order (`Directory\Read::search`), each row `[0] => [1]` with a
+/// plain overwrite (no identity-row handling at this layer; that only happens
+/// once the whole pack dictionary reaches `_addData`).
+fn read_pack_csv(pack: &LanguagePack) -> Vec<(String, String)> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&pack.dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("csv")))
+        .collect();
+    files.sort();
+    let mut rows = Vec::new();
+    for f in files {
+        if let Ok(text) = std::fs::read_to_string(&f) {
+            rows.extend(parse_csv(&text));
+        }
+    }
+    rows
+}
+
+/// `Dictionary::getDictionary` — the merged language-pack dictionary for
+/// `locale`, honoring pack inheritance and sort order.
+///
+/// Every pack declaring `locale` is a root; `collectInheritedPacks` flattens
+/// each root's `<use>` tree recording an inheritance level, roots are ordered
+/// by `sort_order` DESCENDING (ties by key descending), each root is emitted
+/// followed depth-first by its parents, and the whole list is REVERSED — so
+/// the highest-`sort_order` root ends up last and therefore wins. Returns the
+/// rows in application order (earlier entries are overridden by later ones).
+pub fn pack_dictionary(packs: &[LanguagePack], locale: &str) -> Vec<(String, String)> {
+    use std::collections::HashMap;
+
+    let by_key: HashMap<String, &LanguagePack> =
+        packs.iter().map(|p| (p.key(), p)).collect();
+
+    // Flatten the inheritance trees of every pack declaring this locale.
+    // `collected` keeps insertion order (PHP array) and maps key -> level.
+    let mut collected: Vec<(String, usize)> = Vec::new();
+    for root in packs.iter().filter(|p| p.code == locale) {
+        let mut visited: HashSet<String> = HashSet::new();
+        collect_inherited(root, &by_key, &mut collected, 0, &mut visited);
+    }
+
+    // Roots (level 0), sorted by sort_order DESC then key DESC (`sortPacks`).
+    let mut roots: Vec<&String> =
+        collected.iter().filter(|(_, lvl)| *lvl == 0).map(|(k, _)| k).collect();
+    roots.sort_by(|a, b| {
+        let (pa, pb) = (by_key[*a], by_key[*b]);
+        pb.sort_order.cmp(&pa.sort_order).then_with(|| b.cmp(a))
+    });
+
+    // Each root, then its `<use>` parents depth-first, skipping duplicates.
+    let known: HashSet<&String> = collected.iter().map(|(k, _)| k).collect();
+    let mut sorted: Vec<String> = Vec::new();
+    for r in roots {
+        add_inherited(r, &by_key, &known, &mut sorted);
+    }
+
+    // Reversed: lowest priority first, highest last.
+    sorted.reverse();
+    let mut rows = Vec::new();
+    for key in sorted {
+        rows.extend(read_pack_csv(by_key[&key]));
+    }
+    rows
+}
+
+fn collect_inherited(
+    cfg: &LanguagePack,
+    by_key: &std::collections::HashMap<String, &LanguagePack>,
+    result: &mut Vec<(String, usize)>,
+    level: usize,
+    visited: &mut HashSet<String>,
+) {
+    let key = cfg.key();
+    let existing = result.iter().position(|(k, _)| *k == key);
+    // PHP: skip when already visited on THIS root's walk, or when an existing
+    // entry is already at least as deep (`< $level` is the only re-entry).
+    if visited.contains(&key) || existing.is_some_and(|i| result[i].1 >= level) {
+        return;
+    }
+    visited.insert(key.clone());
+    match existing {
+        Some(i) => result[i].1 = level,
+        None => result.push((key, level)),
+    }
+    for (v, p) in &cfg.uses {
+        if let Some(parent) = by_key.get(&format!("{v}|{p}")) {
+            collect_inherited(parent, by_key, result, level + 1, visited);
+        }
+    }
+}
+
+fn add_inherited(
+    key: &str,
+    by_key: &std::collections::HashMap<String, &LanguagePack>,
+    known: &HashSet<&String>,
+    sorted: &mut Vec<String>,
+) {
+    if sorted.iter().any(|k| k == key) {
+        return;
+    }
+    sorted.push(key.to_string());
+    let Some(pack) = by_key.get(key) else { return };
+    for (v, p) in &pack.uses {
+        let pk = format!("{v}|{p}");
+        if known.contains(&pk) {
+            add_inherited(&pk, by_key, known, sorted);
+        }
+    }
+}
+
 /// Build the merged translation dictionary for `locale`, mirroring
 /// `Translate::loadData` order: every enabled module's `i18n/<locale>.csv` in
-/// **config.php load order** (`_loadModuleTranslation`), then the theme
+/// **config.php load order** (`_loadModuleTranslation`), then the LANGUAGE
+/// PACKS (`_loadPackTranslation`, see [`pack_dictionary`]), then the theme
 /// chain's `i18n/<locale>.csv` root→child (`_loadThemeTranslation`), each
-/// merged via [`add_data`] (identity-row deletes). Language packs are not
-/// modeled (empty shells on this corpus). `modules` MUST be the ENABLED set
-/// in load order — the real `_moduleList->getNames()`, not the (larger)
-/// ComponentRegistrar scan set.
+/// merged via [`add_data`] (identity-row deletes). Note the middle position:
+/// packs override modules but a theme still overrides packs. `modules` MUST be
+/// the ENABLED set in load order — the real `_moduleList->getNames()`, not the
+/// (larger) ComponentRegistrar scan set.
 pub fn merged_dictionary(
     modules: &[ScanModule],
+    packs: &[LanguagePack],
     theme_dirs: &[PathBuf],
     locale: &str,
 ) -> BTreeMap<String, String> {
     let mut dict: BTreeMap<String, String> = BTreeMap::new();
     let file = format!("{locale}.csv");
     // Module csvs, in load order.
-    let mut sources: Vec<PathBuf> = modules
-        .iter()
-        .map(|m| m.dir.join("i18n").join(&file))
-        .collect();
+    for m in modules {
+        if let Ok(text) = std::fs::read_to_string(m.dir.join("i18n").join(&file)) {
+            add_data(&mut dict, &parse_csv(&text));
+        }
+    }
+    // Language packs. `getDictionary` collapses every pack's rows with a PLAIN
+    // overwrite first (no identity handling), and only the collapsed result
+    // reaches `_addData` — so identity rows are judged on the pack set's final
+    // value, not row by row.
+    let mut pack_rows: BTreeMap<String, String> = BTreeMap::new();
+    for (k, v) in pack_dictionary(packs, locale) {
+        pack_rows.insert(k, v);
+    }
+    add_data(&mut dict, &pack_rows.into_iter().collect::<Vec<_>>());
     // Theme chain csvs, root-first (theme_dirs is child-first from the
     // resolver — reverse so the child's overrides land last).
     for d in theme_dirs.iter().rev() {
-        sources.push(d.join("i18n").join(&file));
-    }
-    for src in sources {
-        if let Ok(text) = std::fs::read_to_string(&src) {
+        if let Ok(text) = std::fs::read_to_string(d.join("i18n").join(&file)) {
             add_data(&mut dict, &parse_csv(&text));
         }
     }
@@ -553,6 +781,96 @@ pub fn js_translation_json(dict: &BTreeMap<String, String>, phrases: &HashSet<St
 
 #[cfg(test)]
 mod tests {
+    use super::{discover_language_packs, merged_dictionary, pack_dictionary, ScanModule};
+
+    fn write(root: &std::path::Path, rel: &str, body: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    fn lang_xml(code: &str, vendor: &str, package: &str, sort: Option<i32>, uses: &[(&str, &str)]) -> String {
+        let mut x = format!("<language>\n<code>{code}</code>\n<vendor>{vendor}</vendor>\n<package>{package}</package>\n");
+        if let Some(s) = sort {
+            x.push_str(&format!("<sort_order>{s}</sort_order>\n"));
+        }
+        for (v, p) in uses {
+            x.push_str(&format!("<use vendor=\"{v}\" package=\"{p}\"/>\n"));
+        }
+        x.push_str("</language>\n");
+        x
+    }
+
+    /// Language packs are `ComponentRegistrar::LANGUAGE` components — neither
+    /// modules nor themes, so nothing else in the deploy sees them. Their
+    /// merge order is `sort_order` DESCENDING among roots, then the list is
+    /// reversed, so the HIGHEST sort_order wins.
+    #[test]
+    fn higher_sort_order_pack_overrides_the_vendor_pack() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        // A community pack with no sort_order (defaults to 0)…
+        write(r, "vendor/community/language-nl/language.xml", &lang_xml("nl_NL", "CommunityEngineering", "nl_NL", None, &[]));
+        write(r, "vendor/community/language-nl/nl_NL.csv", "\"Account ID\",\"Account-ID\"\n\"Only here\",\"Alleen hier\"\n");
+        // …and a store pack that deliberately sorts above it.
+        write(r, "app/i18n/acme/nl_nl/language.xml", &lang_xml("nl_NL", "acme", "nl_nl", Some(100), &[]));
+        write(r, "app/i18n/acme/nl_nl/nl_NL.csv", "\"Account ID\",\"Klant-ID\"\n");
+
+        let packs = discover_language_packs(r);
+        assert_eq!(packs.len(), 2);
+        let rows = pack_dictionary(&packs, "nl_NL");
+        let merged: std::collections::BTreeMap<_, _> = rows.into_iter().collect();
+        assert_eq!(merged["Account ID"], "Klant-ID");
+        assert_eq!(merged["Only here"], "Alleen hier");
+    }
+
+    /// A pack declaring a different locale never contributes.
+    #[test]
+    fn packs_for_other_locales_are_ignored() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        write(r, "app/i18n/acme/de_de/language.xml", &lang_xml("de_DE", "acme", "de_de", None, &[]));
+        write(r, "app/i18n/acme/de_de/de_DE.csv", "\"Tax\",\"Steuer\"\n");
+        let packs = discover_language_packs(r);
+        assert!(pack_dictionary(&packs, "nl_NL").is_empty());
+    }
+
+    /// `<use>` pulls an inherited pack in UNDER the inheriting one.
+    #[test]
+    fn inherited_pack_is_overridden_by_the_pack_that_uses_it() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        write(r, "vendor/base/lang/language.xml", &lang_xml("de_DE", "Base", "de_DE", None, &[]));
+        write(r, "vendor/base/lang/de_DE.csv", "\"Cart\",\"Korb\"\n\"Only base\",\"Nur Basis\"\n");
+        write(r, "app/i18n/acme/de_at/language.xml", &lang_xml("de_AT", "acme", "de_at", Some(100), &[("Base", "de_DE")]));
+        write(r, "app/i18n/acme/de_at/de_AT.csv", "\"Cart\",\"Warenkorb\"\n");
+
+        let packs = discover_language_packs(r);
+        let merged: std::collections::BTreeMap<_, _> = pack_dictionary(&packs, "de_AT").into_iter().collect();
+        assert_eq!(merged["Cart"], "Warenkorb", "the using pack wins");
+        assert_eq!(merged["Only base"], "Nur Basis", "inherited rows still land");
+    }
+
+    /// `Translate::loadData` order: modules, then PACKS, then the theme. So a
+    /// pack overrides a module but a theme still overrides the pack.
+    #[test]
+    fn pack_sits_between_module_and_theme() {
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        write(r, "app/code/Acme/Mod/i18n/nl_NL.csv", "\"A\",\"from-module\"\n\"B\",\"from-module\"\n\"C\",\"from-module\"\n");
+        write(r, "app/i18n/acme/nl_nl/language.xml", &lang_xml("nl_NL", "acme", "nl_nl", None, &[]));
+        write(r, "app/i18n/acme/nl_nl/nl_NL.csv", "\"B\",\"from-pack\"\n\"C\",\"from-pack\"\n");
+        write(r, "app/design/frontend/Acme/t/i18n/nl_NL.csv", "\"C\",\"from-theme\"\n");
+
+        let modules = vec![ScanModule { dir: r.join("app/code/Acme/Mod") }];
+        let packs = discover_language_packs(r);
+        let themes = vec![r.join("app/design/frontend/Acme/t")];
+        let dict = merged_dictionary(&modules, &packs, &themes, "nl_NL");
+        assert_eq!(dict["A"], "from-module");
+        assert_eq!(dict["B"], "from-pack");
+        assert_eq!(dict["C"], "from-theme");
+    }
+
     use super::*;
 
     #[test]

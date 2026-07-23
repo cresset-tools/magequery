@@ -56,24 +56,25 @@
 //!
 //! After the package files: `requirejs-config.js` +
 //! `requirejs-min-resolver.js` (DeployRequireJsConfig), `js-translation.json`
-//! (DeployTranslationsDictionary — the merged js dictionary; empty on
-//! locales where no phrase translates differently, serialized as PHP
-//! `json_encode([])` = the literal `[]`; **limitation**: phrase extraction
-//! from js/html sources is not implemented, so only locales with an empty
-//! dictionary — like en_US — are byte-faithful), `js/bundle/bundle<N>.js`
+//! (DeployTranslationsDictionary — the merged js dictionary: modules, then
+//! LANGUAGE packs, then the deployed theme's own chain; empty on locales
+//! where no phrase translates differently, serialized as PHP
+//! `json_encode([])` = the literal `[]`), `js/bundle/bundle<N>.js`
 //! ([`super::bundle`], shared `.min`-sibling cache across the themes of one
 //! run — the bundler deliberately keeps its own merged js/html view of the
 //! package instead of consuming this resolver: that view is locked by the
 //! 14-bundle byte gate and needs a merged MAP in deployed-tree glob order,
 //! not this resolver's provenance-ordered entry list; both are gated
-//! against the same golden deploy), and `sri-hashes.json` — sha256-base64
-//! of every deployed `.js` (package js in deployment order, then the two
-//! requirejs artifacts, then the bundles; PHP `json_encode` with escaped
-//! slashes).
+//! against the same golden deploy). `sri-hashes.json` is NOT a package file:
+//! `Magento_Csp` writes ONE per AREA at the static root, and each of its three
+//! producing phases runs across every package before the next starts — so it
+//! lists all packages' published js, then all their `requirejs-config.js`
+//! (never the min-resolver), then all their bundles; sha256-base64, PHP
+//! `json_encode` with escaped slashes.
 //! `deployed_version.txt` (pub/static root, run-scoped) is written only when
 //! the caller supplies a version — never an invented timestamp.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::bundle::{self, MinSiblingCache, OrderMode};
@@ -106,6 +107,40 @@ pub const DEPLOYED_VERSION_FILE_NAME: &str = "deployed_version.txt";
 /// anything unmatched in the given order. The DI/config `config.php` order
 /// is NOT the registration order — the golden `sri-hashes.json` proves the
 /// deployment iterates modules in registration order.
+/// The module dirs ONE `registration.php` registers, in registration order.
+///
+/// Usually that is just its own directory. But a composer package may be a
+/// LOADER that pulls in many modules — Magestore ships a "synthesized
+/// superpackage" whose `registration.php` holds a list of
+/// `app/code/<Vendor>/<Module>/registration.php` paths and `require_once
+/// __DIR__ . '/' . $file`s each. Those modules register at the SUPERPACKAGE's
+/// autoload position, in the listed order, so ignoring the indirection would
+/// strand every one of them in the unmatched tail and corrupt the deployment
+/// order (visible in `sri-hashes.json` key order). We follow the same rule PHP
+/// does: every `…/registration.php` string literal in the file, resolved
+/// against the file's own directory.
+fn registered_dirs(reg_file: &Path) -> Vec<PathBuf> {
+    let Some(base) = reg_file.parent() else { return Vec::new() };
+    let mut out = vec![base.to_path_buf()];
+    let Ok(src) = std::fs::read_to_string(reg_file) else { return out };
+    for quote in ['\'', '"'] {
+        let mut rest = src.as_str();
+        while let Some(at) = rest.find(quote) {
+            rest = &rest[at + 1..];
+            let Some(end) = rest.find(quote) else { break };
+            let lit = &rest[..end];
+            rest = &rest[end + 1..];
+            if let Some(dir) = lit.strip_suffix("/registration.php") {
+                let p = base.join(dir);
+                if p.is_dir() {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn registration_order(root: &Path, modules: &[ModuleRef]) -> Vec<ModuleRef> {
     use rayon::prelude::*;
     let autoload = root.join("vendor").join("composer").join("autoload_files.php");
@@ -124,8 +159,8 @@ pub fn registration_order(root: &Path, modules: &[ModuleRef]) -> Vec<ModuleRef> 
             let Some(end) = rest.find('\'') else { break };
             let rel = &rest[..end];
             rest = &rest[end..];
-            if let Some(dir) = rel.strip_suffix("/registration.php") {
-                reg_raw.push(vendor.join(dir.trim_start_matches('/')));
+            if rel.ends_with("/registration.php") {
+                reg_raw.extend(registered_dirs(&vendor.join(rel.trim_start_matches('/'))));
             }
         }
     }
@@ -150,16 +185,116 @@ pub fn registration_order(root: &Path, modules: &[ModuleRef]) -> Vec<ModuleRef> 
             }
         }
     }
-    // app/code (and any unmatched) modules: sorted by path, the sorted-glob
-    // order of `app/code/*/*/registration.php`.
-    let mut rest: Vec<&ModuleRef> = modules
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| !taken[*i])
-        .map(|(_, m)| m)
-        .collect();
-    rest.sort_by(|a, b| a.dir.cmp(&b.dir));
-    out.extend(rest.into_iter().cloned());
+    // Then the non-composer components, in `NonComposerComponentRegistration`
+    // order: each pattern of `app/etc/registration_globlist.php` expanded with
+    // **GLOB_NOSORT** — readdir order, which that file disables sorting for
+    // "performance improvement". NOT alphabetical: on a store with several
+    // app/code vendors the readdir order decides which vendor's modules deploy
+    // first, and that is directly observable in `sri-hashes.json` key order.
+    for dir in noncomposer_registration_dirs(root) {
+        let canon = std::fs::canonicalize(&dir).unwrap_or(dir);
+        if let Some(&i) = by_dir.get(canon.as_path()) {
+            if !taken[i] {
+                taken[i] = true;
+                out.push(modules[i].clone());
+            }
+        }
+    }
+    // Anything still unmatched keeps the caller's order (a module registered by
+    // a mechanism we do not model is better placed than dropped).
+    out.extend(
+        modules
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !taken[*i])
+            .map(|(_, m)| m.clone()),
+    );
+    out
+}
+
+/// Expand `app/etc/registration_globlist.php`'s patterns the way
+/// `NonComposerComponentRegistration` does — `glob(..., GLOB_NOSORT)`, i.e.
+/// **readdir order at every wildcard level** — and return the directory of each
+/// matched `registration.php`, in order. Patterns are literal segments and
+/// single `*` segments only, which is all that file ever holds.
+fn noncomposer_registration_dirs(root: &Path) -> Vec<PathBuf> {
+    /// What `app/etc/registration_globlist.php` ships with, used when that file
+    /// is unreadable so a non-standard checkout still orders app/code sanely.
+    const DEFAULT_PATTERNS: &[&str] = &[
+        "app/code/*/*/registration.php",
+        "app/design/*/*/*/registration.php",
+        "app/i18n/*/*/registration.php",
+        "lib/internal/*/*/registration.php",
+        "lib/internal/*/*/*/registration.php",
+        "setup/src/*/*/registration.php",
+    ];
+
+    let list = root.join("app").join("etc").join("registration_globlist.php");
+    let src = std::fs::read_to_string(&list).unwrap_or_default();
+    let mut patterns: Vec<&str> = Vec::new();
+    let mut rest = src.as_str();
+    // The file is a plain `return [ '<pattern>', … ];` array of single-quoted
+    // strings; take every literal that names a php file.
+    while let Some(at) = rest.find('\'') {
+        rest = &rest[at + 1..];
+        let Some(end) = rest.find('\'') else { break };
+        let lit = &rest[..end];
+        rest = &rest[end + 1..];
+        if lit.ends_with(".php") && lit.contains('/') {
+            patterns.push(lit);
+        }
+    }
+
+    if patterns.is_empty() {
+        patterns = DEFAULT_PATTERNS.to_vec();
+    }
+
+    let mut out = Vec::new();
+    for pattern in patterns {
+        let segs: Vec<&str> = pattern.split('/').collect();
+        let mut level: Vec<PathBuf> = vec![root.to_path_buf()];
+        for (i, seg) in segs.iter().enumerate() {
+            let last = i + 1 == segs.len();
+            let mut next = Vec::new();
+            for base in &level {
+                if *seg == "*" {
+                    // readdir order — no sort, exactly what GLOB_NOSORT yields.
+                    let Ok(rd) = std::fs::read_dir(base) else { continue };
+                    for e in rd.flatten() {
+                        let name = e.file_name();
+                        // glob never matches a leading-dot name with `*`.
+                        if name.to_string_lossy().starts_with('.') {
+                            continue;
+                        }
+                        let p = e.path();
+                        if last {
+                            if p.is_file() {
+                                next.push(p);
+                            }
+                        } else if p.is_dir() {
+                            next.push(p);
+                        }
+                    }
+                } else {
+                    let p = base.join(seg);
+                    let ok = if last { p.is_file() } else { p.is_dir() };
+                    if ok {
+                        next.push(p);
+                    }
+                }
+            }
+            level = next;
+        }
+        // Only `registration.php` registers components; `cli_commands.php`
+        // shares the glob list but registers nothing.
+        for f in level {
+            if f.file_name().is_some_and(|n| n == "registration.php") {
+                if let Some(d) = f.parent() {
+                    out.push(d.to_path_buf());
+                }
+            }
+        }
+    }
     out
 }
 
@@ -289,6 +424,7 @@ pub fn resolve_package(
     chain: &[ThemeRef],
     modules: &[ModuleRef],
     locale: &str,
+    unprefixed_modules: &[String],
 ) -> Vec<PackageEntry> {
     let mut files = OrderedFiles::default();
     let enabled: std::collections::HashSet<&str> =
@@ -403,6 +539,14 @@ pub fn resolve_package(
     // `_*.less` partials (checkFileSkip), rename non-partial `.less` → `.css`.
     let mut out = Vec::with_capacity(files.order.len());
     for (fid, source) in files.order {
+        // `PackageFile::setModule('')` (Hyva_Email's plugin): the module's files
+        // deploy at the THEME root, so the `Vendor_Module/` segment disappears
+        // from both the deployed path and the logical one — which is what puts
+        // their `@import` resolution on the NON-modular fallback.
+        let fid = match fid.split_once("::") {
+            Some((m, rest)) if unprefixed_modules.iter().any(|u| u == m) => rest.to_string(),
+            _ => fid,
+        };
         let logical = fid.replacen("::", "/", 1);
         let basename = logical.rsplit('/').next().unwrap_or(&logical);
         let is_less = basename.ends_with(".less");
@@ -421,7 +565,43 @@ pub fn resolve_package(
             logical,
         });
     }
+
+    // A real `.css` source beats compiling a same-named `.less`
+    // (`Asset\PreProcessor\AlternativeSource`: the LESS alternative is only
+    // consulted when the requested `.css` does not resolve). Both are separate
+    // fileIds and both stay in the collection, but they publish the SAME
+    // bytes — the `.css` ones — so the `.less` entry contributes nothing.
+    // Magestore ships `css/common.{css,less}` pairs whose contents differ
+    // wildly, which is where this stops being academic.
+    let plain_css: HashSet<&str> = out
+        .iter()
+        .filter(|e| !e.less)
+        .map(|e| e.deployed.as_str())
+        .collect();
+    let shadowed: HashSet<String> = out
+        .iter()
+        .filter(|e| e.less && plain_css.contains(e.deployed.as_str()))
+        .map(|e| e.deployed.clone())
+        .collect();
+    out.retain(|e| !(e.less && shadowed.contains(&e.deployed)));
     out
+}
+
+/// Drop the package files a registered `Deploy\Package\Package` plugin removes
+/// (see [`deploy_plugin_effects`]). The plugin matches on `getFilePath()` —
+/// the path WITHIN its module/theme context — so the `Vendor_Module/` segment a
+/// module file carries in the deployed path is not part of the comparison.
+fn apply_package_exclusions(entries: &mut Vec<PackageEntry>, prefixes: &[String]) {
+    if prefixes.is_empty() {
+        return;
+    }
+    entries.retain(|e| {
+        let file_path = match e.deployed.split_once('/') {
+            Some((first, rest)) if is_module_segment(first) => rest,
+            _ => e.deployed.as_str(),
+        };
+        !prefixes.iter().any(|p| file_path.starts_with(p.as_str()))
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +679,18 @@ pub struct PlacedFile {
     pub kind: PlacedKind,
 }
 
+/// One package's `sri-hashes.json` contribution, split by the deploy phase that
+/// produced it.
+#[derive(Debug, Clone, Default)]
+pub struct PackageSri {
+    /// Package files published by `DeployPackage` (phase 0).
+    pub package: Vec<(String, String)>,
+    /// The generated `requirejs-config.js` (phase 1).
+    pub requirejs: Vec<(String, String)>,
+    /// The JS bundles, lexicographic (phase 2).
+    pub bundles: Vec<(String, String)>,
+}
+
 /// One theme's fully placed package.
 #[derive(Debug)]
 pub struct ThemePackage {
@@ -512,6 +704,13 @@ pub struct ThemePackage {
     pub files: Vec<PlacedFile>,
     /// Compiler warnings from the LESS entries (logical path, message).
     pub warnings: Vec<(String, String)>,
+    /// This package's contribution to the AREA-level `sri-hashes.json`, split
+    /// by the deploy PHASE that produced it. Not a package file:
+    /// `Csp\…\Storage\File` writes ONE file per area at the static root, and
+    /// each phase runs across EVERY package before the next begins — so the
+    /// final order is all packages' phase 0, then all their phase 1, then all
+    /// their phase 2 (see [`super::deploy::area_sri_path`]).
+    pub sri: PackageSri,
 }
 
 impl ThemePackage {
@@ -534,6 +733,10 @@ pub struct PlacementOptions {
     pub compress: bool,
     /// Bundle-internal iteration order (the deployed-tree glob simulation).
     pub order: OrderMode,
+    /// What the store's registered deploy plugins do to this run (see
+    /// [`deploy_plugin_effects`]). All-empty on a store with no such plugin —
+    /// derived from the store's own di.xml, never assumed.
+    pub plugins: DeployPluginEffects,
 }
 
 impl Default for PlacementOptions {
@@ -541,6 +744,7 @@ impl Default for PlacementOptions {
         PlacementOptions {
             compress: true,
             order: OrderMode::Sorted,
+            plugins: DeployPluginEffects::default(),
         }
     }
 }
@@ -652,9 +856,18 @@ fn build_theme_prebundle(
         .unwrap_or(&chain[0].id)
         .to_string();
 
-    let entries = resolve_package(root, area, &chain, reg_modules, locale);
+    let mut entries = resolve_package(
+        root,
+        area,
+        &chain,
+        reg_modules,
+        locale,
+        &opts.plugins.unprefixed_modules,
+    );
+    apply_package_exclusions(&mut entries, &opts.plugins.exclude_prefixes);
 
-    let orchestrator = LessOrchestrator::new(root, area, theme_id, themes, modules.to_vec())?;
+    let orchestrator = LessOrchestrator::new(root, area, theme_id, themes, modules.to_vec())?
+        .with_extra_web_dirs(&opts.plugins.extra_web_dirs);
     let less_opts = LessDeployOptions {
         skip_broken_modules: false,
         compress: opts.compress,
@@ -687,6 +900,30 @@ fn build_theme_prebundle(
             files.push(pf);
         }
         warnings.append(&mut warns);
+    }
+
+    // Two package entries can share a DEPLOYED path: `css/common.less` and
+    // `css/common.css` are distinct fileIds (`Package::addFile` keys on
+    // fileId), so both survive collection, and both are written to
+    // `css/common.css`. `DeployPackage` writes them sequentially, so the one
+    // collected LAST wins on disk while the PHP array keeps the first's
+    // position. Collapse to that here: writing both would race (our writes fan
+    // out across rayon) and pick a winner at random — the observed symptom was
+    // a Magestore module deploying its compiled LESS on one run and its
+    // hand-written CSS on the next.
+    {
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut collapsed: Vec<PlacedFile> = Vec::with_capacity(files.len());
+        for f in files.drain(..) {
+            match seen.get(&f.path) {
+                Some(&i) => collapsed[i] = f,
+                None => {
+                    seen.insert(f.path.clone(), collapsed.len());
+                    collapsed.push(f);
+                }
+            }
+        }
+        files = collapsed;
     }
 
     // The requirejs artifacts (DeployRequireJsConfig, post-package).
@@ -767,6 +1004,7 @@ fn finalize_theme(
         modules,
         &generated,
         &opts.order,
+        &opts.plugins.exclude_prefixes,
         min_cache,
     )?;
     for b in bundles.files {
@@ -793,24 +1031,33 @@ fn finalize_theme(
             .and_then(|b| b.rsplit_once('.'))
             .is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("js"))
     };
-    let mut bundle_js: Vec<&PlacedFile> = files
+    // `requirejs-min-resolver.js` is NOT hashed: `GenerateAssetIntegrity`
+    // plugs only `afterCreateRequireJsConfigAsset`, so of the two requirejs
+    // artifacts just `requirejs-config.js` reaches the collector.
+    let hashed = |f: &&PlacedFile| is_js(f) && f.path != requirejs::MIN_RESOLVER_FILE_NAME;
+    let hash_all = |v: Vec<&PlacedFile>| -> Vec<(String, String)> {
+        v.into_iter().map(|f| (format!("{prefix}/{}", f.path), sri_hash(&f.content))).collect()
+    };
+    // Phase 0 — the package files, as `DeployPackage` publishes them.
+    let package_js: Vec<&PlacedFile> = files
         .iter()
-        .filter(|f| f.kind == PlacedKind::Bundle)
-        .filter(is_js)
+        .filter(|f| !matches!(f.kind, PlacedKind::Bundle | PlacedKind::RequireJs))
+        .filter(hashed)
         .collect();
+    // Phase 1 — `DeployRequireJsConfig`'s generated config asset.
+    let requirejs_js: Vec<&PlacedFile> =
+        files.iter().filter(|f| f.kind == PlacedKind::RequireJs).filter(hashed).collect();
+    // Phase 2 — `Service\Bundle`, whose collector lists the bundles via
+    // `$pubStaticDir->search("<pkg>/js/bundle/*.js")`, a SORTING glob, so their
+    // entries are lexicographic (`bundle10` between `bundle1` and `bundle2`).
+    let mut bundle_js: Vec<&PlacedFile> =
+        files.iter().filter(|f| f.kind == PlacedKind::Bundle).filter(hashed).collect();
     bundle_js.sort_by(|a, b| a.path.cmp(&b.path));
-    let sri: Vec<(String, String)> = files
-        .iter()
-        .filter(|f| f.kind != PlacedKind::Bundle)
-        .filter(is_js)
-        .chain(bundle_js)
-        .map(|f| (format!("{prefix}/{}", f.path), sri_hash(&f.content)))
-        .collect();
-    files.push(PlacedFile {
-        path: SRI_HASHES_FILE_NAME.to_string(),
-        content: sri_hashes_json(&sri).into_bytes(),
-        kind: PlacedKind::SriHashes,
-    });
+    let sri = PackageSri {
+        package: hash_all(package_js),
+        requirejs: hash_all(requirejs_js),
+        bundles: hash_all(bundle_js),
+    };
 
     Ok(ThemePackage {
         theme: theme_id,
@@ -818,13 +1065,16 @@ fn finalize_theme(
         chain,
         files,
         warnings,
+        sri,
     })
 }
 
 /// Place one theme's full package: [`build_theme_prebundle`] then
 /// [`finalize_theme`]. The two-phase form exists so a group's themes can render
-/// in parallel and bundle in order (see [`build_group`]); this wrapper keeps
-/// the single-theme path (`build_from_magento`, tests) one call.
+/// in parallel and bundle in order (see [`build_group`]), which every real
+/// caller goes through; this wrapper keeps the single-theme path one call for
+/// the tests that exercise placement on a synthetic root.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build_theme(
     root: &Path,
@@ -862,8 +1112,86 @@ pub struct DeployInputs {
     /// Every module (enabled or not) for the js/html translation scan — the
     /// real deploy's `ComponentRegistrar` sees all installed modules.
     pub scan_modules: Vec<super::jstranslation::ScanModule>,
+    /// Every discovered language package (`ComponentRegistrar::LANGUAGE`) —
+    /// the `_loadPackTranslation` source, invisible to the module and theme
+    /// collectors.
+    pub language_packs: Vec<super::jstranslation::LanguagePack>,
     /// The assembled `requirejs-min-resolver.js` body (theme-independent).
     pub min_resolver: String,
+}
+
+/// Deploy-affecting DI plugins we model, as `(target type, plugin class)` pairs.
+///
+/// A third-party plugin on the deploy pipeline can change the file set, the
+/// deployed paths, or the static fallback — and a pure-static tool cannot run
+/// it. So we never assume: each effect applies only when the store's own merged
+/// di.xml actually registers that plugin, enabled. Anything else on these types
+/// is reported instead of silently diverging.
+///
+/// All three that matter today ship with Hyva, which is why a Hyva store's
+/// deploy diverges so visibly without them: `web/tailwind/` (node_modules and
+/// all, ~11k files per theme) is dropped from every package, and `Hyva_Email`'s
+/// assets deploy at the THEME root rather than under `Hyva_Email/` — which in
+/// turn makes their `@import 'source/lib/…'` resolve through the non-modular
+/// fallback (lib/web) instead of the module's own tree.
+const PACKAGE_PLUGIN_TARGET: &str = "Magento\\Deploy\\Package\\Package";
+const PACKAGE_FILE_PLUGIN_TARGET: &str = "Magento\\Deploy\\Package\\PackageFile";
+const FALLBACK_RULE_PLUGIN_TARGET: &str =
+    "Magento\\Framework\\View\\Design\\Fallback\\Rule\\ModularSwitch";
+
+/// What the modelled plugins do to a deploy, derived from the store's di.xml.
+#[derive(Debug, Clone, Default)]
+pub struct DeployPluginEffects {
+    /// Package-file path prefixes dropped from every package.
+    pub exclude_prefixes: Vec<String>,
+    /// Modules whose files deploy WITHOUT their `Vendor_Module/` path segment,
+    /// i.e. at the theme root (`PackageFile::setModule('')`).
+    pub unprefixed_modules: Vec<String>,
+    /// Extra directories appended to the NON-modular static fallback, after
+    /// `lib/web` (`ModularSwitch::getPatternDirs` `$result[] = …`).
+    pub extra_web_dirs: Vec<PathBuf>,
+    /// Plugins on those types whose effect we do NOT model.
+    pub unknown: Vec<String>,
+}
+
+/// Read the store's merged global di.xml and derive [`DeployPluginEffects`].
+pub fn deploy_plugin_effects(magento: &magequery_core::Magento) -> DeployPluginEffects {
+    let module_dir = |name: &str| -> Option<PathBuf> {
+        magento.modules().iter().find(|m| m.name.as_str() == name).map(|m| m.path.clone())
+    };
+    let di = magento.di_export(magequery_core::Area::Global);
+    let mut out = DeployPluginEffects::default();
+    for p in di.plugins.iter().filter(|p| !p.disabled) {
+        let target = p.target.as_str().trim_start_matches('\\');
+        if !matches!(
+            target,
+            PACKAGE_PLUGIN_TARGET | PACKAGE_FILE_PLUGIN_TARGET | FALLBACK_RULE_PLUGIN_TARGET
+        ) {
+            continue;
+        }
+        let Some(class) = p.class.as_ref() else { continue };
+        match class.as_str().trim_start_matches('\\') {
+            "Hyva\\Theme\\Plugin\\Deploy\\Package\\ExcludeTailwindPlugin" => {
+                out.exclude_prefixes.push("tailwind/".to_string());
+            }
+            "Hyva\\Email\\Plugin\\PackageFilePlugin" => {
+                out.unprefixed_modules.push("Hyva_Email".to_string());
+            }
+            "Hyva\\Email\\Plugin\\FallbackRulePlugin" => {
+                if let Some(dir) = module_dir("Hyva_Email") {
+                    out.extra_web_dirs.push(dir.join("view").join("frontend").join("web"));
+                }
+            }
+            other => out.unknown.push(format!("{other} (on {target})")),
+        }
+    }
+    out.exclude_prefixes.sort();
+    out.exclude_prefixes.dedup();
+    out.unprefixed_modules.sort();
+    out.unprefixed_modules.dedup();
+    out.extra_web_dirs.sort();
+    out.extra_web_dirs.dedup();
+    out
 }
 
 impl DeployInputs {
@@ -886,6 +1214,7 @@ impl DeployInputs {
             .iter()
             .map(|m| super::jstranslation::ScanModule { dir: m.path.clone() })
             .collect();
+        let language_packs = super::jstranslation::discover_language_packs(magento.root());
         let excludes = requirejs::min_resolver_excludes_from_magento(magento)?;
         let min_resolver = requirejs::min_resolver_code(&excludes);
         Ok(DeployInputs {
@@ -894,6 +1223,7 @@ impl DeployInputs {
             modules,
             reg_modules,
             scan_modules,
+            language_packs,
             min_resolver,
         })
     }
@@ -919,11 +1249,30 @@ impl DeployInputs {
 /// storm) and scan phrases only when it is non-empty. This skips the scan
 /// outright for source-locale deploys, and — because this runs inside the
 /// parallel group task — overlaps it across areas/groups when it is needed.
-pub fn js_translation_for(
+/// The area's extracted js/html phrase set — `DataProvider::getData` ignores
+/// its `$themePath` argument, so this scan is theme-INDEPENDENT and is hoisted
+/// out of the per-theme dictionary build (it is the expensive half).
+pub fn area_phrases_for(
     inputs: &DeployInputs,
     area: &str,
+) -> std::collections::HashSet<String> {
+    super::jstranslation::extract_area_phrases(
+        &inputs.root,
+        area,
+        &inputs.scan_modules,
+        &inputs.area_theme_dirs(area),
+    )
+}
+
+/// `js-translation.json` for ONE deployed theme. The phrase SET is theme-
+/// independent (`area_phrases`), but the DICTIONARY is not: `_loadThemeTranslation`
+/// walks the deployed theme's own ancestry, so a child theme with its own
+/// `i18n/<locale>.csv` emits different bytes than its parent.
+pub fn js_translation_for(
+    inputs: &DeployInputs,
     locale: &str,
     theme_chain_dirs: &[PathBuf],
+    area_phrases: &std::collections::HashSet<String>,
 ) -> String {
     // The dictionary uses the ENABLED modules in config.php load order (the
     // real `Translate::_moduleList->getNames()`), NOT the wider registration
@@ -933,14 +1282,17 @@ pub fn js_translation_for(
         .iter()
         .map(|m| super::jstranslation::ScanModule { dir: m.dir.clone() })
         .collect();
-    let dict = super::jstranslation::merged_dictionary(&dict_modules, theme_chain_dirs, locale);
+    let dict = super::jstranslation::merged_dictionary(
+        &dict_modules,
+        &inputs.language_packs,
+        theme_chain_dirs,
+        locale,
+    );
     if dict.is_empty() {
-        // No translations for this locale ⇒ `[]`, no phrase scan needed.
+        // No translations for this locale => `[]`.
         return dictionary_json(&[]);
     }
-    let area_phrases =
-        super::jstranslation::extract_area_phrases(&inputs.root, area, &inputs.scan_modules, &inputs.area_theme_dirs(area));
-    super::jstranslation::js_translation_json(&dict, &area_phrases)
+    super::jstranslation::js_translation_json(&dict, area_phrases)
 }
 
 /// Place a sequence of themes exactly like one deploy sub-run for a single
@@ -953,7 +1305,7 @@ pub fn build_group(
     area: &str,
     theme_ids: &[String],
     locale: &str,
-    js_translation: &str,
+    area_phrases: &std::collections::HashSet<String>,
     opts: &PlacementOptions,
 ) -> Result<Vec<ThemePackage>, FilesError> {
     use rayon::prelude::*;
@@ -964,6 +1316,20 @@ pub fn build_group(
     let prebuilt: Vec<PrebuiltPackage> = theme_ids
         .par_iter()
         .map(|theme_id| {
+            // Per THEME: `_loadThemeTranslation` walks the deployed theme's own
+            // ancestry, so a child with its own `i18n/<locale>.csv` gets
+            // different bytes than its parent.
+            let chain_dirs: Vec<PathBuf> = theme_chain(area, theme_id, &inputs.themes)
+                .map(|chain| {
+                    chain
+                        .iter()
+                        .filter_map(|t| {
+                            inputs.themes.iter().find(|(tid, _)| tid == &t.id).map(|(_, d)| d.clone())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let js_translation = js_translation_for(inputs, locale, &chain_dirs, area_phrases);
             build_theme_prebundle(
                 &inputs.root,
                 area,
@@ -973,7 +1339,7 @@ pub fn build_group(
                 &inputs.modules,
                 &inputs.reg_modules,
                 &inputs.min_resolver,
-                js_translation,
+                &js_translation,
                 opts,
             )
         })
@@ -1015,18 +1381,8 @@ pub fn build_from_magento(
     // Theme chain dirs for the dictionary: use the first theme's chain when
     // present, else no theme overlay. Theme i18n rarely differs; the extracted
     // set is theme-independent regardless.
-    let chain_dirs: Vec<PathBuf> = theme_ids
-        .first()
-        .and_then(|id| theme_chain(area, id, &inputs.themes).ok())
-        .map(|chain| {
-            chain
-                .iter()
-                .filter_map(|t| inputs.themes.iter().find(|(tid, _)| tid == &t.id).map(|(_, d)| d.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let js_translation = js_translation_for(&inputs, area, locale, &chain_dirs);
-    build_group(&inputs, area, theme_ids, locale, &js_translation, opts)
+    let area_phrases = area_phrases_for(&inputs, area);
+    build_group(&inputs, area, theme_ids, locale, &area_phrases, opts)
 }
 
 /// The deployed package root:
@@ -1106,8 +1462,14 @@ mod tests {
         ];
         let ordered = registration_order(r, &modules);
         let names: Vec<&str> = ordered.iter().map(|m| m.name.as_str()).collect();
-        // vendor in autoload order (b before a), then app/code sorted.
-        assert_eq!(names, vec!["Acme_B", "Acme_A", "Alpha_Widgets", "Zeta_Widgets"]);
+        // Composer packages first, in autoload_files order (b before a).
+        assert_eq!(&names[..2], &["Acme_B", "Acme_A"]);
+        // Then the app/code modules. `NonComposerComponentRegistration` globs
+        // them with GLOB_NOSORT, so their relative order is the filesystem's
+        // readdir order — asserting a specific one here would only pin this
+        // machine's. What must hold is that both arrive, after the composer set.
+        let rest: HashSet<&str> = names[2..].iter().copied().collect();
+        assert_eq!(rest, HashSet::from(["Alpha_Widgets", "Zeta_Widgets"]));
     }
 
     // ---- resolution over a synthetic tree ----------------------------------
@@ -1178,7 +1540,7 @@ mod tests {
         let r = td.path();
         let (themes, modules) = refs(r);
         let chain = theme_chain("frontend", "Acme/base", &themes).unwrap();
-        let entries = resolve_package(r, "frontend", &chain, &modules, "en_US");
+        let entries = resolve_package(r, "frontend", &chain, &modules, "en_US", &[]);
         let paths: Vec<&str> = entries.iter().map(|e| e.deployed.as_str()).collect();
 
         // Theme override of a lib file: value = theme source, position = lib's.
@@ -1213,14 +1575,14 @@ mod tests {
         let r = td.path();
         let (themes, modules) = refs(r);
         let chain = theme_chain("frontend", "Acme/base", &themes).unwrap();
-        let nl = resolve_package(r, "frontend", &chain, &modules, "nl_NL");
+        let nl = resolve_package(r, "frontend", &chain, &modules, "nl_NL", &[]);
         assert!(entry(&nl, "Acme_Widgets/img/logo.svg")
             .source
             .ends_with("i18n/nl_NL/img/logo.svg"));
         // The theme's own i18n overlay wins over its plain file…
         assert!(entry(&nl, "css/local.css").source.ends_with("i18n/nl_NL/css/local.css"));
         // …and the en_US build sees the plain file (asserted above).
-        let en = resolve_package(r, "frontend", &chain, &modules, "en_US");
+        let en = resolve_package(r, "frontend", &chain, &modules, "en_US", &[]);
         assert!(entry(&en, "Acme_Widgets/img/logo.svg")
             .source
             .ends_with("frontend/web/img/logo.svg"));
@@ -1269,11 +1631,23 @@ mod tests {
         assert_eq!(by_path(DICTIONARY_FILE_NAME).content, b"[]");
         assert_eq!(by_path("requirejs-min-resolver.js").content, b"RESOLVER");
         assert!(by_path("requirejs-config.js").kind == PlacedKind::RequireJs);
-        // sri: every .js (the lib .min, the two rjs artifacts, bundles),
-        // full static-relative paths with escaped slashes, no non-js.
-        let sri = String::from_utf8_lossy(&by_path(SRI_HASHES_FILE_NAME).content).into_owned();
+        // sri: every .js EXCEPT the min-resolver (Magento_Csp plugs only
+        // `afterCreateRequireJsConfigAsset`), full static-relative paths with
+        // escaped slashes, no non-js. It is an AREA-level artifact now, so it
+        // rides on `pkg.sri` rather than being a file inside the package.
+        assert!(!pkg.files.iter().any(|f| f.path == SRI_HASHES_FILE_NAME));
+        let sri = sri_hashes_json(
+            &pkg.sri
+                .package
+                .iter()
+                .chain(pkg.sri.requirejs.iter())
+                .chain(pkg.sri.bundles.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
         assert!(sri.contains(r#""frontend\/Acme\/base\/en_US\/legacy-build.min.js":"sha256-"#));
         assert!(sri.contains(r#"requirejs-config.js"#));
+        assert!(!sri.contains("requirejs-min-resolver.js"));
         assert!(!sri.contains("spacer.gif"));
         // deployment order: package js before the rjs artifacts.
         let a = sri.find("legacy-build.min.js").unwrap();
@@ -1323,7 +1697,7 @@ mod tests {
         assert!(warn.1.contains("no/such/_partial.less"), "diagnostic kept: {}", warn.1);
         // ...and the rest of the package is untouched.
         assert!(pkg.files.iter().any(|f| f.path == "spacer.gif"));
-        assert!(pkg.files.iter().any(|f| f.path == SRI_HASHES_FILE_NAME));
+        assert!(!pkg.sri.package.is_empty());
     }
 
     #[test]
