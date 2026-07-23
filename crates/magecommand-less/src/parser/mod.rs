@@ -2109,7 +2109,11 @@ impl<'a> Parser<'a> {
                 op: (opc as char).to_string(),
                 left: Box::new(left),
                 right: Box::new(right),
-                spaced: sp_before || sp_after,
+                // less.js/less.php `isSpaced = isWhitespace(-1)`: ONLY the
+                // whitespace preceding the operator. `calc((100%)* .5 - 24px)`
+                // has a space after `*` but none before, and both engines print
+                // it glued — real deployed adminhtml bytes depend on it.
+                spaced: sp_before,
             };
         }
         Ok(left)
@@ -2156,7 +2160,9 @@ impl<'a> Parser<'a> {
                     op: op_str,
                     left: Box::new(left),
                     right: Box::new(right),
-                    spaced: had_ws || ws_after,
+                    // `isWhitespace(-1)` — the whitespace BEFORE the operator
+                    // only (see the addition parser).
+                    spaced: had_ws,
                 };
             } else {
                 self.cur.i = save;

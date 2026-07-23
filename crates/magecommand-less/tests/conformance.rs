@@ -26,6 +26,7 @@
 //! compiler against ground truth, ahead of the Tier-2 SCD oracle diff.
 
 use magecommand_less::{
+    NoopResolver,
     FileInfo, ImportError, ImportPayload, ImportRequest, ImportResolver, LessOptions,
     ResolvedImport,
 };
@@ -606,4 +607,26 @@ fn php_zero_units_compress_quadrants() {
     // Both Magento profiles carry the flag.
     assert!(LessOptions::magento_production().php_zero_units);
     assert!(LessOptions::magento_developer().php_zero_units);
+}
+
+/// `isSpaced` is `isWhitespace(-1)` — the whitespace BEFORE the operator only,
+/// never the one after. Magento's adminhtml ships `calc((100%)* 0.5 - 24px)`,
+/// which both less.js and less.php print glued (`100%*.5`); treating the
+/// trailing space as "spaced" produced a real deployed-byte divergence.
+#[test]
+fn operation_is_spaced_looks_only_before_the_operator() {
+    let cases = [
+        ("calc((100%)* 0.5 - 24px)", "calc(100%*.5 - 24px)"),
+        ("calc((100%) * 0.5 - 24px)", "calc(100% * .5 - 24px)"),
+        ("calc(100%* 0.5 - 24px)", "calc(100%*.5 - 24px)"),
+        ("calc(100%/2 - 3px)", "calc(100%/2 - 3px)"),
+        ("calc(100% / 2 - 3px)", "calc(100% / 2 - 3px)"),
+    ];
+    for (input, expected) in cases {
+        let src = format!(".a {{ w: {input}; }}");
+        let mut opts = LessOptions::magento_production();
+        opts.compress = true;
+        let css = magecommand_less::compile(&src, &opts, &NoopResolver).unwrap().code;
+        assert_eq!(css, format!(".a{{w:{expected}}}"), "input {input:?}");
+    }
 }
