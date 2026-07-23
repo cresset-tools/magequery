@@ -998,7 +998,6 @@ fn fix_import_extensions(src: &str) -> String {
         out.push_str(&src[i..start]);
         let mut j = start + "@import".len();
         // `start` group: `[\(\),\w\s]*?` up to the opening quote.
-        let head = j;
         while j < bytes.len()
             && (bytes[j].is_ascii_alphanumeric()
                 || matches!(bytes[j], b'_' | b'(' | b')' | b',' | b' ' | b'\t' | b'\r' | b'\n'))

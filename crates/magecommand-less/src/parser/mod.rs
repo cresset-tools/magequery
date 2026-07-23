@@ -2146,7 +2146,8 @@ impl<'a> Parser<'a> {
                     self.cur.bump();
                     (op.unwrap() as char).to_string()
                 };
-                let ws_after = self.cur.skip_whitespace();
+                // Consumed for position, not for `isSpaced` (which looks behind).
+                self.cur.skip_whitespace();
                 let before = self.here();
                 let right = self.parse_operand()?;
                 if self.here() == before || !operand_like(&right) {
