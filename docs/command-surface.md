@@ -12,7 +12,7 @@ surface; it is a curated, grep-able set. Bare `magecommand` and bare `magecomman
 <group>` print that level's help (clap `arg_required_else_help`), never a default
 action. Global flags (`--root <path>`, `--json`) apply to every command.
 
-**The `di` group and the `static` group's LESS + requirejs + bundle + minify + files pipelines are built today.** Everything
+**The `di` group and the `static` group's LESS + requirejs + bundle + minify + files + deploy + verify pipelines are built today.** Everything
 else is the planned surface — documented here so the grammar is fixed before scripts
 and muscle memory depend on it, but not yet wired in `main.rs`. New commands MUST slot
 into a group under this grammar, never appear as a bare top-level verb.
@@ -20,8 +20,9 @@ into a group under this grammar, never appear as a bare top-level verb.
 ```
 GENERATE   (static, byte-exact reproducible — a real `bin/magento` run is the oracle)
   di       compile | verify | watch | digest      # setup:di:compile              (BUILT)
-  static   less | cssdiff | requirejs | bundle | minify | files  # SCD artifacts + full package (BUILT)
-           deploy | verify | watch                # deploy-in-place orchestration (planned)
+  static   less | cssdiff | requirejs | bundle | minify | files
+           deploy | verify                        # SCD artifacts + full package (BUILT)
+           watch                                  # deploy-in-place orchestration (planned)
   i18n     collect                                # i18n:collect-phrases          (planned)
 
 SCAFFOLD   (Laravel make: — template codegen, no Magento bootstrap, no DB)         (planned)
@@ -80,7 +81,7 @@ guarding against creatuity's issue #28 (global plugins silently not firing in
 CLI/`primary` scope). Credit: the fused technique is creatuity's prior art
 (github.com/creatuity/magento2-interceptors), reimplemented clean-room.
 
-## The `static` group (LESS + requirejs + bundle + minify + files built)
+## The `static` group (LESS + requirejs + bundle + minify + files + deploy + verify built)
 
 The pure-Rust half of `setup:static-content:deploy` (no PHP, no node). Global
 flags plus:
@@ -250,6 +251,21 @@ static cssdiff <expected.css> <actual.css> [--limit <N>]
     Semantic CSS diff (order-preserving; normalizes only non-semantic formatting:
     whitespace, hex case/shorthand, leading zeros, comments). Exit 0 when
     semantically identical — every remaining finding is a real residual.
+
+static verify --reference <DIR> --output <DIR> [--fail-on-diff] [--strict]
+              [--all] [--sample <N>]
+    Diff a deployed static tree against a real `setup:static-content:deploy`
+    reference — what `di verify` is to the DI half, and the gate static parity is
+    accepted against. Deploy with `static deploy --out <DIR>` first, then point
+    --reference at the store's `pub/static`. Differences are grouped by the
+    deploy's own units (the `<area>/<Vendor>/<theme>/<locale>` packages and the
+    area-level artifacts), because a whole-theme divergence names its bug while a
+    flat file list does not. A css file differing only in non-semantic formatting
+    is `equivalent` (clean) unless --strict; `deployed_version.txt` is skipped
+    (per-run timestamp). By default only the packages the OUTPUT contains are
+    compared, so verifying a one-theme deploy against a whole `pub/static` reports
+    that theme rather than every other — --all requires full coverage.
+    --fail-on-diff exits non-zero on any difference.
 ```
 
 ## Which groups earn their keep, and in what order
