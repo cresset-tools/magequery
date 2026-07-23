@@ -443,6 +443,8 @@ impl LessOrchestrator {
         } else {
             source
         };
+        // The entry goes through the same preprocessor chain as its imports.
+        let source = fix_import_extensions(&source);
 
         let mut less_opts = LessOptions::magento_production();
         less_opts.compress = opts.compress;
@@ -860,7 +862,7 @@ impl ImportResolver for OrchestratorResolver<'_> {
         } else if logical.ends_with(".css") {
             ImportPayload::Css(source.into())
         } else {
-            ImportPayload::Less(source.into())
+            ImportPayload::Less(fix_import_extensions(&source).into())
         };
         Ok(ResolvedImport {
             file: FileInfo {
@@ -971,6 +973,105 @@ pub fn compile_file(path: &Path, compress: bool) -> Result<CompiledFile, LessDep
     }
 }
 
+/// Magento's `Css\PreProcessor\Instruction\Import` extension fix, applied to
+/// every LESS file the preprocessor chain touches (entry AND imports, which is
+/// what `var/view_preprocessed` materializes).
+///
+/// `fixFileExtension` appends `.less` to any `@import` path whose PHP
+/// `pathinfo(..., PATHINFO_EXTENSION)` is empty. For paths we resolve ourselves
+/// this is invisible — the resolver already tries `.less`. It is visible for a
+/// REMOTE `url()` import, which is never fetched but IS rewritten and emitted:
+/// `@import url('…/css?family=Work+Sans:400,700')` deploys as
+/// `…:400,700.less')`, because the basename after the last `/` holds no dot.
+/// Odd, but it is the byte a real deploy writes.
+///
+/// Mirrors `REPLACE_PATTERN`: `@import`, an optional `url(`/options head up to
+/// a quote, the quoted path, the closing quote and optional `)`, then `;`.
+/// Anything that does not match that shape (an unquoted path, a missing `;`)
+/// is left alone, exactly as the regex would.
+fn fix_import_extensions(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = String::with_capacity(src.len() + 32);
+    let mut i = 0usize;
+    while let Some(rel) = src[i..].find("@import") {
+        let start = i + rel;
+        out.push_str(&src[i..start]);
+        let mut j = start + "@import".len();
+        // `start` group: `[\(\),\w\s]*?` up to the opening quote.
+        while j < bytes.len()
+            && (bytes[j].is_ascii_alphanumeric()
+                || matches!(bytes[j], b'_' | b'(' | b')' | b',' | b' ' | b'\t' | b'\r' | b'\n'))
+        {
+            j += 1;
+        }
+        if j >= bytes.len() || !matches!(bytes[j], b'\'' | b'"') {
+            out.push_str(&src[start..j.min(src.len())]);
+            i = j;
+            continue;
+        }
+        let quote = bytes[j];
+        j += 1;
+        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n') {
+            j += 1;
+        }
+        let path_start = j;
+        // `path` group excludes `)` and both quote characters.
+        while j < bytes.len() && !matches!(bytes[j], b')' | b'\'' | b'"') {
+            j += 1;
+        }
+        if j >= bytes.len() || bytes[j] != quote {
+            out.push_str(&src[start..j.min(src.len())]);
+            i = j;
+            continue;
+        }
+        let path_end = j;
+        // `end` group: the closing quote, `[\s\w]*`, an optional `)`, then `;`.
+        let mut k = j + 1;
+        while k < bytes.len()
+            && (bytes[k].is_ascii_alphanumeric()
+                || matches!(bytes[k], b'_' | b' ' | b'\t' | b'\r' | b'\n'))
+        {
+            k += 1;
+        }
+        if k < bytes.len() && bytes[k] == b')' {
+            k += 1;
+        }
+        let mut semi = k;
+        while semi < bytes.len() && matches!(bytes[semi], b' ' | b'\t' | b'\r' | b'\n') {
+            semi += 1;
+        }
+        if semi >= bytes.len() || bytes[semi] != b';' {
+            out.push_str(&src[start..j]);
+            i = j;
+            continue;
+        }
+        // Trailing whitespace inside the quotes belongs to `end` (the path
+        // group is non-greedy), so only the trimmed tail decides the extension.
+        let raw_path = &src[path_start..path_end];
+        let path = raw_path.trim_end();
+        out.push_str(&src[start..path_start]);
+        out.push_str(path);
+        if php_extension(path).is_none() {
+            out.push_str(".less");
+        }
+        out.push_str(&src[path_start + path.len()..=semi]);
+        i = semi + 1;
+    }
+    out.push_str(&src[i..]);
+    out
+}
+
+/// PHP `pathinfo($p, PATHINFO_EXTENSION)`: the part after the last `.` of the
+/// basename, and only when that part is non-empty. No dot in the basename (or a
+/// trailing dot) means no extension.
+fn php_extension(path: &str) -> Option<&str> {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    match base.rsplit_once('.') {
+        Some((_, ext)) if !ext.is_empty() => Some(ext),
+        _ => None,
+    }
+}
+
 /// Plain-filesystem import resolution for [`compile_file`]: the importing
 /// file's directory first (relative imports), then the entry root — the
 /// less.js file-manager search order — with `.less` appended to
@@ -1046,6 +1147,61 @@ impl ImportResolver for FileResolver {
 
 #[cfg(test)]
 mod tests {
+    use super::{fix_import_extensions, php_extension};
+
+    /// `Css\PreProcessor\Instruction\Import::fixFileExtension` appends `.less`
+    /// to any `@import` path with no PHP extension — including a remote
+    /// `url()` one, which is never fetched but IS rewritten and emitted. This
+    /// is the byte a real adminhtml deploy writes for Yotpo's font import.
+    #[test]
+    fn extensionless_import_paths_gain_dot_less() {
+        let src = "@import url('https://fonts.googleapis.com/css?family=Work+Sans:400,700');\n";
+        assert_eq!(
+            fix_import_extensions(src),
+            "@import url('https://fonts.googleapis.com/css?family=Work+Sans:400,700.less');\n"
+        );
+        assert_eq!(fix_import_extensions("@import 'source/_lib';\n"), "@import 'source/_lib.less';\n");
+        assert_eq!(
+            fix_import_extensions("@import (reference) 'x/y';\n"),
+            "@import (reference) 'x/y.less';\n"
+        );
+    }
+
+    /// A path that already has an extension, and shapes the regex does not
+    /// match (unquoted, no terminating `;`), are left untouched.
+    #[test]
+    fn imports_with_an_extension_or_an_unmatched_shape_are_untouched() {
+        for src in [
+            "@import 'a/b.less';\n",
+            "@import url('x.css');\n",
+            "@import (css) 'https://example.com/style.css';\n",
+            "@import url(unquoted/path);\n",
+            "@import 'no-semicolon'\n",
+        ] {
+            assert_eq!(fix_import_extensions(src), src, "{src:?}");
+        }
+    }
+
+    /// Several imports in one file, and surrounding content, survive intact.
+    #[test]
+    fn rewrites_every_import_and_keeps_the_rest() {
+        let src = ".a { color: red; }\n@import 'one';\n// c\n@import 'two.less';\n@import 'three';\n";
+        assert_eq!(
+            fix_import_extensions(src),
+            ".a { color: red; }\n@import 'one.less';\n// c\n@import 'two.less';\n@import 'three.less';\n"
+        );
+    }
+
+    /// PHP `pathinfo` semantics: the extension comes from the BASENAME only.
+    #[test]
+    fn php_extension_reads_the_basename() {
+        assert_eq!(php_extension("a/b.less"), Some("less"));
+        assert_eq!(php_extension("fonts.googleapis.com/css"), None);
+        assert_eq!(php_extension("x/y"), None);
+        assert_eq!(php_extension("trailing."), None);
+        assert_eq!(php_extension("Vendor_Module::file"), None);
+    }
+
     use super::*;
 
     /// Build a synthetic Magento-shaped source tree; returns its root.
