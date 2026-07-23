@@ -66,6 +66,10 @@ pub struct GenContext {
     /// less.php flavor (`php_zero_units`, §C4): keep the unit on a zero
     /// length under compress — less.php's strict `0.0 === 0` never strips.
     pub keep_zero_units: bool,
+    /// less.php flavor (`php_number_format`): print dimensions with less.php's
+    /// float-multiply `fround` and PHP `%.16G` instead of less.js `toFixed` +
+    /// shortest-round-trip. See [`crate::value::format_number_php`].
+    pub php_numbers: bool,
 }
 
 /// Render a parsed [`Node::Root`] to expanded CSS (the `firstRoot`/`root=true`
@@ -77,6 +81,7 @@ pub fn render_root(root: &Node) -> String {
         tab_level: 0,
         num_precision: 8,
         keep_zero_units: false,
+        php_numbers: false,
     };
     if let Node::Root(rules) = root {
         gen_root_rules(rules, &mut ctx, &mut out);
@@ -90,7 +95,7 @@ pub fn render_root(root: &Node) -> String {
 /// evaluator's flat serializer reuses this so value spacing/number formatting
 /// lives in one place (plan §4.7).
 pub(crate) fn render_value(node: &Node, num_precision: u8) -> String {
-    render_value_cz(node, num_precision, false, false)
+    render_value_cz(node, num_precision, false, false, false)
 }
 
 /// [`render_value`] with explicit compress + less.php zero-unit flavor flags
@@ -103,12 +108,14 @@ pub(crate) fn render_value_cz(
     num_precision: u8,
     compress: bool,
     keep_zero_units: bool,
+    php_numbers: bool,
 ) -> String {
     let mut ctx = GenContext {
         compress,
         tab_level: 0,
         num_precision,
         keep_zero_units,
+        php_numbers,
     };
     let mut out = String::new();
     gen(node, &mut ctx, &mut out);
@@ -203,7 +210,11 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
             // zero length drops its unit; `0 < v < 1` drops the leading zero.
             // less.php never takes the zero branch (`php_zero_units`): its
             // strict `$value === 0` compares a floatval'd 0.0 to int 0.
-            let s = format_number(d.value, ctx.num_precision);
+            let s = if ctx.php_numbers {
+                crate::value::format_number_php(d.value, ctx.num_precision)
+            } else {
+                format_number(d.value, ctx.num_precision)
+            };
             let zero_length =
                 ctx.compress && !ctx.keep_zero_units && s == "0" && d.unit.is_length();
             if ctx.compress && s.starts_with("0.") {

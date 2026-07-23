@@ -244,6 +244,86 @@ pub fn format_number(v: f64, num_precision: u8) -> String {
     js_number_string(value)
 }
 
+/// Format a dimension like **less.php** `Tree\Dimension::genCSS` rather than
+/// less.js. Two independent divergences, both observable in real deploys:
+///
+///  1. `fround` is `round($v * 10^p) / 10^p` — a FLOAT multiply, not JS's
+///     decimal `toFixed`, so it rounds across half boundaries the exact
+///     decimal expansion sits below.
+///  2. `(string)$value` runs under `Less_Parser`'s `@ini_set('precision', 16)`,
+///     i.e. PHP's `%.16G`, NOT JS's shortest-round-trip. This is why a literal
+///     `66.6%` deploys as `66.59999999999999%`: the double nearest 66.6 needs
+///     16 significant digits to differ from 66.6, and PHP prints all of them.
+///
+/// The tiny-value branch mirrors `number_format($v, 10)` with trailing zeros
+/// stripped, which less.php substitutes to avoid `1e-6` style output.
+pub fn format_number_php(v: f64, num_precision: u8) -> String {
+    let value = if num_precision > 0 {
+        let p = 10f64.powi(num_precision as i32);
+        // PHP `round()` is half-away-from-zero, like Rust's `f64::round`.
+        (v * p).round() / p
+    } else {
+        v
+    };
+    if value == 0.0 {
+        return "0".to_string(); // also normalizes -0
+    }
+    if value.abs() < 0.000001 {
+        let s = format!("{value:.10}");
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        return if s.is_empty() { "0".to_string() } else { s.to_string() };
+    }
+    php_gcvt(value, 16)
+}
+
+/// PHP's `zend_gcvt(value, ndigit, '.', 'E')` — what `(string)$float` uses.
+/// Round to `ndigit` significant digits, drop trailing zeros, then choose
+/// fixed or exponential notation by the decimal point position.
+fn php_gcvt(v: f64, ndigit: usize) -> String {
+    let neg = v < 0.0;
+    // `{:.*e}` with ndigit-1 fractional digits == ndigit significant digits.
+    let s = format!("{:.*e}", ndigit - 1, v.abs());
+    let (mant, exp) = s.split_once('e').expect("rust exponential form");
+    let exp: i32 = exp.parse().expect("rust exponent");
+    let all: String = mant.chars().filter(|c| *c != '.').collect();
+    let digits = all.trim_end_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    // Digits before the decimal point.
+    let decpt = exp + 1;
+
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    if decpt < -3 || decpt > ndigit as i32 {
+        out.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('E');
+        let e = decpt - 1;
+        out.push(if e >= 0 { '+' } else { '-' });
+        out.push_str(&e.abs().to_string());
+    } else if decpt <= 0 {
+        out.push_str("0.");
+        for _ in 0..-decpt {
+            out.push('0');
+        }
+        out.push_str(digits);
+    } else if decpt as usize >= digits.len() {
+        out.push_str(digits);
+        for _ in 0..decpt as usize - digits.len() {
+            out.push('0');
+        }
+    } else {
+        out.push_str(&digits[..decpt as usize]);
+        out.push('.');
+        out.push_str(&digits[decpt as usize..]);
+    }
+    out
+}
+
 /// JS `Number.prototype.toFixed` numerically: round to `places` decimal digits,
 /// ties away from zero (the spec's "pick the larger n" on the absolute value).
 /// Works on the *exact* decimal expansion of the double (with 40 guard digits),
@@ -318,5 +398,38 @@ pub(crate) fn js_number_string(v: f64) -> String {
         format!("{}", v as i64)
     } else {
         format!("{v}")
+    }
+}
+
+#[cfg(test)]
+mod php_number_tests {
+    use super::format_number_php;
+
+    /// The artifact that makes a Magento deploy's CSS differ from less.js's:
+    /// `Less_Parser` runs under `@ini_set('precision', 16)`, so the double
+    /// nearest `66.6` prints all 16 significant digits. A literal `66.6%` in a
+    /// third-party stylesheet really does deploy as `66.59999999999999%`.
+    #[test]
+    fn sixteen_significant_digits_leak_the_binary_value() {
+        assert_eq!(format_number_php(66.6, 8), "66.59999999999999");
+        // 56.2 rounds to a 16-digit form whose tail is zeros, so it prints short.
+        assert_eq!(format_number_php(56.2, 8), "56.2");
+        assert_eq!(format_number_php(125.0, 8), "125");
+        assert_eq!(format_number_php(0.5, 8), "0.5");
+        assert_eq!(format_number_php(-0.0, 8), "0");
+    }
+
+    /// `fround` is `round($v * 10^p) / 10^p` at `numPrecision = 8`.
+    #[test]
+    fn fround_is_a_float_multiply_at_eight_places() {
+        assert_eq!(format_number_php(1.234_567_891_2, 8), "1.23456789");
+        assert_eq!(format_number_php(0.000_000_004, 8), "0");
+    }
+
+    /// Below 1e-6 less.php substitutes `number_format($v, 10)` with trailing
+    /// zeros stripped, rather than letting PHP print exponential form.
+    #[test]
+    fn tiny_values_use_the_number_format_branch() {
+        assert_eq!(format_number_php(0.000_000_5, 8), "0.0000005");
     }
 }

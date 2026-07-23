@@ -74,6 +74,11 @@ pub struct LessOptions {
     pub profile: CompatProfile,
     /// Math mode (plan §1/§2.0).
     pub math: MathMode,
+    /// less.php number printing (`php_number_format`): float-multiply `fround`
+    /// plus PHP `%.16G` (`Less_Parser` sets `precision=16`) instead of less.js
+    /// `toFixed` + shortest-round-trip. A literal `66.6%` prints as
+    /// `66.59999999999999%` under it — real, deployed bytes.
+    pub php_number_format: bool,
     /// `strictUnits` (default false): true throws on dimensionally-invalid ops.
     pub strict_units: bool,
     /// `strictImports` (default false).
@@ -233,6 +238,7 @@ impl Default for LessOptions {
             source_map: false,
             process_imports: true,
             num_precision: 8,
+            php_number_format: false,
             filename: None,
             magento_mode: false,
             php_float_shim: false,
@@ -269,6 +275,7 @@ impl LessOptions {
             php_interp_rounding: true,
             php_reference_visibility: true,
             php_zero_units: true,
+            php_number_format: true,
             php_import_order: true,
             php_selector_interpolation: true,
             php_selector_paren_combinators: true,
@@ -287,6 +294,7 @@ impl LessOptions {
             php_interp_rounding: true,
             php_reference_visibility: true,
             php_zero_units: true,
+            php_number_format: true,
             php_import_order: true,
             php_selector_interpolation: true,
             php_selector_paren_combinators: true,

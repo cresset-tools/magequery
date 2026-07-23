@@ -313,7 +313,13 @@ fn utf8_len(b: u8) -> usize {
 /// the substituted value is squeezed (`%d` of `rgba(255, 255, 255, 0)` becomes
 /// `rgba(255,255,255,0)` — the backend `_utilities.less` gradient-filter mixin
 /// bakes an `rgba` color into a `progid:…gradient(startColorstr='%d', …)` string).
-pub(super) fn format(args: &[Node], np: u8, compress: bool, keep_zero_units: bool) -> FnResult {
+pub(super) fn format(
+    args: &[Node],
+    np: u8,
+    compress: bool,
+    keep_zero_units: bool,
+    php_numbers: bool,
+) -> FnResult {
     let (quote, escaped, fmt) = subject_parts(args.first())?;
     let mut result = fmt;
     for arg in &args[1..] {
@@ -321,7 +327,7 @@ pub(super) fn format(args: &[Node], np: u8, compress: bool, keep_zero_units: boo
         let Some((pos, token)) = find_format_token(&result) else { break };
         let value = match arg {
             Node::Quoted { value, .. } if token.eq_ignore_ascii_case("s") => value.clone(),
-            other if compress => render_value_cz(other, np, true, keep_zero_units),
+            other if compress => render_value_cz(other, np, true, keep_zero_units, php_numbers),
             other => render_value(other, 0),
         };
         let value = if token.chars().all(|c| c.is_ascii_uppercase()) {
@@ -511,16 +517,16 @@ mod tests {
     fn format_pads_and_encodes() {
         // %A (uppercase) → encodeURIComponent of the rendered value.
         let color = Node::Color(crate::color::Color::from_hex("#ff0000").unwrap());
-        let out = qval(format(&[quoted('"', "red is %A"), color], 0, false, false));
+        let out = qval(format(&[quoted('"', "red is %A"), color], 0, false, false, false));
         assert_eq!(out, "red is %23ff0000");
 
         // %% collapses after substitution.
-        let out = qval(format(&[quoted('"', "100%%")], 0, false, false));
+        let out = qval(format(&[quoted('"', "100%%")], 0, false, false, false));
         assert_eq!(out, "100%");
 
         // Full float digits — no fround in the context-less toCSS (F8).
         let d = Node::Dimension(crate::value::Dimension::with_unit(9.876543219, "px"));
-        let out = qval(format(&[quoted('"', "%a"), d], 0, false, false));
+        let out = qval(format(&[quoted('"', "%a"), d], 0, false, false, false));
         assert_eq!(out, "9.876543219px");
     }
 

@@ -413,6 +413,264 @@ pub fn min_resolver_excludes(config: &ConfigSet, modules: &[ModuleRef]) -> Vec<S
         .collect()
 }
 
+/// Statically evaluate the `js` excludes contributed by DI plugins on
+/// `Magento\Framework\View\Asset\Minification::getExcludes`.
+///
+/// The config tree is only half the list on a real store: modules append theirs
+/// from a plugin, and those appends are deployed bytes (they land inside
+/// `requirejs-min-resolver.js` and therefore inside the JS bundles). magecommand
+/// never executes PHP, so we evaluate the one shape these plugins all take:
+///
+/// ```php
+/// public function aroundGetExcludes($subject, callable $proceed, $contentType) {
+///     $result = $proceed($contentType);
+///     if ($contentType !== 'js') { return $result; }
+///     $result[] = 'literal';   // …repeated
+///     return $result;
+/// }
+/// ```
+///
+/// Anything else in the body (a loop, a config read, a method call feeding the
+/// array) means we cannot know the values statically: that plugin is reported to the
+/// caller instead of being silently dropped or half-applied.
+///
+/// Ordering: these are `around` plugins that append AFTER `$proceed` returns, so
+/// the innermost runs first. `plugins` must arrive in Magento's execution order
+/// (outermost first), and the appends are therefore applied in REVERSE.
+pub fn plugin_min_excludes(
+    magento: &magequery_core::Magento,
+) -> (Vec<String>, Vec<String>) {
+    const TARGET: &str = "Magento\\Framework\\View\\Asset\\Minification";
+    let di = magento.di_export(magequery_core::Area::Global);
+    let mut classes: Vec<&magequery_core::ClassName> = Vec::new();
+    for p in di.plugins.iter().filter(|p| !p.disabled) {
+        if p.target.as_str().trim_start_matches('\\') != TARGET {
+            continue;
+        }
+        if let Some(c) = p.class.as_ref() {
+            classes.push(c);
+        }
+    }
+
+    let (mut excludes, mut unknown) = (Vec::new(), Vec::new());
+    // Innermost appends first => reverse of execution order.
+    for class in classes.iter().rev() {
+        let Some(file) = magento.class_file(class) else {
+            unknown.push(format!("{} (source not found)", class.as_str()));
+            continue;
+        };
+        let Ok(src) = magento.read_source(&file) else {
+            unknown.push(format!("{} (source unreadable)", class.as_str()));
+            continue;
+        };
+        match literal_exclude_appends(&src) {
+            Some(vals) => excludes.extend(vals),
+            None => unknown.push(class.as_str().to_string()),
+        }
+    }
+    (excludes, unknown)
+}
+
+/// Extract the `$result[] = '<literal>';` appends a `*GetExcludes` plugin makes
+/// for the `js` content type, in source order — but ONLY when the whole body is
+/// statically decidable. Returns `None` otherwise, so the caller can report the
+/// plugin instead of emitting a half-right exclude list.
+///
+/// Decidable means: every statement is `$result = $proceed(…)`, a `return`, or a
+/// literal append; and every block is guarded by a comparison of `$contentType`
+/// against `'js'`, which we can evaluate because `getExcludes('js')` is the only
+/// call whose result reaches `requirejs-min-resolver.js`. Both real shapes fall
+/// out of that: an early-return guard (`if ($contentType !== 'js') { return …; }`
+/// followed by appends) and a positive block (`if ($contentType == 'js') { …
+/// appends … }`).
+fn literal_exclude_appends(src: &str) -> Option<Vec<String>> {
+    let sig = src
+        .find("function aroundGetExcludes")
+        .or_else(|| src.find("function afterGetExcludes"))?;
+    let open = src[sig..].find('{')? + sig;
+    let bytes = src.as_bytes();
+    let (mut depth, mut i) = (0usize, open);
+    let end = loop {
+        match bytes.get(i)? {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break i;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    };
+
+    /// One lexed event from the method body.
+    enum Ev {
+        /// A `;`-terminated statement.
+        Stmt(String),
+        /// A block opener, carrying the header text before its `{`.
+        Open(String),
+        Close,
+    }
+
+    // Lex quote-aware: a `//` inside `'https://…'` is not a comment and a `;`
+    // inside a literal is not a terminator.
+    let body: Vec<char> = src[open + 1..end].chars().collect();
+    let mut evs: Vec<Ev> = Vec::new();
+    let mut cur = String::new();
+    let mut k = 0usize;
+    while k < body.len() {
+        let c = body[k];
+        match c {
+            '\'' | '"' => {
+                cur.push(c);
+                k += 1;
+                while k < body.len() {
+                    let d = body[k];
+                    cur.push(d);
+                    k += 1;
+                    if d == '\\' {
+                        if k < body.len() {
+                            cur.push(body[k]);
+                            k += 1;
+                        }
+                    } else if d == c {
+                        break;
+                    }
+                }
+            }
+            '/' if body.get(k + 1) == Some(&'/') => {
+                while k < body.len() && body[k] != '\n' {
+                    k += 1;
+                }
+            }
+            '#' => {
+                while k < body.len() && body[k] != '\n' {
+                    k += 1;
+                }
+            }
+            '/' if body.get(k + 1) == Some(&'*') => {
+                k += 2;
+                while k + 1 < body.len() && !(body[k] == '*' && body[k + 1] == '/') {
+                    k += 1;
+                }
+                k = (k + 2).min(body.len());
+            }
+            ';' => {
+                evs.push(Ev::Stmt(std::mem::take(&mut cur)));
+                k += 1;
+            }
+            '{' => {
+                evs.push(Ev::Open(std::mem::take(&mut cur)));
+                k += 1;
+            }
+            '}' => {
+                let pending = std::mem::take(&mut cur);
+                if !pending.trim().is_empty() {
+                    evs.push(Ev::Stmt(pending));
+                }
+                evs.push(Ev::Close);
+                k += 1;
+            }
+            _ => {
+                cur.push(c);
+                k += 1;
+            }
+        }
+    }
+    if !cur.trim().is_empty() {
+        evs.push(Ev::Stmt(cur));
+    }
+
+    // Walk with a suppression stack: statements inside a block whose guard is
+    // false for `'js'` contribute nothing.
+    let mut suppressed: Vec<bool> = Vec::new();
+    let mut out = Vec::new();
+    for ev in evs {
+        match ev {
+            Ev::Open(header) => suppressed.push(!guard_holds_for_js(&header)?),
+            Ev::Close => {
+                suppressed.pop();
+            }
+            Ev::Stmt(stmt) => {
+                let stmt = stmt.trim();
+                if stmt.is_empty()
+                    || stmt.starts_with("$result = $proceed(")
+                    || stmt.starts_with("return ")
+                {
+                    continue;
+                }
+                let Some(rhs) = stmt.strip_prefix("$result[] =") else {
+                    return None;
+                };
+                let value = php_string_literal(rhs.trim())?;
+                if !suppressed.iter().any(|s| *s) {
+                    out.push(value);
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Does a block header hold when `$contentType` is `'js'`? `Some(true/false)`
+/// for a decidable `$contentType`-vs-`'js'` comparison (or a bare block),
+/// `None` for anything we cannot evaluate — a loop, a config read, a different
+/// variable.
+fn guard_holds_for_js(header: &str) -> Option<bool> {
+    let h = header.trim();
+    if h.is_empty() {
+        return Some(true); // a bare `{ … }` block
+    }
+    let cond = h.strip_prefix("if")?.trim();
+    let cond = cond.strip_prefix('(')?.trim_end();
+    let cond = cond.strip_suffix(')')?.trim();
+    if !cond.contains("$contentType") {
+        return None;
+    }
+    let js = |s: &str| s == "'js'" || s == "\"js\"";
+    for (op, positive) in [("!==", false), ("===", true), ("!=", false), ("==", true)] {
+        if let Some((l, r)) = cond.split_once(op) {
+            let (l, r) = (l.trim(), r.trim());
+            let matches_js = (l == "$contentType" && js(r)) || (r == "$contentType" && js(l));
+            return matches_js.then_some(positive);
+        }
+    }
+    None
+}
+
+/// Read one complete PHP single- or double-quoted literal; `None` if `s` is not
+/// exactly that (a concatenation, a call, an unterminated string).
+fn php_string_literal(s: &str) -> Option<String> {
+    let mut chars = s.chars();
+    let quote = chars.next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let mut value = String::new();
+    let mut closed = false;
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                // PHP single quotes only escape `\` and `'`.
+                Some(e) if quote == '\'' && (e == '\\' || e == '\'') => value.push(e),
+                Some(e) if quote == '"' => value.push(e),
+                Some(e) => {
+                    value.push('\\');
+                    value.push(e);
+                }
+                None => return None,
+            }
+        } else if c == quote {
+            closed = true;
+            break;
+        } else {
+            value.push(c);
+        }
+    }
+    (closed && chars.as_str().trim().is_empty()).then_some(value)
+}
+
 /// `Config::getMinResolverCode()`, unminified branch: the fixed template with
 /// the exclude condition interpolated. The condition is
 /// `url.indexOf(baseUrl)===0` plus one `!url.match(/<regex>/)` per exclude
@@ -448,7 +706,18 @@ pub fn min_resolver_excludes_from_magento(
             dir: m.path.clone(),
         })
         .collect();
-    Ok(min_resolver_excludes(&config, &modules))
+    let mut excludes = min_resolver_excludes(&config, &modules);
+    // Plugin-contributed excludes (statically evaluated — see
+    // `plugin_min_excludes`). On a real store these outnumber the config ones.
+    let (from_plugins, unknown) = plugin_min_excludes(magento);
+    for class in unknown {
+        eprintln!(
+            "warning: plugin {class} on Minification::getExcludes is not statically \
+             evaluable — its excludes are missing from requirejs-min-resolver.js"
+        );
+    }
+    excludes.extend(from_plugins);
+    Ok(excludes)
 }
 
 /// Where the verbatim [`MIXINS_FILE_NAME`] copy comes FROM:
@@ -460,6 +729,99 @@ pub fn mixins_source_path(root: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use super::literal_exclude_appends;
+
+    /// The `around` shape: an early-return guard, then literal appends. The URL
+    /// literal contains `//`, which a naive comment strip would truncate.
+    #[test]
+    fn around_plugin_with_early_return_guard() {
+        let src = r#"<?php
+class P {
+    public function aroundGetExcludes(Minification $subject, callable $proceed, $contentType)
+    {
+        $result = $proceed($contentType);
+        if ($contentType !== 'js') {
+            return $result;
+        }
+        $result[] = 'https://static-app.connect.trustedshops.com';
+        $result[] = 'Firebear_ImportExport/js/lib/ace/snippets/abap';
+        return $result;
+    }
+}"#;
+        assert_eq!(
+            literal_exclude_appends(src).unwrap(),
+            vec![
+                "https://static-app.connect.trustedshops.com".to_string(),
+                "Firebear_ImportExport/js/lib/ace/snippets/abap".to_string(),
+            ]
+        );
+    }
+
+    /// The `after` shape: the appends live INSIDE a positive guard block.
+    #[test]
+    fn after_plugin_with_positive_guard_block() {
+        let src = r#"<?php
+class P {
+    public function afterGetExcludes(Minification $subject, $result, $contentType)
+    {
+        if ($contentType == 'js') {
+            $result[] = 'js.mollie.com';
+        }
+        return $result;
+    }
+}"#;
+        assert_eq!(literal_exclude_appends(src).unwrap(), vec!["js.mollie.com".to_string()]);
+    }
+
+    /// A guard that is false for `js` contributes nothing — its block is
+    /// suppressed rather than flattened into the result.
+    #[test]
+    fn appends_under_a_non_js_guard_are_suppressed() {
+        let src = r#"<?php
+class P {
+    public function afterGetExcludes($subject, $result, $contentType)
+    {
+        if ($contentType !== 'js') {
+            $result[] = 'only-for-css';
+        }
+        $result[] = 'always';
+        return $result;
+    }
+}"#;
+        assert_eq!(literal_exclude_appends(src).unwrap(), vec!["always".to_string()]);
+    }
+
+    /// Anything we cannot evaluate statically must be REJECTED, so the caller
+    /// reports the plugin instead of emitting a half-right exclude list.
+    #[test]
+    fn non_literal_bodies_are_rejected() {
+        let computed = r#"<?php
+    public function afterGetExcludes($subject, $result, $contentType)
+    {
+        $result[] = $this->config->getValue('some/path');
+        return $result;
+    }"#;
+        assert!(literal_exclude_appends(computed).is_none());
+
+        let looped = r#"<?php
+    public function afterGetExcludes($subject, $result, $contentType)
+    {
+        foreach ($this->paths as $p) {
+            $result[] = 'x';
+        }
+        return $result;
+    }"#;
+        assert!(literal_exclude_appends(looped).is_none());
+
+        let concatenated = r#"<?php
+    public function afterGetExcludes($subject, $result, $contentType)
+    {
+        $result[] = 'a' . $suffix;
+        return $result;
+    }"#;
+        assert!(literal_exclude_appends(concatenated).is_none());
+    }
+
     use super::*;
 
     /// A synthetic Magento-shaped tree exercising every collector layer:

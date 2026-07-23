@@ -213,7 +213,16 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
             super::bundle::OrderMode::Probe(scratch)
         }
     };
-    let opts = PlacementOptions { compress: !req.no_compress, order: order_mode };
+    // File-set exclusions contributed by DI plugins on `Deploy\Package\Package`
+    // (Hyva's tailwind drop). Read from THIS store's di.xml, never assumed.
+    let plugins = files::deploy_plugin_effects(&magento);
+    for class in &plugins.unknown {
+        eprintln!(
+            "warning: unmodelled deploy plugin {class} — it may change which files \
+             deploy, or where, in ways we cannot reproduce"
+        );
+    }
+    let opts = PlacementOptions { compress: !req.no_compress, order: order_mode, plugins };
 
     // deployed_version.txt — ONE file at the static root, written first (only
     // with an explicit version, never an invented timestamp).
@@ -472,22 +481,10 @@ fn build_group_packages(
     g: &Group,
     opts: &PlacementOptions,
 ) -> Result<Vec<ThemePackage>, DeployError> {
-    // Theme-chain i18n for the dictionary (extraction is theme-independent,
-    // but a theme's own i18n csv could add entries — use the first theme's
-    // chain, as the group's themes share an area).
-    let chain_dirs: Vec<PathBuf> = g
-        .theme_ids
-        .first()
-        .and_then(|id| super::less::theme_chain(&g.area, id, &inputs.themes).ok())
-        .map(|chain| {
-            chain
-                .iter()
-                .filter_map(|t| inputs.themes.iter().find(|(tid, _)| tid == &t.id).map(|(_, d)| d.clone()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let js_translation = files::js_translation_for(inputs, &g.area, &g.locale, &chain_dirs);
-    files::build_group(inputs, &g.area, &g.theme_ids, &g.locale, &js_translation, opts)
+    // The phrase scan is theme-independent (`getData` ignores its themePath),
+    // so hoist it out of the per-theme dictionary build inside `build_group`.
+    let area_phrases = files::area_phrases_for(inputs, &g.area);
+    files::build_group(inputs, &g.area, &g.theme_ids, &g.locale, &area_phrases, opts)
 }
 
 /// Wrap a fan-out closure in the requested thread pool. `--jobs 1` forces
@@ -509,6 +506,13 @@ where
     }
 }
 
+/// `<static root>/<area>/sri-hashes.json` — the ONE integrity file per AREA
+/// (`Csp\Model\SubresourceIntegrity\Storage\File::resolveFilePath`, whose
+/// `$context` is the area name), never a per-package artifact.
+pub fn area_sri_path(static_root: &std::path::Path, area: &str) -> PathBuf {
+    static_root.join(area).join(files::SRI_HASHES_FILE_NAME)
+}
+
 /// Execute the plan and WRITE each group's packages under `static_root` as it
 /// finishes — the memory-bounded path (one group's bytes live at a time per
 /// worker) the CLI uses. Fan-out over groups; writes are to disjoint package
@@ -522,15 +526,23 @@ pub fn execute_to_disk(
 ) -> Result<Vec<TupleStat>, DeployError> {
     use files::PlacedKind as K;
 
-    let stats: Vec<Vec<TupleStat>> = with_pool(jobs, || {
+    // Per group: the stat rows plus this group's contribution to its area's
+    // `sri-hashes.json`. `par_iter().map().collect()` preserves group order, so
+    // the accumulated integrity entries land in the run's deployment order —
+    // the order a real deploy's successive `saveBunch` calls produce.
+    type GroupOut = (Vec<TupleStat>, Vec<(String, files::PackageSri)>);
+    let collected: Vec<GroupOut> = with_pool(jobs, || {
         groups
             .par_iter()
             .map(|g| {
                 let packages = build_group_packages(inputs, g, opts)?;
                 let mut rows = Vec::with_capacity(packages.len());
+                let mut sri: Vec<(String, files::PackageSri)> =
+                    Vec::with_capacity(packages.len());
                 for pkg in &packages {
                     let target = files::package_dir(static_root, &g.area, &pkg.theme, &g.locale);
                     write_package(pkg, &target)?;
+                    sri.push((g.area.clone(), pkg.sri.clone()));
                     rows.push(TupleStat {
                         area: g.area.clone(),
                         // Bare `Vendor/name` (the area is a separate field).
@@ -547,12 +559,44 @@ pub fn execute_to_disk(
                         warnings: pkg.warnings.clone(),
                     });
                 }
-                Ok(rows)
+                Ok((rows, sri))
             })
             .collect::<Result<Vec<_>, DeployError>>()
     })?;
 
-    Ok(stats.into_iter().flatten().collect())
+    // One `sri-hashes.json` per area at the static root. `RemoveAllAssetIntegrityHashes`
+    // wipes each area's file before a CLI deploy and the run then accumulates
+    // into it, so writing exactly this run's entries reproduces the result.
+    // Each SRI phase runs across EVERY package before the next starts, so the
+    // file lists all packages' published js, THEN all their `requirejs-config.js`,
+    // THEN all their bundles — not one package's three phases at a time.
+    let mut by_area: Vec<(String, Vec<&files::PackageSri>)> = Vec::new();
+    for (_, groups_sri) in &collected {
+        for (area, pkg_sri) in groups_sri {
+            match by_area.iter_mut().find(|(a, _)| a == area) {
+                Some((_, acc)) => acc.push(pkg_sri),
+                None => by_area.push((area.clone(), vec![pkg_sri])),
+            }
+        }
+    }
+    for (area, pkgs) in &by_area {
+        let entries: Vec<(String, String)> = pkgs
+            .iter()
+            .flat_map(|p| p.package.iter())
+            .chain(pkgs.iter().flat_map(|p| p.requirejs.iter()))
+            .chain(pkgs.iter().flat_map(|p| p.bundles.iter()))
+            .cloned()
+            .collect();
+        let path = area_sri_path(static_root, area);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| err(format!("mkdir {}: {e}", parent.display())))?;
+        }
+        std::fs::write(&path, files::sri_hashes_json(&entries))
+            .map_err(|e| err(format!("write {}: {e}", path.display())))?;
+    }
+
+    Ok(collected.into_iter().flat_map(|(rows, _)| rows).collect())
 }
 
 /// Write one theme package to `target` (the real deploy's per-package
@@ -597,6 +641,7 @@ mod tests {
             modules: Vec::new(),
             reg_modules: Vec::new(),
             scan_modules: Vec::new(),
+            language_packs: Vec::new(),
             min_resolver: String::new(),
         }
     }
@@ -640,6 +685,7 @@ mod tests {
             modules: Vec::new(),
             reg_modules: Vec::new(),
             scan_modules: Vec::new(),
+            language_packs: Vec::new(),
             min_resolver: String::new(),
         };
         let p = plan(&inp, &["en_US".into()], &[], &[], false).unwrap();

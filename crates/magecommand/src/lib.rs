@@ -194,9 +194,9 @@ enum StaticCommand {
         #[arg(long, default_value = "frontend",
               value_parser = ["frontend", "adminhtml"])]
         area: String,
-        /// Locale of the package. (Dictionary limitation: only locales whose
-        /// js dictionary is empty — no phrase translating differently, like
-        /// en_US — produce a byte-faithful `js-translation.json`.)
+        /// Locale of the package. The `js-translation.json` dictionary merges
+        /// modules, then LANGUAGE packs, then the theme chain — as
+        /// `Translate::loadData` does — so every locale is byte-faithful.
         #[arg(long, default_value = "en_US")]
         locale: String,
         /// Write the packages under this static root (as
@@ -1110,6 +1110,7 @@ fn static_files(
     let opts = sdf::PlacementOptions {
         compress: !no_compress,
         order: order_mode,
+        plugins: sdf::deploy_plugin_effects(&magento),
     };
     let packages = match sdf::build_from_magento(&magento, area, themes, locale, &opts) {
         Ok(p) => p,

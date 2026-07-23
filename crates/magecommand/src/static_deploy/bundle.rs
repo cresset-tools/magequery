@@ -833,10 +833,24 @@ pub fn build_theme(
     modules: &[ModuleRef],
     generated: &[(String, String)],
     order: &OrderMode,
+    exclude_prefixes: &[String],
     min_cache: &mut MinSiblingCache,
 ) -> Result<ThemeBundles, BundleError> {
     let chain = theme_chain(area, theme_id, themes)?;
-    let disk = deployed_tree(root, area, &chain, modules, locale);
+    let mut disk = deployed_tree(root, area, &chain, modules, locale);
+    // The bundler keeps its own view of the deployed tree, so the package
+    // exclusions a DI plugin applies (`Deploy\Package\Package::getFiles`) have
+    // to be applied here too — otherwise a Hyva theme's `web/tailwind/`
+    // node_modules get bundled even though they never reach the package.
+    if !exclude_prefixes.is_empty() {
+        disk.retain(|deployed, _| {
+            let file_path = match deployed.split_once('/') {
+                Some((first, rest)) if super::less::is_module_segment(first) => rest,
+                _ => deployed.as_str(),
+            };
+            !exclude_prefixes.iter().any(|p| file_path.starts_with(p.as_str()))
+        });
+    }
     let mut paths: std::collections::BTreeMap<String, Option<&PathBuf>> =
         disk.iter().map(|(k, v)| (k.clone(), Some(v))).collect();
     for (p, _) in generated {
@@ -947,6 +961,7 @@ pub fn build_from_magento(
             &modules,
             &generated,
             order,
+            &[],
             &mut min_cache,
         )?);
     }
@@ -1279,6 +1294,7 @@ mod tests {
                 (s("requirejs-min-resolver.js"), s("RJS-RESOLVER")),
             ],
             &OrderMode::Sorted,
+            &[],
             &mut cache,
         )
         .expect("build")

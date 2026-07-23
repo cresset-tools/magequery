@@ -80,6 +80,7 @@ pub(super) fn min_max(
     np: u8,
     compress: bool,
     keep_zero_units: bool,
+    php_numbers: bool,
 ) -> Option<Node> {
     let mut queue: Vec<Node> = args.to_vec();
     let mut order: Vec<Dimension> = Vec::new();
@@ -170,7 +171,7 @@ pub(super) fn min_max(
     // less.js `minMax` uses `context.compress ? ',' : ', '` (§C4).
     let rendered: Vec<String> = order
         .iter()
-        .map(|d| render_value_cz(&Node::Dimension(d.clone()), np, compress, keep_zero_units))
+        .map(|d| render_value_cz(&Node::Dimension(d.clone()), np, compress, keep_zero_units, php_numbers))
         .collect();
     Some(Node::Anonymous(format!(
         "{}({})",
@@ -189,7 +190,7 @@ mod tests {
 
     #[test]
     fn min_reduces_compatible_units() {
-        let out = min_max(&[dim(1.0, "cm"), dim(3.0, "mm")], true, 8, false, false).unwrap();
+        let out = min_max(&[dim(1.0, "cm"), dim(3.0, "mm")], true, 8, false, false, false).unwrap();
         let Node::Dimension(d) = out else { panic!() };
         assert_eq!(d.value, 3.0);
         assert_eq!(d.unit.to_unit_string(), "mm");
@@ -202,6 +203,7 @@ mod tests {
             &[dim(6.0, "em"), dim(5.0, ""), dim(4.0, "ex"), dim(3.0, ""), dim(2.0, "pt"), dim(1.0, "")],
             true,
             8,
+            false,
             false,
             false,
         )
@@ -219,6 +221,7 @@ mod tests {
             8,
             false,
             false,
+            false,
         )
         .unwrap();
         let Node::Anonymous(s) = out else { panic!() };
@@ -232,6 +235,6 @@ mod tests {
             args: vec![dim(1.0, "")],
             span: Default::default(),
         };
-        assert!(min_max(&[call, dim(1.0, "")], true, 8, false, false).is_none());
+        assert!(min_max(&[call, dim(1.0, "")], true, 8, false, false, false).is_none());
     }
 }
