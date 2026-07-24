@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.14.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.13.0...magequery-v0.14.0) (2026-07-24)
+
+
+### Features
+
+* **magecommand:** `static verify` — the oracle harness for static deploy ([#83](https://github.com/cresset-tools/magequery/issues/83)) ([6651acc](https://github.com/cresset-tools/magequery/commit/6651accde52a9dad40d2cb70c36567c4c7386b04))
+
+
+### Bug Fixes
+
+* **magecommand:** model Hyva's compat-module fallback ([#85](https://github.com/cresset-tools/magequery/issues/85)) ([42234db](https://github.com/cresset-tools/magequery/commit/42234db8e5daaeba04dd6a009fb1e00d4412a9fa))
+* **magecommand:** read deploy plugins PER AREA, and widen what we watch ([#84](https://github.com/cresset-tools/magequery/issues/84)) ([0d71606](https://github.com/cresset-tools/magequery/commit/0d71606d385cdcaafe0a1b5f88c19b46d84e09ef))
+* **magecommand:** static deploy — byte parity with a real setup:static-content:deploy ([#81](https://github.com/cresset-tools/magequery/issues/81)) ([67245fd](https://github.com/cresset-tools/magequery/commit/67245fd5a5a9c43119b14b70ada0db5c9ffece13))
+* **magecommand:** static deploy silent by default, --verbose surfaces LESS diagnostics ([#79](https://github.com/cresset-tools/magequery/issues/79)) ([09f6036](https://github.com/cresset-tools/magequery/commit/09f60362732a29304e4dbbda5b40903c9e201f0d))
+
 ## [0.13.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.12.4...magequery-v0.13.0) (2026-07-22)
 
 
