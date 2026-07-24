@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.16.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.15.0...magequery-v0.16.0) (2026-07-24)
+
+
+### Features
+
+* **magecommand:** less.php 3.x profile — 2.4.7 stores deploy their stylesheets ([#89](https://github.com/cresset-tools/magequery/issues/89)) ([d07f667](https://github.com/cresset-tools/magequery/commit/d07f667a591f2ca64979f8fcd65ce34f119ee2e1))
+
+
+### Bug Fixes
+
+* **magecommand-less:** 247 font shorthand — keep literal slash, divide via variable/paren ([#94](https://github.com/cresset-tools/magequery/issues/94)) ([e41e711](https://github.com/cresset-tools/magequery/commit/e41e711da7d83ac6b66722f3fc6132516449c346))
+* **magecommand:** emit sri-hashes.json only when the store's Csp supports it ([#93](https://github.com/cresset-tools/magequery/issues/93)) ([be1896e](https://github.com/cresset-tools/magequery/commit/be1896ea9e57c4167828d5f0272eeefe38c70094))
+
 ## [0.15.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.14.0...magequery-v0.15.0) (2026-07-24)
 
 
