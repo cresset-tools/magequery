@@ -121,6 +121,17 @@ pub struct DeployRequest {
     pub jobs: Option<usize>,
     /// Skip gzip/brotli pre-compression of text assets.
     pub no_compress: bool,
+    /// Skip LESS compilation — the deploy emits no `.css` for `.less` entry
+    /// points (plain `.css`, incl. a Hyvä theme's pre-built Tailwind
+    /// `styles.css`, is still copied). Magento's `--no-less`.
+    pub no_less: bool,
+    /// Skip the `js/bundle/bundle<N>.js` generation step. Magento's
+    /// `--no-js-bundle`. (Hyvä doesn't use RequireJS bundles.)
+    pub no_js_bundle: bool,
+    /// Accept Magento's `--no-html-minify` for parity — a no-op here:
+    /// magecommand byte-copies `.html` templates and never minifies them, so
+    /// this is already the behavior.
+    pub no_html_minify: bool,
 }
 
 /// The result of [`deploy_to_disk`] — everything the CLI renders, so an
@@ -223,7 +234,13 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
     // (Hyva's tailwind drop). Read from THIS store's di.xml, never assumed.
     let plugins = files::deploy_plugin_effects(&magento);
     let (plugin_warnings, plugin_notices) = (plugins.unknown(), plugins.unmodelled_surface());
-    let opts = PlacementOptions { compress: !req.no_compress, order: order_mode, plugins };
+    let opts = PlacementOptions {
+        compress: !req.no_compress,
+        order: order_mode,
+        plugins,
+        no_less: req.no_less,
+        no_js_bundle: req.no_js_bundle,
+    };
 
     // deployed_version.txt — ONE file at the static root, written first (only
     // with an explicit version, never an invented timestamp).
