@@ -736,6 +736,11 @@ pub struct PlacementOptions {
     /// (see [`deploy_plugin_effects`]). All-empty on a store with no such
     /// plugin — derived from the store's own di.xml, never assumed.
     pub plugins: AreaPluginEffects,
+    /// `--no-less`: skip LESS compilation (no `.css` emitted for `.less`
+    /// entries; plain `.css` still copied).
+    pub no_less: bool,
+    /// `--no-js-bundle`: skip `js/bundle/bundle<N>.js` generation.
+    pub no_js_bundle: bool,
 }
 
 impl Default for PlacementOptions {
@@ -744,6 +749,8 @@ impl Default for PlacementOptions {
             compress: true,
             order: OrderMode::Sorted,
             plugins: AreaPluginEffects::default(),
+            no_less: false,
+            no_js_bundle: false,
         }
     }
 }
@@ -882,9 +889,16 @@ fn build_theme_prebundle(
     // order (hence `sri-hashes.json` deployment order) is identical to serial,
     // and a `--jobs 1` run (one-thread pool) is byte-identical.
     use rayon::prelude::*;
+    let no_less = opts.no_less;
     let rendered: Vec<(Option<PlacedFile>, Vec<(String, String)>)> = entries
         .par_iter()
         .map(|entry| {
+            // `--no-less`: don't compile `.less` entry points (their `.css` is
+            // not deployed). Plain `.css` — including a Hyvä theme's pre-built
+            // Tailwind `styles.css` — is a non-LESS entry and still copies.
+            if no_less && entry.less {
+                return Ok((None, Vec::new()));
+            }
             let (rendered, warns) =
                 render_entry(entry, &orchestrator, &less_opts, area, &theme_path)?;
             let placed = rendered
@@ -996,24 +1010,28 @@ fn finalize_theme(
     // js/bundle/bundle<N>.js (Service\Bundle) — the bundler resolves its own
     // js/html view of the package (proven byte-exact by its own gate) and
     // needs the generated requirejs artifacts as package files.
-    let bundles = bundle::build_theme(
-        root,
-        area,
-        &theme_id,
-        locale,
-        themes,
-        modules,
-        &generated,
-        &opts.order,
-        &opts.plugins.for_area(area).exclude_prefixes,
-        min_cache,
-    )?;
-    for b in bundles.files {
-        files.push(PlacedFile {
-            path: format!("{}/{}", bundle::BUNDLE_JS_DIR, b.name),
-            content: b.content.into_bytes(),
-            kind: PlacedKind::Bundle,
-        });
+    // `--no-js-bundle` skips the whole step (Hyvä doesn't use RequireJS
+    // bundles); with no Bundle files the sri-hashes step below emits none.
+    if !opts.no_js_bundle {
+        let bundles = bundle::build_theme(
+            root,
+            area,
+            &theme_id,
+            locale,
+            themes,
+            modules,
+            &generated,
+            &opts.order,
+            &opts.plugins.for_area(area).exclude_prefixes,
+            min_cache,
+        )?;
+        for b in bundles.files {
+            files.push(PlacedFile {
+                path: format!("{}/{}", bundle::BUNDLE_JS_DIR, b.name),
+                content: b.content.into_bytes(),
+                kind: PlacedKind::Bundle,
+            });
+        }
     }
 
     // sri-hashes.json (Magento_Csp Integrity + the requirejs/bundle
@@ -1903,6 +1921,61 @@ mod tests {
         let a = sri.find("legacy-build.min.js").unwrap();
         let b = sri.find("requirejs-config.js").unwrap();
         assert!(a < b);
+    }
+
+    #[test]
+    fn no_less_and_no_js_bundle_skip_their_steps() {
+        let td = synth_root();
+        let r = td.path();
+        // A trivial compilable LESS entry so the default build has a
+        // LESS-compiled `.css` to skip under `--no-less`.
+        std::fs::write(
+            r.join("app/code/Acme/Widgets/view/frontend/web/css/lean.less"),
+            ".lean { color: #fff; }\n",
+        )
+        .unwrap();
+        let (themes, modules) = refs(r);
+
+        // Control: the default build compiles LESS and emits bundles.
+        let mut c1 = MinSiblingCache::new();
+        let base = build_theme(
+            r, "frontend", "Acme/base", "en_US", &themes, &modules, &modules, "RESOLVER",
+            "[]", &PlacementOptions::default(), &mut c1,
+        )
+        .expect("build");
+        assert!(
+            base.files.iter().any(|f| f.kind == PlacedKind::LessCompiled),
+            "fixture must compile some LESS by default"
+        );
+        assert!(
+            base.files.iter().any(|f| f.kind == PlacedKind::Bundle),
+            "fixture must bundle some JS by default"
+        );
+
+        // With --no-less + --no-js-bundle: neither step runs.
+        let mut c2 = MinSiblingCache::new();
+        let opts = PlacementOptions {
+            no_less: true,
+            no_js_bundle: true,
+            ..PlacementOptions::default()
+        };
+        let lean = build_theme(
+            r, "frontend", "Acme/base", "en_US", &themes, &modules, &modules, "RESOLVER",
+            "[]", &opts, &mut c2,
+        )
+        .expect("build");
+        assert!(
+            !lean.files.iter().any(|f| f.kind == PlacedKind::LessCompiled),
+            "--no-less must emit no LESS-compiled css"
+        );
+        assert!(
+            !lean.files.iter().any(|f| f.kind == PlacedKind::Bundle)
+                && !lean.files.iter().any(|f| f.path.starts_with("js/bundle/")),
+            "--no-js-bundle must emit no bundles"
+        );
+        // Plain assets still copy (a Hyvä theme's Tailwind styles.css is one).
+        assert!(lean.files.iter().any(|f| f.path == "spacer.gif"));
+        assert!(lean.files.iter().any(|f| f.path == "css/mail.css"));
     }
 
     /// A LESS entry that will not compile must not sink the package: a real
