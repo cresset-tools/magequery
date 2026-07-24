@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.14.0...magequery-v0.15.0) (2026-07-24)
+
+
+### Features
+
+* **static-deploy:** --no-less / --no-js-bundle / --no-html-minify ([#88](https://github.com/cresset-tools/magequery/issues/88)) ([2ae8a92](https://github.com/cresset-tools/magequery/commit/2ae8a9234bfc24ff2dbd97a4897f8eb233f5c0a4))
+* **static-deploy:** --symlink file (deployed copies symlink to source) ([#91](https://github.com/cresset-tools/magequery/issues/91)) ([4c4e556](https://github.com/cresset-tools/magequery/commit/4c4e556ccc93fbc4b859210fa46e7d54528f6587))
+
 ## [0.14.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.13.0...magequery-v0.14.0) (2026-07-24)
 
 
