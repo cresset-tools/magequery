@@ -307,9 +307,12 @@ impl LessOptions {
     /// — compile at all; under parens-division it throws, and the theme's whole
     /// `styles-m.css` silently fails to deploy. Every other formatting rule
     /// Also gated: less.js 2.5.3 has no `@charset`-hoisting visitor (a
-    /// `@charset` stays where it appears) and no `calc()` special-casing (its
+    /// `@charset` stays where it appears); no `calc()` special-casing (its
     /// interior evaluates as plain arithmetic that ignores unit compatibility,
-    /// `calc(100% - 40px + 10px)` -> `calc(70%)`).
+    /// `calc(100% - 40px + 10px)` -> `calc(70%)`); and its `font` shorthand
+    /// keeps a TOP-LEVEL literal `/` (`font: 16px/1.333`) while dividing a `/`
+    /// reached through a variable (`@h1font: …28px/1.2…; font: @h1font` ->
+    /// `23.33333333px`) or a paren.
     ///
     /// KNOWN residuals (not yet modeled — cosmetic, visually identical, so a
     /// deploy is ~99.9% byte-identical with these confined to third-party

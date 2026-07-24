@@ -76,6 +76,12 @@ pub struct Ctx<'a> {
     math_on: bool,
     parens: usize,
     in_calc: bool,
+    /// less.js 2.5.3 keeps a `font` shorthand's TOP-LEVEL literal `/` (parser
+    /// behavior): `font: 16px/1.333` stays, but a `/` reached through a
+    /// variable or a paren still divides under `math=always`. On while
+    /// evaluating a font declaration's own value; cleared when descending into
+    /// a variable or paren. Only ever set under the 247 profile.
+    keep_shorthand_slash: bool,
     important_scope: Vec<Option<String>>,
     evaluating: Vec<String>,
     mixin_depth: usize,
@@ -452,6 +458,7 @@ impl<'a> Ctx<'a> {
             math_on: true,
             parens: 0,
             in_calc: false,
+            keep_shorthand_slash: false,
             important_scope: Vec::new(),
             evaluating: Vec::new(),
             mixin_depth: 0,
@@ -1744,10 +1751,16 @@ impl<'a> Ctx<'a> {
         // less.js `Declaration.eval` math bypass: under math=always, a `font`
         // declaration's value evaluates in parens-division mode (the font
         // shorthand `0/0` protection — units/no-strict).
+        // Under `math=always` (less.php 3.x / 2.5.3) a `font` shorthand keeps
+        // its top-level literal `/` — the parser treats it as a separator, not
+        // a division (a `/` via a variable or paren still divides; handled in
+        // `eval_binary`/`eval_variable`/`eval_paren`). The modern profiles
+        // reach `font` under parens-division, where a bare `/` never divides
+        // anyway, so this only changes the 247 path.
         let res = if self.math == MathMode::Always && d.name == "font" {
-            self.math = MathMode::ParensDivision;
+            self.keep_shorthand_slash = true;
             let res = self.eval_declaration_inner(d);
-            self.math = MathMode::Always;
+            self.keep_shorthand_slash = false;
             res
         } else {
             self.eval_declaration_inner(d)
@@ -2144,6 +2157,16 @@ impl<'a> Ctx<'a> {
     }
 
     fn eval_variable(&mut self, name: &str, span: crate::ast::Span) -> Result<Node, LessError> {
+        // A `/` reached through a variable is parsed in the variable's own
+        // context, not the shorthand's — so it divides even inside `font:`.
+        let saved_slash = self.keep_shorthand_slash;
+        self.keep_shorthand_slash = false;
+        let out = self.eval_variable_inner(name, span);
+        self.keep_shorthand_slash = saved_slash;
+        out
+    }
+
+    fn eval_variable_inner(&mut self, name: &str, span: crate::ast::Span) -> Result<Node, LessError> {
         // Strip a leading `@@` handled by caller; here `name` has no `@`.
         let key = name.trim_start_matches('@').to_string();
 
@@ -2200,6 +2223,14 @@ impl<'a> Ctx<'a> {
     }
 
     fn eval_paren(&mut self, inner: &Node, in_op: bool) -> Result<Node, LessError> {
+        let saved_slash = self.keep_shorthand_slash;
+        self.keep_shorthand_slash = false;
+        let out = self.eval_paren_inner(inner, in_op);
+        self.keep_shorthand_slash = saved_slash;
+        out
+    }
+
+    fn eval_paren_inner(&mut self, inner: &Node, in_op: bool) -> Result<Node, LessError> {
         // less.js `Expression.eval` for a `parens` sub (§2.4/calc): the literal
         // paren survives ONLY for an operand paren whose math didn't run and
         // whose result is not a folded number — everything else unwraps.
@@ -2252,7 +2283,15 @@ impl<'a> Ctx<'a> {
         // the parens-division slash rule (less.js `isMathOn('./')` — only the
         // parens-mode parens requirement still applies).
         let opc = if op == "./" { '/' } else { op.chars().next().unwrap_or('+') };
-        let math_on = if op == "./" { self.is_math_on_plain() } else { self.is_math_on(opc) };
+        let math_on = if op == "/" && self.keep_shorthand_slash {
+            // A top-level literal `/` in a `font` shorthand is a separator, not
+            // a division (less.js 2.5.3 parser). Operands still evaluate.
+            false
+        } else if op == "./" {
+            self.is_math_on_plain()
+        } else {
+            self.is_math_on(opc)
+        };
         let a = self.eval_value(left)?;
         let b = self.eval_value(right)?;
         if !math_on {
