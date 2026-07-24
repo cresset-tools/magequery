@@ -617,7 +617,9 @@ pub fn execute_to_disk(
             }
         }
     }
-    for (area, pkgs) in &by_area {
+    // Only when the store's Csp ships the SRI writer (2.4.7+); older stores
+    // produce no `sri-hashes.json`.
+    for (area, pkgs) in by_area.iter().filter(|_| inputs.sri_supported) {
         let entries: Vec<(String, String)> = pkgs
             .iter()
             .flat_map(|p| p.package.iter())
@@ -756,6 +758,7 @@ mod tests {
             scan_modules: Vec::new(),
             language_packs: Vec::new(),
             min_resolver: String::new(),
+            sri_supported: true,
         }
     }
 
@@ -800,6 +803,7 @@ mod tests {
             scan_modules: Vec::new(),
             language_packs: Vec::new(),
             min_resolver: String::new(),
+            sri_supported: true,
         };
         let p = plan(&inp, &["en_US".into()], &[], &[], false).unwrap();
         assert_eq!(p.skipped.len(), 1);
