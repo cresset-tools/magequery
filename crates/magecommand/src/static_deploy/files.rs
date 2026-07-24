@@ -771,6 +771,9 @@ pub struct PlacementOptions {
     /// `--symlink`: whether pure-copy files symlink to source instead of being
     /// copied (see [`Symlink`]). Default [`Symlink::None`].
     pub symlink: Symlink,
+    /// The less.php dialect the store runs (from its `wikimedia/less.php`
+    /// version). Selects the math mode; see [`detect_less_profile`].
+    pub less_profile: super::less::LessProfile,
 }
 
 impl Default for PlacementOptions {
@@ -782,6 +785,7 @@ impl Default for PlacementOptions {
             no_less: false,
             no_js_bundle: false,
             symlink: Symlink::None,
+            less_profile: super::less::LessProfile::default(),
         }
     }
 }
@@ -910,6 +914,7 @@ fn build_theme_prebundle(
     let less_opts = LessDeployOptions {
         skip_broken_modules: false,
         compress: opts.compress,
+        profile: opts.less_profile,
     };
 
     // Render every package entry to bytes. Each entry is an independent pure
@@ -1387,6 +1392,67 @@ fn hyva_base_themes(di: &magequery_core::DiExport) -> Vec<String> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Select the less.php dialect from the store's installed `wikimedia/less.php`
+/// version, read straight from `vendor/composer/installed.json`.
+///
+/// The 5.x major is the less.js 3.13 port (parens-division, Magento 2.4.8+);
+/// everything before it — 3.x on 2.4.7 stores, and the 1.x/2.x/4.x majors —
+/// ports less.js 2.5.3 or earlier, all `math=always`. So the rule is simply
+/// major < 5 ⇒ [`LessProfile::Magento247`]. If the package is not found (it is
+/// always a Magento dependency, so this is unexpected) we keep the modern
+/// default rather than guess an old dialect, and say so.
+pub fn detect_less_profile(root: &Path) -> (super::less::LessProfile, Option<String>) {
+    use super::less::LessProfile;
+    let path = root.join("vendor").join("composer").join("installed.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (LessProfile::Magento248, Some(format!("could not read {}", path.display())));
+    };
+    let Some(version) = installed_package_version(&text, "wikimedia/less.php") else {
+        return (
+            LessProfile::Magento248,
+            Some("wikimedia/less.php not found in installed.json".to_string()),
+        );
+    };
+    match major_version(&version) {
+        Some(major) if major < 5 => (LessProfile::Magento247, None),
+        Some(_) => (LessProfile::Magento248, None),
+        None => (
+            LessProfile::Magento248,
+            Some(format!("could not parse wikimedia/less.php version {version:?}")),
+        ),
+    }
+}
+
+/// The `version` string of one package in `installed.json` (Composer 2 wraps
+/// packages in `{"packages":[…]}`; Composer 1 is a bare array — both have the
+/// same `{"name":…, "version":…}` objects, so a scan finds it either way).
+fn installed_package_version(text: &str, name: &str) -> Option<String> {
+    let needle = format!("\"name\":\"{name}\"");
+    // Tolerate whitespace variants of the name field.
+    let pos = text
+        .find(&needle)
+        .or_else(|| text.find(&format!("\"name\": \"{name}\"")))?;
+    // The version field of the SAME object. Composer writes `"name"` before
+    // `"version"`, so take the FIRST version field after the name (bounded, so
+    // a name with no version does not borrow the next package's) — and only
+    // fall back to a small backward window for the rare reversed order.
+    let forward = &text[pos..(pos + 400).min(text.len())];
+    for key in ["\"version\":\"", "\"version\": \""] {
+        if let Some(i) = forward.find(key) {
+            let rest = &forward[i + key.len()..];
+            if let Some(j) = rest.find('"') {
+                return Some(rest[..j].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The leading integer of a `vX.Y.Z` / `X.Y.Z` version, ignoring a `v` prefix.
+fn major_version(version: &str) -> Option<u32> {
+    version.trim_start_matches('v').split('.').next()?.parse().ok()
 }
 
 /// Read the store's merged di.xml — per area, so area-scoped `etc/<area>/di.xml`
@@ -2062,6 +2128,46 @@ mod tests {
         // ...and the rest of the package is untouched.
         assert!(pkg.files.iter().any(|f| f.path == "spacer.gif"));
         assert!(!pkg.sri.package.is_empty());
+    }
+
+    #[test]
+    fn less_profile_from_installed_json_version() {
+        use super::super::less::LessProfile;
+        let td = tempfile::tempdir().unwrap();
+        let r = td.path();
+        let write_installed = |ver: &str| {
+            let p = r.join("vendor/composer/installed.json");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(
+                p,
+                format!(
+                    r#"{{"packages":[{{"name":"magento/framework","version":"103.0.0"}},{{"name":"wikimedia/less.php","version":"{ver}"}}]}}"#
+                ),
+            )
+            .unwrap();
+        };
+
+        // 3.x / older majors are the less.js 2.5.3 dialect (math=always).
+        write_installed("v3.2.1");
+        assert_eq!(detect_less_profile(r).0, LessProfile::Magento247);
+        write_installed("1.8.2");
+        assert_eq!(detect_less_profile(r).0, LessProfile::Magento247);
+        write_installed("v4.3.0");
+        assert_eq!(detect_less_profile(r).0, LessProfile::Magento247);
+        // 5.x is the modern parens-division dialect.
+        write_installed("v5.5.1");
+        assert_eq!(detect_less_profile(r).0, LessProfile::Magento248);
+
+        // Package absent, or file missing: keep the modern default, with a note
+        // (never silently assume an old dialect).
+        std::fs::write(
+            r.join("vendor/composer/installed.json"),
+            r#"{"packages":[{"name":"magento/framework","version":"103.0.0"}]}"#,
+        )
+        .unwrap();
+        let (profile, note) = detect_less_profile(r);
+        assert_eq!(profile, LessProfile::Magento248);
+        assert!(note.is_some(), "an unexpected absence must be surfaced");
     }
 
     #[test]

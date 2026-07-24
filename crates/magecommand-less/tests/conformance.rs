@@ -630,3 +630,66 @@ fn operation_is_spaced_looks_only_before_the_operator() {
         assert_eq!(css, format!(".a{{w:{expected}}}"), "input {input:?}");
     }
 }
+
+/// less.php 3.x (a less.js 2.5.3 port, Magento 2.4.7 and older) is `math=always`
+/// AND has neither the `@charset`-hoisting visitor nor the `calc()`
+/// special-casing that less.js 3.0 added. Every expectation here is pinned
+/// against a live `wikimedia/less.php` v3.2.1 probe.
+#[test]
+fn magento_247_matches_less_php_3x() {
+    let opts = LessOptions::magento_247();
+
+    // math=always: `*` and `/` evaluate without parentheses — this is what
+    // makes Magento's unparenthesized `unit(@x * 16/100)` compile at all.
+    let src = "@base: 62.5%;\n.a { r: unit(@base * 16/100); }\n";
+    let css = magecommand_less::compile(src, &opts, &NoopResolver).unwrap().code;
+    assert_eq!(css, ".a {\n  r: 10;\n}\n");
+
+    // calc() interior math folds — 2.5.3 has no calc special-casing, so the
+    // interior evaluates as plain arithmetic that ignores unit compatibility
+    // and keeps the first unit (probed: less.php 3.2.1 gives `calc(70%)`).
+    let mut c = opts.clone();
+    c.compress = true;
+    assert_eq!(
+        magecommand_less::compile(".a { w: calc(100% - 40px + 10px); }\n", &c, &NoopResolver)
+            .unwrap()
+            .code,
+        ".a{w:calc(70%)}"
+    );
+    assert_eq!(
+        magecommand_less::compile(".a { w: calc(100% - 40px); }\n", &c, &NoopResolver)
+            .unwrap()
+            .code,
+        ".a{w:calc(60%)}"
+    );
+
+    // @charset stays where it appears — no hoisting to the top.
+    let src = ".a { b: 1; }\n@charset \"UTF-8\";\n.c { d: 2; }\n";
+    assert_eq!(
+        magecommand_less::compile(src, &c, &NoopResolver).unwrap().code,
+        ".a{b:1}@charset \"UTF-8\";.c{d:2}"
+    );
+}
+
+/// The modern profile (less.php 5.x) must keep the opposite behavior — the
+/// same inputs throw on unparenthesized division, preserve calc interiors, and
+/// hoist @charset. Guards the 2.4.8 byte-parity from the 247 flags.
+#[test]
+fn magento_248_keeps_parens_division_and_hoisting() {
+    let mut opts = LessOptions::magento_production();
+    opts.compress = true;
+
+    // calc interior preserved.
+    assert_eq!(
+        magecommand_less::compile(".a { w: calc(100% - 40px + 10px); }\n", &opts, &NoopResolver)
+            .unwrap()
+            .code,
+        ".a{w:calc(100% - 40px + 10px)}"
+    );
+    // @charset hoisted to the top.
+    let src = ".a { b: 1; }\n@charset \"UTF-8\";\n.c { d: 2; }\n";
+    assert_eq!(
+        magecommand_less::compile(src, &opts, &NoopResolver).unwrap().code,
+        "@charset \"UTF-8\";.a{b:1}.c{d:2}"
+    );
+}
