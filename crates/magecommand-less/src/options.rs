@@ -79,6 +79,18 @@ pub struct LessOptions {
     /// `toFixed` + shortest-round-trip. A literal `66.6%` prints as
     /// `66.59999999999999%` under it — real, deployed bytes.
     pub php_number_format: bool,
+    /// Evaluate math INSIDE `calc(…)`. less.js only special-cased `calc` in
+    /// 3.0 (preserving its interior); before that — less.js 2.5.3 / less.php
+    /// 3.x — `calc` is an ordinary function whose arguments evaluate under the
+    /// active math mode, so `calc(100% - 40px + 10px)` folds to
+    /// `calc(100% - 50px)`. `false` for the modern profiles; `true` for
+    /// [`magento_247`](Self::magento_247).
+    pub php_calc_interior_math: bool,
+    /// Hoist `@charset` to the top of the output (less.js 3.x `visitAtRule`
+    /// behavior, less.php 5.x). less.php 3.x / less.js 2.5.3 does NOT — a
+    /// `@charset` inside an imported file stays where it appears. `true` for
+    /// the modern profiles; `false` for [`magento_247`](Self::magento_247).
+    pub hoist_charset: bool,
     /// `strictUnits` (default false): true throws on dimensionally-invalid ops.
     pub strict_units: bool,
     /// `strictImports` (default false).
@@ -250,6 +262,8 @@ impl Default for LessOptions {
             php_selector_interpolation: false,
             php_selector_paren_combinators: false,
             php_css_url_passthrough: false,
+            php_calc_interior_math: false,
+            hoist_charset: true,
             max_eval_depth: None,
         }
     }
@@ -281,6 +295,40 @@ impl LessOptions {
             php_selector_paren_combinators: true,
             php_css_url_passthrough: true,
             ..LessOptions::default()
+        }
+    }
+
+    /// Magento on **`wikimedia/less.php` 3.x** (a port of less.js 2.5.3), used
+    /// by 2.4.7 and earlier stores. The one behavioral divergence from
+    /// [`magento_production`](Self::magento_production) (less.php 5.x /
+    /// less.js 3.13) is the math mode: 2.5.3 is `math=always`, so `*` and `/`
+    /// evaluate without parentheses. That is exactly what makes Magento's
+    /// `_typography.less` — `unit(@root__font-size * 16/100)`, unparenthesized
+    /// — compile at all; under parens-division it throws, and the theme's whole
+    /// `styles-m.css` silently fails to deploy. Every other formatting rule
+    /// Also gated: less.js 2.5.3 has no `@charset`-hoisting visitor (a
+    /// `@charset` stays where it appears) and no `calc()` special-casing (its
+    /// interior evaluates as plain arithmetic that ignores unit compatibility,
+    /// `calc(100% - 40px + 10px)` -> `calc(70%)`).
+    ///
+    /// KNOWN residuals (not yet modeled — cosmetic, visually identical, so a
+    /// deploy is ~99.9% byte-identical with these confined to third-party
+    /// module CSS): under 2.5.3 COMPRESS a named color and an `hsl()`/`rgb()`
+    /// value print as computed hex (`white` -> `#fff`), and a source dimension
+    /// keeps its original spelling (`-.5em` is NOT normalized to `-0.5em`).
+    /// These are distinct output paths (Keyword, Color, Dimension) whose modern
+    /// behavior is byte-load-bearing for the 2.4.8 profile, so they are left
+    /// for a separate, carefully-gated change.
+    pub fn magento_247() -> Self {
+        LessOptions {
+            profile: CompatProfile::Magento247,
+            math: MathMode::Always,
+            // less.js 2.5.3 has no `@charset` hoisting visitor — it stays where
+            // it appears (verified against less.php 3.2.1).
+            hoist_charset: false,
+            // less.js 2.5.3 has no calc special-casing — interior math folds.
+            php_calc_interior_math: true,
+            ..LessOptions::magento_production()
         }
     }
 

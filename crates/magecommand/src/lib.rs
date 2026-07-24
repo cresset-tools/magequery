@@ -899,6 +899,7 @@ fn static_less(
     let opts = sdless::LessDeployOptions {
         skip_broken_modules,
         compress,
+        profile: static_deploy::files::detect_less_profile(&root).0,
     };
     let names: Vec<String> = if entries.is_empty() {
         // Every entry the theme chain itself provides (its top-level
@@ -1310,6 +1311,7 @@ fn static_files(
         no_less: false,
         no_js_bundle: false,
         symlink: sdf::Symlink::None,
+        less_profile: sdf::detect_less_profile(&root).0,
     };
     let packages = match sdf::build_from_magento(&magento, area, themes, locale, &opts) {
         Ok(p) => p,

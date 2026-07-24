@@ -237,6 +237,13 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
     // (Hyva's tailwind drop). Read from THIS store's di.xml, never assumed.
     let plugins = files::deploy_plugin_effects(&magento);
     let (plugin_warnings, plugin_notices) = (plugins.unknown(), plugins.unmodelled_surface());
+    // Which less.php dialect the store runs — decides the math mode. An
+    // unexpected detection (package absent/unparseable) is surfaced, not
+    // silently defaulted.
+    let (less_profile, less_note) = files::detect_less_profile(&root);
+    if let Some(note) = less_note {
+        eprintln!("warning: assuming less.php 5.x (parens-division) — {note}");
+    }
     let opts = PlacementOptions {
         compress: !req.no_compress,
         order: order_mode,
@@ -244,6 +251,7 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
         no_less: req.no_less,
         no_js_bundle: req.no_js_bundle,
         symlink: req.symlink,
+        less_profile,
     };
 
     // deployed_version.txt — ONE file at the static root, written first (only

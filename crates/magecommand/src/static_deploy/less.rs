@@ -140,6 +140,29 @@ impl std::fmt::Display for LessDeployError {
 
 impl std::error::Error for LessDeployError {}
 
+/// Which `wikimedia/less.php` dialect the store runs, and so which
+/// [`LessOptions`] profile a deploy compiles under. The only behavioral
+/// difference is the math mode (see [`LessOptions::magento_247`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LessProfile {
+    /// less.php 5.x (less.js 3.13) — Magento 2.4.8+. Parens-division.
+    #[default]
+    Magento248,
+    /// less.php 3.x and earlier (less.js 2.5.3) — Magento 2.4.7 and older.
+    /// `math=always`.
+    Magento247,
+}
+
+impl LessProfile {
+    /// The base `LessOptions` for this dialect (compress is layered on top).
+    pub fn options(self) -> LessOptions {
+        match self {
+            LessProfile::Magento248 => LessOptions::magento_production(),
+            LessProfile::Magento247 => LessOptions::magento_247(),
+        }
+    }
+}
+
 /// Options for one deploy run.
 #[derive(Debug, Clone, Default)]
 pub struct LessDeployOptions {
@@ -150,6 +173,9 @@ pub struct LessDeployOptions {
     /// Magento's PHP adapter sets outside developer mode). Default OFF:
     /// the plain non-compressed `.css`.
     pub compress: bool,
+    /// The less.php dialect to compile under (selected from the store's
+    /// installed `wikimedia/less.php` version).
+    pub profile: LessProfile,
 }
 
 /// A compiled entry point.
@@ -520,7 +546,7 @@ impl LessOrchestrator {
         // The entry goes through the same preprocessor chain as its imports.
         let source = fix_import_extensions(&source);
 
-        let mut less_opts = LessOptions::magento_production();
+        let mut less_opts = opts.profile.options();
         less_opts.compress = opts.compress;
         less_opts.filename = Some(logical.clone());
 
