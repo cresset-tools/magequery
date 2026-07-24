@@ -693,3 +693,47 @@ fn magento_248_keeps_parens_division_and_hoisting() {
         "@charset \"UTF-8\";.a{b:1}.c{d:2}"
     );
 }
+
+/// less.php 3.x (less.js 2.5.3) keeps a `font` shorthand's TOP-LEVEL literal
+/// `/` as a separator, but a `/` reached through a variable or a paren still
+/// divides under `math=always`. Pinned against `wikimedia/less.php` v3.2.1.
+#[test]
+fn magento_247_font_shorthand_slash() {
+    let mut o = LessOptions::magento_247();
+    o.compress = false;
+    let compile = |src: &str| magecommand_less::compile(src, &o, &NoopResolver).unwrap().code;
+
+    // Literal slash in the font value: KEPT.
+    assert_eq!(
+        compile(".b { font: normal 16px/1.333 Arial; }\n"),
+        ".b {\n  font: normal 16px/1.333 Arial;\n}\n"
+    );
+    // The slash lives inside a variable: DIVIDES (variable parsed in its own
+    // context — this is the real `@h1font` construct in Magento's admin theme).
+    assert_eq!(
+        compile("@h1font: 400 28px/1.2 Arial;\n.a { font: @h1font; }\n"),
+        ".a {\n  font: 400 23.33333333px Arial;\n}\n"
+    );
+    // Parenthesized: DIVIDES (parens force it, as everywhere).
+    assert_eq!(
+        compile(".c { font: 400 (28px / 1.2) Arial; }\n"),
+        ".c {\n  font: 400 23.33333333px Arial;\n}\n"
+    );
+    // A non-font property divides a bare slash under math=always.
+    assert_eq!(compile(".d { width: 28px/1.2; }\n"), ".d {\n  width: 23.33333333px;\n}\n");
+}
+
+/// The modern profile (less.php 5.x, parens-division) keeps EVERY bare `/` —
+/// font or not, literal or via a variable — since none divide without parens.
+/// Guards the 2.4.8 byte-parity from the 247 font change.
+#[test]
+fn magento_248_font_shorthand_unaffected() {
+    let mut o = LessOptions::magento_production();
+    o.compress = false;
+    let compile = |src: &str| magecommand_less::compile(src, &o, &NoopResolver).unwrap().code;
+    assert_eq!(
+        compile("@h1font: 400 28px/1.2 Arial;\n.a { font: @h1font; }\n"),
+        ".a {\n  font: 400 28px/1.2 Arial;\n}\n"
+    );
+    assert_eq!(compile(".d { width: 28px/1.2; }\n"), ".d {\n  width: 28px/1.2;\n}\n");
+}
