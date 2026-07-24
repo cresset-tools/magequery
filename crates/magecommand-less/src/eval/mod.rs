@@ -380,7 +380,13 @@ fn eval_on_this_thread(
                     }
                     ordered.push(o);
                 }
-                Out::At { header, .. } if header.starts_with("@charset") => {
+                // less.js 2.5.3 (less.php 3.x) has no charset-hoisting visitor:
+                // a `@charset` stays where it appears. `hoist_charset` off keeps
+                // it in source position (it still advances the import insert
+                // point, as a leading charset does in every version).
+                Out::At { header, .. }
+                    if ctx.opts.hoist_charset && header.starts_with("@charset") =>
+                {
                     ordered.insert(charset_idx, o);
                     charset_idx += 1;
                     import_idx += 1;
@@ -2399,10 +2405,15 @@ impl<'a> Ctx<'a> {
         // Evaluate arguments with less.js `Call.eval`'s math context: math turns
         // back ON inside any function's arguments — EXCEPT calc(), which
         // suppresses it (and flags `inCalc` for nested variables; plan §2.4).
+        // less.js 3.0 special-cased calc to SUPPRESS interior math; 2.5.3
+        // (less.php 3.x) does not, so under `php_calc_interior_math` calc is an
+        // ordinary function and its arguments evaluate under the active math
+        // mode (`calc(100% - 40px + 10px)` -> `calc(100% - 50px)`).
+        let calc_suppresses = is_calc && !self.opts.php_calc_interior_math;
         let prev_math = self.math_on;
         let prev_calc = self.in_calc;
-        self.math_on = !is_calc;
-        if is_calc {
+        self.math_on = !calc_suppresses;
+        if calc_suppresses {
             self.in_calc = true;
         }
         let mut evaled = Vec::with_capacity(args.len());
