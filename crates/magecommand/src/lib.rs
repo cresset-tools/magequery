@@ -290,6 +290,19 @@ enum StaticCommand {
         /// production-mode compressed css.
         #[arg(long)]
         no_compress: bool,
+        /// Skip LESS compilation — emit no css for `.less` entries (plain css,
+        /// incl. a Hyvä theme's pre-built Tailwind `styles.css`, still copies).
+        /// Magento's `--no-less`.
+        #[arg(long)]
+        no_less: bool,
+        /// Skip `js/bundle/bundle<N>.js` generation. Magento's `--no-js-bundle`
+        /// (Hyvä doesn't use RequireJS bundles).
+        #[arg(long)]
+        no_js_bundle: bool,
+        /// Accepted for parity with Magento's `--no-html-minify`; a no-op here
+        /// (magecommand byte-copies `.html` and never minifies it).
+        #[arg(long)]
+        no_html_minify: bool,
         /// Print per-entry LESS compiler diagnostics ("extend has no matches",
         /// complex-selector notes) and any un-compilable entry that was skipped.
         /// Off by default: a real `setup:static-content:deploy` prints none of
@@ -563,6 +576,9 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 ref deployed_version,
                 jobs,
                 no_compress,
+                no_less,
+                no_js_bundle,
+                no_html_minify,
                 verbose,
             } => static_deploy(
                 cli.root,
@@ -576,6 +592,9 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 deployed_version.as_deref(),
                 jobs,
                 no_compress,
+                no_less,
+                no_js_bundle,
+                no_html_minify,
                 verbose,
                 cli.json,
             ),
@@ -1270,6 +1289,8 @@ fn static_files(
         compress: !no_compress,
         order: order_mode,
         plugins: sdf::deploy_plugin_effects(&magento),
+        no_less: false,
+        no_js_bundle: false,
     };
     let packages = match sdf::build_from_magento(&magento, area, themes, locale, &opts) {
         Ok(p) => p,
@@ -1389,6 +1410,9 @@ fn static_deploy(
     deployed_version: Option<&str>,
     jobs: Option<usize>,
     no_compress: bool,
+    no_less: bool,
+    no_js_bundle: bool,
+    no_html_minify: bool,
     verbose: bool,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
@@ -1414,6 +1438,9 @@ fn static_deploy(
         deployed_version: deployed_version.map(str::to_string),
         jobs,
         no_compress,
+        no_less,
+        no_js_bundle,
+        no_html_minify,
     };
 
     // The whole matrix orchestration is now the linkable in-process engine call
