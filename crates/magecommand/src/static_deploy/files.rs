@@ -1183,6 +1183,10 @@ pub struct DeployInputs {
     pub language_packs: Vec<super::jstranslation::LanguagePack>,
     /// The assembled `requirejs-min-resolver.js` body (theme-independent).
     pub min_resolver: String,
+    /// Whether this store's Magento_Csp ships the SubresourceIntegrity feature
+    /// (`Storage\File`, the `sri-hashes.json` writer). Added in 2.4.7; absent
+    /// on older stores, which then produce no `sri-hashes.json` at all.
+    pub sri_supported: bool,
 }
 
 /// Extension points whose plugins we MODEL. An unrecognized plugin on one of
@@ -1533,6 +1537,14 @@ impl DeployInputs {
         let language_packs = super::jstranslation::discover_language_packs(magento.root());
         let excludes = requirejs::min_resolver_excludes_from_magento(magento)?;
         let min_resolver = requirejs::min_resolver_code(&excludes);
+        // `sri-hashes.json` is written by `Csp\…\SubresourceIntegrity\Storage\File`,
+        // which Magento_Csp only gained in 2.4.7 — older stores (Csp enabled or
+        // not) produce no such file. Gate on the writer class resolving.
+        let sri_supported = magento
+            .class_file(&magequery_core::ClassName::new(
+                "Magento\\Csp\\Model\\SubresourceIntegrity\\Storage\\File",
+            ))
+            .is_some();
         Ok(DeployInputs {
             root: magento.root().to_path_buf(),
             themes,
@@ -1541,6 +1553,7 @@ impl DeployInputs {
             scan_modules,
             language_packs,
             min_resolver,
+            sri_supported,
         })
     }
 
