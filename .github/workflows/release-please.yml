@@ -76,3 +76,28 @@ jobs:
             git commit -m "chore(release): refresh Cargo.lock"
             git push
           fi
+
+      # A release just published — nudge magebuild to re-pin its magequery /
+      # magecommand git deps to it. magebuild links these engines by exact
+      # commit, so a repository_dispatch there opens its bump PR within seconds
+      # (magebuild/.github/workflows/bump-magequery.yml). A separate app token
+      # scoped to magebuild authorizes the cross-repo call — the same bot app is
+      # installed on both repos; the release-please token above is magequery-only.
+      - name: Mint magebuild token
+        id: magebuild-token
+        if: ${{ steps.release.outputs.release_created }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: Iv23liCDQHGQVKPD1b41
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          owner: cresset-tools
+          repositories: magebuild
+
+      - name: Notify magebuild of the release
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ steps.magebuild-token.outputs.token }}
+        run: |
+          gh api repos/cresset-tools/magebuild/dispatches \
+            -f event_type=magequery-release \
+            -F "client_payload[tag]=${{ steps.release.outputs.tag_name }}"
