@@ -676,6 +676,14 @@ pub struct PlacedFile {
     pub path: String,
     pub content: Vec<u8>,
     pub kind: PlacedKind,
+    /// The winning physical source file, set ONLY for [`PlacedKind::Copy`] —
+    /// the one kind whose deployed bytes equal a single source file verbatim.
+    /// [`Symlink::ToSource`] uses it to emit a relative symlink instead of a
+    /// byte copy; every derived kind (LESS-compiled, css-processed, generated)
+    /// has no 1:1 source and stays `None` (always a real file). `content` is
+    /// still populated even for a symlinked file — the sri-hashes step hashes
+    /// its `.js` bytes regardless of how it lands on disk.
+    pub source: Option<PathBuf>,
 }
 
 /// One package's `sri-hashes.json` contribution, split by the deploy phase that
@@ -724,6 +732,25 @@ impl ThemePackage {
     }
 }
 
+/// How a deployed file is materialized to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Symlink {
+    /// Every deployed file is a real byte copy — the default, self-contained
+    /// output that depends on nothing at serve time.
+    #[default]
+    None,
+    /// Pure-copy files ([`PlacedKind::Copy`]) become RELATIVE symlinks back to
+    /// their `vendor/`/`app/design/`/`lib/web/` source; derived files
+    /// (LESS-compiled, css-processed, generated) stay real. Smaller output +
+    /// faster write (no bytes copied), but the source tree must be present
+    /// under a shared ancestor at serve time — true inside a build artifact
+    /// that ships `vendor` beside `pub/static`, false for a bare `pub/static`.
+    /// The web server must follow symlinks (nginx `disable_symlinks off`, the
+    /// default). Emitted relative so the tree survives extraction to any path
+    /// and an atomic `current → releases/N` swap.
+    ToSource,
+}
+
 /// Deploy options.
 #[derive(Debug, Clone)]
 pub struct PlacementOptions {
@@ -741,6 +768,9 @@ pub struct PlacementOptions {
     pub no_less: bool,
     /// `--no-js-bundle`: skip `js/bundle/bundle<N>.js` generation.
     pub no_js_bundle: bool,
+    /// `--symlink`: whether pure-copy files symlink to source instead of being
+    /// copied (see [`Symlink`]). Default [`Symlink::None`].
+    pub symlink: Symlink,
 }
 
 impl Default for PlacementOptions {
@@ -751,6 +781,7 @@ impl Default for PlacementOptions {
             plugins: AreaPluginEffects::default(),
             no_less: false,
             no_js_bundle: false,
+            symlink: Symlink::None,
         }
     }
 }
@@ -901,8 +932,14 @@ fn build_theme_prebundle(
             }
             let (rendered, warns) =
                 render_entry(entry, &orchestrator, &less_opts, area, &theme_path)?;
-            let placed = rendered
-                .map(|(content, kind)| PlacedFile { path: entry.deployed.clone(), content, kind });
+            let placed = rendered.map(|(content, kind)| PlacedFile {
+                path: entry.deployed.clone(),
+                content,
+                // Only a verbatim byte copy has a single source file to point a
+                // symlink at; every processed/compiled kind is derived.
+                source: (kind == PlacedKind::Copy).then(|| entry.source.clone()),
+                kind,
+            });
             Ok((placed, warns))
         })
         .collect::<Result<Vec<_>, FilesError>>()?;
@@ -947,11 +984,13 @@ fn build_theme_prebundle(
         path: requirejs::CONFIG_FILE_NAME.to_string(),
         content: rjs.js.into_bytes(),
         kind: PlacedKind::RequireJs,
+        source: None,
     });
     files.push(PlacedFile {
         path: requirejs::MIN_RESOLVER_FILE_NAME.to_string(),
         content: min_resolver.as_bytes().to_vec(),
         kind: PlacedKind::RequireJs,
+        source: None,
     });
 
     // js-translation.json (DeployTranslationsDictionary): the merged js
@@ -961,6 +1000,7 @@ fn build_theme_prebundle(
         path: DICTIONARY_FILE_NAME.to_string(),
         content: js_translation.as_bytes().to_vec(),
         kind: PlacedKind::Translation,
+        source: None,
     });
 
     // The generated requirejs artifacts the bundler needs as package files.
@@ -1030,6 +1070,7 @@ fn finalize_theme(
                 path: format!("{}/{}", bundle::BUNDLE_JS_DIR, b.name),
                 content: b.content.into_bytes(),
                 kind: PlacedKind::Bundle,
+                source: None,
             });
         }
     }

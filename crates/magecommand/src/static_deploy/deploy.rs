@@ -51,7 +51,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
-use super::files::{self, DeployInputs, PlacementOptions, ThemePackage};
+use super::files::{self, DeployInputs, PlacementOptions, Symlink, ThemePackage};
 
 /// Magento's allowed-locale set — the curated `Locale\Config::$_allowedLocales`
 /// list (`array_keys(Setup\Lists::getLocaleList())` before the ICU-availability
@@ -132,6 +132,9 @@ pub struct DeployRequest {
     /// magecommand byte-copies `.html` templates and never minifies them, so
     /// this is already the behavior.
     pub no_html_minify: bool,
+    /// Materialize pure-copy files as relative symlinks to source instead of
+    /// byte copies (see [`Symlink`]). Default [`Symlink::None`].
+    pub symlink: Symlink,
 }
 
 /// The result of [`deploy_to_disk`] — everything the CLI renders, so an
@@ -240,6 +243,7 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
         plugins,
         no_less: req.no_less,
         no_js_bundle: req.no_js_bundle,
+        symlink: req.symlink,
     };
 
     // deployed_version.txt — ONE file at the static root, written first (only
@@ -567,7 +571,7 @@ pub fn execute_to_disk(
                     Vec::with_capacity(packages.len());
                 for pkg in &packages {
                     let target = files::package_dir(static_root, &g.area, &pkg.theme, &g.locale);
-                    write_package(pkg, &target)?;
+                    write_package(pkg, &target, opts.symlink)?;
                     sri.push((g.area.clone(), pkg.sri.clone()));
                     rows.push(TupleStat {
                         area: g.area.clone(),
@@ -627,8 +631,14 @@ pub fn execute_to_disk(
 
 /// Write one theme package to `target` (the real deploy's per-package
 /// `bundle` clear, then every file in write order). Mirrors the CLI's
-/// `static files` writer.
-fn write_package(pkg: &ThemePackage, target: &std::path::Path) -> Result<(), DeployError> {
+/// `static files` writer. Under [`Symlink::ToSource`], a [`PlacedKind::Copy`]
+/// file lands as a relative symlink to its source instead of a byte copy;
+/// every other kind is always a real file.
+fn write_package(
+    pkg: &ThemePackage,
+    target: &std::path::Path,
+    symlink: Symlink,
+) -> Result<(), DeployError> {
     let bundle_dir = target.join(super::bundle::BUNDLE_JS_DIR);
     if bundle_dir.is_dir() {
         std::fs::remove_dir_all(&bundle_dir)
@@ -650,10 +660,79 @@ fn write_package(pkg: &ThemePackage, target: &std::path::Path) -> Result<(), Dep
     for dir in &dirs {
         std::fs::create_dir_all(dir).map_err(|e| err(format!("mkdir {}: {e}", dir.display())))?;
     }
+    // Symlink mode computes each link relative to the deployed file's parent, so
+    // it needs the package dir as an ABSOLUTE base (a relative `target` would
+    // yield a relative-to-cwd link parent and a wrong `..` count). Canonicalize
+    // it ONCE — the per-file `src` canonicalize below is the only other realpath.
+    let target_abs = match symlink {
+        Symlink::ToSource => {
+            std::fs::create_dir_all(target)
+                .map_err(|e| err(format!("mkdir {}: {e}", target.display())))?;
+            target.canonicalize().unwrap_or_else(|_| target.to_path_buf())
+        }
+        Symlink::None => PathBuf::new(),
+    };
     pkg.files.par_iter().try_for_each(|f| {
         let path = target.join(&f.path);
-        std::fs::write(&path, &f.content).map_err(|e| err(format!("write {}: {e}", path.display())))
+        match (symlink, &f.source) {
+            // A pure copy in symlink mode: point a RELATIVE symlink at the
+            // source instead of writing its bytes. Remove any prior entry first
+            // so a re-deploy is idempotent AND so we never write THROUGH a
+            // symlink a previous run left (which would clobber the vendor file).
+            (Symlink::ToSource, Some(src)) => {
+                let src_abs = src.canonicalize().unwrap_or_else(|_| src.clone());
+                let link_parent = match std::path::Path::new(&f.path).parent() {
+                    Some(p) if !p.as_os_str().is_empty() => target_abs.join(p),
+                    _ => target_abs.clone(),
+                };
+                let rel = relative_path(&link_parent, &src_abs);
+                let _ = std::fs::remove_file(&path);
+                symlink_file(&rel, &path).map_err(|e| {
+                    err(format!("symlink {} -> {}: {e}", path.display(), rel.display()))
+                })
+            }
+            // A derived file, or symlinking off: a real byte copy. Remove any
+            // prior entry first — cheap ENOENT on a fresh target, but on a
+            // re-deploy over a PREVIOUS `--symlink` run it drops the leftover
+            // symlink so the write lands on a new real file instead of writing
+            // THROUGH the link into the vendor source.
+            _ => {
+                let _ = std::fs::remove_file(&path);
+                std::fs::write(&path, &f.content)
+                    .map_err(|e| err(format!("write {}: {e}", path.display())))
+            }
+        }
     })
+}
+
+/// The relative path from directory `from_dir` to `to` — both must be absolute.
+/// Pure path arithmetic (no filesystem access): walk `..` up to the common
+/// prefix, then down into `to`. Used to emit relocatable symlinks that survive
+/// artifact extraction to any path and a `current → releases/N` swap.
+fn relative_path(from_dir: &Path, to: &Path) -> PathBuf {
+    let from: Vec<_> = from_dir.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut rel = PathBuf::new();
+    for _ in common..from.len() {
+        rel.push("..");
+    }
+    for c in &to[common..] {
+        rel.push(c.as_os_str());
+    }
+    rel
+}
+
+/// Create a file symlink `link` → `original` (platform-portable). On Windows a
+/// file symlink needs elevation or Developer Mode; the deploy targets are Linux
+/// build hosts, but the arm keeps the crate cross-compiling.
+#[cfg(unix)]
+fn symlink_file(original: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(original, link)
+}
+#[cfg(windows)]
+fn symlink_file(original: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(original, link)
 }
 
 #[cfg(test)]
@@ -821,5 +900,101 @@ mod tests {
         assert_eq!(sorted, ALLOWED_LOCALES, "ALLOWED_LOCALES must stay sorted");
         assert!(is_allowed_locale("en_US") && is_allowed_locale("zh_Hant_TW"));
         assert!(!is_allowed_locale("zz_ZZ"));
+    }
+
+    #[test]
+    fn relative_path_walks_up_then_down() {
+        assert_eq!(
+            relative_path(
+                Path::new("/root/pub/static/frontend/V/t/en_US/js"),
+                Path::new("/root/vendor/v/mod/view/frontend/web/js/x.js"),
+            ),
+            // 7 dirs from root down to `.../en_US/js`, then down into vendor/.
+            PathBuf::from("../../../../../../../vendor/v/mod/view/frontend/web/js/x.js"),
+        );
+        // Sibling dirs: one `..` then down.
+        assert_eq!(
+            relative_path(Path::new("/a/b/c"), Path::new("/a/b/d/f")),
+            PathBuf::from("../d/f"),
+        );
+    }
+
+    fn placed(path: &str, content: &[u8], kind: files::PlacedKind, source: Option<PathBuf>) -> files::PlacedFile {
+        files::PlacedFile { path: path.into(), content: content.to_vec(), kind, source }
+    }
+
+    fn pkg_with(files: Vec<files::PlacedFile>) -> ThemePackage {
+        ThemePackage {
+            theme: "Vendor/t".into(),
+            theme_path: "Vendor/t".into(),
+            chain: Vec::new(),
+            files,
+            warnings: Vec::new(),
+            sri: files::PackageSri::default(),
+        }
+    }
+
+    #[test]
+    fn symlink_to_source_links_copies_keeps_generated_real() {
+        // A source tree with one real asset, and a `pub/static` target beside it
+        // under a shared root — the artifact layout where relative symlinks work.
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        let src = root.join("vendor/v/mod/view/frontend/web/js/x.js");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, b"SOURCE-BYTES").unwrap();
+        let target = root.join("pub/static/frontend/Vendor/t/en_US");
+
+        let pkg = pkg_with(vec![
+            // a pure copy (has a source) and a generated file (no source)
+            placed("js/x.js", b"SOURCE-BYTES", files::PlacedKind::Copy, Some(src.clone())),
+            placed("js-translation.json", b"[]", files::PlacedKind::Translation, None),
+        ]);
+        write_package(&pkg, &target, Symlink::ToSource).unwrap();
+
+        // The copy is a RELATIVE symlink that resolves to the source bytes.
+        let link = target.join("js/x.js");
+        let meta = std::fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink(), "js/x.js should be a symlink");
+        assert!(std::fs::read_link(&link).unwrap().is_relative(), "symlink must be relative");
+        assert_eq!(std::fs::read(&link).unwrap(), b"SOURCE-BYTES");
+
+        // The generated file is a real file with its own content.
+        let gen = target.join("js-translation.json");
+        assert!(!std::fs::symlink_metadata(&gen).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&gen).unwrap(), b"[]");
+    }
+
+    #[test]
+    fn redeploy_over_symlink_never_writes_through_to_source() {
+        // Deploy in symlink mode, then re-deploy the SAME file as a normal byte
+        // copy into the same target: the write must land on a fresh real file,
+        // never follow the leftover symlink and clobber the vendor source.
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        let src = root.join("vendor/v/mod/web/js/x.js");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, b"PRISTINE").unwrap();
+        let target = root.join("pub/static/frontend/Vendor/t/en_US");
+
+        write_package(
+            &pkg_with(vec![placed("js/x.js", b"PRISTINE", files::PlacedKind::Copy, Some(src.clone()))]),
+            &target,
+            Symlink::ToSource,
+        )
+        .unwrap();
+        // Now a plain deploy (symlinking off) of new bytes to the same path.
+        write_package(
+            &pkg_with(vec![placed("js/x.js", b"REBUILT", files::PlacedKind::Copy, Some(src.clone()))]),
+            &target,
+            Symlink::None,
+        )
+        .unwrap();
+
+        let out = target.join("js/x.js");
+        assert!(!std::fs::symlink_metadata(&out).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&out).unwrap(), b"REBUILT");
+        // The source file is untouched — the symlink was never written through.
+        assert_eq!(std::fs::read(&src).unwrap(), b"PRISTINE");
     }
 }
