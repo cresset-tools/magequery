@@ -57,6 +57,14 @@ enum Command {
     },
 }
 
+/// `--symlink` strategies. Only `file` (pure copies symlink to source) exists
+/// today; a future `locale` (dedup identical locale trees) would slot in here.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum SymlinkMode {
+    /// Each byte-identical asset becomes a relative symlink to its source.
+    File,
+}
+
 /// `magecommand static <subcommand>` — the static-content group. Only the
 /// LESS pipeline is built today; JS/requirejs come later.
 #[derive(Subcommand)]
@@ -303,6 +311,14 @@ enum StaticCommand {
         /// (magecommand byte-copies `.html` and never minifies it).
         #[arg(long)]
         no_html_minify: bool,
+        /// Materialize each byte-identical asset as a RELATIVE symlink to its
+        /// vendor/app/lib source instead of copying it (`--symlink file`).
+        /// Smaller + faster output, but the source tree must ship alongside
+        /// `pub/static` (true in a build artifact) and the web server must
+        /// follow symlinks. Derived files (LESS/css-processed/bundles) stay
+        /// real. Omit for a self-contained byte copy.
+        #[arg(long, value_name = "file", value_enum)]
+        symlink: Option<SymlinkMode>,
         /// Print per-entry LESS compiler diagnostics ("extend has no matches",
         /// complex-selector notes) and any un-compilable entry that was skipped.
         /// Off by default: a real `setup:static-content:deploy` prints none of
@@ -579,6 +595,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 no_less,
                 no_js_bundle,
                 no_html_minify,
+                symlink,
                 verbose,
             } => static_deploy(
                 cli.root,
@@ -595,6 +612,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 no_less,
                 no_js_bundle,
                 no_html_minify,
+                symlink,
                 verbose,
                 cli.json,
             ),
@@ -1291,6 +1309,7 @@ fn static_files(
         plugins: sdf::deploy_plugin_effects(&magento),
         no_less: false,
         no_js_bundle: false,
+        symlink: sdf::Symlink::None,
     };
     let packages = match sdf::build_from_magento(&magento, area, themes, locale, &opts) {
         Ok(p) => p,
@@ -1413,6 +1432,7 @@ fn static_deploy(
     no_less: bool,
     no_js_bundle: bool,
     no_html_minify: bool,
+    symlink: Option<SymlinkMode>,
     verbose: bool,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
@@ -1441,6 +1461,10 @@ fn static_deploy(
         no_less,
         no_js_bundle,
         no_html_minify,
+        symlink: match symlink {
+            Some(SymlinkMode::File) => sdf::Symlink::ToSource,
+            None => sdf::Symlink::None,
+        },
     };
 
     // The whole matrix orchestration is now the linkable in-process engine call
