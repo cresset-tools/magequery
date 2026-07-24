@@ -48,6 +48,17 @@ $ cargo install --git https://github.com/cresset-tools/magequery magequery
 Point it at a store with `--root <path-to-magento>`, or run it from inside the Magento root
 (the default is the current directory).
 
+### Without installing (bgx)
+
+[bougie](https://bougie.tools)'s `bgx` (like npx) runs magequery in an isolated,
+globally-cached environment without adding it to your project. Everything after the package is
+forwarded straight to magequery:
+
+```console
+$ bgx cresset/magequery doctor
+$ bgx cresset/magequery di 'Magento\Catalog\Api\ProductRepositoryInterface'
+```
+
 ### GitHub Action
 
 Use the reusable [magequery action](https://github.com/cresset-tools/magequery-action) in a
