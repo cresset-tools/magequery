@@ -38,6 +38,13 @@ DATA       (live DB — write counterpart to magequery's read cards)            
   product | order | customer | category | …   create | update <id> | delete <id>
 ```
 
+**Meta-command, outside the grammar:** `magecommand skill` prints the agent skill
+(`assets/skill/magecommand/SKILL.md`, embedded via `include_str!`) to stdout, for
+`.claude/skills/magecommand/SKILL.md`. It describes the CLI itself rather than acting on a
+codebase, so it is a single token, `#[command(hide = true)]`, and dispatched before
+anything touches a Magento root — mirroring magequery's `skill`/`completions`/`man`/`lsp`.
+It does not take a group, and no future group may be named `skill`.
+
 ## The `di` group (built)
 
 Reproduces `setup:di:compile` byte-for-byte (`generated/code` + `generated/metadata`).

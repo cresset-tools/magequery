@@ -110,10 +110,11 @@ To enable shell completions, add one line to your shell config:
 
 Then restart your shell.
 
-Using an AI coding agent? Install the magequery skill into your project:
+Using an AI coding agent? Install both agent skills into your project:
 
-    mkdir -p .claude/skills/magequery
+    mkdir -p .claude/skills/magequery .claude/skills/magecommand
     magequery skill > .claude/skills/magequery/SKILL.md
+    magecommand skill > .claude/skills/magecommand/SKILL.md
 """
 
 # The live-database commands compile a bundled MySQL client, which builds C via

@@ -55,6 +55,13 @@ enum Command {
         #[command(subcommand)]
         command: StaticCommand,
     },
+
+    // Tooling meta-command: it describes the CLI itself rather than acting on a
+    // Magento codebase, so it sits outside the groups and is hidden from help
+    // (still `--help`-discoverable and tab-completable), like magequery's.
+    /// Print the agent skill (SKILL.md) to stdout, for `.claude/skills/`.
+    #[command(hide = true)]
+    Skill,
 }
 
 /// `--symlink` strategies. Only `file` (pure copies symlink to source) exists
@@ -488,7 +495,18 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
     }
 
     let cli = Cli::parse();
+
+    // Dispatched before anything touches a Magento root: the skill describes the
+    // binary, not a codebase, so it works from any directory.
+    if matches!(cli.command, Command::Skill) {
+        // The canonical SKILL.md is embedded so it always matches this binary's
+        // command surface; `magecommand skill > .claude/skills/magecommand/SKILL.md`.
+        print!("{}", include_str!("../../../assets/skill/magecommand/SKILL.md"));
+        return Ok(ExitCode::SUCCESS);
+    }
+
     match cli.command {
+        Command::Skill => unreachable!("handled above"),
         Command::Di { command } => match command {
             DiCommand::Compile { dry_run, force, incremental, fused } => {
                 compile(cli.root, cli.json, dry_run, force, incremental, fused)

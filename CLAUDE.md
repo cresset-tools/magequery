@@ -229,6 +229,16 @@ otherwise `magequery skill` emits a stale map that silently steers agents to the
 command. Treat `assets/skill/SKILL.md` as part of the command-surface contract, alongside
 `HELP_GROUPS`.
 
+**`magecommand` carries its own skill, under the same rule.** `magecommand skill` (hidden,
+dispatched before anything touches a Magento root, so it works from any directory) prints
+`assets/skill/magecommand/SKILL.md`, embedded via `include_str!` exactly like magequery's.
+It is hand-maintained too: adding or changing anything in the `di`/`static` groups means
+updating it. Its frontmatter deliberately **never mentions magequery** — naming the read-side
+tool in the write-side trigger only confuses an agent choosing between them; the guardrail is
+stated positively instead ("only to generate artifacts, never to inspect, explain, or debug").
+The installer's `install-success-msg` advertises both skills, so both lines must stay in step
+with the two commands.
+
 Distribution is the `curl | sh` cargo-dist installer, which **cannot run custom logic or
 place extra files** (confirmed: axodotdev/cargo-dist#1696), so
 `[workspace.metadata.dist] install-success-msg` (root `Cargo.toml`) tells users to **source**
