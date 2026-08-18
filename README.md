@@ -166,12 +166,13 @@ Grouped as `magequery --help` shows them.
 
 **Entry points**: `routes`, `actions`, `webapi`, `cron`, `commands`, `graphql`.
 
-**Data**: `schema`, `indexers`, `extension-attributes`, `catalog-attributes`, `eav`,
-`product`, `price`, `category`, `order`, `customer`, `quote`, `invoice`, `shipment`,
-`creditmemo`, `order-statuses`, `sequences`, `sales-rule`, `catalog-rule`, `tax`.
+**Data**: `schema`, `indexers`, `extension-attributes`, `catalog-attributes`, `fieldset`, `eav`,
+`product`, `product-links`, `price`, `category`, `order`, `customer`, `customer-groups`,
+`quote`, `invoice`, `shipment`, `creditmemo`, `order-statuses`, `sequences`, `sales-rule`,
+`catalog-rule`, `tax`.
 
-**Frontend**: `layout`, `widgets`, `email-templates`, `translations`, `ui-components`,
-`cms-page`, `cms-block`.
+**Frontend**: `layout`, `templates`, `widgets`, `email-templates`, `translations`,
+`ui-components`, `cms-page`, `cms-block`.
 
 **Config and admin**: `config`, `system-config`, `acl`, `menu`, `admin-users`,
 `admin-roles`, `integrations`.

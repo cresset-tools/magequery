@@ -55,11 +55,12 @@ pub use model::{
     EavCatalogFlags, EavEntityType, EavScope, EavSetMembership, EavSetupKind, EavSetupProp,
     EavSetupRef, EavValueKind, EmailTemplate,
     EmailTemplateOverride, ExtendedType, ExtensionAttribute,
+    Fieldset, FieldsetAspect, FieldsetField, FieldsetFieldHit,
     ExtensionJoin, GqlArg, GqlField, GqlKind, GqlType,
     Indexer, IndexerLive, InstanceInfo, Integration, InterceptKind,
     LayoutContribution, LayoutLayer, LayoutOp, LayoutOpKind, LayoutView,
     MenuItem, MethodChain, Module, ModuleCheck, ModuleDeps, Patch, PatchKind, Patches,
-    Template, TemplateFile, TemplateUsage,
+    PhpTemplateBinding, Template, TemplateFile, TemplatePhpUsage, TemplateUsage,
     MviewSubscription, Observer, PluginTarget,
     BundleOption, BundleSelection, Category, CategoryHit, CategoryIndexCount,
     CategoryIndexedProduct, CategoryProduct,
@@ -127,6 +128,7 @@ pub struct Magento {
     widgets: OnceLock<breadth::WidgetIndex>,
     email_templates: OnceLock<breadth::EmailTemplateIndex>,
     catalog_attrs: OnceLock<breadth::CatalogAttrIndex>,
+    fieldsets: OnceLock<breadth::FieldsetIndex>,
 }
 
 struct DiBuilt {
@@ -195,6 +197,7 @@ impl Magento {
             widgets: OnceLock::new(),
             email_templates: OnceLock::new(),
             catalog_attrs: OnceLock::new(),
+            fieldsets: OnceLock::new(),
         })
     }
 

@@ -224,6 +224,51 @@ pub struct CatalogAttributeGroup {
     pub attributes: Vec<CatalogAttribute>,
 }
 
+/// One `<aspect>` of a fieldset field: the copy operation that carries it across, and the
+/// destination field when it is renamed on the way.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FieldsetAspect {
+    /// `to_order`, `to_order_item`, `to_quote`, `to_cm`, … — the copy Magento performs.
+    pub name: String,
+    /// `targetField=`: the destination field, when it differs from the source field name.
+    pub target_field: Option<String>,
+    pub source: Source,
+}
+
+/// One field of a fieldset, with every aspect declared for it (across modules).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FieldsetField {
+    pub name: String,
+    /// Sorted by aspect name; each keeps the declaring module's `Source`.
+    pub aspects: Vec<FieldsetAspect>,
+    /// The module and line that first declared the field.
+    pub source: Source,
+}
+
+/// An `etc/fieldset.xml` fieldset — Magento's object-copy map
+/// (`Magento\Framework\DataObject\Copy`): which fields are carried from one entity to
+/// another and under which aspect, e.g. `sales_convert_quote_item` + aspect
+/// `to_order_item` is what copies a quote item's field onto the order item. Merged across
+/// modules, so a third-party field appears beside core's with its own provenance — the
+/// "why isn't my custom field on the order item" surface.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Fieldset {
+    pub id: String,
+    /// `<scope id=>` — `global` in practice.
+    pub scope: String,
+    /// Sorted by field name.
+    pub fields: Vec<FieldsetField>,
+}
+
+/// One place a field name occurs across all fieldsets — the reverse lookup behind
+/// `magequery fieldset <field>`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FieldsetFieldHit {
+    pub fieldset: String,
+    pub scope: String,
+    pub field: FieldsetField,
+}
+
 /// A theme's override of an email template file.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EmailTemplateOverride {

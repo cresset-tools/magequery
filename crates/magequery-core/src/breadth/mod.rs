@@ -12,6 +12,7 @@ use std::path::Path;
 use crate::ids::{Area, ClassName, EventName, ModuleName};
 use crate::model::{
     AclResource, CatalogAttribute, CatalogAttributeGroup, CronJob, DbColumn, DbConstraint,
+    Fieldset, FieldsetAspect, FieldsetField, FieldsetFieldHit,
     DbIndex, DbTable, EmailTemplate,
     EmailTemplateOverride, ExtendedType,
     ExtensionAttribute, ExtensionJoin, GqlArg, GqlField, GqlKind,
@@ -74,7 +75,7 @@ pub(crate) use events::{CronIndex, EventIndex};
 mod routes;
 pub(crate) use routes::{RouteIndex, WebapiIndex};
 mod schema;
-pub(crate) use schema::{CatalogAttrIndex, SchemaIndex};
+pub(crate) use schema::{CatalogAttrIndex, FieldsetIndex, SchemaIndex};
 mod frontend;
 pub(crate) use frontend::{EmailTemplateIndex, LayoutIndex, UiComponentIndex, WidgetIndex};
 mod extensions;

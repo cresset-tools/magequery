@@ -179,6 +179,7 @@ ENTRY POINTS  (how execution starts)
 DATA          (persistence & model)
   schema [<table>] [--db]       indexers [<id>] [--db]
   extension-attributes [<type>]    catalog-attributes [<group>|<attr>]    eav [<attr>|<entity>] [--db]
+  fieldset [<id>|<field>]
   product <sku> [--id <n>] [--store <code>]   price <sku> [--id <n>]   (live DB)
   category [<id>|<name>] [--store] [--products]   order <increment#> [--id]
   customer <email> [--id]   quote <id|email>
@@ -595,6 +596,53 @@ attributes unioned per group with the **adding** module's `Source` (Sales adds
 exact group → its attributes with `← module` provenance; anything else is an **attribute**
 search showing every group containing it (`catalog-attributes special_price` → 2
 occurrences with who added each).
+
+### `fieldset` (etc/fieldset.xml — the object-copy map, static, done)
+
+Why a custom quote-item field never reaches `sales_order_item`. `Magento\Framework\
+DataObject\Copy` drives entity conversion from `etc/fieldset.xml`
+(`<scope id><fieldset id><field name><aspect name= targetField=>`), and it is merged
+config like everything else here: a `FieldsetIndex` (lazy `OnceLock`, parallel
+`read_parse`, global) keyed `(scope, fieldset id)`; fields merge by name with the first
+declaration owning `Source`; **aspects merge by name individually**, each keeping the
+module that declared *it* — the payoff, since core declares the field and another module
+often declares the aspect that carries it (validated: `customer_account.dob` is
+Magento_Customer's, its `to_quote → customer_dob` aspect is Magento_Sales').
+`parse::fieldset_xml` attaches `<aspect>` to the enclosing `<field>` and only a
+non-self-closing `Start` opens one, so a bare `<field/>` cannot swallow the next field's
+aspects (the db_schema column-reference pattern; two unit tests lock it).
+
+`Magento::fieldsets(filter?)` / `fieldset(id)` / `fieldset_field(name)` (exact hits, else
+substring). CLI `fieldset [<id>|<field>]`: no arg → every fieldset with field/aspect
+counts; exact id → fields with `← module` and each aspect (`to_order_item → qty_backordered
+← Magento_Quote`), a field with **no aspect** flagged red (declared but never copied);
+anything else → a field search across all fieldsets, the reverse lookup. Validated on the
+proforto store: 24 fieldsets, exactly matching a grep of the 15 `etc/fieldset.xml` files
+(the `sales_convert_quote_item` in magento2-base is a *test fixture* and correctly absent);
+line provenance verified by hand; ~18ms.
+
+### `templates`: PHP bindings (the other half of "who uses this")
+
+Layout XML is only one way a template is used, so `templates` counting only layout ops
+made a PHP-bound template read as dead code. Two changes: the count is labelled
+**`N layout.xml use(s)`** (the qualifier travels with the number), and
+`Magento::template_php_usages(reference)` reports the PHP half — `php::template_binds`
+classifies each string literal as `$_template` / `setTemplate()` / bare `Mention` by
+looking *back* from the literal, over the enabled modules' PHP in parallel. It searches
+the full `Vendor_Module::path.phtml` **and** the bare relative path (the short form a
+block in the owning module may write), where a short-form hit only counts inside the
+reference's own module, so another module's `order/detail.phtml` is never miscredited
+(rendered `as '<short>'`). Deliberately **not** folded into `template()`: it greps the
+module trees, and `template()` is on the LSP's hover/definition path. The CLI prints a
+`bound in PHP:` section, says "rendered from PHP, not layout XML" when layout uses are
+zero, and only claims dead code when **both** halves are empty.
+
+### Cross-area hint on a miss
+
+`layout`/`templates`/`ui-components` default to one area, and a miss there used to be a
+bare error even though the index already knew where the thing lived. `other_area_hint`
+probes the other presentation area (base folds into frontend, so the two are the whole
+space) and appends "Found in adminhtml — pass `--area adminhtml`".
 
 ### `system-config` (admin settings map from `adminhtml/system.xml`, static, done)
 

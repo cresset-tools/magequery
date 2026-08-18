@@ -46,6 +46,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("indexers", "Indexers from indexer.xml + their mview subscriptions"),
             ("extension-attributes", "Who bolts what onto which API interface"),
             ("catalog-attributes", "Attribute groups: what loads on quote items, wishlists, …"),
+            ("fieldset", "Object-copy map: which fields carry from quote to order"),
             ("eav", "EAV attributes: type, models, flags, sets, creator patch (--db)"),
             ("product", "One product as the DB stores it: values per scope, stock, categories"),
             ("price", "Every price of a product: attributes, tiers, rules, the price index"),
@@ -271,6 +272,8 @@ enum Command {
     ExtensionAttributes(ExtAttrArgs),
     /// Catalog attribute groups: what loads on quote items, wishlists, collections.
     CatalogAttributes(CatalogAttrsArgs),
+    /// Fieldsets from fieldset.xml: which fields are copied quote → order, and by whom.
+    Fieldset(FieldsetArgs),
     /// EAV attributes: type, models, flags, sets, creator patch (live rows via --db).
     Eav(EavArgs),
     /// One product as the database stores it: EAV values per scope, stock, categories.
@@ -535,6 +538,15 @@ struct ExtAttrArgs {
 struct CatalogAttrsArgs {
     /// A group name (`quote_item`) → its attributes; an attribute name → the groups
     /// containing it. Omit to list every group with counts.
+    query: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct FieldsetArgs {
+    /// A fieldset id (`sales_convert_quote_item`) → its fields and aspects; a field name
+    /// → every fieldset that copies it. Omit to list every fieldset with counts.
     query: Option<String>,
     #[arg(long)]
     json: bool,
@@ -1173,6 +1185,7 @@ fn main() -> Result<()> {
         Command::Indexers(args) => indexers(&mage, &args, &cli.root),
         Command::ExtensionAttributes(args) => extension_attributes(&mage, &args, &cli.root),
         Command::CatalogAttributes(args) => catalog_attributes(&mage, &args, &cli.root),
+        Command::Fieldset(args) => fieldset(&mage, &args, &cli.root),
         Command::Layout(args) => layout(&mage, &args, &cli.root),
         Command::Templates(args) => templates(&mage, &args, &cli.root),
         Command::Widgets(args) => widgets(&mage, &args, &cli.root),
@@ -5819,6 +5832,118 @@ fn ui_op_line(op: &magequery_core::UiComponentOp) -> String {
     }
     s.push_str(&style::path(&format!("   #{}", op.source.line)));
     s
+}
+
+/// `magequery fieldset [<id>|<field>]` — Magento's object-copy map. Three dispatches, like
+/// `catalog-attributes`: no arg lists every fieldset, an exact id shows its fields and the
+/// aspects that carry them, anything else is a **field** search across every fieldset (the
+/// "is my custom field copied onto the order item, and who declared it" question).
+fn fieldset(mage: &Magento, args: &FieldsetArgs, root: &Path) -> Result<()> {
+    let Some(q) = &args.query else {
+        let all = mage.fieldsets(None);
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&all)?);
+            return Ok(());
+        }
+        let w = all.iter().map(|f| f.id.len()).max().unwrap_or(0);
+        for f in &all {
+            let pad = " ".repeat(w - f.id.len());
+            let aspects: usize = f.fields.iter().map(|fl| fl.aspects.len()).sum();
+            println!(
+                "{}{pad}  {}  {}",
+                style::name(&f.id),
+                style::dim(&format!("{} field(s)", f.fields.len())),
+                style::dim(&format!("{aspects} aspect(s)")),
+            );
+        }
+        eprintln!("\n{} fieldset(s)", all.len());
+        return Ok(());
+    };
+
+    // Exact fieldset id → the full field/aspect view.
+    if let Some(f) = mage.fieldset(q) {
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&f)?);
+            return Ok(());
+        }
+        println!(
+            "{}  ({})  {}",
+            style::name(&f.id),
+            style::area(&f.scope),
+            style::dim(&format!("{} field(s)", f.fields.len())),
+        );
+        let w = f.fields.iter().map(|fl| fl.name.len()).max().unwrap_or(0);
+        for field in &f.fields {
+            let pad = " ".repeat(w - field.name.len());
+            println!(
+                "\n  {}{pad}  {}   {}",
+                style::name(&field.name),
+                style::module(&format!("← {}", field.source.module.as_str())),
+                style::path(&short_loc(&field.source, root)),
+            );
+            for aspect in &field.aspects {
+                println!("    {}", aspect_line(aspect, &field.name, root));
+            }
+            if field.aspects.is_empty() {
+                println!(
+                    "    {}",
+                    style::err("(no aspect — the field is declared but never copied)")
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    // Otherwise: a field name, across every fieldset.
+    let hits = mage.fieldset_field(q);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&hits)?);
+        return Ok(());
+    }
+    if hits.is_empty() {
+        return Err(anyhow!(
+            "no fieldset or field matching `{q}`\n  \
+             List fieldsets with `magequery fieldset`."
+        ));
+    }
+    for hit in &hits {
+        println!(
+            "{}  {}   {}",
+            style::name(&hit.fieldset),
+            style::target(&hit.field.name),
+            style::path(&short_loc(&hit.field.source, root)),
+        );
+        for aspect in &hit.field.aspects {
+            println!("  {}", aspect_line(aspect, &hit.field.name, root));
+        }
+        if hit.field.aspects.is_empty() {
+            println!(
+                "  {}",
+                style::err("(no aspect — the field is declared but never copied)")
+            );
+        }
+    }
+    eprintln!("\n{} occurrence(s)", hits.len());
+    Ok(())
+}
+
+/// One aspect line: the copy operation, the renamed destination when there is one, and who
+/// declared it.
+fn aspect_line(
+    aspect: &magequery_core::FieldsetAspect,
+    field: &str,
+    root: &Path,
+) -> String {
+    let target = match &aspect.target_field {
+        Some(t) if t != field => format!("  {}", style::dim(&format!("→ {t}"))),
+        _ => String::new(),
+    };
+    format!(
+        "{}{target}  {}   {}",
+        style::kind(&aspect.name),
+        style::module(&format!("← {}", aspect.source.module.as_str())),
+        style::path(&short_loc(&aspect.source, root)),
+    )
 }
 
 fn catalog_attributes(mage: &Magento, args: &CatalogAttrsArgs, root: &Path) -> Result<()> {

@@ -377,3 +377,128 @@ mod widget_tests {
         assert_eq!(w.containers, ["sidebar.main"]);
     }
 }
+
+// ---------- fieldsets (etc/fieldset.xml) ----------
+
+pub(crate) struct RawFieldsetAspect {
+    pub name: String,
+    /// `targetField=` — the destination column when it differs from the source field.
+    pub target_field: Option<String>,
+    pub line: u32,
+}
+
+pub(crate) struct RawFieldsetField {
+    pub scope: String,
+    pub fieldset: String,
+    pub name: String,
+    pub aspects: Vec<RawFieldsetAspect>,
+    pub line: u32,
+}
+
+/// Parse `fieldset.xml`: `<scope id=><fieldset id=><field name=><aspect name= targetField=/>`.
+///
+/// This is the object-copy map (`Magento\Framework\DataObject\Copy`) — which quote field is
+/// carried over to which order field, and under which aspect. `<aspect>` is nested inside
+/// `<field>`, so aspects are attached to the field currently open; only a non-self-closing
+/// `Start` opens one, so a self-closing `<field/>` (no `End`) can't capture the aspects of
+/// the field that follows it.
+pub(crate) fn fieldset_xml(xml: &str) -> Vec<RawFieldsetField> {
+    let lines = LineMap::new(xml);
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut out: Vec<RawFieldsetField> = Vec::new();
+    let mut scope = String::new();
+    let mut fieldset = String::new();
+    // Index into `out` of the field currently open, if any.
+    let mut current: Option<usize> = None;
+    loop {
+        let ev = reader.read_event_into(&mut buf);
+        let line = lines.line(reader.buffer_position() as usize);
+        // Computed before the match moves `ev`: a self-closing `<field/>` must not stay
+        // open and swallow the following field's aspects.
+        let self_closing = matches!(ev, Ok(Event::Empty(_)));
+        match ev {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                match local_name(&e).as_str() {
+                    "scope" => scope = attr(&e, b"id").unwrap_or_default(),
+                    "fieldset" => fieldset = attr(&e, b"id").unwrap_or_default(),
+                    "field" => {
+                        if let Some(name) = attr(&e, b"name") {
+                            if !fieldset.is_empty() {
+                                out.push(RawFieldsetField {
+                                    scope: scope.clone(),
+                                    fieldset: fieldset.clone(),
+                                    name,
+                                    aspects: Vec::new(),
+                                    line,
+                                });
+                                current = if self_closing { None } else { Some(out.len() - 1) };
+                            }
+                        }
+                    }
+                    "aspect" => {
+                        if let (Some(name), Some(i)) = (attr(&e, b"name"), current) {
+                            out[i].aspects.push(RawFieldsetAspect {
+                                name,
+                                target_field: attr(&e, b"targetField"),
+                                line,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(e)) => match e.name().as_ref() {
+                b"field" => current = None,
+                b"fieldset" => {
+                    fieldset.clear();
+                    current = None;
+                }
+                b"scope" => scope.clear(),
+                _ => {}
+            },
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+#[cfg(test)]
+mod fieldset_tests {
+    use super::*;
+
+    #[test]
+    fn nested_aspects_attach_to_their_field() {
+        let xml = r#"<config><scope id="global">
+            <fieldset id="sales_convert_quote_item">
+              <field name="custom_flag"><aspect name="to_order_item" /></field>
+              <field name="renamed">
+                <aspect name="to_order_item" targetField="order_flag" />
+                <aspect name="to_cm" />
+              </field>
+            </fieldset></scope></config>"#;
+        let fields = fieldset_xml(xml);
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].fieldset, "sales_convert_quote_item");
+        assert_eq!(fields[0].scope, "global");
+        assert_eq!(fields[0].aspects.len(), 1);
+        assert_eq!(fields[0].aspects[0].name, "to_order_item");
+        assert_eq!(fields[0].aspects[0].target_field, None);
+        assert_eq!(fields[1].aspects.len(), 2);
+        assert_eq!(fields[1].aspects[0].target_field.as_deref(), Some("order_flag"));
+    }
+
+    #[test]
+    fn self_closing_field_does_not_capture_the_next_fields_aspects() {
+        let xml = r#"<config><scope id="global"><fieldset id="fs">
+            <field name="bare" />
+            <field name="real"><aspect name="to_order" /></field>
+        </fieldset></scope></config>"#;
+        let fields = fieldset_xml(xml);
+        assert_eq!(fields.len(), 2);
+        assert!(fields[0].aspects.is_empty(), "self-closing field must stay empty");
+        assert_eq!(fields[1].aspects.len(), 1);
+    }
+}

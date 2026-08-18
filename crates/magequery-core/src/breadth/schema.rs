@@ -179,3 +179,117 @@ impl CatalogAttrIndex {
         v
     }
 }
+
+// ---------- fieldsets (etc/fieldset.xml) ----------
+
+pub(crate) struct FieldsetIndex {
+    /// (scope, fieldset id) -> fieldset.
+    fieldsets: HashMap<(String, String), Fieldset>,
+}
+
+impl FieldsetIndex {
+    pub fn build(modules: &[Module], vfs: &Vfs) -> Self {
+        let mut fieldsets: HashMap<(String, String), Fieldset> = HashMap::new();
+        for (i, path, raws) in
+            read_parse(modules, vfs, Area::Global, "fieldset.xml", parse::fieldset_xml)
+        {
+            let module = &modules[i].name;
+            for r in raws {
+                let src = |line: u32| Source {
+                    module: module.clone(),
+                    file: path.clone(),
+                    line,
+                    area: Area::Global,
+                };
+                let entry = fieldsets
+                    .entry((r.scope.clone(), r.fieldset.clone()))
+                    .or_insert_with(|| Fieldset {
+                        id: r.fieldset.clone(),
+                        scope: r.scope.clone(),
+                        fields: Vec::new(),
+                    });
+                // Modules add fields to each other's fieldsets (that is the whole point),
+                // so a field merges by name and the first declaration owns its `Source`;
+                // each aspect keeps the module that declared *it*.
+                let field = match entry.fields.iter_mut().find(|f| f.name == r.name) {
+                    Some(existing) => existing,
+                    None => {
+                        entry.fields.push(FieldsetField {
+                            name: r.name.clone(),
+                            aspects: Vec::new(),
+                            source: src(r.line),
+                        });
+                        entry.fields.last_mut().expect("just pushed")
+                    }
+                };
+                for a in r.aspects {
+                    // Same aspect re-declared for the same field: last wins (it may only
+                    // add a `targetField`), matching the config merge.
+                    let aspect = FieldsetAspect {
+                        name: a.name,
+                        target_field: a.target_field,
+                        source: src(a.line),
+                    };
+                    match field.aspects.iter_mut().find(|x| x.name == aspect.name) {
+                        Some(existing) => *existing = aspect,
+                        None => field.aspects.push(aspect),
+                    }
+                }
+            }
+        }
+        for f in fieldsets.values_mut() {
+            f.fields.sort_by(|a, b| a.name.cmp(&b.name));
+            for field in &mut f.fields {
+                field.aspects.sort_by(|a, b| a.name.cmp(&b.name));
+            }
+        }
+        Self { fieldsets }
+    }
+
+    /// One fieldset by exact id (first matching scope, `global` in practice).
+    pub fn fieldset(&self, id: &str) -> Option<Fieldset> {
+        let mut hits: Vec<&Fieldset> = self.fieldsets.values().filter(|f| f.id == id).collect();
+        hits.sort_by(|a, b| a.scope.cmp(&b.scope));
+        hits.first().map(|f| (*f).clone())
+    }
+
+    /// All fieldsets, optionally filtered by an id substring. Sorted by id.
+    pub fn fieldsets(&self, filter: Option<&str>) -> Vec<Fieldset> {
+        let needle = filter.map(str::to_lowercase);
+        let mut v: Vec<Fieldset> = self
+            .fieldsets
+            .values()
+            .filter(|f| {
+                needle.as_ref().map_or(true, |n| f.id.to_lowercase().contains(n))
+            })
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| (&a.id, &a.scope).cmp(&(&b.id, &b.scope)));
+        v
+    }
+
+    /// Every fieldset carrying a field whose name matches (exact first, else substring) —
+    /// "is this field copied to the order item, and who declared it".
+    pub fn field(&self, name: &str) -> Vec<FieldsetFieldHit> {
+        let needle = name.to_lowercase();
+        let mut exact = Vec::new();
+        let mut partial = Vec::new();
+        for fs in self.fieldsets.values() {
+            for field in &fs.fields {
+                let hit = || FieldsetFieldHit {
+                    fieldset: fs.id.clone(),
+                    scope: fs.scope.clone(),
+                    field: field.clone(),
+                };
+                if field.name == name {
+                    exact.push(hit());
+                } else if field.name.to_lowercase().contains(&needle) {
+                    partial.push(hit());
+                }
+            }
+        }
+        let mut out = if exact.is_empty() { partial } else { exact };
+        out.sort_by(|a, b| (&a.fieldset, &a.field.name).cmp(&(&b.fieldset, &b.field.name)));
+        out
+    }
+}

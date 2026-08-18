@@ -567,6 +567,28 @@ impl Magento {
         self.catalog_attr_index().group(name)
     }
 
+    fn fieldset_index(&self) -> &breadth::FieldsetIndex {
+        self.fieldsets
+            .get_or_init(|| breadth::FieldsetIndex::build(&self.index.modules, &self.index.vfs))
+    }
+
+    /// Fieldsets from `etc/fieldset.xml` — Magento's object-copy map, merged across modules.
+    /// Filter is a case-insensitive id substring.
+    pub fn fieldsets(&self, filter: Option<&str>) -> Vec<Fieldset> {
+        self.fieldset_index().fieldsets(filter)
+    }
+
+    /// One fieldset by exact id, with every field and aspect.
+    pub fn fieldset(&self, id: &str) -> Option<Fieldset> {
+        self.fieldset_index().fieldset(id)
+    }
+
+    /// Every fieldset that carries a field of this name (exact matches, else substring) —
+    /// the reverse lookup: "is this field copied to the order item, and who declared it".
+    pub fn fieldset_field(&self, name: &str) -> Vec<FieldsetFieldHit> {
+        self.fieldset_index().field(name)
+    }
+
     fn email_template_index(&self) -> &breadth::EmailTemplateIndex {
         self.email_templates.get_or_init(|| {
             breadth::EmailTemplateIndex::build(&self.index.modules, &self.index.vfs, &self.discover_themes())
