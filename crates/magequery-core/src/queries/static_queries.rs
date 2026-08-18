@@ -720,6 +720,83 @@ impl Magento {
         self.layout_index().template(reference, area)
     }
 
+    /// Every PHP binding of a template reference — the other half of `template()`.
+    ///
+    /// Layout XML is only one way a template gets used: a block may hard-bind it with
+    /// `protected $_template = '...'` or `setTemplate('...')`, so a template with zero
+    /// layout usages can still render on every page. Scans the enabled modules' PHP for
+    /// the full `Vendor_Module::path.phtml` reference **and** the bare relative path (the
+    /// short form a block inside the owning module may write, mirroring layout's short-ref
+    /// normalization) — a short-form hit only counts inside the module that owns the
+    /// reference, so `order/detail.phtml` in another module is never miscredited.
+    ///
+    /// Not folded into [`template()`](Self::template): this greps the module trees, and
+    /// `template()` is on the LSP's hover/definition path where that cost is not wanted.
+    pub fn template_php_usages(&self, reference: &str) -> Vec<TemplatePhpUsage> {
+        use rayon::prelude::*;
+
+        let (module, rel) = match reference.split_once("::") {
+            Some((m, r)) => (ModuleName::new(m), r),
+            // A bare path can't be attributed to a module; nothing to scan for.
+            None => return Vec::new(),
+        };
+        if rel.is_empty() {
+            return Vec::new();
+        }
+
+        let lists: Vec<Vec<TemplatePhpUsage>> = self
+            .index
+            .modules
+            .par_iter()
+            .map(|m| {
+                // The short form is only meaningful inside the reference's own module.
+                let needles: Vec<&str> =
+                    if m.name == module { vec![reference, rel] } else { vec![reference] };
+                let mut out = Vec::new();
+                crate::doctor::walk_php(&m.path, 0, &mut |path| {
+                    let Ok(src) = self.index.vfs.read_to_string(path) else { return };
+                    if !needles.iter().any(|n| src.contains(*n)) {
+                        return;
+                    }
+                    let binds = php::template_binds(&src, &needles);
+                    if binds.is_empty() {
+                        return;
+                    }
+                    let lines = crate::parse::LineMap::new(&src);
+                    let class = php::parse_header(&src).map(|h| h.fqcn);
+                    for bind in binds {
+                        out.push(TemplatePhpUsage {
+                            binding: match bind.kind {
+                                php::TemplateBindKind::TemplateProperty => {
+                                    PhpTemplateBinding::TemplateProperty
+                                }
+                                php::TemplateBindKind::SetTemplate => {
+                                    PhpTemplateBinding::SetTemplate
+                                }
+                                php::TemplateBindKind::Mention => PhpTemplateBinding::Mention,
+                            },
+                            class: class.clone(),
+                            matched: bind.matched,
+                            source: Source {
+                                module: m.name.clone(),
+                                file: path.to_path_buf(),
+                                line: lines.line(bind.offset),
+                                area: Area::Global,
+                            },
+                        });
+                    }
+                });
+                out
+            })
+            .collect();
+
+        let mut all: Vec<TemplatePhpUsage> = lists.into_iter().flatten().collect();
+        all.sort_by(|a, b| {
+            (&a.source.file, a.source.line).cmp(&(&b.source.file, b.source.line))
+        });
+        all
+    }
+
     fn ui_component_index(&self) -> &breadth::UiComponentIndex {
         self.ui_components.get_or_init(|| {
             breadth::UiComponentIndex::build(&self.index.modules, &self.index.vfs, &self.discover_themes())

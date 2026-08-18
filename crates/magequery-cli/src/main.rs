@@ -1929,6 +1929,23 @@ fn render_acl_detail(mage: &Magento, res: &AclResource, root: &Path) {
     }
 }
 
+/// A miss in one area is usually the wrong `--area`, and the index already knows where the
+/// thing lives — so say so instead of only listing the area that didn't have it. Probes the
+/// other presentation areas (`base` folds into frontend, so these two are the whole space).
+fn other_area_hint(area: Area, mut found_in: impl FnMut(Area) -> bool) -> String {
+    let others: Vec<Area> = [Area::Frontend, Area::Adminhtml]
+        .into_iter()
+        .filter(|a| *a != area && found_in(*a))
+        .collect();
+    match others.first() {
+        None => String::new(),
+        Some(first) => {
+            let list: Vec<String> = others.iter().map(|a| a.to_string()).collect();
+            format!("\n  Found in {} — pass `--area {first}`.", list.join(", "))
+        }
+    }
+}
+
 fn layout(mage: &Magento, args: &LayoutArgs, root: &Path) -> Result<()> {
     let area = match &args.area {
         Some(a) => a.parse::<Area>().map_err(|e| anyhow!("{e}"))?,
@@ -1955,8 +1972,9 @@ fn layout(mage: &Magento, args: &LayoutArgs, root: &Path) -> Result<()> {
     };
 
     let Some(view) = mage.layout(handle, area) else {
+        let hint = other_area_hint(area, |a| mage.layout(handle, a).is_some());
         return Err(anyhow!(
-            "no layout file declares handle `{handle}` in {area}\n  \
+            "no layout file declares handle `{handle}` in {area}{hint}\n  \
              List handles with `magequery layout --area {area}`."
         ));
     };
@@ -2013,8 +2031,11 @@ fn templates(mage: &Magento, args: &TemplatesArgs, root: &Path) -> Result<()> {
 
     if matches.is_empty() {
         let query = args.reference.as_deref().unwrap_or("");
+        let hint = other_area_hint(area, |a| {
+            mage.template(query, a).is_some() || !mage.templates(a, Some(query)).is_empty()
+        });
         return Err(anyhow!(
-            "no template reference matching `{query}` in {area}\n  \
+            "no template reference matching `{query}` in {area}{hint}\n  \
              List templates with `magequery templates --area {area}`."
         ));
     }
@@ -2027,7 +2048,7 @@ fn templates(mage: &Magento, args: &TemplatesArgs, root: &Path) -> Result<()> {
         return Ok(());
     }
     if args.reference.is_some() && matches.len() == 1 {
-        render_template(&matches[0], root);
+        render_template(mage, &matches[0], root);
         return Ok(());
     }
 
@@ -2043,14 +2064,14 @@ fn templates(mage: &Magento, args: &TemplatesArgs, root: &Path) -> Result<()> {
             "{}{pad}  {}  {}{missing}",
             style::name(&template.reference),
             style::dim(&format!("{} file(s)", template.files.len())),
-            style::dim(&format!("{} use(s)", template.usages.len())),
+            style::dim(&format!("{} layout.xml use(s)", template.usages.len())),
         );
     }
     eprintln!("\n{} template(s) ({area})", matches.len());
     Ok(())
 }
 
-fn render_template(template: &magequery_core::Template, root: &Path) {
+fn render_template(mage: &Magento, template: &magequery_core::Template, root: &Path) {
     println!(
         "{}  ({})",
         style::name(&template.reference),
@@ -2074,7 +2095,7 @@ fn render_template(template: &magequery_core::Template, root: &Path) {
     if template.usages.is_empty() {
         println!("\n  {}", style::dim("(not referenced by layout XML)"));
     } else {
-        println!("\n{}", style::dim("used by:"));
+        println!("\n{}", style::dim("used by (layout.xml):"));
         for usage in &template.usages {
             let class = usage
                 .class
@@ -2087,6 +2108,50 @@ fn render_template(template: &magequery_core::Template, root: &Path) {
                 style::target(&usage.block),
                 class,
                 style::path(&short_loc(&usage.source, root)),
+            );
+        }
+    }
+
+    // The other half: a block may hard-bind its template in PHP, so zero layout usages
+    // is not the same as unused. Scanned on demand (this greps the module trees).
+    let php = mage.template_php_usages(&template.reference);
+    if php.is_empty() {
+        if template.usages.is_empty() {
+            println!(
+                "  {}",
+                style::dim("(and no PHP binds it — candidate dead code)")
+            );
+        }
+    } else {
+        println!("\n{}", style::dim("bound in PHP:"));
+        for usage in &php {
+            let kind = match usage.binding {
+                magequery_core::PhpTemplateBinding::TemplateProperty => "$_template",
+                magequery_core::PhpTemplateBinding::SetTemplate => "setTemplate()",
+                magequery_core::PhpTemplateBinding::Mention => "mentioned",
+                // `PhpTemplateBinding` is #[non_exhaustive]; a new form renders neutrally.
+                _ => "bound",
+            };
+            let class = usage
+                .class
+                .as_ref()
+                .map(|c| format!("  {}", style::class(c.as_str())))
+                .unwrap_or_default();
+            let short = if usage.matched == template.reference {
+                String::new()
+            } else {
+                format!("  {}", style::dim(&format!("as '{}'", usage.matched)))
+            };
+            println!(
+                "  {}{class}{short}  {}",
+                style::target(kind),
+                style::path(&short_loc(&usage.source, root)),
+            );
+        }
+        if template.usages.is_empty() {
+            println!(
+                "\n  {}",
+                style::number("rendered from PHP, not layout XML — 0 layout.xml uses is expected here")
             );
         }
     }
@@ -5736,8 +5801,15 @@ fn ui_components(mage: &Magento, args: &UiComponentsArgs, root: &Path) -> Result
             return render_ui_component(&view, args.json, root);
         }
         if matches.is_empty() {
+            let hint = other_area_hint(area, |a| {
+                mage.ui_component(name, a).is_some()
+                    || mage
+                        .ui_components(a)
+                        .iter()
+                        .any(|(n, _, _)| n.to_lowercase().contains(&needle))
+            });
             return Err(anyhow!(
-                "no ui component matches `{name}` in {area}\n  \
+                "no ui component matches `{name}` in {area}{hint}\n  \
                  List components with `magequery ui-components --area {area}`."
             ));
         }

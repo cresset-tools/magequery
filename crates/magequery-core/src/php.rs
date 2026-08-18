@@ -399,6 +399,77 @@ pub(crate) enum EavCallKind {
     Remove,
 }
 
+/// How a PHP file binds a template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TemplateBindKind {
+    /// `protected $_template = '...'`.
+    TemplateProperty,
+    /// `setTemplate('...')`.
+    SetTemplate,
+    /// The literal occurs, in neither binding form.
+    Mention,
+}
+
+pub(crate) struct RawTemplateBind {
+    pub kind: TemplateBindKind,
+    /// The literal as written (full `Vendor_Module::path.phtml` or the short path).
+    pub matched: String,
+    /// Byte offset of the literal, for line lookup.
+    pub offset: usize,
+}
+
+/// Find every string literal equal to one of `needles` and classify how it is bound.
+///
+/// A block may hard-bind its template in PHP instead of layout XML — `protected
+/// $_template = 'Vendor_Module::x.phtml'` or `setTemplate(...)` — which makes a template
+/// with zero layout usages perfectly live. Classification looks *back* from the literal:
+/// `setTemplate` is the nearest preceding identifier before the `(`, and the property form
+/// is `$_template` (tokenized as `$` + `_template`) followed by `=` before the literal.
+/// Anything else is reported as a `Mention` rather than guessed at.
+pub(crate) fn template_binds(src: &str, needles: &[&str]) -> Vec<RawTemplateBind> {
+    let (tokens, offsets) = tokenize_at(src);
+    let mut out = Vec::new();
+    for (i, token) in tokens.iter().enumerate() {
+        let Token::Str(value) = token else { continue };
+        if !needles.contains(&value.as_str()) {
+            continue;
+        }
+        // `setTemplate(` — allow the literal not to be the first argument.
+        let mut kind = TemplateBindKind::Mention;
+        let mut j = i;
+        while j > 0 {
+            j -= 1;
+            match &tokens[j] {
+                Token::Punct('(') => {
+                    if let Some(Token::Ident(name)) = j.checked_sub(1).map(|k| &tokens[k]) {
+                        if name.eq_ignore_ascii_case("setTemplate") {
+                            kind = TemplateBindKind::SetTemplate;
+                        }
+                    }
+                    break;
+                }
+                // `$_template = '...'` (with an optional intervening `?:`-free chain).
+                Token::Punct('=') => {
+                    if let Some(Token::Ident(name)) = j.checked_sub(1).map(|k| &tokens[k]) {
+                        if name == "_template" {
+                            kind = TemplateBindKind::TemplateProperty;
+                        }
+                    }
+                    break;
+                }
+                Token::Punct(';') | Token::Punct('{') | Token::Punct('}') => break,
+                _ => {}
+            }
+        }
+        out.push(RawTemplateBind {
+            kind,
+            matched: value.clone(),
+            offset: offsets.get(i).copied().unwrap_or(0),
+        });
+    }
+    out
+}
+
 pub(crate) struct RawEavCall {
     pub kind: EavCallKind,
     /// Resolved entity-type code (`catalog_product`) when recognizable, else the raw

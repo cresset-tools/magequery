@@ -400,6 +400,34 @@ pub struct TemplateUsage {
     pub source: Source,
 }
 
+/// How a PHP class binds a template, bypassing layout XML entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub enum PhpTemplateBinding {
+    /// `protected $_template = '...'` — a block's compiled-in default template.
+    TemplateProperty,
+    /// A `setTemplate('...')` call.
+    SetTemplate,
+    /// The reference occurs in PHP but in neither binding form (a constant, an array
+    /// of templates, an argument passed on). Reported, not interpreted.
+    Mention,
+}
+
+/// One PHP occurrence of a template reference. Layout XML is only half the story: a
+/// block may hard-bind its template in PHP, which makes a template with zero layout
+/// usages perfectly live. Found by scanning the enabled modules' PHP for the full
+/// `Vendor_Module::path.phtml` reference **and** the bare relative path (the short form
+/// a block inside the owning module may use), so the count is honest either way.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TemplatePhpUsage {
+    pub binding: PhpTemplateBinding,
+    /// The class declared in the file, when its namespace could be derived.
+    pub class: Option<ClassName>,
+    /// The matched text as written (full reference or short relative path).
+    pub matched: String,
+    pub source: Source,
+}
+
 /// A `Vendor_Module::path.phtml` template in one area, joined to its module file,
 /// every theme override candidate, and every layout operation that uses it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
