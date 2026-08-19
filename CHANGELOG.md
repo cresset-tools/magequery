@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.17.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.16.0...magequery-v0.17.0) (2026-08-19)
+
+
+### Features
+
+* fieldset command, PHP template bindings, and agent-skill trigger fixes ([#95](https://github.com/cresset-tools/magequery/issues/95)) ([c64e7e0](https://github.com/cresset-tools/magequery/commit/c64e7e045f9dde39734f1d27630ee55719dfadc7))
+
+
+### Bug Fixes
+
+* **magecommand:** di compile — generate factories for area-scoped virtualTypes ([eb3d85e](https://github.com/cresset-tools/magequery/commit/eb3d85e44827d2101fc33419b6a9275991c9887f))
+
 ## [0.16.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.15.0...magequery-v0.16.0) (2026-07-24)
 
 
