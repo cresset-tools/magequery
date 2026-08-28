@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.0...magequery-v0.17.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **magecommand:** di compile — canonicalize built-in type names ([#100](https://github.com/cresset-tools/magequery/issues/100)) ([a488844](https://github.com/cresset-tools/magequery/commit/a488844c7f5c43e6032758081b760d374ccb301a))
+* **magecommand:** di verify — explain types disabled modules reach indirectly ([#99](https://github.com/cresset-tools/magequery/issues/99)) ([e2509c3](https://github.com/cresset-tools/magequery/commit/e2509c3fd48caca28c29ad83f6f37f61f621fa7e))
+
 ## [0.17.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.16.0...magequery-v0.17.0) (2026-08-19)
 
 
