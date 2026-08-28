@@ -31,6 +31,12 @@ pub enum KnownKind {
     /// A metadata DI-config file (`global.php`, `<area>.php`) that is identical
     /// once the top-level entries for classes in disabled modules are removed.
     DisabledModuleMetadata,
+    /// A type the archive's compile reached ONLY by way of a disabled module —
+    /// its own name belongs to an enabled module (so the name-prefix rule can't
+    /// see it), but nothing in the enabled universe pulls it into the compile:
+    /// only a disabled module declares it, or names it as a parent class or
+    /// implemented interface.
+    DisabledModuleReachableType,
     /// A metadata DI-config file where the output is a strict superset of the
     /// archive: it only *adds* entries (e.g. the `nonLazyTypes` section and the
     /// `NonLazyTypes` compiler-chain step, a 2.4.9 / PHP 8.4 feature the older
@@ -66,6 +72,9 @@ impl KnownKind {
             }
             KnownKind::DisabledModuleMetadata => {
                 "DI-config entries for disabled modules (Magento 2.4.9 behavior)"
+            }
+            KnownKind::DisabledModuleReachableType => {
+                "Types reachable only through disabled modules (Magento 2.4.9 behavior)"
             }
             KnownKind::ExtraMetadata => {
                 "Extra DI-config metadata (output superset — nonLazyTypes, Magento 2.4.9)"
@@ -134,6 +143,22 @@ pub struct ClassifyCtx<'a> {
     /// statically unresolvable because their constructor chain runs through
     /// eval-obfuscated vendor source — see [`obfuscation_blocked_classes`].
     pub obfuscation_blocked: &'a HashSet<String>,
+    /// Type keys (escaped `Vendor\\\\Class` metadata form) the archive's compile
+    /// reached only through a disabled module, though the name itself belongs to
+    /// an enabled one — see [`disabled_reachable_types`].
+    pub disabled_reachable: &'a HashSet<String>,
+}
+
+impl ClassifyCtx<'_> {
+    /// [`strip_expected_entries`] with this context's three expected-key sets.
+    fn strip(&self, text: &str) -> (String, bool) {
+        strip_expected_entries(
+            text,
+            self.disabled_modules,
+            self.obfuscation_blocked,
+            self.disabled_reachable,
+        )
+    }
 }
 
 /// Partition `report`'s differences into explained known groups and the
@@ -198,6 +223,34 @@ arguments entry honestly degrades to NULL (a compile finding records each one). 
 object manager falls back to reflection for a NULL entry, so the store still works — the row is \
 just uncached. This is the one place the no-PHP-execution guarantee costs fidelity."
                     .to_owned(),
+            items,
+            verified: true,
+        });
+    }
+
+    // 5a. Types the archive reached only through a disabled module. Like rule 5,
+    //    their entries are stripped inside rules 5b–7's comparisons so the files
+    //    claim under their natural patterns; this group carries the WHY.
+    if !ctx.disabled_reachable.is_empty() {
+        let mut items: Vec<String> =
+            ctx.disabled_reachable.iter().map(|k| k.replace("\\\\", "\\")).collect();
+        items.sort();
+        let mut module_list: Vec<String> = ctx.disabled_modules.iter().cloned().collect();
+        module_list.sort();
+        known.push(KnownGroup {
+            kind: KnownKind::DisabledModuleReachableType,
+            title: KnownKind::DisabledModuleReachableType.title().to_owned(),
+            explanation: format!(
+                "These types are named after an ENABLED module, so the disabled-module rule \
+does not recognize them — but nothing in the enabled codebase pulls them into the compile. Each \
+one is declared by, or named as a parent class / implemented interface of, a class in a module \
+disabled in app/etc/config.php ({}). The archive was produced by a Magento that compiled every \
+module on disk, so those disabled classes dragged their interfaces into the interception walk; \
+since 2.4.9 only enabled modules are compiled, so magecommand correctly leaves them out. The \
+classic shape is an interface in a core module whose only implementations ship in a disabled \
+payment module. Verified against the disabled modules' own source, one PHP header parse per file.",
+                module_list.join(", ")
+            ),
             items,
             verified: true,
         });
@@ -424,8 +477,9 @@ fn top_level_entry_key(line: &str) -> Option<&str> {
 }
 
 /// Remove every top-level DI-config entry whose class key belongs to a disabled
-/// module — or is a known obfuscation-blocked class — so two metadata files can
-/// be compared modulo that expected noise.
+/// module — or is a known obfuscation-blocked class, or a type only a disabled
+/// module reached — so two metadata files can be compared modulo that expected
+/// noise.
 ///
 /// The block a key introduces is either a single inline line (`'K' => NULL,`) or
 /// a `var_export` array spanning to its own indent-four `    ),` close; both are
@@ -435,13 +489,17 @@ fn strip_expected_entries(
     text: &str,
     disabled: &HashSet<String>,
     blocked: &HashSet<String>,
+    reachable: &HashSet<String>,
 ) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
     let mut stripped = false;
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
         if let Some(key) = top_level_entry_key(line) {
-            if metadata_entry_module_disabled(key, disabled) || blocked.contains(key) {
+            if metadata_entry_module_disabled(key, disabled)
+                || blocked.contains(key)
+                || reachable.contains(key)
+            {
                 stripped = true;
                 // A block value (`'K' =>` with the value on the following lines)
                 // runs to a `)` at the key's own indentation; an inline value is
@@ -478,6 +536,141 @@ fn strip_expected_entries(
 /// `extends` chain through real files until one matches the obfuscation
 /// signature (`eval(` + `base64_decode` in the same source). Returns the keys
 /// in their escaped metadata form, for [`ClassifyCtx::obfuscation_blocked`].
+/// Types the archive's compile reached **only by way of a disabled module**.
+///
+/// The name-prefix rule ([`metadata_entry_module_disabled`]) explains an
+/// archive-only entry when the key *itself* is named after a disabled module.
+/// It misses the indirect case: `Magento\Payment\Model\Method\TransparentInterface`
+/// is owned by the enabled `Magento_Payment`, yet the only class implementing it
+/// lives in the disabled `Magento_Paypal`. The archive's compiler scanned every
+/// module on disk, so implementing it pulled the interface into
+/// `Interception\Config\Config::_inheritInterception`'s walk; magecommand
+/// compiles only enabled modules, so nothing reaches it. Before this, one such
+/// entry left the whole of `interception.php` flagged as unexplained.
+///
+/// Evidence is positive and drawn from the disabled modules' own source: a
+/// candidate is claimed only when a disabled module **declares** the type, or
+/// **names it as a parent** (`extends`/`implements`) of something it declares —
+/// which is exactly how Magento's `Relations::getParents` would have reached it.
+/// A candidate no disabled module touches stays flagged.
+///
+/// Candidates are archive-only keys, and only those absent from *every* output
+/// file, so stripping the key from both sides can never mask a changed value.
+/// (The one thing this cannot rule out is a type an enabled module *should* have
+/// reached through its own ancestry and didn't — that path is what produced the
+/// output being checked, so it can't also serve as independent evidence.)
+pub fn disabled_reachable_types(
+    report: &CompareReport,
+    archive: &Path,
+    output: &Path,
+    magento: Option<&magequery_core::Magento>,
+    disabled_modules: &HashSet<String>,
+) -> HashSet<String> {
+    let Some(magento) = magento else { return HashSet::new() };
+    if disabled_modules.is_empty() {
+        return HashSet::new();
+    }
+    let candidates = archive_only_entry_keys(report, archive, output, disabled_modules);
+    if candidates.is_empty() {
+        return HashSet::new();
+    }
+
+    let reached = disabled_module_type_closure(magento, disabled_modules);
+    candidates
+        .into_iter()
+        .filter(|k| reached.contains(&k.replace("\\\\", "\\")))
+        .collect()
+}
+
+/// Top-level DI-config entry keys the archive has and the output lacks, across
+/// the changed `var_export`ed metadata files — the candidate set for
+/// [`disabled_reachable_types`], minus what the name-prefix rule already covers.
+///
+/// Only FQCN-shaped keys qualify (`Vendor\\Class`): section headers and virtual
+/// types never name a PHP type. A key present in *any* output file is dropped,
+/// even if some other file lacks it — stripping such a key from both sides could
+/// mask a changed value (`=> true` vs `=> false`), and the strip is per-key, not
+/// per-file.
+fn archive_only_entry_keys(
+    report: &CompareReport,
+    archive: &Path,
+    output: &Path,
+    disabled_modules: &HashSet<String>,
+) -> HashSet<String> {
+    let mut candidates: HashSet<String> = HashSet::new();
+    let mut in_output: HashSet<String> = HashSet::new();
+    for rel in &report.changed {
+        let (Ok(a), Ok(b)) =
+            (fs::read_to_string(archive.join(rel)), fs::read_to_string(output.join(rel)))
+        else {
+            continue;
+        };
+        if !a.starts_with("<?php return array (") {
+            continue;
+        }
+        let b_keys: HashSet<&str> = b.lines().filter_map(top_level_entry_key).collect();
+        in_output.extend(b_keys.iter().map(|k| (*k).to_owned()));
+        for key in a.lines().filter_map(top_level_entry_key) {
+            if !b_keys.contains(key)
+                && key.contains("\\\\")
+                && !metadata_entry_module_disabled(key, disabled_modules)
+            {
+                candidates.insert(key.to_owned());
+            }
+        }
+    }
+    candidates.retain(|k| !in_output.contains(k));
+    candidates
+}
+
+/// Every type the DISABLED modules put in front of the archive's compiler: the
+/// types they declare, plus every parent class and interface those declarations
+/// name. One header parse per file (never an execution), the modules walked in
+/// parallel under the same exclusion rules as the real scan.
+///
+/// Transitivity needs no closure pass: a parent that is itself declared in a
+/// disabled module contributes its own parents when that file is parsed, and a
+/// chain leaving the disabled set lands on an enabled class whose ancestry the
+/// compile already walks.
+fn disabled_module_type_closure(
+    magento: &magequery_core::Magento,
+    disabled: &HashSet<String>,
+) -> HashSet<String> {
+    use rayon::prelude::*;
+
+    let dirs: Vec<std::path::PathBuf> = magento
+        .modules()
+        .iter()
+        .filter(|m| !m.enabled && disabled.contains(&m.name.to_string()))
+        .map(|m| m.path.clone())
+        .collect();
+
+    dirs.par_iter()
+        .map(|dir| {
+            let mut files = Vec::new();
+            crate::definitions::collect_included(
+                dir,
+                dir,
+                crate::definitions::PathKind::Module,
+                &mut files,
+            );
+            let mut out: HashSet<String> = HashSet::new();
+            for file in files {
+                let Ok(src) = fs::read(&file) else { continue };
+                for decl in magecommand_php::parse_file(&src).declarations {
+                    out.insert(decl.fqcn);
+                    out.extend(decl.extends);
+                    out.extend(decl.implements);
+                }
+            }
+            out
+        })
+        .reduce(HashSet::new, |mut a, b| {
+            a.extend(b);
+            a
+        })
+}
+
 pub fn obfuscation_blocked_classes(
     report: &CompareReport,
     archive: &Path,
@@ -579,8 +772,8 @@ fn disabled_module_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Opt
         if !a.starts_with("<?php return array (") {
             continue;
         }
-        let (sa, stripped_a) = strip_expected_entries(&a, ctx.disabled_modules, ctx.obfuscation_blocked);
-        let (sb, stripped_b) = strip_expected_entries(&b, ctx.disabled_modules, ctx.obfuscation_blocked);
+        let (sa, stripped_a) = ctx.strip(&a);
+        let (sb, stripped_b) = ctx.strip(&b);
         // Claim only when removing disabled-module entries (from at least one
         // side) makes the files identical — so any *other* difference keeps the
         // file flagged.
@@ -656,8 +849,8 @@ fn extra_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownG
         if !a.starts_with("<?php return array (") {
             continue;
         }
-        let (sa, _) = strip_expected_entries(&a, ctx.disabled_modules, ctx.obfuscation_blocked);
-        let (sb, _) = strip_expected_entries(&b, ctx.disabled_modules, ctx.obfuscation_blocked);
+        let (sa, _) = ctx.strip(&a);
+        let (sb, _) = ctx.strip(&b);
         // Claim only when the output strictly grew and contains every archive line
         // in order — additions only. `sa.len() < sb.len()` also rules out the
         // equal case (which rule 5 already handles).
@@ -750,8 +943,8 @@ fn class_scanner_exclude_regex(
         if !a.starts_with("<?php return array (") {
             continue;
         }
-        let (sa, _) = strip_expected_entries(&a, ctx.disabled_modules, ctx.obfuscation_blocked);
-        let (sb, _) = strip_expected_entries(&b, ctx.disabled_modules, ctx.obfuscation_blocked);
+        let (sa, _) = ctx.strip(&a);
+        let (sb, _) = ctx.strip(&b);
         let ca = canonicalize_class_scanner_regex(&sa);
         let cb = canonicalize_class_scanner_regex(&sb);
         // Only relevant when a scanner regex was actually present and differed;
@@ -888,8 +1081,8 @@ PHP 8.4 compat form), and the proxy template's laziness hardening (null-guards i
 /// without hand-rolling the block-aware disabled-strip in a shell.
 pub fn residual_report(archive_text: &str, output_text: &str, disabled: &HashSet<String>) -> String {
     let no_blocked = HashSet::new();
-    let (sa, _) = strip_expected_entries(archive_text, disabled, &no_blocked);
-    let (sb, _) = strip_expected_entries(output_text, disabled, &no_blocked);
+    let (sa, _) = strip_expected_entries(archive_text, disabled, &no_blocked, &no_blocked);
+    let (sb, _) = strip_expected_entries(output_text, disabled, &no_blocked, &no_blocked);
     let na = canonicalize_class_scanner_regex(&sa);
     let nb = canonicalize_class_scanner_regex(&sb);
     let a: Vec<&str> = na.lines().collect();
@@ -955,6 +1148,7 @@ mod tests {
             output: dir,
             disabled_modules: disabled,
             obfuscation_blocked: no_blocked(),
+            disabled_reachable: no_blocked(),
         }
     }
 
@@ -1038,6 +1232,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
+            disabled_reachable: no_blocked(),
         };
         let r = report(&[], &[], &["global.php", "crontab.php"]);
         let c = classify(&r, &ctx);
@@ -1095,6 +1290,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
+            disabled_reachable: no_blocked(),
         };
         let r = report(&[], &[], &["additions.php", "changed.php", "removed.php"]);
         let c = classify(&r, &ctx);
@@ -1187,6 +1383,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
+            disabled_reachable: no_blocked(),
         };
         let r = report(&[], &[], &["A/Interceptor.php", "B/Interceptor.php"]);
         let c = classify(&r, &ctx);
@@ -1229,6 +1426,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
+            disabled_reachable: no_blocked(),
         };
         let r = report(&[], &[], &["P/Proxy.php"]);
         let c = classify(&r, &ctx);
@@ -1268,6 +1466,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
+            disabled_reachable: no_blocked(),
         };
         let r = report(&[], &[], &["interception.php"]);
         let c = classify(&r, &ctx);
@@ -1277,6 +1476,112 @@ mod tests {
         assert!(c.changed.is_empty());
         // A two-space *section header* is never mistaken for a module class.
         assert!(!metadata_entry_module_disabled("arguments", &disabled));
+    }
+
+    #[test]
+    fn reachable_type_strip_claims_the_file_and_leaves_a_real_miss_flagged() {
+        // The indirect case: the archive holds an entry named after an ENABLED
+        // module (a core interface) that only a disabled module implemented, so
+        // the name-prefix rule cannot explain it. Feeding it through
+        // `disabled_reachable` makes the file claim; an archive-only entry with
+        // no such evidence must keep the file flagged.
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        write(
+            archive.path(),
+            "interception.php",
+            "<?php return array (\n  'Good\\\\Mod\\\\A' => true,\n  'Good\\\\Mod\\\\IfaceOnlyBadImplements' => false,\n);",
+        );
+        write(
+            output.path(),
+            "interception.php",
+            "<?php return array (\n  'Good\\\\Mod\\\\A' => true,\n);",
+        );
+        let mut disabled = HashSet::new();
+        disabled.insert("Bad_Mod".to_string());
+
+        // Without the evidence the file stays unexplained.
+        let bare = ClassifyCtx {
+            archive: archive.path(),
+            output: output.path(),
+            disabled_modules: &disabled,
+            obfuscation_blocked: no_blocked(),
+            disabled_reachable: no_blocked(),
+        };
+        let c = classify(&report(&[], &[], &["interception.php"]), &bare);
+        assert_eq!(c.changed, vec!["interception.php"]);
+
+        // With it, the type is reported as its own group and the file claims.
+        let mut reachable = HashSet::new();
+        reachable.insert("Good\\\\Mod\\\\IfaceOnlyBadImplements".to_string());
+        let ctx = ClassifyCtx {
+            archive: archive.path(),
+            output: output.path(),
+            disabled_modules: &disabled,
+            obfuscation_blocked: no_blocked(),
+            disabled_reachable: &reachable,
+        };
+        let c = classify(&report(&[], &[], &["interception.php"]), &ctx);
+        assert!(c.changed.is_empty());
+        let kinds: Vec<KnownKind> = c.known.iter().map(|g| g.kind).collect();
+        assert!(kinds.contains(&KnownKind::DisabledModuleReachableType));
+        assert!(kinds.contains(&KnownKind::DisabledModuleMetadata));
+        // The group names the unescaped type, so the reader can grep for it.
+        let g = c.known.iter().find(|g| g.kind == KnownKind::DisabledModuleReachableType).unwrap();
+        assert_eq!(g.items, vec!["Good\\Mod\\IfaceOnlyBadImplements"]);
+    }
+
+    #[test]
+    fn reachable_candidates_never_include_a_key_the_output_also_has() {
+        // The soundness guard: a key present in ANY output file is not
+        // archive-only, so it must never become a strip candidate — stripping it
+        // from both sides would mask a changed value (`=> true` vs `=> false`).
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        write(
+            archive.path(),
+            "interception.php",
+            "<?php return array (\n  'Good\\\\Mod\\\\A' => true,\n);",
+        );
+        write(
+            output.path(),
+            "interception.php",
+            "<?php return array (\n  'Good\\\\Mod\\\\A' => false,\n);",
+        );
+        let mut disabled = HashSet::new();
+        disabled.insert("Bad_Mod".to_string());
+        let got = archive_only_entry_keys(
+            &report(&[], &[], &["interception.php"]),
+            archive.path(),
+            output.path(),
+            &disabled,
+        );
+        assert!(got.is_empty(), "a key the output also has must not be a candidate: {got:?}");
+
+        // A key the output genuinely lacks IS a candidate (so the emptiness
+        // above is the guard firing, not the scan finding nothing at all).
+        fs::write(
+            archive.path().join("interception.php"),
+            "<?php return array (\n  'Good\\\\Mod\\\\A' => false,\n  'Good\\\\Mod\\\\B' => true,\n);",
+        )
+        .unwrap();
+        let got = archive_only_entry_keys(
+            &report(&[], &[], &["interception.php"]),
+            archive.path(),
+            output.path(),
+            &disabled,
+        );
+        assert_eq!(got, HashSet::from(["Good\\\\Mod\\\\B".to_string()]));
     }
 
     #[test]
@@ -1337,6 +1642,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
+            disabled_reachable: no_blocked(),
         };
         let r = report(&[], &[], &["global.php", "other.php"]);
         let c = classify(&r, &ctx);

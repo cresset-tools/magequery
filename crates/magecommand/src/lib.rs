@@ -2054,11 +2054,19 @@ fn compare(
         output,
         magento.as_ref(),
     );
+    let disabled_reachable = magecommand_engine::disabled_reachable_types(
+        &report,
+        archive,
+        output,
+        magento.as_ref(),
+        &disabled_modules,
+    );
     let ctx = magecommand_engine::ClassifyCtx {
         archive,
         output,
         disabled_modules: &disabled_modules,
         obfuscation_blocked: &obfuscation_blocked,
+        disabled_reachable: &disabled_reachable,
     };
     let classified = magecommand_engine::classify(&report, &ctx);
 

@@ -13,7 +13,7 @@ use rayon::prelude::*;
 /// Which compile path a file came from — decides the exclude rule, mirroring
 /// DiCompileCommand's per-kind regexes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PathKind {
+pub(crate) enum PathKind {
     /// `<module>/Test/**` and `<module>/tests/**` excluded.
     Module,
     /// `<lib>/([\w]+/)?Test|tests/**` excluded (one optional level).
@@ -776,7 +776,7 @@ fn internal_ctor(fqcn: &str) -> Option<&'static [ParamMeta]> {
 }
 
 
-fn collect_included(base: &Path, dir: &Path, kind: PathKind, out: &mut Vec<PathBuf>) {
+pub(crate) fn collect_included(base: &Path, dir: &Path, kind: PathKind, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
