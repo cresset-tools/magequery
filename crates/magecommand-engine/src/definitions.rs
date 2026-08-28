@@ -57,6 +57,128 @@ pub struct Definitions {
     canonical: HashMap<String, String>,
 }
 
+/// PHP's own type names, in the spelling the engine reports.
+///
+/// Class names are case-insensitive in PHP, so source may spell a built-in any
+/// way it likes — `vendor/anowave/ec/vendor/FacebookAds/Cursor.php` writes
+/// `implements \Iterator, \Countable, \arrayaccess`. The real compiler reflects
+/// the type and gets the engine's canonical spelling back; magecommand derives
+/// [`Definitions::canonical_case`] from the declarations it scanned, and a
+/// built-in has no file to scan — so the use-site spelling survived as a key of
+/// its own, emitting a duplicate `'arrayaccess' => false` beside
+/// `'ArrayAccess' => false` in `interception.php`. Seeding these names supplies
+/// the declaration case there is no declaration to read.
+///
+/// Deliberately harmless to get wrong in either direction: the map only ever
+/// normalizes CASE, a name nothing references is never looked up, and a real
+/// declaration of the same name overrides the seed (a project may legitimately
+/// declare a global-namespace `Error`). Missing an entry costs nothing beyond
+/// the behavior that shipped before this list existed.
+///
+/// Membership is the union of the built-ins the engine already models —
+/// [`internal_ctor`]'s constructor set and `interception::internal_relations`'
+/// keys AND relation targets (a target gets a map entry too) — plus the
+/// interfaces PHP code most often implements.
+pub(crate) const BUILTIN_TYPES: &[&str] = &[
+    // Interfaces classes implement (the case that produced the bug).
+    "ArrayAccess",
+    "BackedEnum",
+    "Countable",
+    "DateTimeInterface",
+    "Iterator",
+    "IteratorAggregate",
+    "JsonSerializable",
+    "OuterIterator",
+    "RecursiveIterator",
+    "SeekableIterator",
+    "Serializable",
+    "SessionHandlerInterface",
+    "SessionIdInterface",
+    "SplObserver",
+    "SplSubject",
+    "Stringable",
+    "Throwable",
+    "Traversable",
+    "UnitEnum",
+    // Classes.
+    "ArrayIterator",
+    "ArrayObject",
+    "Closure",
+    "Collator",
+    "DateInterval",
+    "DateTime",
+    "DateTimeImmutable",
+    "DateTimeZone",
+    "Directory",
+    "DOMDocument",
+    "DOMNode",
+    "DOMParentNode",
+    "FilterIterator",
+    "Generator",
+    "IntlDateFormatter",
+    "IteratorIterator",
+    "Locale",
+    "NumberFormatter",
+    "PDO",
+    "php_user_filter",
+    "RecursiveArrayIterator",
+    "RecursiveFilterIterator",
+    "RecursiveIteratorIterator",
+    "ReflectionClass",
+    "SessionHandler",
+    "SimpleXMLElement",
+    "SimpleXMLIterator",
+    "SoapClient",
+    "SoapServer",
+    "SplDoublyLinkedList",
+    "SplFileInfo",
+    "SplFileObject",
+    "SplFixedArray",
+    "SplHeap",
+    "SplMaxHeap",
+    "SplMinHeap",
+    "SplObjectStorage",
+    "SplPriorityQueue",
+    "SplQueue",
+    "SplStack",
+    "SplTempFileObject",
+    "stdClass",
+    "WeakMap",
+    "XMLReader",
+    "XMLWriter",
+    // Throwables.
+    "BadFunctionCallException",
+    "BadMethodCallException",
+    "DomainException",
+    "Error",
+    "ErrorException",
+    "Exception",
+    "InvalidArgumentException",
+    "JsonException",
+    "LengthException",
+    "LogicException",
+    "OutOfBoundsException",
+    "OutOfRangeException",
+    "OverflowException",
+    "RangeException",
+    "RuntimeException",
+    "TypeError",
+    "UnderflowException",
+    "UnexpectedValueException",
+    "ValueError",
+];
+
+/// `lowercase fqcn -> declared fqcn`, built-ins seeded first so that a real
+/// declaration of the same name always overrides the seed.
+fn canonical_map(classes: &HashMap<String, ClassRecord>) -> HashMap<String, String> {
+    let mut map: HashMap<String, String> = BUILTIN_TYPES
+        .iter()
+        .map(|name| (name.to_ascii_lowercase(), (*name).to_owned()))
+        .collect();
+    map.extend(classes.keys().map(|k| (k.to_ascii_lowercase(), k.clone())));
+    map
+}
+
 impl Definitions {
     /// Test-only: build a `Definitions` from `(fqcn, record)` pairs, populating
     /// the case-insensitive `canonical` map. The other index sets stay empty.
@@ -65,8 +187,7 @@ impl Definitions {
         records: impl IntoIterator<Item = (String, ClassRecord)>,
     ) -> Definitions {
         let classes: HashMap<String, ClassRecord> = records.into_iter().collect();
-        let canonical =
-            classes.keys().map(|k| (k.to_ascii_lowercase(), k.clone())).collect();
+        let canonical = canonical_map(&classes);
         Definitions {
             classes,
             scanned: HashSet::new(),
@@ -200,10 +321,7 @@ impl Definitions {
                 }
             }
         }
-        let canonical = classes
-            .keys()
-            .map(|k| (k.to_ascii_lowercase(), k.clone()))
-            .collect();
+        let canonical = canonical_map(&classes);
         Definitions { classes, scanned, setup_classes, from_scan, generated_classes, canonical }
     }
 
@@ -931,6 +1049,31 @@ mod tests {
             generated_classes: HashSet::new(),
             canonical: HashMap::new(),
         }
+    }
+
+    #[test]
+    fn builtin_names_canonicalize_and_yield_to_a_real_declaration() {
+        // PHP is case-insensitive about class names, so vendor source may write
+        // `implements \arrayaccess` (anowave/ec does). Reflection hands the real
+        // compiler the engine's spelling; with no file to scan, only the seeded
+        // built-in list can supply it — otherwise the use-site spelling becomes a
+        // second `interception.php` key beside the properly-cased one.
+        let d = Definitions::from_records([]);
+        assert_eq!(d.canonical_case("arrayaccess"), Some("ArrayAccess"));
+        assert_eq!(d.canonical_case("ARRAYACCESS"), Some("ArrayAccess"));
+        assert_eq!(d.canonical_case("ArrayAccess"), Some("ArrayAccess"));
+        assert_eq!(d.canonical_case("datetimeinterface"), Some("DateTimeInterface"));
+        // A name that is not a built-in stays unknown, as before.
+        assert_eq!(d.canonical_case("acme\\widget"), None);
+
+        // A real declaration of a global-namespace name PHP also defines wins:
+        // the seed must never shadow something the scan actually found.
+        let d = Definitions::from_records([record("<?php class Error {}")]);
+        assert_eq!(d.canonical_case("error"), Some("Error"));
+        assert!(d.get("error").is_some(), "the scanned record is still reachable");
+        // A built-in has no record, so lookups still miss — seeding only ever
+        // fixes the SPELLING, it does not invent a class.
+        assert!(d.get("arrayaccess").is_none());
     }
 
     #[test]
