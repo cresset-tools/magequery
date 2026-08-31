@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.2](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.1...magequery-v0.17.2) (2026-08-31)
+
+
+### Bug Fixes
+
+* **magecommand:** di verify — explain disabled-module artifacts in a whole-tree diff ([#102](https://github.com/cresset-tools/magequery/issues/102)) ([b00c677](https://github.com/cresset-tools/magequery/commit/b00c6779139fb9516946ed58c3bf760b3376ed93))
+
 ## [0.17.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.0...magequery-v0.17.1) (2026-08-28)
 
 
