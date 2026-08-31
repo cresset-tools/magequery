@@ -109,11 +109,28 @@ fn collect_files(root: &Path) -> Result<BTreeMap<String, PathBuf>> {
                     .expect("entry is under root")
                     .to_string_lossy()
                     .replace('\\', "/");
+                if !is_generated_artifact(&rel) {
+                    continue;
+                }
                 files.insert(rel, path);
             }
         }
     }
     Ok(files)
+}
+
+/// Whether a path under a `generated/` tree is compile OUTPUT, and so belongs in
+/// the diff at all.
+///
+/// Two things live in `generated/` that `setup:di:compile` does not produce, and
+/// counting them as differences is noise the reader has to learn to ignore:
+/// Magento's own `generated/.htaccess` (shipped by the installer — a compile
+/// into a freshly emptied directory simply never recreates it) and magecommand's
+/// `.mqcache/` bookkeeping (the incremental-compile manifest). Both showed up as
+/// unexplained `extra` entries whenever a whole `generated/` tree was compared
+/// rather than its `code/` and `metadata/` halves.
+fn is_generated_artifact(rel: &str) -> bool {
+    rel != ".htaccess" && !rel.starts_with(".mqcache/") && !rel.contains("/.mqcache/")
 }
 
 fn same_content(a: &Path, b: &Path) -> Result<bool> {

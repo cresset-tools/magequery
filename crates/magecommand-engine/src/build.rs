@@ -142,5 +142,15 @@ pub fn compute_outputs_opts(
     }
     findings.extend(code.findings);
 
+    // `extend_hierarchy` ran in round 1, when `generated/code` was still empty,
+    // so it counted every not-yet-emitted factory and proxy as unresolvable. The
+    // fold loop has since generated them. Report only what is STILL unknown —
+    // a from-empty compile otherwise ends with a four-digit "unresolvable" note
+    // that is almost entirely its own output (1139 of them on a real store),
+    // which reads like a catastrophe in a build log and buries the handful of
+    // names that genuinely have no autoload entry.
+    let unresolved: Vec<String> =
+        unresolved.into_iter().filter(|name| !defs.contains(name)).collect();
+
     CompileOutputs { files, findings, unresolved }
 }

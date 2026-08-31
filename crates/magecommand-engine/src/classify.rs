@@ -26,7 +26,8 @@ use crate::compare::{canonical_method_order, CompareReport};
 pub enum KnownKind {
     /// Plugin-list cache filename scope ordering (sorted vs load-order).
     PluginListScopeOrder,
-    /// Interceptor for a class in a module that is disabled in config.php.
+    /// A generated artifact (interceptor, proxy or factory) for a class in a
+    /// module that is disabled in config.php.
     DisabledModuleInterceptor,
     /// A metadata DI-config file (`global.php`, `<area>.php`) that is identical
     /// once the top-level entries for classes in disabled modules are removed.
@@ -68,7 +69,7 @@ impl KnownKind {
         match self {
             KnownKind::PluginListScopeOrder => "Plugin-list cache filename scope ordering",
             KnownKind::DisabledModuleInterceptor => {
-                "Interceptors for disabled modules (Magento 2.4.9 behavior)"
+                "Generated artifacts for disabled modules (Magento 2.4.9 behavior)"
             }
             KnownKind::DisabledModuleMetadata => {
                 "DI-config entries for disabled modules (Magento 2.4.9 behavior)"
@@ -147,6 +148,10 @@ pub struct ClassifyCtx<'a> {
     /// reached only through a disabled module, though the name itself belongs to
     /// an enabled one — see [`disabled_reachable_types`].
     pub disabled_reachable: &'a HashSet<String>,
+    /// Every type a disabled module declares, inherits from, or type-hints —
+    /// see [`disabled_module_types`]. The evidence behind `disabled_reachable`,
+    /// also consulted directly to explain a missing generated FILE.
+    pub disabled_types: &'a HashSet<String>,
 }
 
 impl ClassifyCtx<'_> {
@@ -188,6 +193,13 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
     //    owning module is disabled in config.php (no extra counterpart —
     //    magecommand simply doesn't generate it).
     if let Some(group) = disabled_module_interceptors(&mut missing, ctx) {
+        known.push(group);
+    }
+
+    // 3b. Generated artifacts named after an enabled module that only a disabled
+    //    module ever asks for (a factory behind a switched-off constructor's
+    //    type-hint) — the file-level twin of rule 5a.
+    if let Some(group) = disabled_reachable_artifacts(&mut missing, ctx) {
         known.push(group);
     }
 
@@ -356,6 +368,61 @@ the order scopes are requested in — the fix behind Adobe issue #40408."
     })
 }
 
+/// Missing generated artifacts whose own name belongs to an ENABLED module, but
+/// which the archive only holds because a DISABLED module asked for them.
+///
+/// The file-level twin of [`disabled_reachable_types`]. A factory is emitted
+/// because some constructor type-hints it, and the hint may live in a module
+/// that is switched off: `code/Magento/Checkout/Model/Type/OnepageFactory.php`
+/// is named after enabled `Magento_Checkout`, so [`disabled_artifact_module`]
+/// cannot see it, yet the only class asking for it is disabled
+/// `Magento_Paypal`'s `Express\Checkout`. Same evidence, same conservatism: no
+/// disabled module naming the type means the file stays flagged.
+fn disabled_reachable_artifacts(
+    missing: &mut Vec<String>,
+    ctx: &ClassifyCtx,
+) -> Option<KnownGroup> {
+    if ctx.disabled_types.is_empty() {
+        return None;
+    }
+    let mut items: Vec<String> = Vec::new();
+    let mut claimed: HashSet<String> = HashSet::new();
+
+    for m in missing.iter() {
+        let stripped = m.strip_prefix("code/").unwrap_or(m);
+        if !is_generated_artifact_path(stripped) {
+            continue;
+        }
+        let Some(ty) = generated_artifact_type(m) else { continue };
+        if ctx.disabled_types.contains(&ty) {
+            items.push(m.clone());
+            claimed.insert(m.clone());
+        }
+    }
+
+    if items.is_empty() {
+        return None;
+    }
+    missing.retain(|m| !claimed.contains(m));
+    items.sort();
+
+    Some(KnownGroup {
+        kind: KnownKind::DisabledModuleReachableType,
+        title: "Generated artifacts only disabled modules asked for".to_owned(),
+        explanation:
+            "These artifacts are named after an ENABLED module, so the disabled-module rule does \
+not recognize them — but the only code that asks for them is switched off. A factory is generated \
+because some constructor type-hints it, and here every such type-hint lives in a module disabled \
+in app/etc/config.php. The archive was produced by a Magento that compiled every module on disk, \
+so those constructors were read and the factories emitted; since 2.4.9 only enabled modules are \
+compiled, and nothing left in the codebase can ask for these. Verified against the disabled \
+modules' own source, one PHP header parse per file."
+                .to_owned(),
+        items,
+        verified: true,
+    })
+}
+
 fn filename_casing(missing: &mut Vec<String>, extra: &mut Vec<String>) -> Option<KnownGroup> {
     let mut items: Vec<String> = Vec::new();
     let mut claimed_missing: HashSet<String> = HashSet::new();
@@ -392,15 +459,50 @@ the correct, unambiguous form on the case-sensitive filesystems used in producti
     })
 }
 
-/// Module name owning an interceptor path, if that module is disabled.
-/// `Magento/Swagger/Controller/Index/Index/Interceptor.php` -> `Magento_Swagger`.
-fn disabled_interceptor_module(rel: &str, disabled: &HashSet<String>) -> Option<String> {
-    let subject = rel.strip_suffix("/Interceptor.php")?;
-    let mut segs = subject.split('/');
+/// The type a generated-code path stands for, as a PHP name.
+///
+/// `code/Magento/Swagger/Controller/Index/Interceptor.php` ->
+/// `Magento\Swagger\Controller\Index\Interceptor`. The leading `code/` is
+/// optional: `di verify` is pointed at a whole `generated/` tree as often as at
+/// its `code/` half, and a path parsed with the prefix still attached used to
+/// read its vendor as the literal `code`. That is what silently disabled the
+/// disabled-module rule for every whole-tree comparison — the shape CI runs.
+fn generated_artifact_type(rel: &str) -> Option<String> {
+    let rel = rel.strip_prefix("code/").unwrap_or(rel);
+    let stem = rel.strip_suffix(".php")?;
+    if stem.is_empty() || stem.contains('.') {
+        return None;
+    }
+    Some(stem.replace('/', "\\"))
+}
+
+/// Module owning a generated artifact, if that module is disabled.
+///
+/// The artifact's path mirrors its PHP namespace, so the first two segments are
+/// `Vendor/Module` — `Magento/Swagger/Controller/Index/Interceptor.php` ->
+/// `Magento_Swagger`. Covers every kind the compile emits, not just
+/// interceptors: a disabled module's `*Factory.php` and `*/Proxy.php` are just
+/// as absent from a 2.4.9 compile, and used to be reported raw (60 of them on
+/// the store that surfaced this).
+fn disabled_artifact_module(rel: &str, disabled: &HashSet<String>) -> Option<String> {
+    let rel = rel.strip_prefix("code/").unwrap_or(rel);
+    if !is_generated_artifact_path(rel) {
+        return None;
+    }
+    let mut segs = rel.split('/');
     let vendor = segs.next()?;
     let module = segs.next()?;
     let name = format!("{vendor}_{module}");
     disabled.contains(&name).then_some(name)
+}
+
+/// Whether a generated-code path is one of the artifact kinds the compile emits
+/// — an interceptor, a lazy proxy, or a factory. Anything else under `code/` is
+/// not ours to explain away.
+fn is_generated_artifact_path(rel: &str) -> bool {
+    rel.ends_with("/Interceptor.php")
+        || rel.ends_with("/Proxy.php")
+        || rel.ends_with("Factory.php")
 }
 
 fn disabled_module_interceptors(missing: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
@@ -412,7 +514,7 @@ fn disabled_module_interceptors(missing: &mut Vec<String>, ctx: &ClassifyCtx) ->
     let mut modules: HashSet<String> = HashSet::new();
 
     for m in missing.iter() {
-        if let Some(module) = disabled_interceptor_module(m, ctx.disabled_modules) {
+        if let Some(module) = disabled_artifact_module(m, ctx.disabled_modules) {
             items.push(format!("{m}  ({module}, disabled)"));
             claimed.insert(m.clone());
             modules.insert(module);
@@ -430,11 +532,12 @@ fn disabled_module_interceptors(missing: &mut Vec<String>, ctx: &ClassifyCtx) ->
         kind: KnownKind::DisabledModuleInterceptor,
         title: KnownKind::DisabledModuleInterceptor.title().to_owned(),
         explanation: format!(
-            "These interceptors are for classes in modules disabled in app/etc/config.php ({}). \
-Since Magento 2.4.9, setup:di:compile compiles only enabled modules, so magecommand — which \
-targets 2.4.9 / Mage-OS 3.1.0 — correctly omits them. The archive was produced by an older \
-Magento (2.4.8 or earlier) that compiled every module on disk regardless of enable-state. \
-Skipping disabled modules is the improvement: it never generates code that can't run.",
+            "These generated artifacts — interceptors, proxies and factories — belong to classes \
+in modules disabled in app/etc/config.php ({}). Since Magento 2.4.9, setup:di:compile compiles \
+only enabled modules, so magecommand — which targets 2.4.9 / Mage-OS 3.1.0 — correctly omits them. \
+The archive was produced by an older Magento (2.4.8 or earlier) that compiled every module on disk \
+regardless of enable-state. Skipping disabled modules is the improvement: it never generates code \
+that can't run.",
             module_list.join(", ")
         ),
         items,
@@ -563,22 +666,27 @@ pub fn disabled_reachable_types(
     report: &CompareReport,
     archive: &Path,
     output: &Path,
-    magento: Option<&magequery_core::Magento>,
     disabled_modules: &HashSet<String>,
+    reached: &HashSet<String>,
 ) -> HashSet<String> {
-    let Some(magento) = magento else { return HashSet::new() };
-    if disabled_modules.is_empty() {
+    if disabled_modules.is_empty() || reached.is_empty() {
         return HashSet::new();
     }
-    let candidates = archive_only_entry_keys(report, archive, output, disabled_modules);
-    if candidates.is_empty() {
-        return HashSet::new();
-    }
-
-    let reached = disabled_module_type_closure(magento, disabled_modules);
-    candidates
+    archive_only_entry_keys(report, archive, output, disabled_modules)
         .into_iter()
         .filter(|k| reached.contains(&k.replace("\\\\", "\\")))
+        .collect()
+}
+
+/// The class names in a resolved type expression: `?A\B` -> `A\B`,
+/// `A\B|C\D` -> both, and scalars/`self`/`static` -> nothing. The parser has
+/// already resolved each name against the file's namespace and `use` imports, so
+/// these are FQCNs.
+fn hinted_type_names(ty: &str) -> Vec<String> {
+    ty.split(['|', '&'])
+        .map(|part| part.trim().trim_start_matches('?').trim_start_matches('\\'))
+        .filter(|part| part.contains('\\'))
+        .map(str::to_owned)
         .collect()
 }
 
@@ -623,15 +731,37 @@ fn archive_only_entry_keys(
     candidates
 }
 
-/// Every type the DISABLED modules put in front of the archive's compiler: the
-/// types they declare, plus every parent class and interface those declarations
-/// name. One header parse per file (never an execution), the modules walked in
-/// parallel under the same exclusion rules as the real scan.
+/// Every type the DISABLED modules put in front of the archive's compiler.
+///
+/// Three ways a disabled module drags a type into a compile that scans every
+/// module on disk, all read from one PHP header parse per file (never an
+/// execution), the modules walked in parallel under the same exclusion rules as
+/// the real scan:
+///
+/// - it **declares** the type;
+/// - it names the type as a **parent** (`extends`/`implements`) — this is how
+///   `Relations::getParents` reaches a core interface whose only implementations
+///   ship in a disabled payment module;
+/// - it **type-hints** the type in a signature — which is how the compiler
+///   decides to emit a `…Factory`. `Magento\Checkout\Model\Type\OnepageFactory`
+///   exists in the archive for exactly one reason: disabled `Magento_Paypal`'s
+///   `Express\Checkout` constructor asks for it.
 ///
 /// Transitivity needs no closure pass: a parent that is itself declared in a
 /// disabled module contributes its own parents when that file is parsed, and a
 /// chain leaving the disabled set lands on an enabled class whose ancestry the
 /// compile already walks.
+pub fn disabled_module_types(
+    magento: Option<&magequery_core::Magento>,
+    disabled: &HashSet<String>,
+) -> HashSet<String> {
+    let Some(magento) = magento else { return HashSet::new() };
+    if disabled.is_empty() {
+        return HashSet::new();
+    }
+    disabled_module_type_closure(magento, disabled)
+}
+
 fn disabled_module_type_closure(
     magento: &magequery_core::Magento,
     disabled: &HashSet<String>,
@@ -661,6 +791,12 @@ fn disabled_module_type_closure(
                     out.insert(decl.fqcn);
                     out.extend(decl.extends);
                     out.extend(decl.implements);
+                    for method in &decl.methods {
+                        for param in &method.params {
+                            let Some(ty) = param.ty.as_deref() else { continue };
+                            out.extend(hinted_type_names(ty));
+                        }
+                    }
                 }
             }
             out
@@ -1149,6 +1285,7 @@ mod tests {
             disabled_modules: disabled,
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
+            disabled_types: no_blocked(),
         }
     }
 
@@ -1233,6 +1370,7 @@ mod tests {
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
+            disabled_types: no_blocked(),
         };
         let r = report(&[], &[], &["global.php", "crontab.php"]);
         let c = classify(&r, &ctx);
@@ -1291,6 +1429,7 @@ mod tests {
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
+            disabled_types: no_blocked(),
         };
         let r = report(&[], &[], &["additions.php", "changed.php", "removed.php"]);
         let c = classify(&r, &ctx);
@@ -1384,6 +1523,7 @@ mod tests {
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
+            disabled_types: no_blocked(),
         };
         let r = report(&[], &[], &["A/Interceptor.php", "B/Interceptor.php"]);
         let c = classify(&r, &ctx);
@@ -1427,6 +1567,7 @@ mod tests {
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
+            disabled_types: no_blocked(),
         };
         let r = report(&[], &[], &["P/Proxy.php"]);
         let c = classify(&r, &ctx);
@@ -1467,6 +1608,7 @@ mod tests {
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
+            disabled_types: no_blocked(),
         };
         let r = report(&[], &[], &["interception.php"]);
         let c = classify(&r, &ctx);
@@ -1476,6 +1618,89 @@ mod tests {
         assert!(c.changed.is_empty());
         // A two-space *section header* is never mistaken for a module class.
         assert!(!metadata_entry_module_disabled("arguments", &disabled));
+    }
+
+    #[test]
+    fn disabled_artifacts_claim_under_a_code_prefix_and_across_artifact_kinds() {
+        // `di verify` is pointed at a whole `generated/` tree as often as at its
+        // `code/` half. Parsing `code/Bad/Mod/X/Interceptor.php` without allowing
+        // for the prefix read the vendor as `code`, so NOTHING claimed — the
+        // shape CI runs, and the reason 308 correct omissions were reported raw.
+        // Proxies and factories count too: a disabled module's are just as absent.
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let mut disabled = HashSet::new();
+        disabled.insert("Bad_Mod".to_string());
+        let ctx = ClassifyCtx {
+            archive: archive.path(),
+            output: output.path(),
+            disabled_modules: &disabled,
+            obfuscation_blocked: no_blocked(),
+            disabled_reachable: no_blocked(),
+            disabled_types: no_blocked(),
+        };
+        let missing = [
+            "code/Bad/Mod/Block/Thing/Interceptor.php",
+            "code/Bad/Mod/Api/PoolInterface/Proxy.php",
+            "code/Bad/Mod/Model/ThingFactory.php",
+            // No `code/` prefix: the half-tree layout must keep working.
+            "Bad/Mod/Other/Interceptor.php",
+            // An enabled module's artifact is never claimed by this rule.
+            "code/Good/Mod/Block/Thing/Interceptor.php",
+        ];
+        let r = report(&missing, &[], &[]);
+        let c = classify(&r, &ctx);
+        assert_eq!(c.known.len(), 1);
+        assert_eq!(c.known[0].kind, KnownKind::DisabledModuleInterceptor);
+        assert_eq!(c.known[0].items.len(), 4);
+        assert_eq!(c.missing, vec!["code/Good/Mod/Block/Thing/Interceptor.php"]);
+    }
+
+    #[test]
+    fn an_enabled_named_artifact_needs_disabled_evidence_to_claim() {
+        // A factory named after an ENABLED module that only a disabled module's
+        // constructor type-hints. Without the evidence it must stay flagged —
+        // this rule absorbs 6 files on a real store, so it has to be the
+        // evidence doing the work, not the filename shape.
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let disabled = HashSet::from(["Bad_Mod".to_string()]);
+        let missing = ["code/Good/Mod/Model/Type/OnepageFactory.php"];
+
+        let bare = ClassifyCtx {
+            archive: archive.path(),
+            output: output.path(),
+            disabled_modules: &disabled,
+            obfuscation_blocked: no_blocked(),
+            disabled_reachable: no_blocked(),
+            disabled_types: no_blocked(),
+        };
+        let c = classify(&report(&missing, &[], &[]), &bare);
+        assert_eq!(c.missing, vec!["code/Good/Mod/Model/Type/OnepageFactory.php"]);
+
+        let types = HashSet::from(["Good\\Mod\\Model\\Type\\OnepageFactory".to_string()]);
+        let ctx = ClassifyCtx { disabled_types: &types, ..bare };
+        let c = classify(&report(&missing, &[], &[]), &ctx);
+        assert!(c.missing.is_empty());
+        assert_eq!(c.known[0].kind, KnownKind::DisabledModuleReachableType);
+
+        // A DIFFERENT type in the evidence set must not claim this file.
+        let other = HashSet::from(["Good\\Mod\\Model\\Type\\SomethingElse".to_string()]);
+        let ctx = ClassifyCtx { disabled_types: &other, ..bare };
+        let c = classify(&report(&missing, &[], &[]), &ctx);
+        assert_eq!(c.missing, vec!["code/Good/Mod/Model/Type/OnepageFactory.php"]);
+    }
+
+    #[test]
+    fn type_hint_names_split_out_of_a_resolved_expression() {
+        assert_eq!(hinted_type_names("?A\\B"), vec!["A\\B"]);
+        assert_eq!(hinted_type_names("A\\B|C\\D"), vec!["A\\B", "C\\D"]);
+        assert_eq!(hinted_type_names("\\A\\B"), vec!["A\\B"]);
+        // Scalars, `self`, and unqualified names carry no namespace: not types
+        // a factory could be generated for.
+        assert!(hinted_type_names("string").is_empty());
+        assert!(hinted_type_names("self").is_empty());
+        assert!(hinted_type_names("?int").is_empty());
     }
 
     #[test]
@@ -1512,6 +1737,7 @@ mod tests {
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
+            disabled_types: no_blocked(),
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &bare);
         assert_eq!(c.changed, vec!["interception.php"]);
@@ -1525,6 +1751,7 @@ mod tests {
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
             disabled_reachable: &reachable,
+            disabled_types: no_blocked(),
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &ctx);
         assert!(c.changed.is_empty());
@@ -1643,6 +1870,7 @@ mod tests {
             disabled_modules: &disabled,
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
+            disabled_types: no_blocked(),
         };
         let r = report(&[], &[], &["global.php", "other.php"]);
         let c = classify(&r, &ctx);

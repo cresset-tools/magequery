@@ -2054,12 +2054,16 @@ fn compare(
         output,
         magento.as_ref(),
     );
+    // One parallel walk of the disabled modules' source, shared by the metadata
+    // rule and the generated-artifact rule.
+    let disabled_types =
+        magecommand_engine::disabled_module_types(magento.as_ref(), &disabled_modules);
     let disabled_reachable = magecommand_engine::disabled_reachable_types(
         &report,
         archive,
         output,
-        magento.as_ref(),
         &disabled_modules,
+        &disabled_types,
     );
     let ctx = magecommand_engine::ClassifyCtx {
         archive,
@@ -2067,6 +2071,7 @@ fn compare(
         disabled_modules: &disabled_modules,
         obfuscation_blocked: &obfuscation_blocked,
         disabled_reachable: &disabled_reachable,
+        disabled_types: &disabled_types,
     };
     let classified = magecommand_engine::classify(&report, &ctx);
 
