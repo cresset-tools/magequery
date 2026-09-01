@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.3](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.2...magequery-v0.17.3) (2026-09-01)
+
+
+### Bug Fixes
+
+* **magecommand:** di compile — float defaults; di verify — five more client-store cases ([#105](https://github.com/cresset-tools/magequery/issues/105)) ([15fd8b3](https://github.com/cresset-tools/magequery/commit/15fd8b306102bc40a82ac80971a2493901614d2e))
+* **magecommand:** di compile — PSR-0 paths for underscore class names, const classes outside the scan ([#104](https://github.com/cresset-tools/magequery/issues/104)) ([205aa2d](https://github.com/cresset-tools/magequery/commit/205aa2ddfe39c9976993d77caeacff2c99a4cb71))
+
 ## [0.17.2](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.1...magequery-v0.17.2) (2026-08-31)
 
 
