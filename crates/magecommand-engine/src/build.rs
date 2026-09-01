@@ -43,6 +43,30 @@ pub fn compute_outputs(magento: &Magento, defs: &mut Definitions, root: &Path) -
 
 /// Like [`compute_outputs`], with `fused` selecting the fused-interceptor
 /// renderer (`di compile --fused`) for global-only classes.
+/// Class names referenced by `xsi:type="const"` values anywhere in an argument
+/// tree, so they can be resolved for constant evaluation.
+///
+/// `\Foo\Bar::BAZ` -> `Foo\Bar`. A bare `SOME_CONST` (no `::`) names a global
+/// constant, not a class, and is skipped.
+fn collect_const_classes(value: &magequery_core::ArgValue, out: &mut Vec<String>) {
+    match value {
+        magequery_core::ArgValue::Scalar { xsi_type, text } if xsi_type == "const" => {
+            if let Some((class, _)) = text.rsplit_once("::") {
+                let class = class.trim().trim_start_matches('\\');
+                if !class.is_empty() {
+                    out.push(class.to_owned());
+                }
+            }
+        }
+        magequery_core::ArgValue::Array(items) => {
+            for item in items {
+                collect_const_classes(&item.value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn compute_outputs_opts(
     magento: &Magento,
     defs: &mut Definitions,
@@ -72,6 +96,20 @@ pub fn compute_outputs_opts(
             export.plugins.iter().filter_map(|p| p.class.as_ref()).map(|c| c.as_str().to_owned()),
         );
     }
+    // …and the classes named by `xsi:type="const"` argument values. PHP evaluates
+    // `\Magento\Paypal\Model\Config::METHOD_WPP_EXPRESS` through the AUTOLOADER, which
+    // does not care whether the owning module is enabled — a composer-installed
+    // file resolves either way. Without seeding these, a const whose class sits
+    // outside the scan universe (a disabled module, or a classmap-only package)
+    // evaluated to NULL: on one store an enabled GraphQL module's
+    // `allowedPaymentMethodCodes` came out `'paypal_express' => NULL` where the
+    // oracle has `'paypal_express' => 'paypal_express'`.
+    for (area, _) in AREA_CODES {
+        for decl in &magento.di_export_ref(area).arguments {
+            collect_const_classes(&decl.value, &mut resolve_keys);
+        }
+    }
+
     let unresolved = defs.extend_hierarchy(magento, root, resolve_keys);
     ilap!(_it, "extend_hierarchy");
 

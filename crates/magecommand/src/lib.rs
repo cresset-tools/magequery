@@ -2002,13 +2002,29 @@ fn compare(
         })
         .unwrap_or_default();
 
-    // Diagnostic mode: pinpoint one file's residual difference and stop.
+    // Diagnostic mode: pinpoint one file's residual difference and stop. It must
+    // apply the SAME normalizations the classifiers do — including the
+    // disabled-reachable strip — or it reports a divergence that was in fact
+    // explained and sends the reader chasing a non-issue.
     if let Some(rel) = show_residual {
         let a = std::fs::read_to_string(archive.join(rel))
             .with_context(|| format!("reading archive {}", archive.join(rel).display()))?;
         let b = std::fs::read_to_string(output.join(rel))
             .with_context(|| format!("reading output {}", output.join(rel).display()))?;
-        print!("{}", magecommand_engine::residual_report(&a, &b, &disabled_modules));
+        let report = magecommand_engine::compare_dirs(archive, output, strict_ordering)?;
+        let disabled_types =
+            magecommand_engine::disabled_module_types(magento.as_ref(), &disabled_modules);
+        let reachable = magecommand_engine::disabled_reachable_types(
+            &report,
+            archive,
+            output,
+            &disabled_modules,
+            &disabled_types,
+        );
+        print!(
+            "{}",
+            magecommand_engine::residual_report(&a, &b, &disabled_modules, &reachable)
+        );
         return Ok(ExitCode::SUCCESS);
     }
 

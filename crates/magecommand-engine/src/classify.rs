@@ -461,6 +461,12 @@ the correct, unambiguous form on the case-sensitive filesystems used in producti
 
 /// The type a generated-code path stands for, as a PHP name.
 ///
+/// Best-effort, and deliberately fail-closed: Magento maps BOTH `\\` and `_` to
+/// `/` when it writes the file, so a path cannot always be inverted (a segment
+/// could have been either). A name that inverts wrongly simply will not be found
+/// in the disabled-module evidence set, so the file stays flagged rather than
+/// being claimed on a bad name.
+///
 /// `code/Magento/Swagger/Controller/Index/Interceptor.php` ->
 /// `Magento\Swagger\Controller\Index\Interceptor`. The leading `code/` is
 /// optional: `di verify` is pointed at a whole `generated/` tree as often as at
@@ -496,13 +502,23 @@ fn disabled_artifact_module(rel: &str, disabled: &HashSet<String>) -> Option<Str
     disabled.contains(&name).then_some(name)
 }
 
-/// Whether a generated-code path is one of the artifact kinds the compile emits
-/// — an interceptor, a lazy proxy, or a factory. Anything else under `code/` is
-/// not ours to explain away.
+/// Whether a generated-code path names one of the artifact kinds the compile
+/// emits.
+///
+/// Asks the code generator's own `generatedEntities` registry rather than
+/// listing suffixes here. Hand-listing them is what made this incomplete twice:
+/// first only `/Interceptor.php` (missing every disabled module's factories and
+/// proxies), then those three (missing `…Extension` and `…ExtensionInterface`,
+/// which is 46 files on one store and 50 on another once MSI is switched off).
+/// The registry has fourteen entries — repositories, mappers, persistors,
+/// search-results and the rest — and a new one now needs no change here.
+///
+/// The WHOLE path-derived name is classified, not its last segment: the registry
+/// requires a non-empty dispatch source before the suffix, so a bare
+/// `Interceptor` (which is exactly what an interceptor's last segment is) does
+/// not classify, while `Magento\Inventory\…\Collection\Interceptor` does.
 fn is_generated_artifact_path(rel: &str) -> bool {
-    rel.ends_with("/Interceptor.php")
-        || rel.ends_with("/Proxy.php")
-        || rel.ends_with("Factory.php")
+    generated_artifact_type(rel).is_some_and(|name| crate::codegen::classify(&name).is_some())
 }
 
 fn disabled_module_interceptors(missing: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
@@ -623,7 +639,60 @@ fn strip_expected_entries(
         out.push_str(line);
         out.push('\n');
     }
-    (out, stripped)
+    let (out, rewrote) = canonicalize_disabled_interceptor_refs(&out, disabled);
+    (out, stripped || rewrote)
+}
+
+/// Rewrite `'Vendor\\Module\\…\\Interceptor'` to the plain class it wraps, for
+/// every DISABLED module — the value-level twin of the entry strip.
+///
+/// A disabled module's class can still be injected into an ENABLED one: on a
+/// store where `Magento_PaypalGraphQl` is on while `Magento_Paypal` is off, the
+/// resolver's constructor type-hints `…\Payflow\Transparent`, whose file is
+/// composer-installed and autoloadable whatever config.php says. The archive's
+/// compiler merged the disabled module's di.xml, found plugins on that class and
+/// recorded `Transparent\Interceptor`; magecommand, compiling only enabled
+/// modules, sees no plugins on it, generates no interceptor, and records plain
+/// `Transparent` — which is both correct for 2.4.9 and the only reference that
+/// resolves against the tree it just wrote. Equating the two is what lets such a
+/// file claim.
+///
+/// Only disabled modules are rewritten, and only the interceptor suffix, so an
+/// enabled class losing its interceptor still shows up as a real difference.
+fn canonicalize_disabled_interceptor_refs(
+    text: &str,
+    disabled: &HashSet<String>,
+) -> (String, bool) {
+    // Escaped `\Interceptor` as it appears inside a var_export'ed string.
+    const SUFFIX: &str = "\\\\Interceptor";
+    if disabled.is_empty() || !text.contains(SUFFIX) {
+        return (text.to_owned(), false);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rewrote = false;
+    let mut rest = text;
+    while let Some(open) = rest.find('\'') {
+        let (head, tail) = rest.split_at(open + 1);
+        out.push_str(head);
+        let Some(close) = tail.find('\'') else {
+            rest = tail;
+            break;
+        };
+        let (literal, after) = tail.split_at(close);
+        match literal
+            .strip_suffix(SUFFIX)
+            .filter(|subject| metadata_entry_module_disabled(subject, disabled))
+        {
+            Some(subject) => {
+                out.push_str(subject);
+                rewrote = true;
+            }
+            None => out.push_str(literal),
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    (out, rewrote)
 }
 
 /// Find changed-metadata argument entries that are statically unresolvable
@@ -1215,10 +1284,15 @@ PHP 8.4 compat form), and the proxy template's laziness hardening (null-guards i
 /// reorder, or drop — with context from both sides. This is what the `compare
 /// --show-residual` flag prints so a lone unexplained file can be pinpointed
 /// without hand-rolling the block-aware disabled-strip in a shell.
-pub fn residual_report(archive_text: &str, output_text: &str, disabled: &HashSet<String>) -> String {
+pub fn residual_report(
+    archive_text: &str,
+    output_text: &str,
+    disabled: &HashSet<String>,
+    reachable: &HashSet<String>,
+) -> String {
     let no_blocked = HashSet::new();
-    let (sa, _) = strip_expected_entries(archive_text, disabled, &no_blocked, &no_blocked);
-    let (sb, _) = strip_expected_entries(output_text, disabled, &no_blocked, &no_blocked);
+    let (sa, _) = strip_expected_entries(archive_text, disabled, &no_blocked, reachable);
+    let (sb, _) = strip_expected_entries(output_text, disabled, &no_blocked, reachable);
     let na = canonicalize_class_scanner_regex(&sa);
     let nb = canonicalize_class_scanner_regex(&sb);
     let a: Vec<&str> = na.lines().collect();
@@ -1654,6 +1728,58 @@ mod tests {
         assert_eq!(c.known[0].kind, KnownKind::DisabledModuleInterceptor);
         assert_eq!(c.known[0].items.len(), 4);
         assert_eq!(c.missing, vec!["code/Good/Mod/Block/Thing/Interceptor.php"]);
+    }
+
+    #[test]
+    fn every_generator_kind_counts_as_an_artifact_not_just_interceptors() {
+        // Driven by the codegen registry, so the kinds this recognizes cannot
+        // drift from the kinds the compile emits. `…Extension` /
+        // `…ExtensionInterface` are the ones that were missing: 46 files on one
+        // store, 50 on another, once MSI is switched off.
+        for rel in [
+            "code/Bad/Mod/Block/Thing/Interceptor.php",
+            "code/Bad/Mod/Api/Data/SourceExtension.php",
+            "code/Bad/Mod/Api/Data/SourceExtensionInterface.php",
+            "code/Bad/Mod/Api/Data/SourceExtensionInterfaceFactory.php",
+            "code/Bad/Mod/Api/PoolInterface/Proxy.php",
+            "code/Bad/Mod/Model/ThingFactory.php",
+            "code/Bad/Mod/Model/ThingRepository.php",
+            "code/Bad/Mod/Model/ThingSearchResults.php",
+        ] {
+            assert!(is_generated_artifact_path(rel), "should classify: {rel}");
+        }
+        // A bare `Interceptor` with no subject before it is not a generatable
+        // name — the registry requires a non-empty dispatch source.
+        assert!(!is_generated_artifact_path("Interceptor.php"));
+        assert!(!is_generated_artifact_path("code/Bad/Mod/etc/module.xml"));
+    }
+
+    #[test]
+    fn disabled_interceptor_refs_are_equated_with_the_plain_class() {
+        // A disabled module's class injected into an ENABLED one: the archive
+        // records `…\Transparent\Interceptor` (its compile merged the disabled
+        // di.xml and found plugins), magecommand records plain `…\Transparent`
+        // (no plugins, so no interceptor, so nothing to reference). Equating the
+        // two is what lets the file claim.
+        let disabled = HashSet::from(["Bad_Mod".to_string()]);
+        let archive = "  'x' => 'Bad\\\\Mod\\\\Model\\\\Thing\\\\Interceptor',\n";
+        let (out, rewrote) = canonicalize_disabled_interceptor_refs(archive, &disabled);
+        assert!(rewrote);
+        assert_eq!(out, "  'x' => 'Bad\\\\Mod\\\\Model\\\\Thing',\n");
+
+        // An ENABLED module's interceptor reference is left alone — losing that
+        // one is a real difference, not an expected one.
+        let enabled_ref = "  'x' => 'Good\\\\Mod\\\\Model\\\\Thing\\\\Interceptor',\n";
+        let (out, rewrote) = canonicalize_disabled_interceptor_refs(enabled_ref, &disabled);
+        assert!(!rewrote);
+        assert_eq!(out, enabled_ref);
+
+        // Text with no interceptor reference is returned untouched, and a
+        // disabled class that is NOT an interceptor reference keeps its name.
+        let plain = "  'x' => 'Bad\\\\Mod\\\\Model\\\\Thing',\n";
+        let (out, rewrote) = canonicalize_disabled_interceptor_refs(plain, &disabled);
+        assert!(!rewrote);
+        assert_eq!(out, plain);
     }
 
     #[test]
