@@ -469,7 +469,7 @@ impl<'a> ArgsCtx<'a> {
         let parsed = parse_const_expr(default, definer_ns, definer_uses);
         let lookup = DefsLookup { defs: self.defs };
         match eval(&parsed, &EvalCtx::new(&lookup, Some(definer_fqcn))) {
-            Ok(v) => const_to_cfg(&v),
+            Ok(v) => coerce_to_declared_float(const_to_cfg(&v), param.ty.as_deref()),
             Err(e) => {
                 // An enum-case default can't fold (an enum case is an object, not
                 // a scalar) — Magento keeps it as the constant reference. Emit the
@@ -666,6 +666,21 @@ fn const_to_cfg(value: &ConstValue) -> Cfg {
 /// deprecation that Magento's dev-mode ErrorHandler turns fatal, so the real
 /// compiler cannot even process such a class there — the shape exists only on
 /// older-PHP stores, and the 2.4.5 store 2.4.5 archive is its ground truth.
+/// An int default on a `float`-declared parameter is a FLOAT to reflection.
+///
+/// `float $price = 0` — PHP coerces the literal to the declared type, so
+/// `getDefaultValue()` returns `0.0` and `var_export` writes `0.0`. Emitting the
+/// integer `0` diverged from the oracle on a real store (loki-checkout's
+/// `Timeframe`). Only a plain `float`/`?float` coerces: a union like `int|float`
+/// keeps the int, exactly as PHP does.
+fn coerce_to_declared_float(value: Cfg, ty: Option<&str>) -> Cfg {
+    let ty = ty.map(|t| t.trim().trim_start_matches('?'));
+    match (value, ty) {
+        (Cfg::Int(n), Some(t)) if t.eq_ignore_ascii_case("float") => Cfg::Float(n as f64),
+        (other, _) => other,
+    }
+}
+
 fn optional_tail_start(params: &[ParamMeta]) -> usize {
     params
         .iter()

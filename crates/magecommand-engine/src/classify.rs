@@ -14,7 +14,7 @@
 //! case-only path pair, an interceptor whose module is provably disabled), so a
 //! real regression is never silently absorbed into the "known" bucket.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -151,6 +151,11 @@ pub struct ClassifyCtx<'a> {
     /// Every type a disabled module declares, inherits from, or type-hints —
     /// see [`disabled_module_types`]. The evidence behind `disabled_reachable`,
     /// also consulted directly to explain a missing generated FILE.
+    ///
+    /// **Lowercased.** PHP class names are case-insensitive, and the two sides
+    /// genuinely disagree in the wild — Page Builder type-hints `GT\\Dom\\Document`
+    /// while phpgt declares `Gt\\Dom\\Document`. Look names up with
+    /// `to_ascii_lowercase`.
     pub disabled_types: &'a HashSet<String>,
 }
 
@@ -394,7 +399,7 @@ fn disabled_reachable_artifacts(
             continue;
         }
         let Some(ty) = generated_artifact_type(m) else { continue };
-        if ctx.disabled_types.contains(&ty) {
+        if ctx.disabled_types.contains(&ty.to_ascii_lowercase()) {
             items.push(m.clone());
             claimed.insert(m.clone());
         }
@@ -743,7 +748,7 @@ pub fn disabled_reachable_types(
     }
     archive_only_entry_keys(report, archive, output, disabled_modules)
         .into_iter()
-        .filter(|k| reached.contains(&k.replace("\\\\", "\\")))
+        .filter(|k| reached.contains(&k.replace("\\\\", "\\").to_ascii_lowercase()))
         .collect()
 }
 
@@ -751,10 +756,21 @@ pub fn disabled_reachable_types(
 /// `A\B|C\D` -> both, and scalars/`self`/`static` -> nothing. The parser has
 /// already resolved each name against the file's namespace and `use` imports, so
 /// these are FQCNs.
+///
+/// Global-namespace names are kept, not just namespaced ones: `\DOMDocument` is
+/// a perfectly good hint, and the interception map carries an entry for it. They
+/// are told apart from scalars by an explicit keyword list rather than by the
+/// presence of a separator.
 fn hinted_type_names(ty: &str) -> Vec<String> {
+    const KEYWORDS: &[&str] = &[
+        "array", "callable", "bool", "float", "int", "string", "iterable", "object", "mixed",
+        "never", "void", "null", "false", "true", "self", "static", "parent",
+    ];
     ty.split(['|', '&'])
         .map(|part| part.trim().trim_start_matches('?').trim_start_matches('\\'))
-        .filter(|part| part.contains('\\'))
+        .filter(|part| {
+            !part.is_empty() && !KEYWORDS.contains(&part.to_ascii_lowercase().as_str())
+        })
         .map(str::to_owned)
         .collect()
 }
@@ -763,8 +779,8 @@ fn hinted_type_names(ty: &str) -> Vec<String> {
 /// the changed `var_export`ed metadata files — the candidate set for
 /// [`disabled_reachable_types`], minus what the name-prefix rule already covers.
 ///
-/// Only FQCN-shaped keys qualify (`Vendor\\Class`): section headers and virtual
-/// types never name a PHP type. A key present in *any* output file is dropped,
+/// Only type-shaped keys qualify — see [`is_type_shaped_key`]. A key present in
+/// *any* output file is dropped,
 /// even if some other file lacks it — stripping such a key from both sides could
 /// mask a changed value (`=> true` vs `=> false`), and the strip is per-key, not
 /// per-file.
@@ -789,7 +805,7 @@ fn archive_only_entry_keys(
         in_output.extend(b_keys.iter().map(|k| (*k).to_owned()));
         for key in a.lines().filter_map(top_level_entry_key) {
             if !b_keys.contains(key)
-                && key.contains("\\\\")
+                && is_type_shaped_key(key)
                 && !metadata_entry_module_disabled(key, disabled_modules)
             {
                 candidates.insert(key.to_owned());
@@ -798,6 +814,39 @@ fn archive_only_entry_keys(
     }
     candidates.retain(|k| !in_output.contains(k));
     candidates
+}
+
+/// [`crate::interception::internal_relations`] keyed case-insensitively: the
+/// evidence set is lowercased, the table is written in PHP's declared case.
+fn internal_relations_ci(lower: &str) -> Option<&'static [&'static str]> {
+    const BUILTINS: &[&str] = &[
+        "DOMDocument", "FilterIterator", "IteratorIterator", "RecursiveFilterIterator",
+        "SplFileObject", "SplTempFileObject", "SplFileInfo", "ArrayIterator", "ArrayObject",
+        "SessionHandler", "SimpleXMLElement", "Exception", "RuntimeException", "LogicException",
+        "ErrorException", "JsonException", "InvalidArgumentException", "DomainException",
+        "LengthException", "BadFunctionCallException", "BadMethodCallException",
+        "OutOfRangeException", "OutOfBoundsException", "RangeException", "OverflowException",
+        "UnderflowException", "UnexpectedValueException", "DateTime", "DateTimeImmutable",
+    ];
+    let declared = BUILTINS.iter().find(|n| n.eq_ignore_ascii_case(lower))?;
+    crate::interception::internal_relations(declared)
+}
+
+/// Whether a metadata entry key could name a PHP type.
+///
+/// A namespaced `Vendor\\Class` obviously can. So can a GLOBAL-namespace class:
+/// `DOMDocument`, `DOMNode` and `DOMParentNode` all get interception entries, and
+/// on a store with Page Builder switched off they are reachable only through it —
+/// requiring a namespace separator left exactly those three unexplained.
+///
+/// The two things at this indentation that are NOT types are told apart by their
+/// first character: `var_export` section headers (`arguments`, `preferences`,
+/// `instanceTypes`, `nonLazyTypes`) and Magento's virtual types (written
+/// lowercase-initial by convention) both begin lowercase, while a PHP class name
+/// begins uppercase. Membership in the disabled-module evidence set is still the
+/// real gate; this only keeps obvious non-types out of the candidate pool.
+fn is_type_shaped_key(key: &str) -> bool {
+    key.contains("\\\\") || key.chars().next().is_some_and(|c| c.is_ascii_uppercase())
 }
 
 /// Every type the DISABLED modules put in front of the archive's compiler.
@@ -844,7 +893,8 @@ fn disabled_module_type_closure(
         .map(|m| m.path.clone())
         .collect();
 
-    dirs.par_iter()
+    let mut reached: HashSet<String> = dirs
+        .par_iter()
         .map(|dir| {
             let mut files = Vec::new();
             crate::definitions::collect_included(
@@ -857,13 +907,16 @@ fn disabled_module_type_closure(
             for file in files {
                 let Ok(src) = fs::read(&file) else { continue };
                 for decl in magecommand_php::parse_file(&src).declarations {
-                    out.insert(decl.fqcn);
-                    out.extend(decl.extends);
-                    out.extend(decl.implements);
+                    let mut add = |name: String| {
+                        out.insert(name.to_ascii_lowercase());
+                    };
+                    add(decl.fqcn);
+                    decl.extends.into_iter().for_each(&mut add);
+                    decl.implements.into_iter().for_each(&mut add);
                     for method in &decl.methods {
                         for param in &method.params {
                             let Some(ty) = param.ty.as_deref() else { continue };
-                            out.extend(hinted_type_names(ty));
+                            hinted_type_names(ty).into_iter().for_each(&mut add);
                         }
                     }
                 }
@@ -873,7 +926,24 @@ fn disabled_module_type_closure(
         .reduce(HashSet::new, |mut a, b| {
             a.extend(b);
             a
-        })
+        });
+
+    // A PHP built-in drags its own parents into the interception walk, and those
+    // have no file to parse: `DOMDocument` is type-hinted by a disabled module,
+    // but `DOMParentNode` is reachable only as its interface, through the
+    // engine's relations table. Close over that table so the whole branch counts
+    // as evidence, not just the name the source happens to mention.
+    let mut queue: Vec<String> = reached.iter().cloned().collect();
+    while let Some(name) = queue.pop() {
+        let Some(relations) = internal_relations_ci(&name) else { continue };
+        for relation in relations {
+            let lower = relation.to_ascii_lowercase();
+            if reached.insert(lower.clone()) {
+                queue.push(lower);
+            }
+        }
+    }
+    reached
 }
 
 pub fn obfuscation_blocked_classes(
@@ -979,6 +1049,8 @@ fn disabled_module_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Opt
         }
         let (sa, stripped_a) = ctx.strip(&a);
         let (sb, stripped_b) = ctx.strip(&b);
+        let (sa, dropped) = drop_inert_interception_misses(c, &sa, &sb);
+        let stripped_a = stripped_a || dropped;
         // Claim only when removing disabled-module entries (from at least one
         // side) makes the files identical — so any *other* difference keeps the
         // file flagged.
@@ -1009,6 +1081,74 @@ Omitting disabled modules is the improvement: the config never references code t
         items,
         verified: true,
     })
+}
+
+/// Drop archive-only `'X' => false,` rows from `interception.php`.
+///
+/// The backstop for a chase with no natural end. The oracle compiled every
+/// module on disk, so its interception map also names whatever the DISABLED
+/// modules' dependency closure dragged in — the module's own classes (stripped
+/// by name), the core interfaces they implement (the evidence rules), and then
+/// their vendor libraries' ancestors and PHP's own built-ins, which live in no
+/// module directory at all. Following every hop of that graph is unbounded; on
+/// one store it went module source -> `Gt\Dom` -> Guzzle -> `Psr\Http\Message`.
+///
+/// What makes stopping safe is the VALUE. `false` records "this type has no
+/// plugins", and `Interception\Config\Config::hasPlugins()` recomputes when a key
+/// is absent, so a missing `false` row costs a cache entry and changes no
+/// behaviour. A missing `true` row is the opposite — interception silently off —
+/// and is deliberately NOT dropped, so a real regression still fails the diff.
+///
+/// Narrow by construction: only this one file, only rows the output lacks
+/// entirely, and only when the store HAS disabled modules — a fully-enabled
+/// store is still compared exactly. A class magecommand missed outright would
+/// also lose its generated files and its `arguments` entries, and those stay
+/// flagged; the inert `false` row was never the load-bearing signal.
+fn drop_inert_interception_misses(rel: &str, archive: &str, output: &str) -> (String, bool) {
+    if !rel.ends_with("interception.php") {
+        return (archive.to_owned(), false);
+    }
+    let mut present: HashSet<&str> = HashSet::new();
+    // lowercased key -> value, for the case-alias rule.
+    let mut by_lower: HashMap<String, &str> = HashMap::new();
+    for line in output.lines() {
+        let Some(key) = top_level_entry_key(line) else { continue };
+        present.insert(key);
+        by_lower.insert(key.to_ascii_lowercase(), entry_value(line));
+    }
+
+    let mut out = String::with_capacity(archive.len());
+    let mut dropped = false;
+    for line in archive.lines() {
+        if let Some(key) = top_level_entry_key(line) {
+            if !present.contains(key) {
+                // (a) an inert `false` row the output simply lacks, and
+                // (b) a case-variant ALIAS of a row the output does have, with
+                //     the same verdict — PHP class names are case-insensitive, so
+                //     the two keys denote one type. The oracle records both when
+                //     a di.xml `<type name=>` spells a class differently from its
+                //     declaration (`…\KingDebtor` in config, `class Kingdebtor` in
+                //     source); magecommand canonicalizes to the declared case and
+                //     writes the single key. Both sides generate the interceptor
+                //     at the same path, so the code is identical either way.
+                let value = entry_value(line);
+                let inert = value == "false";
+                let alias = by_lower.get(&key.to_ascii_lowercase()) == Some(&value);
+                if inert || alias {
+                    dropped = true;
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    (out, dropped)
+}
+
+/// The scalar of a flat `'Key' => value,` row, or `""` if the line is not one.
+fn entry_value(line: &str) -> &str {
+    line.trim_end().strip_suffix(',').unwrap_or("").rsplit("=> ").next().unwrap_or("")
 }
 
 /// True when every line of `a` appears in `b` in order — i.e. `b` is `a` with
@@ -1056,6 +1196,7 @@ fn extra_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownG
         }
         let (sa, _) = ctx.strip(&a);
         let (sb, _) = ctx.strip(&b);
+        let (sa, _) = drop_inert_interception_misses(c, &sa, &sb);
         // Claim only when the output strictly grew and contains every archive line
         // in order — additions only. `sa.len() < sb.len()` also rules out the
         // equal case (which rule 5 already handles).
@@ -1150,6 +1291,7 @@ fn class_scanner_exclude_regex(
         }
         let (sa, _) = ctx.strip(&a);
         let (sb, _) = ctx.strip(&b);
+        let (sa, _) = drop_inert_interception_misses(c, &sa, &sb);
         let ca = canonicalize_class_scanner_regex(&sa);
         let cb = canonicalize_class_scanner_regex(&sb);
         // Only relevant when a scanner regex was actually present and differed;
@@ -1288,11 +1430,15 @@ pub fn residual_report(
     archive_text: &str,
     output_text: &str,
     disabled: &HashSet<String>,
+    blocked: &HashSet<String>,
     reachable: &HashSet<String>,
 ) -> String {
-    let no_blocked = HashSet::new();
-    let (sa, _) = strip_expected_entries(archive_text, disabled, &no_blocked, reachable);
-    let (sb, _) = strip_expected_entries(output_text, disabled, &no_blocked, reachable);
+    // EVERY set the classifiers use, or this reports a divergence that was in
+    // fact explained. It has now misled twice: first with no sets at all, then
+    // with `reachable` supplied but `blocked` still empty, which pointed at an
+    // obfuscation-blocked Anowave class the classifier was already stripping.
+    let (sa, _) = strip_expected_entries(archive_text, disabled, blocked, reachable);
+    let (sb, _) = strip_expected_entries(output_text, disabled, blocked, reachable);
     let na = canonicalize_class_scanner_regex(&sa);
     let nb = canonicalize_class_scanner_regex(&sb);
     let a: Vec<&str> = na.lines().collect();
@@ -1731,6 +1877,44 @@ mod tests {
     }
 
     #[test]
+    fn inert_interception_misses_drop_but_a_missing_true_row_survives() {
+        // The backstop: an archive-only `=> false` row is a cache entry Magento
+        // recomputes when absent, so dropping it is safe. An archive-only
+        // `=> true` row means interception silently off — it must survive.
+        let archive = "  'A\\\\B' => false,\n  'C\\\\D' => true,\n  'E\\\\F' => false,\n";
+        let output = "  'E\\\\F' => false,\n";
+        let (out, dropped) = drop_inert_interception_misses("interception.php", archive, output);
+        assert!(dropped);
+        assert_eq!(out, "  'C\\\\D' => true,\n  'E\\\\F' => false,\n");
+
+        // Scoped to that one file: an area config is never touched.
+        let (out, dropped) = drop_inert_interception_misses("global.php", archive, output);
+        assert!(!dropped);
+        assert_eq!(out, archive);
+    }
+
+    #[test]
+    fn global_namespace_types_can_be_candidates_but_lowercase_keys_cannot() {
+        // `DOMDocument` has no namespace separator yet is a real interception
+        // entry; requiring one left it unexplained. Section headers and
+        // Magento's lowercase-initial virtual types must still be excluded.
+        assert!(is_type_shaped_key("DOMDocument"));
+        assert!(is_type_shaped_key("Magento\\\\Catalog\\\\Model\\\\Product"));
+        assert!(!is_type_shaped_key("arguments"));
+        assert!(!is_type_shaped_key("nonLazyTypes"));
+        assert!(!is_type_shaped_key("adminhtmlConfigScope"));
+    }
+
+    #[test]
+    fn type_hints_keep_global_names_and_drop_scalars() {
+        assert_eq!(hinted_type_names("\\\\DOMDocument"), vec!["DOMDocument"]);
+        assert_eq!(hinted_type_names("?DOMDocument"), vec!["DOMDocument"]);
+        assert!(hinted_type_names("string").is_empty());
+        assert!(hinted_type_names("?int").is_empty());
+        assert!(hinted_type_names("self").is_empty());
+    }
+
+    #[test]
     fn every_generator_kind_counts_as_an_artifact_not_just_interceptors() {
         // Driven by the codegen registry, so the kinds this recognizes cannot
         // drift from the kinds the compile emits. `…Extension` /
@@ -1804,14 +1988,15 @@ mod tests {
         let c = classify(&report(&missing, &[], &[]), &bare);
         assert_eq!(c.missing, vec!["code/Good/Mod/Model/Type/OnepageFactory.php"]);
 
-        let types = HashSet::from(["Good\\Mod\\Model\\Type\\OnepageFactory".to_string()]);
+        // The evidence set is lowercased — PHP class names are case-insensitive.
+        let types = HashSet::from(["good\\mod\\model\\type\\onepagefactory".to_string()]);
         let ctx = ClassifyCtx { disabled_types: &types, ..bare };
         let c = classify(&report(&missing, &[], &[]), &ctx);
         assert!(c.missing.is_empty());
         assert_eq!(c.known[0].kind, KnownKind::DisabledModuleReachableType);
 
         // A DIFFERENT type in the evidence set must not claim this file.
-        let other = HashSet::from(["Good\\Mod\\Model\\Type\\SomethingElse".to_string()]);
+        let other = HashSet::from(["good\\mod\\model\\type\\somethingelse".to_string()]);
         let ctx = ClassifyCtx { disabled_types: &other, ..bare };
         let c = classify(&report(&missing, &[], &[]), &ctx);
         assert_eq!(c.missing, vec!["code/Good/Mod/Model/Type/OnepageFactory.php"]);
@@ -1843,10 +2028,12 @@ mod tests {
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, c).unwrap();
         };
+        // A `=> true` row: `drop_inert_interception_misses` deliberately leaves
+        // those alone, so this exercises the evidence rule and not the backstop.
         write(
             archive.path(),
             "interception.php",
-            "<?php return array (\n  'Good\\\\Mod\\\\A' => true,\n  'Good\\\\Mod\\\\IfaceOnlyBadImplements' => false,\n);",
+            "<?php return array (\n  'Good\\\\Mod\\\\A' => true,\n  'Good\\\\Mod\\\\IfaceOnlyBadImplements' => true,\n);",
         );
         write(
             output.path(),

@@ -2021,9 +2021,15 @@ fn compare(
             &disabled_modules,
             &disabled_types,
         );
+        let blocked = magecommand_engine::obfuscation_blocked_classes(
+            &report,
+            archive,
+            output,
+            magento.as_ref(),
+        );
         print!(
             "{}",
-            magecommand_engine::residual_report(&a, &b, &disabled_modules, &reachable)
+            magecommand_engine::residual_report(&a, &b, &disabled_modules, &blocked, &reachable)
         );
         return Ok(ExitCode::SUCCESS);
     }

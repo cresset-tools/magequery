@@ -266,6 +266,10 @@ impl<'a> ExprParser<'a> {
             }
             Some(b'\'' | b'"') => self.parse_string(),
             Some(b) if b.is_ascii_digit() => self.parse_number(),
+            // `.5` — the other half of DNUM, a dot with no leading digits.
+            Some(b'.') if matches!(self.cur.peek_at(1), Some(b) if b.is_ascii_digit()) => {
+                self.parse_number()
+            }
             Some(b'\\') => self.parse_name(),
             Some(_) if self.cur.at_ident_start() => self.parse_name(),
             _ => self.opaque(),
@@ -389,8 +393,18 @@ impl<'a> ExprParser<'a> {
         while matches!(self.cur.peek(), Some(b) if b.is_ascii_digit() || b == b'_') {
             self.cur.bump();
         }
-        if self.cur.peek() == Some(b'.') && matches!(self.cur.peek_at(1), Some(b) if b.is_ascii_digit())
-        {
+        // PHP's DNUM is `[0-9]*\.[0-9]+ | [0-9]+\.[0-9]*`: the fractional digits
+        // are OPTIONAL, so `0.` and `1.` are floats. Requiring a digit after the
+        // dot left the dot behind as a stray concatenation operator, the
+        // expression went opaque, and the parameter default was dropped
+        // altogether — which turns an inherited-optional parameter into a
+        // required one and FATALS at class load. Magento_Bundle's
+        // `Calculator::getOptionsAmount($baseAmount = 0., …)` is exactly this.
+        //
+        // Consuming the dot unconditionally matches PHP's own lexer. It cannot
+        // swallow a concatenation: `1 . 'x'` and `1 .'x'` have a space after the
+        // digits, and `1.'x'` is a syntax error in PHP too.
+        if self.cur.peek() == Some(b'.') {
             is_float = true;
             self.cur.bump();
             while matches!(self.cur.peek(), Some(b) if b.is_ascii_digit() || b == b'_') {
@@ -811,6 +825,29 @@ fn to_php_string(v: &ConstValue) -> Result<String, EvalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PHP's `DNUM` is `[0-9]*\.[0-9]+ | [0-9]+\.[0-9]*` — the digits on EITHER
+    /// side of the dot are optional. `0.` used to leave the dot behind as a
+    /// stray concatenation operator, so the whole expression went opaque and a
+    /// parameter default was dropped: an inherited-optional parameter became
+    /// required, which fatals at class load. Magento_Bundle's
+    /// `Calculator::getOptionsAmount($baseAmount = 0., …)` hits this.
+    #[test]
+    fn float_literals_with_an_open_dot() {
+        let f = |src: &str| parse_const_expr(src, "", &[]).expr;
+        assert_eq!(f("0."), ConstExpr::Float(0.0));
+        assert_eq!(f("1."), ConstExpr::Float(1.0));
+        assert_eq!(f(".5"), ConstExpr::Float(0.5));
+        assert_eq!(f("0.5"), ConstExpr::Float(0.5));
+        // Unchanged forms.
+        assert_eq!(f("0"), ConstExpr::Int(0));
+        assert_eq!(f("1e3"), ConstExpr::Float(1000.0));
+        assert_eq!(f("0x1F"), ConstExpr::Int(31));
+        // Consuming the dot must not swallow a concatenation: PHP separates
+        // those with whitespace, and `1.'x'` is a syntax error there too.
+        assert!(matches!(f("'a' . 'b'"), ConstExpr::BinOp { .. }));
+        assert!(matches!(f("1 . 'x'"), ConstExpr::BinOp { .. }));
+    }
 
     struct NoLookup;
     impl ConstLookup for NoLookup {
