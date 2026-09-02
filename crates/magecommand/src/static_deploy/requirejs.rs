@@ -434,9 +434,18 @@ pub fn min_resolver_excludes(config: &ConfigSet, modules: &[ModuleRef]) -> Vec<S
 /// array) means we cannot know the values statically: that plugin is reported to the
 /// caller instead of being silently dropped or half-applied.
 ///
-/// Ordering: these are `around` plugins that append AFTER `$proceed` returns, so
-/// the innermost runs first. `plugins` must arrive in Magento's execution order
-/// (outermost first), and the appends are therefore applied in REVERSE.
+/// Ordering depends on the INTERCEPTION KIND, which is why the plugin's own
+/// source decides it:
+///
+/// - an **`after`** plugin receives the previous result and appends to it, so a
+///   chain of them applies in execution order (ascending `sortOrder`);
+/// - an **`around`** plugin appends after `$proceed` returns, so the innermost
+///   runs first — reverse execution order — and all of those land before any
+///   `after` plugin sees the array.
+///
+/// Reversing unconditionally (correct only for `around`) emitted a real store's
+/// two `after` plugins backwards, so `requirejs-min-resolver.js` — and every JS
+/// bundle that embeds it — differed from the real deploy.
 pub fn plugin_min_excludes(
     magento: &magequery_core::Magento,
 ) -> (Vec<String>, Vec<String>) {
@@ -452,9 +461,9 @@ pub fn plugin_min_excludes(
         }
     }
 
-    let (mut excludes, mut unknown) = (Vec::new(), Vec::new());
-    // Innermost appends first => reverse of execution order.
-    for class in classes.iter().rev() {
+    // Walked in EXECUTION order; each plugin's appends are bucketed by kind.
+    let (mut arounds, mut afters, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
+    for class in classes.iter() {
         let Some(file) = magento.class_file(class) else {
             unknown.push(format!("{} (source not found)", class.as_str()));
             continue;
@@ -464,10 +473,24 @@ pub fn plugin_min_excludes(
             continue;
         };
         match literal_exclude_appends(&src) {
-            Some(vals) => excludes.extend(vals),
+            Some(vals) => {
+                if src.contains("function aroundGetExcludes") {
+                    arounds.push(vals);
+                } else {
+                    afters.extend(vals);
+                }
+            }
             None => unknown.push(class.as_str().to_string()),
         }
     }
+
+    // The around chain unwinds innermost-first, and every `after` plugin runs
+    // once that chain has returned.
+    let mut excludes: Vec<String> = Vec::new();
+    for vals in arounds.into_iter().rev() {
+        excludes.extend(vals);
+    }
+    excludes.extend(afters);
     (excludes, unknown)
 }
 

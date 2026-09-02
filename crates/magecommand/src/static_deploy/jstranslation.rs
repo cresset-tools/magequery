@@ -431,7 +431,13 @@ pub fn merged_dictionary(
 /// `'foo' + 'bar'` becomes `'foobar'`).
 fn glue_concatenations(content: &str) -> String {
     let bytes = content.as_bytes();
-    let mut out = String::with_capacity(content.len());
+    // Collected as BYTES and decoded once at the end. Pushing `byte as char`
+    // instead re-encodes every non-ASCII byte as its own code point, so
+    // `You\u{2019}re` became `You\u{e2}\u{80}\u{99}re` — the mangled phrase then
+    // matches no dictionary key and is silently dropped from
+    // `js-translation.json`. Only whole ASCII runs are ever removed here, so the
+    // surviving bytes stay valid UTF-8.
+    let mut out: Vec<u8> = Vec::with_capacity(content.len());
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i];
@@ -453,12 +459,10 @@ fn glue_concatenations(content: &str) -> String {
                 }
             }
         }
-        // push this byte (content is valid UTF-8; ASCII-safe indexing since we
-        // only special-case ASCII quotes/`+`).
-        out.push(c as char);
+        out.push(c);
         i += 1;
     }
-    out
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).into_owned())
 }
 
 /// Unescape `\'`→`'` and `\"`→`"` like `str_replace(["\'", '\"'], …)`.
@@ -925,5 +929,27 @@ mod tests {
         let dict = BTreeMap::new();
         let phrases = HashSet::new();
         assert_eq!(js_translation_json(&dict, &phrases), "[]");
+    }
+
+
+    /// A phrase with a non-ASCII character must survive the scanner byte-for-byte.
+    /// `glue_concatenations` used to push each byte as its own `char`, so
+    /// `You\u{2019}re` came out as `You\u{e2}\u{80}\u{99}re`; that key matches no
+    /// dictionary entry, so the phrase vanished from `js-translation.json` — two
+    /// admin strings on a real store, and every non-ASCII source phrase in
+    /// principle.
+    #[test]
+    fn non_ascii_phrases_survive_extraction() {
+        let mut out = HashSet::new();
+        phrases_in(
+            "<em data-bind=\"i18n: 'You\u{2019}re on the Open Source Edition.'\"></em>",
+            &mut out,
+        );
+        phrases_in("<a data-bind=\"i18n: '\u{279c} Explore the list.'\"></a>", &mut out);
+        phrases_in("<p data-bind=\"html: $t('Caf\u{e9} r\u{e9}sum\u{e9}')\"></p>", &mut out);
+
+        assert!(out.contains("You\u{2019}re on the Open Source Edition."), "got {out:?}");
+        assert!(out.contains("\u{279c} Explore the list."), "got {out:?}");
+        assert!(out.contains("Caf\u{e9} r\u{e9}sum\u{e9}"), "got {out:?}");
     }
 }
