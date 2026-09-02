@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.4](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.3...magequery-v0.17.4) (2026-09-02)
+
+
+### Bug Fixes
+
+* **magecommand:** di compile — `xsi:type="null"` unsets an argument, not passes null ([#107](https://github.com/cresset-tools/magequery/issues/107)) ([77381ca](https://github.com/cresset-tools/magequery/commit/77381caad1023e97852009e90ee0ee5161ad5758))
+
 ## [0.17.3](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.2...magequery-v0.17.3) (2026-09-01)
 
 
