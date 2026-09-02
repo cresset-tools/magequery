@@ -2087,6 +2087,14 @@ fn compare(
         &disabled_modules,
         &disabled_types,
     );
+    let outside_scan = magecommand_engine::outside_scan_types(
+        &report,
+        archive,
+        output,
+        magento.as_ref(),
+        &disabled_modules,
+        &disabled_reachable,
+    );
     let ctx = magecommand_engine::ClassifyCtx {
         archive,
         output,
@@ -2094,6 +2102,7 @@ fn compare(
         obfuscation_blocked: &obfuscation_blocked,
         disabled_reachable: &disabled_reachable,
         disabled_types: &disabled_types,
+        outside_scan: &outside_scan,
     };
     let classified = magecommand_engine::classify(&report, &ctx);
 

@@ -32,6 +32,11 @@ pub enum KnownKind {
     /// A metadata DI-config file (`global.php`, `<area>.php`) that is identical
     /// once the top-level entries for classes in disabled modules are removed.
     DisabledModuleMetadata,
+    /// An entry for a class whose FILE lies outside every path the compile
+    /// scans — a composer package that registers itself as a MODULE from
+    /// `registration.php` but ships no `etc/module.xml` and is absent from
+    /// config.php, so it is not an enabled module.
+    OutsideScanPaths,
     /// A type the archive's compile reached ONLY by way of a disabled module —
     /// its own name belongs to an enabled module (so the name-prefix rule can't
     /// see it), but nothing in the enabled universe pulls it into the compile:
@@ -73,6 +78,9 @@ impl KnownKind {
             }
             KnownKind::DisabledModuleMetadata => {
                 "DI-config entries for disabled modules (Magento 2.4.9 behavior)"
+            }
+            KnownKind::OutsideScanPaths => {
+                "Classes outside the compile's scan paths (not an enabled module)"
             }
             KnownKind::DisabledModuleReachableType => {
                 "Types reachable only through disabled modules (Magento 2.4.9 behavior)"
@@ -157,17 +165,27 @@ pub struct ClassifyCtx<'a> {
     /// while phpgt declares `Gt\\Dom\\Document`. Look names up with
     /// `to_ascii_lowercase`.
     pub disabled_types: &'a HashSet<String>,
+    /// Entry keys (escaped metadata form) whose class file lies outside every
+    /// path the compile scans — see [`outside_scan_types`].
+    pub outside_scan: &'a HashSet<String>,
 }
 
 impl ClassifyCtx<'_> {
     /// [`strip_expected_entries`] with this context's three expected-key sets.
     fn strip(&self, text: &str) -> (String, bool) {
-        strip_expected_entries(
+        let (text, a) = strip_expected_entries(
             text,
             self.disabled_modules,
             self.obfuscation_blocked,
             self.disabled_reachable,
-        )
+        );
+        let (text, b) = strip_expected_entries(
+            &text,
+            self.disabled_modules,
+            self.obfuscation_blocked,
+            self.outside_scan,
+        );
+        (text, a || b)
     }
 }
 
@@ -239,6 +257,29 @@ class; magecommand never executes PHP, so the constructor is statically invisibl
 arguments entry honestly degrades to NULL (a compile finding records each one). At runtime the \
 object manager falls back to reflection for a NULL entry, so the store still works — the row is \
 just uncached. This is the one place the no-PHP-execution guarantee costs fidelity."
+                    .to_owned(),
+            items,
+            verified: true,
+        });
+    }
+
+    // 5c. Classes whose file sits outside every scan path — a component that
+    //    registers as a module without being one. Stripped inside 5b–7 too.
+    if !ctx.outside_scan.is_empty() {
+        let mut items: Vec<String> =
+            ctx.outside_scan.iter().map(|k| k.replace("\\\\", "\\")).collect();
+        items.sort();
+        known.push(KnownGroup {
+            kind: KnownKind::OutsideScanPaths,
+            title: KnownKind::OutsideScanPaths.title().to_owned(),
+            explanation:
+                "These classes live in a composer package that registers itself as a MODULE from \
+`registration.php` but ships no `etc/module.xml` and never appears in app/etc/config.php, so it is \
+not an enabled module. The archive's compiler walks the ComponentRegistrar paths directly and \
+compiled the package anyway; magecommand discovers modules by module.xml plus the enabled list, \
+and since 2.4.9 compiles only enabled modules. Verified by location, not by name: each class \
+resolves to a real file under none of the compile's scan roots (enabled module directories, the \
+framework library paths, setup/src), so a missing framework or module entry still fails the diff."
                     .to_owned(),
             items,
             verified: true,
@@ -847,6 +888,66 @@ fn internal_relations_ci(lower: &str) -> Option<&'static [&'static str]> {
 /// real gate; this only keeps obvious non-types out of the candidate pool.
 fn is_type_shaped_key(key: &str) -> bool {
     key.contains("\\\\") || key.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+}
+
+/// Archive-only entries whose class FILE lies outside every path the compile
+/// scans.
+///
+/// A composer package can call
+/// `ComponentRegistrar::register(ComponentRegistrar::MODULE, 'Vendor_Name', …)`
+/// from `registration.php` while shipping no `etc/module.xml` and never
+/// appearing in `config.php` — bigbridge/deployersupport does exactly this. The
+/// archive's compiler walks the ComponentRegistrar paths directly, so it scans
+/// and compiles the package; magecommand discovers modules by `etc/module.xml`
+/// and an enabled-list entry, so it does not. Neither is an enabled module by
+/// 2.4.9's rules, and its classes cannot be instantiated through the compiled
+/// config anyway.
+///
+/// Evidence is the file's location, not the name: the key is claimed only when
+/// the class resolves to a real file that sits under none of the compile's scan
+/// roots (enabled module directories, the framework library paths, `setup/src`).
+/// A class the resolver cannot place, or one inside those roots, stays flagged —
+/// so a genuinely missing framework or module entry is never absorbed.
+pub fn outside_scan_types(
+    report: &CompareReport,
+    archive: &Path,
+    output: &Path,
+    magento: Option<&magequery_core::Magento>,
+    disabled_modules: &HashSet<String>,
+    already_explained: &HashSet<String>,
+) -> HashSet<String> {
+    let Some(magento) = magento else { return HashSet::new() };
+    let candidates = archive_only_entry_keys(report, archive, output, disabled_modules);
+    if candidates.is_empty() {
+        return HashSet::new();
+    }
+
+    let mut roots: Vec<std::path::PathBuf> = magento
+        .modules()
+        .iter()
+        .filter(|m| m.enabled)
+        .map(|m| m.path.clone())
+        .collect();
+    roots.extend(magento.library_paths().iter().cloned());
+    roots.push(magento.root().join("setup/src"));
+    // `generated/` is compile OUTPUT, not a package outside the module system.
+    // Omitting it made every generated factory resolve "outside the scan" and
+    // get absorbed here instead of by the rule that actually explains it —
+    // nine of them on one store, all already covered by the disabled-module
+    // evidence. A rule this broad must not be the one that claims them.
+    roots.push(magento.root().join("generated"));
+
+    candidates
+        .into_iter()
+        // A more specific rule has first claim, so the attribution stays honest.
+        .filter(|key| !already_explained.contains(key))
+        .filter(|key| {
+            let name = magequery_core::ClassName::new(key.replace("\\\\", "\\"));
+            magento
+                .class_file(&name)
+                .is_some_and(|file| !roots.iter().any(|r| file.starts_with(r)))
+        })
+        .collect()
 }
 
 /// Every type the DISABLED modules put in front of the archive's compiler.
@@ -1506,6 +1607,7 @@ mod tests {
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
+            outside_scan: no_blocked(),
         }
     }
 
@@ -1591,6 +1693,7 @@ mod tests {
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
+            outside_scan: no_blocked(),
         };
         let r = report(&[], &[], &["global.php", "crontab.php"]);
         let c = classify(&r, &ctx);
@@ -1650,6 +1753,7 @@ mod tests {
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
+            outside_scan: no_blocked(),
         };
         let r = report(&[], &[], &["additions.php", "changed.php", "removed.php"]);
         let c = classify(&r, &ctx);
@@ -1744,6 +1848,7 @@ mod tests {
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
+            outside_scan: no_blocked(),
         };
         let r = report(&[], &[], &["A/Interceptor.php", "B/Interceptor.php"]);
         let c = classify(&r, &ctx);
@@ -1788,6 +1893,7 @@ mod tests {
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
+            outside_scan: no_blocked(),
         };
         let r = report(&[], &[], &["P/Proxy.php"]);
         let c = classify(&r, &ctx);
@@ -1829,6 +1935,7 @@ mod tests {
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
+            outside_scan: no_blocked(),
         };
         let r = report(&[], &[], &["interception.php"]);
         let c = classify(&r, &ctx);
@@ -1858,6 +1965,7 @@ mod tests {
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
+            outside_scan: no_blocked(),
         };
         let missing = [
             "code/Bad/Mod/Block/Thing/Interceptor.php",
@@ -1984,6 +2092,7 @@ mod tests {
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
+            outside_scan: no_blocked(),
         };
         let c = classify(&report(&missing, &[], &[]), &bare);
         assert_eq!(c.missing, vec!["code/Good/Mod/Model/Type/OnepageFactory.php"]);
@@ -2051,6 +2160,7 @@ mod tests {
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
+            outside_scan: no_blocked(),
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &bare);
         assert_eq!(c.changed, vec!["interception.php"]);
@@ -2065,6 +2175,7 @@ mod tests {
             obfuscation_blocked: no_blocked(),
             disabled_reachable: &reachable,
             disabled_types: no_blocked(),
+            outside_scan: no_blocked(),
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &ctx);
         assert!(c.changed.is_empty());
@@ -2184,6 +2295,7 @@ mod tests {
             obfuscation_blocked: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
+            outside_scan: no_blocked(),
         };
         let r = report(&[], &[], &["global.php", "other.php"]);
         let c = classify(&r, &ctx);

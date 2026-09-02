@@ -368,7 +368,17 @@ impl<'a> ArgsCtx<'a> {
             } else {
                 vn_pattern()
             };
-            if let Some(cfg) = map_get(&configured, &param.name) {
+            // `ArgumentsResolver::getResolvedConstructorArguments` gates the
+            // configured value behind `isset($configuredArguments[$name])`, and
+            // **isset() is false for null**. So `<argument name="x"
+            // xsi:type="null"/>` does not pass null — it UNSETS the argument and
+            // lets the default resolution stand, which is exactly how a module
+            // reverts an inherited argument for backward compatibility.
+            // Amasty_CompanyAccount does this for four constructor params;
+            // honouring the null emitted `_vn_` where the oracle injects the
+            // type's interceptor.
+            if let Some(cfg) = map_get(&configured, &param.name).filter(|c| !matches!(c, Cfg::Null))
+            {
                 arg = if class_ty.is_some() {
                     self.configured_instance(cfg, instance_name, &param.name)
                 } else if let Cfg::Map(entries) = cfg {
@@ -469,7 +479,9 @@ impl<'a> ArgsCtx<'a> {
         let parsed = parse_const_expr(default, definer_ns, definer_uses);
         let lookup = DefsLookup { defs: self.defs };
         match eval(&parsed, &EvalCtx::new(&lookup, Some(definer_fqcn))) {
-            Ok(v) => coerce_to_declared_float(const_to_cfg(&v), param.ty.as_deref()),
+            Ok(v) => {
+                coerce_to_declared_float(const_to_cfg(&v), param.ty.as_deref(), &parsed.expr)
+            }
             Err(e) => {
                 // An enum-case default can't fold (an enum case is an object, not
                 // a scalar) — Magento keeps it as the constant reference. Emit the
@@ -666,14 +678,25 @@ fn const_to_cfg(value: &ConstValue) -> Cfg {
 /// deprecation that Magento's dev-mode ErrorHandler turns fatal, so the real
 /// compiler cannot even process such a class there — the shape exists only on
 /// older-PHP stores, and the 2.4.5 store 2.4.5 archive is its ground truth.
-/// An int default on a `float`-declared parameter is a FLOAT to reflection.
+/// An int LITERAL default on a `float`-declared parameter is a FLOAT to
+/// reflection.
 ///
-/// `float $price = 0` — PHP coerces the literal to the declared type, so
-/// `getDefaultValue()` returns `0.0` and `var_export` writes `0.0`. Emitting the
-/// integer `0` diverged from the oracle on a real store (loki-checkout's
-/// `Timeframe`). Only a plain `float`/`?float` coerces: a union like `int|float`
-/// keeps the int, exactly as PHP does.
-fn coerce_to_declared_float(value: Cfg, ty: Option<&str>) -> Cfg {
+/// `float $price = 0` — PHP's compiler coerces the literal into the declared
+/// type, so `getDefaultValue()` returns `0.0` and `var_export` writes `0.0`.
+///
+/// A **constant** default is not coerced: `float $boost =
+/// QueryInterface::DEFAULT_BOOST_VALUE` where the constant is int `1` reflects as
+/// `1`, not `1.0` — the constant expression is evaluated on its own terms and the
+/// parameter's declared type never touches it. Coercing those too was a
+/// regression against a real store, so the literal check is load-bearing, not
+/// belt-and-braces.
+///
+/// Only a plain `float`/`?float` coerces: a union like `int|float` keeps the int,
+/// exactly as PHP does.
+fn coerce_to_declared_float(value: Cfg, ty: Option<&str>, expr: &ConstExpr) -> Cfg {
+    if !matches!(expr, ConstExpr::Int(_)) {
+        return value;
+    }
     let ty = ty.map(|t| t.trim().trim_start_matches('?'));
     match (value, ty) {
         (Cfg::Int(n), Some(t)) if t.eq_ignore_ascii_case("float") => Cfg::Float(n as f64),
@@ -1181,6 +1204,28 @@ fn preg_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PHP's compiler coerces a LITERAL default into the declared scalar type,
+    /// so `float $price = 0` reflects as `0.0`. A CONSTANT default is evaluated
+    /// on its own terms and keeps its type: `float $boost = SomeIface::DEFAULT`
+    /// where the constant is int `1` reflects as `1`, not `1.0`. Coercing the
+    /// constant case too was a regression against a real store, so the literal
+    /// gate is load-bearing.
+    #[test]
+    fn only_literal_int_defaults_coerce_to_a_declared_float() {
+        let lit = ConstExpr::Int(0);
+        assert_eq!(coerce_to_declared_float(Cfg::Int(0), Some("float"), &lit), Cfg::Float(0.0));
+        assert_eq!(coerce_to_declared_float(Cfg::Int(1), Some("?float"), &lit), Cfg::Float(1.0));
+
+        // A class constant that evaluated to an int keeps the int.
+        let konst = ConstExpr::ClassConst { class: ClassRef::Fqcn(0), name: "DEFAULT".into() };
+        assert_eq!(coerce_to_declared_float(Cfg::Int(1), Some("float"), &konst), Cfg::Int(1));
+
+        // Non-float declarations, and unions, are untouched either way.
+        assert_eq!(coerce_to_declared_float(Cfg::Int(1), Some("int"), &lit), Cfg::Int(1));
+        assert_eq!(coerce_to_declared_float(Cfg::Int(1), Some("int|float"), &lit), Cfg::Int(1));
+        assert_eq!(coerce_to_declared_float(Cfg::Int(1), None, &lit), Cfg::Int(1));
+    }
 
     fn modifier(class: &str, sort_order: Option<i64>) -> Cfg {
         let mut m = vec![(CfgKey::s("class"), Cfg::Str(class.to_owned()))];
