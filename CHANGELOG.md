@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.5](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.4...magequery-v0.17.5) (2026-09-03)
+
+
+### Bug Fixes
+
+* **magecommand:** di verify — resolve a generated name through its dispatch subject ([#112](https://github.com/cresset-tools/magequery/issues/112)) ([be6e786](https://github.com/cresset-tools/magequery/commit/be6e786455330dffd8f0cbed2d411b399a9bcc45))
+* **magecommand:** static deploy — after-plugin exclude order, and non-ASCII js phrases ([#111](https://github.com/cresset-tools/magequery/issues/111)) ([e2b2b20](https://github.com/cresset-tools/magequery/commit/e2b2b20cbb9b6032061e934e982e2a725bc9c8b6))
+
 ## [0.17.4](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.3...magequery-v0.17.4) (2026-09-02)
 
 
