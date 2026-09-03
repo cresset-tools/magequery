@@ -2027,9 +2027,21 @@ fn compare(
             output,
             magento.as_ref(),
         );
+        let outside = magecommand_engine::outside_scan_types(
+            &report,
+            archive,
+            output,
+            magento.as_ref(),
+            &disabled_modules,
+            &reachable,
+        );
+        // Every expected-key set, unioned — see `residual_report`.
+        let mut expected = blocked;
+        expected.extend(reachable);
+        expected.extend(outside);
         print!(
             "{}",
-            magecommand_engine::residual_report(&a, &b, &disabled_modules, &blocked, &reachable)
+            magecommand_engine::residual_report(&a, &b, &disabled_modules, &expected)
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -2095,6 +2107,8 @@ fn compare(
         &disabled_modules,
         &disabled_reachable,
     );
+    let outside_scan_files =
+        magecommand_engine::outside_scan_artifacts(&report, magento.as_ref());
     let ctx = magecommand_engine::ClassifyCtx {
         archive,
         output,
@@ -2103,6 +2117,7 @@ fn compare(
         disabled_reachable: &disabled_reachable,
         disabled_types: &disabled_types,
         outside_scan: &outside_scan,
+        outside_scan_files: &outside_scan_files,
     };
     let classified = magecommand_engine::classify(&report, &ctx);
 

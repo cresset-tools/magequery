@@ -168,6 +168,9 @@ pub struct ClassifyCtx<'a> {
     /// Entry keys (escaped metadata form) whose class file lies outside every
     /// path the compile scans — see [`outside_scan_types`].
     pub outside_scan: &'a HashSet<String>,
+    /// Missing generated-artifact PATHS whose subject class lies outside every
+    /// scan path — see [`outside_scan_artifacts`].
+    pub outside_scan_files: &'a HashSet<String>,
 }
 
 impl ClassifyCtx<'_> {
@@ -264,10 +267,22 @@ just uncached. This is the one place the no-PHP-execution guarantee costs fideli
     }
 
     // 5c. Classes whose file sits outside every scan path — a component that
-    //    registers as a module without being one. Stripped inside 5b–7 too.
-    if !ctx.outside_scan.is_empty() {
+    //    registers as a module without being one. Stripped inside 5b–7 too, and
+    //    the same component's generated artifacts are claimed out of `missing`
+    //    here so the two halves never disagree.
+    let mut outside_files: Vec<String> = Vec::new();
+    missing.retain(|m| {
+        if ctx.outside_scan_files.contains(m) {
+            outside_files.push(m.clone());
+            false
+        } else {
+            true
+        }
+    });
+    if !ctx.outside_scan.is_empty() || !outside_files.is_empty() {
         let mut items: Vec<String> =
             ctx.outside_scan.iter().map(|k| k.replace("\\\\", "\\")).collect();
+        items.extend(outside_files);
         items.sort();
         known.push(KnownGroup {
             kind: KnownKind::OutsideScanPaths,
@@ -908,6 +923,79 @@ fn is_type_shaped_key(key: &str) -> bool {
 /// roots (enabled module directories, the framework library paths, `setup/src`).
 /// A class the resolver cannot place, or one inside those roots, stays flagged —
 /// so a genuinely missing framework or module entry is never absorbed.
+/// Every path the compile scans: the ENABLED modules, the framework library
+/// paths, `setup/src`, and `generated/`.
+///
+/// `generated/` belongs here because it is compile OUTPUT, not a package outside
+/// the module system. Omitting it made every generated factory resolve "outside
+/// the scan" and be absorbed by the broad rule instead of the specific one that
+/// actually explains it.
+fn scan_roots(magento: &magequery_core::Magento) -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = magento
+        .modules()
+        .iter()
+        .filter(|m| m.enabled)
+        .map(|m| m.path.clone())
+        .collect();
+    roots.extend(magento.library_paths().iter().cloned());
+    roots.push(magento.root().join("setup/src"));
+    roots.push(magento.root().join("generated"));
+    roots
+}
+
+/// Whether `name` resolves to a real file that sits outside every scan root.
+///
+/// A GENERATED name (`…\Interceptor`, `…Factory`, `…\Proxy`) has no source file
+/// of its own, so it is resolved through its dispatch subject instead. Both the
+/// metadata keys and the artifact paths need this: the same component shows up
+/// as `Foo\Bar` in one place and `Foo\Bar\Interceptor` in the other, and
+/// resolving only the literal name explained one and left the other to fail the
+/// build.
+fn resolves_outside_scan(
+    magento: &magequery_core::Magento,
+    roots: &[std::path::PathBuf],
+    name: &str,
+) -> bool {
+    let outside = |n: &str| {
+        let class = magequery_core::ClassName::new(n.to_owned());
+        magento
+            .class_file(&class)
+            .is_some_and(|file| !roots.iter().any(|r| file.starts_with(r)))
+    };
+    outside(name)
+        || crate::codegen::classify(name).is_some_and(|(_, subject)| outside(&subject))
+}
+
+/// Missing generated ARTIFACTS whose SUBJECT class lives outside every scan path
+/// — the file-level twin of [`outside_scan_types`].
+///
+/// An artifact has no source file of its own, so resolving its own name always
+/// fails and [`outside_scan_types`] cannot see it. Its subject does resolve: for
+/// `…\Controller\Post\Livewire\Interceptor` the generator's dispatch source is
+/// `…\Controller\Post\Livewire`, and if THAT sits outside the scan paths the
+/// artifact was only ever emitted because the archive compiled a component the
+/// module system does not enable.
+///
+/// Without this the two rules disagreed about one component: 84 of its entries
+/// were explained and 3 of its generated artifacts still failed the build, which
+/// is the worst of both — most of the evidence hidden, a remnant left to chase.
+pub fn outside_scan_artifacts(
+    report: &CompareReport,
+    magento: Option<&magequery_core::Magento>,
+) -> HashSet<String> {
+    let Some(magento) = magento else { return HashSet::new() };
+    let roots = scan_roots(magento);
+    report
+        .missing
+        .iter()
+        .filter(|rel| {
+            generated_artifact_type(rel)
+                .is_some_and(|name| resolves_outside_scan(magento, &roots, &name))
+        })
+        .cloned()
+        .collect()
+}
+
 pub fn outside_scan_types(
     report: &CompareReport,
     archive: &Path,
@@ -922,31 +1010,13 @@ pub fn outside_scan_types(
         return HashSet::new();
     }
 
-    let mut roots: Vec<std::path::PathBuf> = magento
-        .modules()
-        .iter()
-        .filter(|m| m.enabled)
-        .map(|m| m.path.clone())
-        .collect();
-    roots.extend(magento.library_paths().iter().cloned());
-    roots.push(magento.root().join("setup/src"));
-    // `generated/` is compile OUTPUT, not a package outside the module system.
-    // Omitting it made every generated factory resolve "outside the scan" and
-    // get absorbed here instead of by the rule that actually explains it —
-    // nine of them on one store, all already covered by the disabled-module
-    // evidence. A rule this broad must not be the one that claims them.
-    roots.push(magento.root().join("generated"));
+    let roots = scan_roots(magento);
 
     candidates
         .into_iter()
         // A more specific rule has first claim, so the attribution stays honest.
         .filter(|key| !already_explained.contains(key))
-        .filter(|key| {
-            let name = magequery_core::ClassName::new(key.replace("\\\\", "\\"));
-            magento
-                .class_file(&name)
-                .is_some_and(|file| !roots.iter().any(|r| file.starts_with(r)))
-        })
+        .filter(|key| resolves_outside_scan(magento, &roots, &key.replace("\\\\", "\\")))
         .collect()
 }
 
@@ -1531,15 +1601,16 @@ pub fn residual_report(
     archive_text: &str,
     output_text: &str,
     disabled: &HashSet<String>,
-    blocked: &HashSet<String>,
-    reachable: &HashSet<String>,
+    expected: &HashSet<String>,
 ) -> String {
-    // EVERY set the classifiers use, or this reports a divergence that was in
-    // fact explained. It has now misled twice: first with no sets at all, then
-    // with `reachable` supplied but `blocked` still empty, which pointed at an
-    // obfuscation-blocked Anowave class the classifier was already stripping.
-    let (sa, _) = strip_expected_entries(archive_text, disabled, blocked, reachable);
-    let (sb, _) = strip_expected_entries(output_text, disabled, blocked, reachable);
+    // ONE union of every expected-key set, not a positional list of them. This
+    // diagnostic misled three times — first with no sets, then with `reachable`
+    // but not `blocked`, then again when `outside_scan` was added — because each
+    // new set had to be remembered at this call site. A single `expected`
+    // parameter makes forgetting one impossible.
+    let empty = HashSet::new();
+    let (sa, _) = strip_expected_entries(archive_text, disabled, expected, &empty);
+    let (sb, _) = strip_expected_entries(output_text, disabled, expected, &empty);
     let na = canonicalize_class_scanner_regex(&sa);
     let nb = canonicalize_class_scanner_regex(&sb);
     let a: Vec<&str> = na.lines().collect();
@@ -1608,6 +1679,7 @@ mod tests {
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
+            outside_scan_files: no_blocked(),
         }
     }
 
@@ -1694,6 +1766,7 @@ mod tests {
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
+            outside_scan_files: no_blocked(),
         };
         let r = report(&[], &[], &["global.php", "crontab.php"]);
         let c = classify(&r, &ctx);
@@ -1754,6 +1827,7 @@ mod tests {
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
+            outside_scan_files: no_blocked(),
         };
         let r = report(&[], &[], &["additions.php", "changed.php", "removed.php"]);
         let c = classify(&r, &ctx);
@@ -1849,6 +1923,7 @@ mod tests {
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
+            outside_scan_files: no_blocked(),
         };
         let r = report(&[], &[], &["A/Interceptor.php", "B/Interceptor.php"]);
         let c = classify(&r, &ctx);
@@ -1894,6 +1969,7 @@ mod tests {
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
+            outside_scan_files: no_blocked(),
         };
         let r = report(&[], &[], &["P/Proxy.php"]);
         let c = classify(&r, &ctx);
@@ -1936,6 +2012,7 @@ mod tests {
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
+            outside_scan_files: no_blocked(),
         };
         let r = report(&[], &[], &["interception.php"]);
         let c = classify(&r, &ctx);
@@ -1966,6 +2043,7 @@ mod tests {
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
+            outside_scan_files: no_blocked(),
         };
         let missing = [
             "code/Bad/Mod/Block/Thing/Interceptor.php",
@@ -2020,6 +2098,31 @@ mod tests {
         assert!(hinted_type_names("string").is_empty());
         assert!(hinted_type_names("?int").is_empty());
         assert!(hinted_type_names("self").is_empty());
+    }
+
+    #[test]
+    fn a_generated_name_resolves_through_its_dispatch_subject() {
+        // The outside-scan rules resolve a class to a FILE, and a generated name
+        // has none of its own. Both the metadata key
+        // `Foo\\Bar\\Controller\\Livewire\\Interceptor` and the artifact path
+        // `code/Foo/Bar/Controller/Livewire/Interceptor.php` must fall back to the
+        // same subject, or one half of a component is explained and the other
+        // fails the build — which is exactly what happened.
+        let from_path =
+            generated_artifact_type("code/Foo/Bar/Controller/Livewire/Interceptor.php").unwrap();
+        assert_eq!(from_path, "Foo\\Bar\\Controller\\Livewire\\Interceptor");
+
+        let (_, subject) = crate::codegen::classify(&from_path).unwrap();
+        assert_eq!(subject, "Foo\\Bar\\Controller\\Livewire");
+
+        // A factory dispatches on the name minus `Factory`.
+        let (_, subject) =
+            crate::codegen::classify("Foo\\Bar\\Model\\Event\\EmitMetaDataFactory").unwrap();
+        assert_eq!(subject, "Foo\\Bar\\Model\\Event\\EmitMetaData");
+
+        // A plain class is not generated, so there is no subject to fall back to
+        // and only its own file can place it.
+        assert!(crate::codegen::classify("Foo\\Bar\\Component\\Form").is_none());
     }
 
     #[test]
@@ -2093,6 +2196,7 @@ mod tests {
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
+            outside_scan_files: no_blocked(),
         };
         let c = classify(&report(&missing, &[], &[]), &bare);
         assert_eq!(c.missing, vec!["code/Good/Mod/Model/Type/OnepageFactory.php"]);
@@ -2161,6 +2265,7 @@ mod tests {
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
+            outside_scan_files: no_blocked(),
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &bare);
         assert_eq!(c.changed, vec!["interception.php"]);
@@ -2176,6 +2281,7 @@ mod tests {
             disabled_reachable: &reachable,
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
+            outside_scan_files: no_blocked(),
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &ctx);
         assert!(c.changed.is_empty());
@@ -2296,6 +2402,7 @@ mod tests {
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
+            outside_scan_files: no_blocked(),
         };
         let r = report(&[], &[], &["global.php", "other.php"]);
         let c = classify(&r, &ctx);
