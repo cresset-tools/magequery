@@ -142,6 +142,23 @@ pub struct LessOptions {
     /// context). Luma-real: `_email-base.less` is reference-imported and
     /// calls the visibly-defined `.lib-typography-all()` at top level; the
     /// real SCD email.css contains that output. On in Magento profiles.
+    /// Nested at-rules that carry the ENCLOSING SELECTOR into their body —
+    /// the parser directive table's `isRooted = false` set, matched on the
+    /// vendor-stripped name (`@-moz-document` -> `@document`, as every version
+    /// computes a `nonVendorSpecificName` before the switch).
+    ///
+    /// Version-dependent, which is why it is data and not a constant:
+    ///
+    /// - less.js 4.x adds `@starting-style` and `@layer`;
+    /// - less.php 5.x has `case "@document": case "@supports": … $isRooted = false;`;
+    /// - less.php 3.x has no `isRooted` concept at all, so NOTHING carries the
+    ///   selector.
+    ///
+    /// Two real stores disagreed on exactly this: the same
+    /// `@-moz-document url-prefix()` fieldset fix, nested inside
+    /// `.admin__scope-old`, deploys as `.rule-tree .fieldset` from one and
+    /// `.admin__scope-old .rule-tree .fieldset` from the other.
+    pub non_rooted_at_rules: &'static [&'static str],
     pub php_reference_visibility: bool,
     /// Profile-gated PHP-encoding shim (off by default) — diagnostic only (§3-G).
     pub php_encoding_shim: bool,
@@ -256,6 +273,7 @@ impl Default for LessOptions {
             php_float_shim: false,
             php_encoding_shim: false,
             php_interp_rounding: false,
+            non_rooted_at_rules: &["@supports", "@document", "@starting-style", "@layer"],
             php_reference_visibility: false,
             php_zero_units: false,
             php_import_order: false,
@@ -287,6 +305,7 @@ impl LessOptions {
             javascript_enabled: false,
             magento_mode: true,
             php_interp_rounding: true,
+            non_rooted_at_rules: &["@supports", "@document"],
             php_reference_visibility: true,
             php_zero_units: true,
             php_number_format: true,
@@ -331,6 +350,11 @@ impl LessOptions {
             hoist_charset: false,
             // less.js 2.5.3 has no calc special-casing — interior math folds.
             php_calc_interior_math: true,
+            // less.php 3.x has no `isRooted` concept at all: NO nested at-rule
+            // carries the enclosing selector. Verified against 3.2.1, whose
+            // directive table sets only `$hasUnknown` where 5.x also sets
+            // `$isRooted = false` for `@document`/`@supports`.
+            non_rooted_at_rules: &[],
             ..LessOptions::magento_production()
         }
     }

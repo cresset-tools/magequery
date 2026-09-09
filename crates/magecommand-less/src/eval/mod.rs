@@ -1539,15 +1539,17 @@ impl<'a> Ctx<'a> {
                 body: AtBody::None,
             }]),
             AtRuleBlock::Rules(rules) => {
-                // less.js `isRooted` (parser directive table, §2.13): a non-rooted
-                // at-rule (@supports/@document/@starting-style/@layer) carries the
-                // enclosing selector into its body — bare declarations wrap in the
-                // parent rule; a rooted one (@font-face/@page/@keyframes/unknown)
-                // starts a fresh root — declarations stay bare even when nested.
-                let wraps = matches!(
-                    base.as_str(),
-                    "@supports" | "@document" | "@starting-style" | "@layer"
-                );
+// `isRooted` (parser directive table, §2.13): a non-rooted
+                // at-rule carries the enclosing selector into its body — bare
+                // declarations wrap in the parent rule; a rooted one starts a
+                // fresh root, so declarations stay bare even when nested.
+                //
+                // WHICH at-rules are non-rooted is version-dependent, so it comes
+                // from the profile rather than a constant here — see
+                // `LessOptions::non_rooted_at_rules`. Matched on the
+                // vendor-stripped name, as every version computes a
+                // `nonVendorSpecificName` before its switch.
+                let wraps = self.opts.non_rooted_at_rules.contains(&base.as_str());
                 let inner_parent = if wraps { parent_paths } else { None };
                 // Every at-rule is a media-bubbling boundary (less.js
                 // `AtRule.eval` backs up mediaPath/mediaBlocks): an inner @media
