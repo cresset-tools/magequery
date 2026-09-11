@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.6](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.5...magequery-v0.17.6) (2026-09-11)
+
+
+### Bug Fixes
+
+* **magecommand-less:** at-rule selector scoping follows the less.php version ([#117](https://github.com/cresset-tools/magequery/issues/117)) ([a84b8f9](https://github.com/cresset-tools/magequery/commit/a84b8f9c3707b5c83499b3f846573c8c119e4c84))
+* **magecommand:** static verify — classify a bundle re-split as expected ([#116](https://github.com/cresset-tools/magequery/issues/116)) ([c473e57](https://github.com/cresset-tools/magequery/commit/c473e573184c47d0018508c03442ed7d133744f4))
+
 ## [0.17.5](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.4...magequery-v0.17.5) (2026-09-03)
 
 
