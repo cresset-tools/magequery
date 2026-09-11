@@ -580,6 +580,23 @@ pub fn execute_to_disk(
                 for pkg in &packages {
                     let target = files::package_dir(static_root, &g.area, &pkg.theme, &g.locale);
                     write_package(pkg, &target, opts.symlink)?;
+                    // `Deploy\Package\Processor\PostProcessor\CssUrls` — runs
+                    // AFTER the package is on disk, as Magento does, because its
+                    // "does this url resolve?" checks read the static tree.
+                    let css_files: Vec<(String, Option<PathBuf>)> = pkg
+                        .files
+                        .iter()
+                        .map(|f| (f.path.clone(), f.source.clone()))
+                        .collect();
+                    super::cssurls::process_package(
+                        &css_files,
+                        &target,
+                        static_root,
+                        &g.area,
+                        &pkg.theme_path,
+                        &g.locale,
+                    )
+                    .map_err(|e| err(format!("css url post-process: {e}")))?;
                     sri.push((g.area.clone(), pkg.sri.clone()));
                     rows.push(TupleStat {
                         area: g.area.clone(),

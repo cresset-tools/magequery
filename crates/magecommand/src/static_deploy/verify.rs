@@ -319,6 +319,57 @@ fn bundle_scope_equivalent(reference: &Path, output: &Path, package: &str) -> bo
     })
 }
 
+/// Whether an area's `sri-hashes.json` differs ONLY in entries for bundles of
+/// packages already accepted as a re-split.
+///
+/// The integrity file hashes every deployed `.js`, bundles included, so once a
+/// package's bundles are accepted as the same modules in a different split,
+/// their hashes necessarily differ too — and the area file inherits that. On
+/// one store it was the single remaining difference in an otherwise byte-exact
+/// two-locale deploy, and it is a consequence of a difference already judged
+/// benign, not a second finding.
+///
+/// Fails closed: ONE entry outside a re-split package's `js/bundle/`, or any
+/// change to a non-bundle hash, and the file stays flagged.
+fn sri_differs_only_by_resplit_bundles(
+    reference: &Path,
+    output: &Path,
+    rel: &str,
+    resplit_packages: &BTreeSet<String>,
+) -> bool {
+    if !rel.ends_with("sri-hashes.json") || resplit_packages.is_empty() {
+        return false;
+    }
+    let (Ok(a), Ok(b)) = (
+        std::fs::read_to_string(reference.join(rel)),
+        std::fs::read_to_string(output.join(rel)),
+    ) else {
+        return false;
+    };
+    let (Ok(a), Ok(b)) = (
+        serde_json::from_str::<BTreeMap<String, String>>(&a),
+        serde_json::from_str::<BTreeMap<String, String>>(&b),
+    ) else {
+        return false;
+    };
+    let accepted = |key: &str| {
+        resplit_packages
+            .iter()
+            .any(|pkg| key.starts_with(&format!("{pkg}/js/bundle/")))
+    };
+    let mut any = false;
+    for key in a.keys().chain(b.keys()) {
+        if a.get(key) == b.get(key) {
+            continue;
+        }
+        if !accepted(key) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
 /// Is `rel` one of a package's bundle files?
 fn is_bundle_file(rel: &str) -> bool {
     rel.contains("/js/bundle/")
@@ -375,6 +426,7 @@ pub fn verify(
     // Bundle re-splits: a package whose ONLY differing files are bundles, and
     // whose bundled modules are the same or a superset with identical sources,
     // differs by the `.min`-sibling cache scope alone.
+    let mut resplit_packages: BTreeSet<String> = BTreeSet::new();
     for (bucket, entry) in buckets.iter_mut() {
         let Bucket::Package(package) = bucket else { continue };
         // Only the BUNDLE files move: whatever else differs in the package (css,
@@ -394,6 +446,26 @@ pub fn verify(
             entry.resplit.extend(bundles);
             *list = rest;
         }
+        entry.resplit.sort();
+        resplit_packages.insert(package.clone());
+    }
+
+    // The area-level integrity file inherits an accepted re-split, since it
+    // hashes the very bundles that moved.
+    for (bucket, entry) in buckets.iter_mut() {
+        if !matches!(bucket, Bucket::Area(_)) {
+            continue;
+        }
+        let moved: Vec<String> = entry
+            .changed
+            .iter()
+            .filter(|rel| {
+                sri_differs_only_by_resplit_bundles(reference, output, rel, &resplit_packages)
+            })
+            .cloned()
+            .collect();
+        entry.changed.retain(|rel| !moved.contains(rel));
+        entry.resplit.extend(moved);
         entry.resplit.sort();
     }
 
@@ -506,6 +578,70 @@ mod tests {
         assert!(rep.changed.is_empty(), "bundles must not be `changed`: {:?}", rep.changed);
         assert!(rep.extra.is_empty(), "the extra bundle must not be `extra`: {:?}", rep.extra);
         assert!(!rep.resplit.is_empty(), "it must be reported as a re-split");
+    }
+
+    /// Write an area `sri-hashes.json` on each side.
+    fn sri(root: &Path, entries: &[(&str, &str)]) {
+        let body: Vec<String> =
+            entries.iter().map(|(k, v)| format!("\"{k}\":\"{v}\"")).collect();
+        w(root, "adminhtml/sri-hashes.json", &format!("{{{}}}", body.join(",")));
+    }
+
+    const PKG: &str = "adminhtml/Magento/backend/nl_NL";
+
+    /// The integrity file hashes the very bundles that moved, so an accepted
+    /// re-split necessarily changes it too. Once the package is classified, the
+    /// area file follows — otherwise an otherwise byte-exact deploy fails on a
+    /// single derived artifact.
+    #[test]
+    fn sri_hashes_follow_an_accepted_bundle_resplit() {
+        let td = tempfile::tempdir().unwrap();
+        let (r, o) = (td.path().join("ref"), td.path().join("out"));
+        bundle_pkg(&r, &[("A_M/js/a.js", "srcA")], &["A_M/js/c.js"]);
+        bundle_pkg(&o, &[("A_M/js/a.js", "srcA"), ("A_M/js/c.js", "srcC")], &["A_M/js/c.js"]);
+        sri(&r, &[(&format!("{PKG}/js/bundle/bundle0.js"), "sha256-one")]);
+        sri(&o, &[(&format!("{PKG}/js/bundle/bundle0.js"), "sha256-two")]);
+
+        let rep = verify(&r, &o, false, false).unwrap().totals();
+        assert!(rep.changed.is_empty(), "sri must ride along: {:?}", rep.changed);
+        assert!(rep.resplit.iter().any(|p| p.ends_with("sri-hashes.json")));
+    }
+
+    /// Negative control: a NON-bundle hash change is a real difference — the
+    /// re-split explanation covers bundles and nothing else.
+    #[test]
+    fn a_non_bundle_sri_change_still_fails() {
+        let td = tempfile::tempdir().unwrap();
+        let (r, o) = (td.path().join("ref"), td.path().join("out"));
+        bundle_pkg(&r, &[("A_M/js/a.js", "srcA")], &["A_M/js/c.js"]);
+        bundle_pkg(&o, &[("A_M/js/a.js", "srcA"), ("A_M/js/c.js", "srcC")], &["A_M/js/c.js"]);
+        sri(&r, &[(&format!("{PKG}/A_M/js/thing.js"), "sha256-one")]);
+        sri(&o, &[(&format!("{PKG}/A_M/js/thing.js"), "sha256-two")]);
+
+        let rep = verify(&r, &o, false, false).unwrap().totals();
+        assert!(
+            rep.changed.iter().any(|p| p.ends_with("sri-hashes.json")),
+            "a non-bundle hash change must stay flagged"
+        );
+    }
+
+    /// Negative control: bundle hashes for a package that was NOT accepted as a
+    /// re-split are not covered either.
+    #[test]
+    fn sri_bundle_changes_need_the_package_to_be_a_resplit() {
+        let td = tempfile::tempdir().unwrap();
+        let (r, o) = (td.path().join("ref"), td.path().join("out"));
+        // Identical bundles → no package is classified as a re-split.
+        bundle_pkg(&r, &[("A_M/js/a.js", "srcA")], &[]);
+        bundle_pkg(&o, &[("A_M/js/a.js", "srcA")], &[]);
+        sri(&r, &[(&format!("{PKG}/js/bundle/bundle0.js"), "sha256-one")]);
+        sri(&o, &[(&format!("{PKG}/js/bundle/bundle0.js"), "sha256-two")]);
+
+        let rep = verify(&r, &o, false, false).unwrap().totals();
+        assert!(
+            rep.changed.iter().any(|p| p.ends_with("sri-hashes.json")),
+            "with no accepted re-split there is nothing to ride along with"
+        );
     }
 
     /// Negative control: a module the reference bundles and we do NOT is a real
