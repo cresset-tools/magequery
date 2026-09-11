@@ -91,6 +91,11 @@ pub struct BucketReport {
     /// Present in both, bytes differ, but a semantic CSS diff finds nothing —
     /// formatting only. Clean unless `strict`.
     pub equivalent: Vec<String>,
+    /// Bundle files whose only difference is WHICH bundle each module landed
+    /// in — see [`bundle_scope_equivalent`]. Clean, and not affected by
+    /// `strict`: the modules and their sources are identical, so there is no
+    /// stricter reading under which these are a defect.
+    pub resplit: Vec<String>,
     /// Present in both, byte-identical.
     pub identical: usize,
 }
@@ -98,7 +103,11 @@ pub struct BucketReport {
 impl BucketReport {
     /// Files the reference has in this bucket.
     pub fn reference_total(&self) -> usize {
-        self.identical + self.changed.len() + self.equivalent.len() + self.missing.len()
+        self.identical
+            + self.changed.len()
+            + self.equivalent.len()
+            + self.resplit.len()
+            + self.missing.len()
     }
 
     fn is_clean(&self, strict: bool) -> bool {
@@ -130,6 +139,7 @@ impl VerifyReport {
             t.extra.extend(b.extra.iter().cloned());
             t.changed.extend(b.changed.iter().cloned());
             t.equivalent.extend(b.equivalent.iter().cloned());
+            t.resplit.extend(b.resplit.iter().cloned());
             t.identical += b.identical;
         }
         t
@@ -215,6 +225,106 @@ fn css_equivalent(rel: &str, a: &Path, b: &Path) -> bool {
 /// by default such packages are listed as `not_deployed` and skipped; with
 /// full coverage they count as missing, which is what verifying a COMPLETE
 /// deploy means.
+/// Every module a package's bundles define, as `name -> source literal`.
+///
+/// The bundles are RequireJS config maps: `"Vendor_Module/js/thing.js":
+/// "<source>"`. Which bundle a module lands in is a size-capped split, so the
+/// interesting content is the union across the package, not the per-file bytes.
+fn bundle_modules(bundle_dir: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(bundle_dir) else { return out };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("bundle") && n.ends_with(".js"))
+        })
+        .collect();
+    files.sort();
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(&file) else { continue };
+        let b = text.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] != b'"' {
+                i += 1;
+                continue;
+            }
+            // A quoted string: `"…"`, backslash-escaped.
+            let Some(end) = quoted_end(b, i) else { break };
+            // A module entry is `"<name>":"<source>"`; anything else is skipped
+            // and rescanned from just after this string.
+            if b.get(end + 1) == Some(&b':') && b.get(end + 2) == Some(&b'"') {
+                let Some(src_end) = quoted_end(b, end + 2) else { break };
+                let name = &text[i + 1..end];
+                out.entry(name.to_owned())
+                    .or_insert_with(|| text[end + 3..src_end].to_owned());
+                i = src_end + 1;
+            } else {
+                i = end + 1;
+            }
+        }
+    }
+    out
+}
+
+/// Index of the closing quote of the string opening at `start`, honouring
+/// backslash escapes.
+fn quoted_end(b: &[u8], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'"' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Whether a package's bundle differences are only the `.min`-sibling cache
+/// SCOPE, not a defect.
+///
+/// Magento shares one `.min`-sibling cache across a whole
+/// `setup:static-content:deploy` process, so in a combined multi-locale
+/// invocation the first locale poisons the plain name for every later one — its
+/// bundles then drop files a solo deploy of that same locale keeps. magecommand
+/// scopes the cache per `(area, locale)`, which is deterministic and equals N
+/// separate deploys. Neither output is wrong: a module dropped from the bundle
+/// is fetched from its `.min` sibling, which is deployed either way.
+///
+/// Claimed only on positive evidence, so a genuine bundling defect still fails:
+///
+/// - every module the reference bundles must be in ours with byte-identical
+///   source (a MISSING module is a real defect, never this);
+/// - every module we bundle that the reference does not must have a deployed
+///   `.min` sibling — the only reason the reference could have dropped it.
+fn bundle_scope_equivalent(reference: &Path, output: &Path, package: &str) -> bool {
+    let want = bundle_modules(&reference.join(package).join("js/bundle"));
+    let got = bundle_modules(&output.join(package).join("js/bundle"));
+    if want.is_empty() || got.is_empty() {
+        return false;
+    }
+    for (name, source) in &want {
+        if got.get(name) != Some(source) {
+            return false;
+        }
+    }
+    got.keys().filter(|n| !want.contains_key(*n)).all(|name| {
+        name.strip_suffix(".js").is_some_and(|stem| {
+            output.join(package).join(format!("{stem}.min.js")).is_file()
+        })
+    })
+}
+
+/// Is `rel` one of a package's bundle files?
+fn is_bundle_file(rel: &str) -> bool {
+    rel.contains("/js/bundle/")
+        && rel.rsplit('/').next().is_some_and(|n| n.starts_with("bundle") && n.ends_with(".js"))
+}
+
 pub fn verify(
     reference: &Path,
     output: &Path,
@@ -260,6 +370,31 @@ pub fn verify(
         if !known.contains(rel) {
             buckets.entry(Bucket::of(rel)).or_default().extra.push(rel.clone());
         }
+    }
+
+    // Bundle re-splits: a package whose ONLY differing files are bundles, and
+    // whose bundled modules are the same or a superset with identical sources,
+    // differs by the `.min`-sibling cache scope alone.
+    for (bucket, entry) in buckets.iter_mut() {
+        let Bucket::Package(package) = bucket else { continue };
+        // Only the BUNDLE files move: whatever else differs in the package (css,
+        // say) is an unrelated cause and must keep failing on its own merits.
+        let touches_bundles = entry
+            .changed
+            .iter()
+            .chain(entry.extra.iter())
+            .chain(entry.missing.iter())
+            .any(|r| is_bundle_file(r));
+        if !touches_bundles || !bundle_scope_equivalent(reference, output, package) {
+            continue;
+        }
+        for list in [&mut entry.changed, &mut entry.extra, &mut entry.missing] {
+            let (bundles, rest): (Vec<String>, Vec<String>) =
+                list.drain(..).partition(|r| is_bundle_file(r));
+            entry.resplit.extend(bundles);
+            *list = rest;
+        }
+        entry.resplit.sort();
     }
 
     Ok(VerifyReport {
@@ -330,6 +465,88 @@ mod tests {
         assert_eq!(rep.changed, vec!["frontend/Magento/blank/nl_NL/css/x.css"]);
         assert_eq!(rep.missing, vec!["frontend/Magento/blank/nl_NL/js/gone.js"]);
         assert_eq!(rep.extra, vec!["frontend/Magento/blank/nl_NL/js/new.js"]);
+    }
+
+    /// Build a package whose bundles hold `mods`, plus a deployed `.min`
+    /// sibling for each name in `min_siblings`.
+    fn bundle_pkg(root: &Path, mods: &[(&str, &str)], min_siblings: &[&str]) {
+        const PKG: &str = "adminhtml/Magento/backend/nl_NL";
+        // Two bundles, so a differing split is representable.
+        for (n, chunk) in mods.chunks(2).enumerate() {
+            let body: Vec<String> =
+                chunk.iter().map(|(k, v)| format!("\"{k}\":\"{v}\"")).collect();
+            w(
+                root,
+                &format!("{PKG}/js/bundle/bundle{n}.js"),
+                &format!("require.config({{\"bundles\":{{\"x\":{{{}}}}}}});", body.join(",")),
+            );
+        }
+        for name in min_siblings {
+            let stem = name.strip_suffix(".js").unwrap();
+            w(root, &format!("{PKG}/{stem}.min.js"), "// minified\n");
+        }
+    }
+
+    /// The combined-invocation case: Magento shares one `.min`-sibling cache
+    /// across a multi-locale run, so its bundles DROP files a per-locale deploy
+    /// keeps. Ours is a superset with identical sources and every extra has a
+    /// deployed `.min` sibling — same modules, different split, both correct.
+    #[test]
+    fn a_superset_bundle_split_with_min_siblings_is_a_resplit() {
+        let td = tempfile::tempdir().unwrap();
+        let (r, o) = (td.path().join("ref"), td.path().join("out"));
+        bundle_pkg(&r, &[("A_M/js/a.js", "srcA"), ("A_M/js/b.js", "srcB")], &["A_M/js/c.js"]);
+        bundle_pkg(
+            &o,
+            &[("A_M/js/a.js", "srcA"), ("A_M/js/b.js", "srcB"), ("A_M/js/c.js", "srcC")],
+            &["A_M/js/c.js"],
+        );
+
+        let rep = verify(&r, &o, false, false).unwrap().totals();
+        assert!(rep.changed.is_empty(), "bundles must not be `changed`: {:?}", rep.changed);
+        assert!(rep.extra.is_empty(), "the extra bundle must not be `extra`: {:?}", rep.extra);
+        assert!(!rep.resplit.is_empty(), "it must be reported as a re-split");
+    }
+
+    /// Negative control: a module the reference bundles and we do NOT is a real
+    /// defect — the split explanation must not cover it.
+    #[test]
+    fn a_missing_bundled_module_is_never_a_resplit() {
+        let td = tempfile::tempdir().unwrap();
+        let (r, o) = (td.path().join("ref"), td.path().join("out"));
+        bundle_pkg(&r, &[("A_M/js/a.js", "srcA"), ("A_M/js/b.js", "srcB")], &[]);
+        bundle_pkg(&o, &[("A_M/js/a.js", "srcA")], &[]);
+
+        let rep = verify(&r, &o, false, false).unwrap().totals();
+        assert!(rep.resplit.is_empty(), "a dropped module is not a re-split");
+        assert!(!rep.changed.is_empty() || !rep.missing.is_empty(), "it must still fail");
+    }
+
+    /// Negative control: an extra bundled module with NO `.min` sibling had no
+    /// reason to be dropped by the reference, so it is not the cache scope.
+    #[test]
+    fn an_extra_module_without_a_min_sibling_is_never_a_resplit() {
+        let td = tempfile::tempdir().unwrap();
+        let (r, o) = (td.path().join("ref"), td.path().join("out"));
+        bundle_pkg(&r, &[("A_M/js/a.js", "srcA")], &[]);
+        bundle_pkg(&o, &[("A_M/js/a.js", "srcA"), ("A_M/js/z.js", "srcZ")], &[]);
+
+        let rep = verify(&r, &o, false, false).unwrap().totals();
+        assert!(rep.resplit.is_empty(), "no `.min` sibling means no cache-scope explanation");
+    }
+
+    /// Negative control: same module names, different SOURCE. The split is
+    /// irrelevant — the content is wrong.
+    #[test]
+    fn a_changed_module_source_is_never_a_resplit() {
+        let td = tempfile::tempdir().unwrap();
+        let (r, o) = (td.path().join("ref"), td.path().join("out"));
+        bundle_pkg(&r, &[("A_M/js/a.js", "srcA")], &[]);
+        bundle_pkg(&o, &[("A_M/js/a.js", "TAMPERED")], &[]);
+
+        let rep = verify(&r, &o, false, false).unwrap().totals();
+        assert!(rep.resplit.is_empty(), "differing module source is a real change");
+        assert!(!rep.changed.is_empty(), "it must still fail");
     }
 
     /// A css file differing only in formatting is `equivalent` — clean by

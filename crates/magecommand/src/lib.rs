@@ -689,6 +689,7 @@ fn static_verify(
                     "identical": r.identical,
                     "changed": r.changed,
                     "equivalent": r.equivalent,
+                    "resplit": r.resplit,
                     "missing": r.missing,
                     "extra": r.extra,
                 })
@@ -706,6 +707,7 @@ fn static_verify(
                 "identical": totals.identical,
                 "changed": totals.changed.len(),
                 "equivalent": totals.equivalent.len(),
+                "resplit": totals.resplit.len(),
                 "missing": totals.missing.len(),
                 "extra": totals.extra.len(),
             },
@@ -717,7 +719,7 @@ fn static_verify(
             // Only name a bucket that has something to say; a clean run then
             // prints just the totals line.
             if r.changed.is_empty() && r.missing.is_empty() && r.extra.is_empty()
-                && r.equivalent.is_empty()
+                && r.equivalent.is_empty() && r.resplit.is_empty()
             {
                 continue;
             }
@@ -738,18 +740,24 @@ fn static_verify(
             show("missing (reference only)", &r.missing);
             show("extra (ours only)", &r.extra);
             // Never hidden, but marked as not-a-defect outside --strict.
+            show("bundle re-split (.min-sibling cache scope)", &r.resplit);
             show(
                 if strict { "equivalent (counted: --strict)" } else { "equivalent (formatting only)" },
                 &r.equivalent,
             );
         }
         let mut line = format!(
-            "reference: {} file(s) · identical {} · changed {} · missing {} · extra {}",
+            "reference: {} file(s) · identical {} · changed {} · missing {} · extra {}{}",
             totals.reference_total(),
             totals.identical,
             totals.changed.len(),
             totals.missing.len(),
-            totals.extra.len()
+            totals.extra.len(),
+            if totals.resplit.is_empty() {
+                String::new()
+            } else {
+                format!(" · re-split {}", totals.resplit.len())
+            }
         );
         if !totals.equivalent.is_empty() {
             line.push_str(&format!(" · equivalent {}", totals.equivalent.len()));
