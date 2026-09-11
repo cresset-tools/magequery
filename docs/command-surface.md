@@ -204,6 +204,14 @@ static files --theme <VENDOR/NAME>... [--locale <L>] [--out <DIR>]
     css notation processors on every published css (VariableNotation — the
     {{base_url_path}} static-path injection that closes email-inline.css —
     then ModuleNotation Module::path → context-relative urls),
+    the CssUrls package post-processor (Magento\Deploy's deploy-ONLY pass:
+    a relative url() that does not resolve inside its own package is
+    repointed at the parent package that owns the file — the theme ladder
+    at the default locale, then Magento/base, then the same under the
+    `base` area, closest ancestor first, falling back to the base-theme
+    package on disk; an url that already resolves is left verbatim.
+    Nothing about compiling a stylesheet reveals it, and on a real store's
+    admin theme it was the last file between us and byte-parity),
     js-translation.json (the js dictionary; the literal 2-byte `[]` whenever
     no phrase translates differently — the en_US case; phrase extraction for
     locales with a non-empty dictionary is a documented gap), and
@@ -269,7 +277,14 @@ static verify --reference <DIR> --output <DIR> [--fail-on-diff] [--strict]
     area-level artifacts), because a whole-theme divergence names its bug while a
     flat file list does not. A css file differing only in non-semantic formatting
     is `equivalent` (clean) unless --strict; `deployed_version.txt` is skipped
-    (per-run timestamp). By default only the packages the OUTPUT contains are
+    (per-run timestamp). A package whose bundles hold exactly the same modules
+    split across different files is `re-split` (clean): bundle boundaries depend
+    on a `.min`-sibling cache Magento shares process-wide, so the same input can
+    legitimately pack differently — the contract is the module SET, verified
+    per package, and one module more or less is still a real difference. The
+    area's `sri-hashes.json` rides along with an accepted re-split, since it
+    hashes the very bundles that moved; ONE entry outside a re-split package's
+    bundles and the file stays flagged. By default only the packages the OUTPUT contains are
     compared, so verifying a one-theme deploy against a whole `pub/static` reports
     that theme rather than every other — --all requires full coverage.
     --fail-on-diff exits non-zero on any difference.

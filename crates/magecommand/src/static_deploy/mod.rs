@@ -23,6 +23,7 @@
 pub mod bundle;
 pub mod cssdiff;
 pub mod cssnotation;
+pub mod cssurls;
 pub mod deploy;
 pub mod files;
 pub mod jstranslation;
