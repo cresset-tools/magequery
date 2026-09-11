@@ -631,6 +631,92 @@ fn operation_is_spaced_looks_only_before_the_operator() {
     }
 }
 
+/// `&:extend` inside a MIXIN that is called more than once: each call site
+/// registers its own extend, and less.php 5.x lets the second one match the
+/// selectors the FIRST call site generated. From
+///
+/// ```less
+/// .mx() { color: red; .sub { &:extend(.menu all); color: blue; } }
+/// .menu { .mx(); }
+/// .abs  { .mx(); }
+/// ```
+///
+/// 5.x additionally emits `.abs .sub .sub` — the `.abs`-site extend
+/// (replacement `.abs .sub`, target `.menu`) applied to `.menu .sub`. Writing
+/// the same structure out literally, or calling the mixin once, produces no
+/// such selector on either version: the duplicated mixin is the trigger.
+///
+/// We match 5.x byte for byte, which this pins. **less.php 3.x does NOT emit
+/// those**, so a Magento 2.4.7 store legitimately deploys a smaller stylesheet
+/// than we produce — the `Magento247` profile does not yet model 2.5.3's extend
+/// semantics, and on one real 2.4.7 store that is ~17KB of extra selectors
+/// across the admin theme. Bloat, not a cascade change; every selector we add
+/// is a descendant chain that matches nothing the reference matched.
+///
+/// Reproduce with `scripts/diff-against-less-php.sh` against stores on both
+/// majors.
+#[test]
+fn extend_in_a_duplicated_mixin_matches_less_php_5x() {
+    let src = ".mx() { color: red; .sub { &:extend(.menu all); color: blue; } }\n\
+               .menu { .mx(); }\n.abs  { .mx(); }\n";
+    let mut opts = LessOptions::magento_production();
+    opts.compress = true;
+    let css = magecommand_less::compile(src, &opts, &NoopResolver).unwrap().code;
+    assert_eq!(
+        css,
+        ".menu,.menu .sub,.abs .sub,.abs .sub .sub{color:red}\
+         .menu .sub,.abs .sub .sub{color:blue}.abs{color:red}.abs .sub{color:blue}",
+        "probed against wikimedia/less.php 5.5.1"
+    );
+}
+
+/// Which nested at-rules carry the ENCLOSING SELECTOR into their body is
+/// version-dependent, and two real 2.4.x stores disagree on it. The same
+/// `@-moz-document url-prefix()` fieldset fix, nested inside `.admin__scope-old`
+/// in Magento's own `_rules-temp.less`, deploys as:
+///
+/// - `.rule-tree .fieldset` on a less.php 3.2.1 store — 3.x has no `isRooted`
+///   concept at all, so nothing carries the selector;
+/// - `.admin__scope-old .rule-tree .fieldset` on a less.php 5.5.1 store, whose
+///   directive table sets `$isRooted = false` for `@document`/`@supports`.
+///
+/// Both match on the vendor-STRIPPED name: every version computes a
+/// `nonVendorSpecificName` before its switch, so `@-moz-document` is
+/// `@document`. Pinned against live probes of both versions.
+#[test]
+fn at_rule_selector_scoping_follows_the_less_php_version() {
+    let src = ".admin__scope-old {\n  @-moz-document url-prefix() {\n    \
+               .rule-tree .fieldset { display: table-cell; }\n  }\n}\n";
+
+    let mut opts = LessOptions::magento_production();
+    opts.compress = true;
+    let css = magecommand_less::compile(src, &opts, &NoopResolver).unwrap().code;
+    assert_eq!(
+        css,
+        "@-moz-document url-prefix(){.admin__scope-old .rule-tree .fieldset{display:table-cell}}",
+        "less.php 5.x treats @document as non-rooted"
+    );
+
+    let mut opts = LessOptions::magento_247();
+    opts.compress = true;
+    let css = magecommand_less::compile(src, &opts, &NoopResolver).unwrap().code;
+    assert_eq!(
+        css,
+        "@-moz-document url-prefix(){.rule-tree .fieldset{display:table-cell}}",
+        "less.php 3.x has no isRooted concept — nothing carries the selector"
+    );
+
+    // A ROOTED at-rule never carries the selector, on either profile — the fix
+    // must not have made every at-rule wrap.
+    let rooted = ".a {\n  @media print { .b { c: d; } }\n}\n";
+    for opts in [LessOptions::magento_production(), LessOptions::magento_247()] {
+        let mut opts = opts;
+        opts.compress = true;
+        let css = magecommand_less::compile(rooted, &opts, &NoopResolver).unwrap().code;
+        assert_eq!(css, "@media print{.a .b{c:d}}", "@media nests by its own path");
+    }
+}
+
 /// less.php 3.x (a less.js 2.5.3 port, Magento 2.4.7 and older) is `math=always`
 /// AND has neither the `@charset`-hoisting visitor nor the `calc()`
 /// special-casing that less.js 3.0 added. Every expectation here is pinned
