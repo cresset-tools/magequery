@@ -175,12 +175,22 @@ def gen_module(rng, index, out: pathlib.Path):
 
     # Sometimes a base class, so the constructor is INHERITED rather than
     # declared and the leaf's interceptor must still forward every parameter.
+    # Sometimes THREE levels, the middle declaring nothing, so the leaf
+    # inherits through it and di.xml may configure any level.
     extends = ""
-    if ctor and rng.random() < 0.3:
+    chain = []
+    if ctor and rng.random() < 0.4:
         (root / "Model" / "Base.php").write_text(
             f"<?php\n\nnamespace {ns}\\Model;\n\nclass Base\n{{\n"
             f"    public const LIMIT = {rng.randint(1, 50)};\n\n{ctor}}}\n")
-        extends, ctor = " extends Base", ""
+        chain.append("Base")
+        if rng.random() < 0.5:
+            (root / "Model" / "Mid.php").write_text(
+                f"<?php\n\nnamespace {ns}\\Model;\n\n"
+                "/** No constructor: the leaf inherits Base's through here. */\n"
+                "class Mid extends Base\n{\n}\n")
+            chain.append("Mid")
+        extends, ctor = f" extends {chain[-1]}", ""
 
     impl = f" implements \\{ns}\\Api\\{iface}" if iface else ""
     (root / "Model" / "Target.php").write_text(
@@ -247,6 +257,28 @@ def gen_module(rng, index, out: pathlib.Path):
                          f'type="{ns}\\Plugin\\{cls}" {attrs}/>')
         plug = "\n".join(decls)
 
+    # The subject's own <type> node. This is the main construct — without it a
+    # module carries no DI config at all, and a round proves nothing.
+    # Configure an ANCESTOR too. Own-vs-inherited merges with
+    # array_replace_recursive, but merging ACROSS relations is a plain
+    # array_replace, so which level declares what changes the answer.
+    if chain and args and rng.random() < 0.5:
+        di.append(f'    <type name="{ns}\\Model\\{chain[0]}">')
+        di.append("        <arguments>")
+        di.extend(args[-1:])
+        di.append("        </arguments>")
+        di.append("    </type>")
+
+    if args or plug:
+        di.append(f'    <type name="{subject}">')
+        if args:
+            di.append("        <arguments>")
+            di.extend(args)
+            di.append("        </arguments>")
+        if plug:
+            di.append(plug)
+        di.append("    </type>")
+
     # A virtualType, sometimes carrying its own arguments (which inherit the
     # base's and override per key) and sometimes chained off another.
     if rng.random() < 0.4 and modifiers.strip() != "abstract":
@@ -287,6 +319,46 @@ def gen_module(rng, index, out: pathlib.Path):
             f'        <plugin name="fz{index}_area" type="{ns}\\Plugin\\Area" '
             f'sortOrder="{rng.choice([5, 15, 25])}"/>\n'
             '    </type>\n</config>\n')
+    # An OVERLAY module sequenced AFTER this one, re-configuring the same
+    # type. Merge order is only reachable with a coordinated PAIR — independent
+    # modules never collide, which is why the generator could not reach it
+    # before. Pins that a later argument wins per KEY (earlier keys survive),
+    # that a same-named plugin MERGES rather than duplicating, and that a later
+    # preference wins outright.
+    if (args or plug) and rng.random() < 0.35:
+        omod, oname = f"{mod}b", f"Acme_{mod}b"
+        oroot = out / "Acme" / omod
+        (oroot / "etc").mkdir(parents=True, exist_ok=True)
+        (oroot / "registration.php").write_text(
+            "<?php\n\n\\Magento\\Framework\\Component\\ComponentRegistrar::register(\n"
+            "    \\Magento\\Framework\\Component\\ComponentRegistrar::MODULE,\n"
+            f"    '{oname}',\n    __DIR__\n);\n")
+        (oroot / "etc" / "module.xml").write_text(
+            '<?xml version="1.0"?>\n<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+            'xsi:noNamespaceSchemaLocation="urn:magento:framework:Module/etc/module.xsd">\n'
+            f'    <module name="{oname}">\n        <sequence>\n'
+            f'            <module name="{name}"/>\n'
+            "        </sequence>\n    </module>\n</config>\n")
+        od = ['<?xml version="1.0"?>',
+              '<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+              'xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">',
+              f'    <type name="{subject}">']
+        if args:
+            aname = args[0].split('name="', 1)[1].split('"', 1)[0]
+            kind, val = rng.choice(XSI_SCALARS)
+            val = val.replace("{NS}", ns)
+            od.append("        <arguments>")
+            od.append(f'            <argument name="{aname}" xsi:type="{kind}">{val}</argument>')
+            od.append("        </arguments>")
+        if plug:
+            pname = plug.split('name="', 1)[1].split('"', 1)[0]
+            od.append(f'        <plugin name="{pname}" sortOrder="{rng.choice([2, 40, 99])}"/>')
+        od.append("    </type>")
+        if iface and modifiers.strip() == "":
+            od.append(f'    <preference for="{ns}\\Api\\{iface}" type="{subject}"/>')
+        od.append("</config>\n")
+        (oroot / "etc" / "di.xml").write_text("\n".join(od))
+
     return name, ns
 
 
