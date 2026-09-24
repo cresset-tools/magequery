@@ -13,7 +13,31 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+
+/// A JSON object, or an empty list standing in for one. PHP's `json_encode`
+/// writes an empty array as `[]`, so an installer that serializes a PHP array
+/// (bougie does) emits `"psr-0": []` where Composer would omit the key. Composer
+/// decodes both the same way; a strict map type rejects the whole file instead.
+fn map_or_empty_list<'de, D, V>(deserializer: D) -> Result<HashMap<String, V>, D::Error>
+where
+    D: Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum MapOrList<V> {
+        Map(HashMap<String, V>),
+        List(Vec<serde::de::IgnoredAny>),
+    }
+    match MapOrList::deserialize(deserializer)? {
+        MapOrList::Map(map) => Ok(map),
+        MapOrList::List(list) if list.is_empty() => Ok(HashMap::new()),
+        MapOrList::List(_) => Err(serde::de::Error::custom(
+            "expected an object (or an empty list), found a non-empty list",
+        )),
+    }
+}
 
 pub(crate) struct ComposerPackage {
     /// Package name (`vendor/name`), when the entry has one.
@@ -52,7 +76,7 @@ struct PackageEntry<'a> {
     #[serde(default)]
     autoload: AutoloadEntry<'a>,
     /// Only the keys (required package names) matter; constraints are skipped unparsed.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "map_or_empty_list")]
     require: HashMap<String, serde::de::IgnoredAny>,
     #[serde(rename = "type", default, borrow)]
     package_type: Option<Cow<'a, str>>,
@@ -63,9 +87,9 @@ struct AutoloadEntry<'a> {
     #[serde(default, borrow)]
     files: Vec<Cow<'a, str>>,
     /// Each value is a single path or a list of paths.
-    #[serde(default, rename = "psr-4")]
+    #[serde(default, rename = "psr-4", deserialize_with = "map_or_empty_list")]
     psr4: HashMap<String, StringOrVec>,
-    #[serde(default, rename = "psr-0")]
+    #[serde(default, rename = "psr-0", deserialize_with = "map_or_empty_list")]
     psr0: HashMap<String, StringOrVec>,
 }
 
@@ -84,8 +108,12 @@ pub(crate) fn installed_packages(vendor: &Path) -> Result<Vec<ComposerPackage>, 
         std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
 
     // Composer 2 wraps packages in `{ "packages": [...] }`; Composer 1 was a bare array.
+    // Report the error of the shape the document actually has: a Composer 2 file
+    // that fails to parse would otherwise surface as the retry's "expected a
+    // sequence at line 1 column 0", which names nothing that is wrong with it.
     let entries: Vec<PackageEntry> = match serde_json::from_str::<InstalledFile>(&text) {
         Ok(f) => f.packages,
+        Err(v2) if text.trim_start().starts_with('{') => return Err(v2.to_string()),
         Err(_) => serde_json::from_str::<Vec<PackageEntry>>(&text).map_err(|e| e.to_string())?,
     };
 
@@ -171,4 +199,50 @@ fn normalize(p: &Path) -> PathBuf {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vendor_with(installed_json: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("composer")).expect("composer dir");
+        std::fs::write(dir.path().join("composer/installed.json"), installed_json)
+            .expect("installed.json");
+        dir
+    }
+
+    /// bougie writes PHP's empty array as `[]` for empty autoload maps. One such
+    /// entry used to fail the whole document, dropping every package (and with
+    /// them the library paths and path-repository modules) to a vendor scan.
+    #[test]
+    fn empty_list_stands_in_for_an_empty_map() {
+        let vendor = vendor_with(
+            r#"{"packages": [
+                {"name": "mage-os/framework", "type": "magento2-library",
+                 "install-path": "../mage-os/framework",
+                 "autoload": {"files": ["registration.php"], "psr-4": {"Magento\\Framework\\": ""}, "psr-0": []},
+                 "require": []},
+                {"name": "brick/math", "install-path": "../brick/math",
+                 "autoload": {"psr-4": [], "psr-0": []}}
+            ], "dev": false}"#,
+        );
+        let packages = installed_packages(vendor.path()).expect("parses");
+        assert_eq!(packages.len(), 2);
+        let framework = &packages[0];
+        assert_eq!(framework.package_type.as_deref(), Some("magento2-library"));
+        assert_eq!(framework.autoload_files, vec!["registration.php".to_owned()]);
+        assert_eq!(framework.psr4.len(), 1);
+        assert!(framework.psr0.is_empty() && framework.require.is_empty());
+        assert!(packages[1].psr4.is_empty() && packages[1].psr0.is_empty());
+    }
+
+    #[test]
+    fn a_broken_composer_2_file_reports_its_own_error() {
+        let vendor = vendor_with(r#"{"packages": [{"name": "a/b", "autoload": {"psr-4": ["src/"]}}]}"#);
+        let error = installed_packages(vendor.path()).err().expect("rejects a non-empty list");
+        assert!(error.contains("non-empty list"), "{error}");
+        assert!(!error.contains("expected a sequence"), "{error}");
+    }
 }
