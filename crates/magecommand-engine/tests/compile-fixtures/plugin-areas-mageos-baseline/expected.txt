@@ -1,0 +1,659 @@
+# magecommand-engine compile fixture — the expected output of compute_outputs()
+# over `in/`, byte for byte. Everything below is generated; edit `in/` instead.
+# Re-bless: MAGECOMMAND_COMPILE_BLESS=1 cargo test -p magecommand-engine --test compile
+# files: 17  findings: 0  unresolved: 0
+
+===== file: code/Acme/Web/Model/Renderer/Interceptor.php =====
+<?php
+namespace Acme\Web\Model\Renderer;
+
+/**
+ * Interceptor class for @see \Acme\Web\Model\Renderer
+ */
+class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework\Interception\InterceptorInterface
+{
+    use \Magento\Framework\Interception\Interceptor;
+
+    public function __construct()
+    {
+        $this->___init();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function render(string $template, array $vars = []): string
+    {
+        $pluginInfo = $this->pluginList->getNext($this->subjectType, 'render');
+        return $pluginInfo ? $this->___callPlugins('render', func_get_args(), $pluginInfo) : parent::render($template, $vars);
+    }
+}
+
+===== file: metadata/adminhtml.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => NULL,
+    'Acme\\Web\\Plugin\\Cache' => NULL,
+    'Acme\\Web\\Plugin\\Theme' => NULL,
+    'Acme\\Web\\Plugin\\Trace' => NULL,
+    'Magento\\Framework\\Interception\\PluginListGenerator' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 'Acme\\Web\\Model\\Renderer\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/adminhtml|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+        'disabled' => true,
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+        'disabled' => true,
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/app_action_list.php =====
+<?php return array (
+);
+
+===== file: metadata/crontab.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => NULL,
+    'Acme\\Web\\Plugin\\Cache' => NULL,
+    'Acme\\Web\\Plugin\\Theme' => NULL,
+    'Acme\\Web\\Plugin\\Trace' => NULL,
+    'Magento\\Framework\\Interception\\PluginListGenerator' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 'Acme\\Web\\Model\\Renderer\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/crontab|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_render_acme_web_cache' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_web_trace',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/frontend.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => NULL,
+    'Acme\\Web\\Plugin\\Cache' => NULL,
+    'Acme\\Web\\Plugin\\Theme' => NULL,
+    'Acme\\Web\\Plugin\\Trace' => NULL,
+    'Magento\\Framework\\Interception\\PluginListGenerator' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 'Acme\\Web\\Model\\Renderer\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/frontend|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+      'acme_web_theme' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Web\\Plugin\\Theme',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_theme' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Web\\Plugin\\Theme',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_render_acme_web_cache' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_theme',
+      ),
+      1 => 
+      array (
+        0 => 'acme_web_trace',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => NULL,
+    'Acme\\Web\\Plugin\\Cache' => NULL,
+    'Acme\\Web\\Plugin\\Theme' => NULL,
+    'Acme\\Web\\Plugin\\Trace' => NULL,
+    'Magento\\Framework\\Interception\\PluginListGenerator' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 'Acme\\Web\\Model\\Renderer\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/global|graphql|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_render_acme_web_cache' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_web_trace',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_render_acme_web_cache' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_web_trace',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|webapi_rest|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_render_acme_web_cache' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_web_trace',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|webapi_soap|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_render_acme_web_cache' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_web_trace',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/graphql.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => NULL,
+    'Acme\\Web\\Plugin\\Cache' => NULL,
+    'Acme\\Web\\Plugin\\Theme' => NULL,
+    'Acme\\Web\\Plugin\\Trace' => NULL,
+    'Magento\\Framework\\Interception\\PluginListGenerator' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 'Acme\\Web\\Model\\Renderer\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/interception.php =====
+<?php return array (
+  'Acme\\Web\\Model\\Renderer' => true,
+  'Acme\\Web\\Model\\Renderer\\Interceptor' => false,
+  'Acme\\Web\\Plugin\\Cache' => false,
+  'Acme\\Web\\Plugin\\Theme' => false,
+  'Acme\\Web\\Plugin\\Trace' => false,
+  'Magento\\Framework\\Interception\\PluginListGenerator' => false,
+);
+
+===== file: metadata/webapi_rest.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => NULL,
+    'Acme\\Web\\Plugin\\Cache' => NULL,
+    'Acme\\Web\\Plugin\\Theme' => NULL,
+    'Acme\\Web\\Plugin\\Trace' => NULL,
+    'Magento\\Framework\\Interception\\PluginListGenerator' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 'Acme\\Web\\Model\\Renderer\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/webapi_soap.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => NULL,
+    'Acme\\Web\\Plugin\\Cache' => NULL,
+    'Acme\\Web\\Plugin\\Theme' => NULL,
+    'Acme\\Web\\Plugin\\Trace' => NULL,
+    'Magento\\Framework\\Interception\\PluginListGenerator' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Web\\Model\\Renderer' => 'Acme\\Web\\Model\\Renderer\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== findings =====
+
+===== unresolved =====
