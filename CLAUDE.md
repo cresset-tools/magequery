@@ -185,7 +185,7 @@ DATA          (persistence & model)
   customer <email> [--id]   quote <id|email>
   invoice|shipment|creditmemo <increment#>   order-statuses [<filter>]   sequences [<entity>]
   sales-rule <coupon|id|name>   catalog-rule [<id|name>]   tax [<filter>]   (live DB)
-  sql <select|-> [--print] [--limit] [--timeout]   sql --describe [<table>]   (live DB)
+  sql <select|-> [--store] [--print] [--limit] [--timeout]   sql --describe [<table>]   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1613,7 +1613,7 @@ Filter narrows all sections (country code exact, rate/rule/class substring). Val
 on the scratchpad DB: the untaxed-class flag, a three-rate rule incl. a US-CA zip-range
 rate, the unused BE rate, and country filtering.
 
-### `sql` (read-only SQL over virtual tables, live DB, M1 done)
+### `sql` (read-only SQL over virtual tables, live DB, M1–M2 done)
 
 `magequery sql "<SELECT …>"` answers the questions the one-record cards can't: anything
 across many rows (revenue by country, best sellers, top customers). Plain MySQL, plus
@@ -1634,6 +1634,29 @@ statement is never rewritten and real tables join as-is. Plan and later mileston
   `website_id`, billing/shipping country, `status_label`, `customer_group_code`) and
   `order_items` (`parent_item_id IS NULL`, `simple_product_id` via a configurable-only
   child join so bundles never multiply rows).
+- **EAV tables** (M2: `products`): a `VirtualTable` with an `EavSpec` turns every
+  non-static attribute of its entity type into a column. The attribute list is live
+  (`eav_attributes`), so expansion goes two-phase: `sql::eav_entities` runs the guard and
+  names the entity types used, the query layer loads only those (plus `--store` → id via
+  `store_tree`, `admin`/`0` = default), then `expand` renders. Each attribute is a
+  **correlated scalar subquery** on the value table's unique `(entity_id, attribute_id,
+  store_id)` key, not a join: a product has hundreds of attributes and MySQL caps a join
+  at 61 tables. Store fallback is `store_id IN (0, S) ORDER BY store_id DESC LIMIT 1`
+  (exact Magento semantics: a store row wins even when NULL); without `--store`,
+  `store_id = 0`. A `select` with table-backed options (no source model, or
+  `Eav…Source\Table`) also offers `<code>_label` via `eav_attribute_option_value`, same
+  fallback. `*` selects the `EavSpec::common` set (name, status, visibility, price,
+  special_price, url_key), never all attributes. Fixed columns (`qty`, `is_in_stock`
+  from the default stock item; `attribute_set_name`; `website_ids` as a GROUP_CONCAT
+  subquery) beat an attribute of the same name; codes are backtick-quoted so reserved
+  words work. `--store` without an EAV table is an error pointing at
+  `WHERE store_code`. `--describe products` lists every attribute with its admin label
+  (`+ <code>_label` where offered); unreachable DB → fixed and base columns plus a
+  `warning`. Benchmarked at 100k products (the scratchpad generator, 161 attributes):
+  MariaDB 11.8 65–380 ms, MySQL 8.0 0.2–1.1 s for full-catalog filters and group-bys.
+  (The first MySQL queries right after the bulk load hit the 30s timeout once; every
+  rerun was fast, so that was post-load InnoDB work, not the query shape: the plan is a
+  per-row index lookup on the unique key.)
 - **Execution** (`db/sql.rs`): session timeout (`max_statement_time` on MariaDB,
   `max_execution_time` on MySQL; `--timeout`, default 30s), `START TRANSACTION READ ONLY`,
   rollback. Cap: `LIMIT cap+1` appended when there is no top-level `LIMIT` (default 200,

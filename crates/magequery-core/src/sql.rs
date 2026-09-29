@@ -27,7 +27,8 @@ pub(crate) struct Join {
 }
 
 /// A column the virtual table adds on top of its base table. Its joins are only emitted
-/// when the column name appears in the statement (or a `*` selects everything).
+/// when the column name appears in the statement (or a `*` selects everything). `expr`
+/// may use `{p}` for the table prefix.
 pub(crate) struct VirtualColumn {
     pub name: &'static str,
     pub expr: &'static str,
@@ -45,8 +46,42 @@ pub(crate) struct VirtualTable {
     /// A `WHERE` over the base table (alias-qualified), shown in `--describe`.
     pub filter: Option<&'static str>,
     pub columns: &'static [VirtualColumn],
-    /// Caveats on base-table columns, printed next to them in `--describe`.
+    /// Caveats on base-table and attribute columns, printed next to them in `--describe`.
     pub notes: &'static [(&'static str, &'static str)],
+    /// Every EAV attribute of this entity type becomes a column (live metadata).
+    pub eav: Option<&'static EavSpec>,
+}
+
+pub(crate) struct EavSpec {
+    /// The `eav_entity_type` code whose attributes become columns.
+    pub entity_type: &'static str,
+    /// The attributes `*` selects. Any other attribute is selected by naming it; `*`
+    /// cannot mean all of them (there are hundreds, each a subquery per row).
+    pub common: &'static [&'static str],
+}
+
+/// One EAV attribute as a virtual column, from the live `eav_attribute` row.
+#[derive(Debug, Clone)]
+pub(crate) struct EavColumn {
+    pub code: String,
+    pub attribute_id: u32,
+    /// `varchar`, `int`, `decimal`, `text`, `datetime`.
+    pub backend_type: String,
+    /// The value table, unprefixed (`catalog_product_entity_varchar`).
+    pub value_table: String,
+    pub label: Option<String>,
+    /// A `select` whose options live in `eav_attribute_option_value`: offers `<code>_label`.
+    pub has_option_labels: bool,
+}
+
+/// Live facts that EAV-backed virtual tables need, loaded by the caller only when
+/// [`eav_entities`] says the statement uses one.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Context {
+    /// Non-static attributes per entity type code.
+    pub attributes: std::collections::BTreeMap<String, Vec<EavColumn>>,
+    /// The store view attribute values resolve for (falling back to store 0).
+    pub store_id: u32,
 }
 
 const J_STORE: Join = Join {
@@ -74,6 +109,15 @@ const J_GROUP: Join = Join {
 const J_CHILD: Join = Join {
     alias: "c",
     sql: "LEFT JOIN {p}sales_order_item c ON c.parent_item_id = i.item_id AND i.product_type = 'configurable'",
+};
+
+const J_STOCK: Join = Join {
+    alias: "si",
+    sql: "LEFT JOIN {p}cataloginventory_stock_item si ON si.product_id = e.entity_id AND si.stock_id = 1",
+};
+const J_ATTR_SET: Join = Join {
+    alias: "aset",
+    sql: "LEFT JOIN {p}eav_attribute_set aset ON aset.attribute_set_id = e.attribute_set_id",
 };
 
 pub(crate) const VIRTUAL_TABLES: &[VirtualTable] = &[
@@ -142,6 +186,7 @@ pub(crate) const VIRTUAL_TABLES: &[VirtualTable] = &[
             ("base_subtotal", "excl. tax and shipping, before discount"),
             ("base_total_refunded", "credit-memoed so far, base currency"),
         ],
+        eav: None,
     },
     VirtualTable {
         name: "order_items",
@@ -164,6 +209,59 @@ pub(crate) const VIRTUAL_TABLES: &[VirtualTable] = &[
             ("base_row_total", "base currency, excl. tax, before discount; subtract base_discount_amount for net"),
             ("created_at", "UTC"),
         ],
+        eav: None,
+    },
+    VirtualTable {
+        name: "products",
+        grain: "one row per product; every attribute is a column",
+        base: "catalog_product_entity",
+        alias: "e",
+        filter: None,
+        columns: &[
+            VirtualColumn {
+                name: "qty",
+                expr: "si.qty",
+                joins: &[&J_STOCK],
+                note: "default-stock quantity (cataloginventory_stock_item). With MSI and several \
+                       sources, per-source quantities are in inventory_source_item",
+            },
+            VirtualColumn {
+                name: "is_in_stock",
+                expr: "si.is_in_stock",
+                joins: &[&J_STOCK],
+                note: "the default-stock status flag: 1 in stock, 0 out of stock",
+            },
+            VirtualColumn {
+                name: "attribute_set_name",
+                expr: "aset.attribute_set_name",
+                joins: &[&J_ATTR_SET],
+                note: "the product's attribute set",
+            },
+            VirtualColumn {
+                name: "website_ids",
+                expr: "(SELECT GROUP_CONCAT(pw.website_id ORDER BY pw.website_id) \
+                       FROM {p}catalog_product_website pw WHERE pw.product_id = e.entity_id)",
+                joins: &[],
+                note: "comma-separated websites the product is assigned to; \
+                       filter with FIND_IN_SET('1', website_ids)",
+            },
+        ],
+        notes: &[
+            ("entity_id", "order_items.product_id joins on this (the parent, for configurable lines)"),
+            ("sku", "unique; order lines keep their own copy in order_items.sku"),
+            ("type_id", "simple, configurable, bundle, grouped, virtual, downloadable"),
+            ("name", "resolved for --store (falling back to the default value)"),
+            ("status", "1 enabled, 2 disabled; can differ per store view, so pass --store"),
+            ("visibility", "1 not visible individually, 2 catalog, 3 search, 4 catalog and search"),
+            ("price", "the base price attribute. Special, tier, and catalog-rule prices are \
+                       separate: `magequery price <sku>` shows them all"),
+            ("special_price", "applies only between special_from_date and special_to_date"),
+            ("url_key", "resolved for --store"),
+        ],
+        eav: Some(&EavSpec {
+            entity_type: "catalog_product",
+            common: &["name", "status", "visibility", "price", "special_price", "url_key"],
+        }),
     },
 ];
 
@@ -324,10 +422,82 @@ pub(crate) struct Expanded {
     pub cap: Option<u64>,
 }
 
+/// What the guard and reference scan learned about a statement.
+struct Analysis<'s> {
+    toks: Vec<Token>,
+    /// The statement without trailing semicolons and comments.
+    body: &'s str,
+    starts_with_with: bool,
+    used: Vec<&'static VirtualTable>,
+    columns: BTreeSet<String>,
+    star: bool,
+    has_limit: bool,
+}
+
+/// The EAV entity types the virtual tables in `stmt` need attribute metadata for. Also
+/// runs the guard, so a refused statement fails here before any database lookup.
+pub(crate) fn eav_entities(stmt: &str) -> Result<Vec<&'static str>> {
+    Ok(analyze(stmt)?
+        .used
+        .iter()
+        .filter_map(|vt| vt.eav.map(|e| e.entity_type))
+        .collect())
+}
+
 /// Validate `stmt` as a single read statement and expand the virtual tables it names.
 /// `prefix` is `env.php`'s table prefix; `limit` caps the rows unless the statement has
-/// its own top-level `LIMIT` (`None` = no cap).
-pub(crate) fn expand(stmt: &str, prefix: &str, limit: Option<u64>) -> Result<Expanded> {
+/// its own top-level `LIMIT` (`None` = no cap); `ctx` carries the live attribute
+/// metadata for EAV tables (see [`eav_entities`]).
+pub(crate) fn expand(
+    stmt: &str,
+    prefix: &str,
+    limit: Option<u64>,
+    ctx: &Context,
+) -> Result<Expanded> {
+    let a = analyze(stmt)?;
+    let cap = if a.has_limit { None } else { limit };
+    let ctes = a
+        .used
+        .iter()
+        .map(|vt| {
+            Ok(format!(
+                "{} AS (\n{}\n)",
+                vt.name,
+                cte_body(vt, prefix, &a, ctx)?
+            ))
+        })
+        .collect::<Result<Vec<String>>>()?;
+    let (toks, body) = (&a.toks, a.body);
+    let mut sql = if ctes.is_empty() {
+        body.to_string()
+    } else if a.starts_with_with {
+        // Splice ours in front of the statement's own CTEs, keeping RECURSIVE (which
+        // applies to the whole list) where the author put it.
+        let with = toks.iter().position(|t| t.is_word("with")).unwrap_or(0);
+        let mut after = toks[with].end;
+        if toks.get(with + 1).is_some_and(|t| t.is_word("recursive")) {
+            after = toks[with + 1].end;
+        }
+        format!(
+            "{} {},\n{}",
+            &body[..after],
+            ctes.join(",\n"),
+            body[after..].trim_start()
+        )
+    } else {
+        format!("WITH {}\n{}", ctes.join(",\n"), body)
+    };
+    if let Some(n) = cap {
+        sql.push_str(&format!("\nLIMIT {}", n.saturating_add(1)));
+    }
+    Ok(Expanded {
+        sql,
+        tables: a.used.iter().map(|vt| vt.name).collect(),
+        cap,
+    })
+}
+
+fn analyze(stmt: &str) -> Result<Analysis<'_>> {
     let mut toks = tokenize(stmt)?;
     // Trailing semicolons are fine; any other one means a second statement.
     while toks.last().is_some_and(|t| t.is_punct(";")) {
@@ -395,7 +565,7 @@ pub(crate) fn expand(stmt: &str, prefix: &str, limit: Option<u64>) -> Result<Exp
     } else {
         BTreeSet::new()
     };
-    let used: Vec<&VirtualTable> = VIRTUAL_TABLES
+    let used: Vec<&'static VirtualTable> = VIRTUAL_TABLES
         .iter()
         .filter(|vt| tables.contains(vt.name) && !own_ctes.contains(vt.name))
         .collect();
@@ -411,44 +581,15 @@ pub(crate) fn expand(stmt: &str, prefix: &str, limit: Option<u64>) -> Result<Exp
             depth == 0 && t.is_word("limit")
         })
     };
-    let cap = if has_limit { None } else { limit };
-
-    let ctes: Vec<String> = used
-        .iter()
-        .map(|vt| {
-            format!(
-                "{} AS (\n{}\n)",
-                vt.name,
-                cte_body(vt, prefix, &columns, star)
-            )
-        })
-        .collect();
-    let mut sql = if ctes.is_empty() {
-        body.to_string()
-    } else if first.is_word("with") {
-        // Splice ours in front of the statement's own CTEs, keeping RECURSIVE (which
-        // applies to the whole list) where the author put it.
-        let with = toks.iter().position(|t| t.is_word("with")).unwrap_or(0);
-        let mut after = toks[with].end;
-        if toks.get(with + 1).is_some_and(|t| t.is_word("recursive")) {
-            after = toks[with + 1].end;
-        }
-        format!(
-            "{} {},\n{}",
-            &body[..after],
-            ctes.join(",\n"),
-            body[after..].trim_start()
-        )
-    } else {
-        format!("WITH {}\n{}", ctes.join(",\n"), body)
-    };
-    if let Some(n) = cap {
-        sql.push_str(&format!("\nLIMIT {}", n.saturating_add(1)));
-    }
-    Ok(Expanded {
-        sql,
-        tables: used.iter().map(|vt| vt.name).collect(),
-        cap,
+    let starts_with_with = first.is_word("with");
+    Ok(Analysis {
+        toks,
+        body,
+        starts_with_with,
+        used,
+        columns,
+        star,
+        has_limit,
     })
 }
 
@@ -501,14 +642,51 @@ fn skip_parens(toks: &[Token], mut k: usize) -> usize {
     k
 }
 
-fn cte_body(vt: &VirtualTable, prefix: &str, columns: &BTreeSet<String>, star: bool) -> String {
+fn cte_body(vt: &VirtualTable, prefix: &str, a: &Analysis, ctx: &Context) -> Result<String> {
     let wanted: Vec<&VirtualColumn> = vt
         .columns
         .iter()
-        .filter(|c| star || columns.contains(c.name))
+        .filter(|c| a.star || a.columns.contains(c.name))
         .collect();
     let mut select = vec![format!("{}.*", vt.alias)];
-    select.extend(wanted.iter().map(|c| format!("{} AS {}", c.expr, c.name)));
+    select.extend(
+        wanted
+            .iter()
+            .map(|c| format!("{} AS {}", c.expr.replace("{p}", prefix), c.name)),
+    );
+    if let Some(spec) = vt.eav {
+        let attrs = ctx.attributes.get(spec.entity_type).ok_or_else(|| {
+            sql_err(&format!(
+                "`{}` reads its attribute list from the database, which is not reachable",
+                vt.name
+            ))
+        })?;
+        for attr in attrs {
+            // A fixed column of the same name wins; it is what --describe documents.
+            if vt.columns.iter().any(|c| c.name == attr.code) {
+                continue;
+            }
+            let label = format!("{}_label", attr.code);
+            let want_value = a.columns.contains(&attr.code)
+                || (a.star && spec.common.contains(&attr.code.as_str()));
+            let want_label = attr.has_option_labels && a.columns.contains(&label);
+            if !(want_value || want_label) {
+                continue;
+            }
+            let value = attr_value(attr, vt.alias, prefix, ctx.store_id);
+            if want_value {
+                select.push(format!("{value} AS {}", quote_ident(&attr.code)));
+            }
+            if want_label {
+                select.push(format!(
+                    "(SELECT ov.value FROM {prefix}eav_attribute_option_value ov \
+                     WHERE ov.option_id = {value} AND {}) AS {}",
+                    store_scope("ov", ctx.store_id),
+                    quote_ident(&label)
+                ));
+            }
+        }
+    }
     let mut joins: Vec<&Join> = Vec::new();
     for c in &wanted {
         for j in c.joins {
@@ -519,7 +697,7 @@ fn cte_body(vt: &VirtualTable, prefix: &str, columns: &BTreeSet<String>, star: b
     }
     let mut out = format!(
         "  SELECT {}\n  FROM {prefix}{} {}",
-        select.join(", "),
+        select.join(",\n    "),
         vt.base,
         vt.alias
     );
@@ -530,7 +708,35 @@ fn cte_body(vt: &VirtualTable, prefix: &str, columns: &BTreeSet<String>, star: b
     if let Some(f) = vt.filter {
         out.push_str(&format!("\n  WHERE {f}"));
     }
-    out
+    Ok(out)
+}
+
+/// One attribute's value for the row, as a scalar subquery on the value table's unique
+/// `(entity_id, attribute_id, store_id)` key: the store view's own row when it has one,
+/// else the default (store 0). Subqueries rather than joins: a product has hundreds of
+/// attributes and MySQL allows 61 tables per join.
+fn attr_value(attr: &EavColumn, alias: &str, prefix: &str, store_id: u32) -> String {
+    format!(
+        "(SELECT v.value FROM {prefix}{} v WHERE v.entity_id = {alias}.entity_id \
+         AND v.attribute_id = {} AND {})",
+        attr.value_table,
+        attr.attribute_id,
+        store_scope("v", store_id)
+    )
+}
+
+/// The store condition of a store-scoped value lookup (one row per store): the default
+/// row only, or the store's row preferred over the default.
+fn store_scope(alias: &str, store_id: u32) -> String {
+    if store_id == 0 {
+        format!("{alias}.store_id = 0")
+    } else {
+        format!("{alias}.store_id IN (0, {store_id}) ORDER BY {alias}.store_id DESC LIMIT 1")
+    }
+}
+
+fn quote_ident(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
 }
 
 #[cfg(test)]
@@ -538,11 +744,39 @@ mod tests {
     use super::*;
 
     fn ok(stmt: &str) -> Expanded {
-        expand(stmt, "", Some(200)).unwrap_or_else(|e| panic!("{stmt}: {e}"))
+        expand(stmt, "", Some(200), &catalog(0)).unwrap_or_else(|e| panic!("{stmt}: {e}"))
+    }
+
+    /// A context with a few product attributes, as the live `eav_attribute` rows give.
+    fn catalog(store_id: u32) -> Context {
+        let attr = |code: &str, id: u32, backend: &str, labels: bool| EavColumn {
+            code: code.to_string(),
+            attribute_id: id,
+            backend_type: backend.to_string(),
+            value_table: format!("catalog_product_entity_{backend}"),
+            label: None,
+            has_option_labels: labels,
+        };
+        let mut ctx = Context {
+            store_id,
+            ..Default::default()
+        };
+        ctx.attributes.insert(
+            "catalog_product".to_string(),
+            vec![
+                attr("name", 73, "varchar", false),
+                attr("status", 97, "int", false),
+                attr("price", 77, "decimal", false),
+                attr("color", 93, "int", true),
+                attr("qty", 999, "decimal", false),
+                attr("group", 500, "varchar", false),
+            ],
+        );
+        ctx
     }
 
     fn refused(stmt: &str) -> String {
-        match expand(stmt, "", Some(200)) {
+        match expand(stmt, "", Some(200), &catalog(0)) {
             Err(e) => e.to_string(),
             Ok(x) => panic!("accepted: {}", x.sql),
         }
@@ -565,12 +799,21 @@ mod tests {
         let x = ok("SELECT * FROM (SELECT * FROM sales_order LIMIT 5) t");
         assert_eq!(x.cap, Some(200));
         // No cap requested.
-        assert!(!expand("SELECT 1", "", None).unwrap().sql.contains("LIMIT"));
+        assert!(!expand("SELECT 1", "", None, &Context::default())
+            .unwrap()
+            .sql
+            .contains("LIMIT"));
     }
 
     #[test]
     fn virtual_tables_become_prefixed_ctes() {
-        let x = expand("SELECT COUNT(*) FROM orders", "m2_", Some(10)).unwrap();
+        let x = expand(
+            "SELECT COUNT(*) FROM orders",
+            "m2_",
+            Some(10),
+            &Context::default(),
+        )
+        .unwrap();
         assert_eq!(x.tables, vec!["orders"]);
         assert!(x
             .sql
@@ -659,6 +902,86 @@ mod tests {
         assert!(refused("SELECT 'unterminated").contains("unterminated"));
         // String functions that share a name with a statement are fine.
         ok("SELECT REPLACE(sku, '-', ''), INSERT(sku, 1, 0, 'x') FROM sales_order_item");
+    }
+
+    #[test]
+    fn product_attributes_are_subqueries_on_the_default_row() {
+        let x = ok("SELECT sku, name, price FROM products WHERE status = 1");
+        assert_eq!(x.tables, vec!["products"]);
+        assert!(x.sql.contains(
+            "(SELECT v.value FROM catalog_product_entity_varchar v WHERE v.entity_id = e.entity_id \
+             AND v.attribute_id = 73 AND v.store_id = 0) AS `name`"
+        ));
+        assert!(x
+            .sql
+            .contains("AND v.attribute_id = 97 AND v.store_id = 0) AS `status`"));
+        assert!(!x.sql.contains("AS `color`"));
+        assert!(!x.sql.contains("LEFT JOIN"));
+    }
+
+    #[test]
+    fn store_view_values_fall_back_to_the_default() {
+        let x = expand("SELECT name FROM products", "", None, &catalog(2)).unwrap();
+        assert!(x
+            .sql
+            .contains("AND v.store_id IN (0, 2) ORDER BY v.store_id DESC LIMIT 1) AS `name`"));
+    }
+
+    #[test]
+    fn option_labels_resolve_through_the_option_table() {
+        let x = expand(
+            "SELECT sku, color_label FROM products",
+            "m_",
+            None,
+            &catalog(1),
+        )
+        .unwrap();
+        assert!(x
+            .sql
+            .contains("FROM m_eav_attribute_option_value ov WHERE ov.option_id = (SELECT"));
+        assert!(x
+            .sql
+            .contains("ov.store_id IN (0, 1) ORDER BY ov.store_id DESC LIMIT 1) AS `color_label`"));
+        // The label alone does not select the raw option id.
+        assert!(!x.sql.contains("AS `color`,"));
+        assert!(!x.sql.ends_with("AS `color`"));
+    }
+
+    #[test]
+    fn product_fixed_columns_and_star() {
+        let x = ok("SELECT sku, qty, is_in_stock FROM products WHERE qty < 5");
+        // A fixed column beats an attribute of the same name.
+        assert!(x.sql.contains("si.qty AS qty"));
+        assert!(!x.sql.contains("attribute_id = 999"));
+        assert_eq!(x.sql.matches("cataloginventory_stock_item si").count(), 1);
+        let x = ok("SELECT * FROM products");
+        for col in [
+            "AS `name`",
+            "AS `status`",
+            "AS `price`",
+            "AS qty",
+            "AS website_ids",
+        ] {
+            assert!(x.sql.contains(col), "{col}");
+        }
+        // `*` is the common set, not every attribute.
+        assert!(!x.sql.contains("AS `color`"));
+        // Codes are quoted, so a reserved word is a fine attribute.
+        assert!(ok("SELECT `group` FROM products")
+            .sql
+            .contains("AS `group`"));
+    }
+
+    #[test]
+    fn eav_tables_need_the_attribute_list() {
+        let e = expand("SELECT name FROM products", "", None, &Context::default()).unwrap_err();
+        assert!(e.to_string().contains("attribute list"));
+        assert_eq!(
+            eav_entities("SELECT * FROM products p JOIN orders o").unwrap(),
+            vec!["catalog_product"]
+        );
+        assert!(eav_entities("SELECT * FROM orders").unwrap().is_empty());
+        assert!(eav_entities("DELETE FROM products").is_err());
     }
 
     /// The skill teaches `magequery sql` by example; every example it shows must at least

@@ -149,8 +149,10 @@ modules       88 enabled, 0 disabled  (88 vendor, 0 app/code)
 The live commands look up one record. For reports and lists, `magequery sql` runs a
 read-only SQL statement against the database from `env.php`. It adds virtual tables that
 know Magento's layout: `orders` has the store code, the billing and shipping countries,
-and an `is_revenue` flag, and `order_items` has only the lines a customer saw, so
-configurable and bundle children are never counted twice. Real tables can be joined too.
+and an `is_revenue` flag; `order_items` has only the lines a customer saw, so
+configurable and bundle children are never counted twice; and `products` has every EAV
+attribute as a column, with option labels, resolved for the store view you pass with
+`--store`. Real tables can be joined too.
 
 ```console
 $ magequery sql --describe orders     # columns, and which amounts are safe to sum
@@ -159,6 +161,8 @@ $ magequery sql "SELECT shipping_country, COUNT(*) orders, SUM(base_grand_total)
 shipping_country  orders   revenue
 NL                     1  100.0000
 DE                     1   50.0000
+$ magequery sql --store nl "SELECT sku, name, color_label, qty FROM products
+                            WHERE status = 1 AND qty < 5"
 ```
 
 Statements run in a read-only transaction with a 30-second server-side timeout

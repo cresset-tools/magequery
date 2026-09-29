@@ -53,7 +53,7 @@ falling back to store 0). Default: admin/default values (store 0).
 
 | table | grain | notes |
 |---|---|---|
-| `products` | one row per product | static `catalog_product_entity` columns + **every EAV attribute as a column**, store fallback applied; `qty`, `is_in_stock` from `cataloginventory_stock_item` |
+| `products` | one row per product | static `catalog_product_entity` columns + **every EAV attribute as a column**, store fallback applied, `<code>_label` for selects; `qty`, `is_in_stock` from `cataloginventory_stock_item`; `attribute_set_name`, `website_ids` (M2) |
 | `orders` | one row per order | `sales_order` + `store_code`, `website_id`, `billing_country`, `shipping_country`, `status_label`, `is_revenue` (see below) |
 | `order_items` | one row per **visible** line | `parent_item_id IS NULL` only; the child SKU of a configurable is exposed as `simple_sku`, so lines are never double-counted |
 
@@ -89,8 +89,9 @@ The schema cannot decide what "revenue" means. Columns carry a one-line caveat t
    fixed joins, static columns with caveats, and an EAV entity type if any. The same
    definitions render `--describe`.
 3. **Expansion**: emit `WITH <vt> AS (…)` for each referenced table, prefixing real table
-   names with the `env.php` prefix, pushing `--store` into the EAV joins
-   (`COALESCE(store_row.value, default_row.value)`).
+   names with the `env.php` prefix. EAV values are scalar subqueries with the store
+   fallback inside them (`store_id IN (0, S) ORDER BY store_id DESC LIMIT 1`), so a
+   store row wins even when it holds NULL, as in Magento.
 4. **Execution** behind the `db` feature, reusing `db::connect` and `clean_err`. Output
    through the existing table/`--json` renderers; columns in select order.
 5. **Later: rebuild cards on the same definitions** where it simplifies them, so
@@ -148,9 +149,10 @@ guests); the `products` example above joins it in M2.
 - **M1 — orders + order_items. Done.** Tokenizer, statement guard, read-only execution,
   `--describe`, `--print`, `--limit`, `--timeout`, `--json`, stdin (`-`), skill section.
   No EAV yet.
-- **M2 — products (EAV).** Attribute-token detection, store fallback, stock columns.
-  Benchmark on the largest catalog we have; pushing `--store` into the join is the
-  main lever.
+- **M2 — products (EAV). Done.** Attributes as correlated scalar subqueries rather
+  than joins (MySQL's 61-table join cap; one unique-key lookup per value), store
+  fallback, `<code>_label` for table-backed selects, stock / attribute set / website
+  columns, `--store`. Benchmarked at 100k products on MariaDB and MySQL (see CLAUDE.md).
 - **M3 — customers, quotes, categories, sales documents.** Mostly definitions, reusing
   M2's EAV path.
 - **M4 — acceptance.** Walk the magento2-mcp read-tool list; each answered by one

@@ -17,7 +17,8 @@ description: >-
   `ui_component` file, or a `Setup/Patch` class. Static by default, so it works on a
   checkout that was never set up; `--db` overlays and diffs the live database. It
   also inspects live orders, products, customers, and carts, and answers questions
-  across many orders (revenue, best sellers) with read-only SQL.
+  across many orders or products (revenue, best sellers, low stock, products missing
+  an attribute) with read-only SQL.
 ---
 
 # Inspecting a Magento 2 codebase with magequery
@@ -150,10 +151,13 @@ cache, `setup:upgrade`.
 
 **Questions across many records (reports, lists, totals)**
 The live entity commands look up one record. For anything across many (revenue by
-period or country, best sellers, guest vs registered orders), write SQL with
-`magequery sql`. It adds Magento-aware virtual tables, `orders` and `order_items`,
-that already handle the table prefix, the store and address joins, and configurable
-and bundle child lines. Real tables can be joined as-is. It is read-only, times out
+period or country, best sellers, low stock, products missing a value), write SQL with
+`magequery sql`. It adds Magento-aware virtual tables that already handle the table
+prefix, the store and address joins, and configurable and bundle child lines:
+`orders`, `order_items`, and `products`, where **every EAV attribute is a column**
+(`name`, `status`, `color`, …; select attributes also get `<code>_label`). Pass
+`--store <code>` to read attribute values as that store view shows them. Real tables
+can be joined as-is. It is read-only, times out
 after 30s (`--timeout`), and shows 200 rows unless the statement has its own `LIMIT`
 or you pass `--limit N` (`--limit 0` for all).
 
@@ -162,6 +166,7 @@ timezone dates are in, and how guests are stored:
 
     magequery sql --describe              # the virtual tables
     magequery sql --describe orders       # columns, sources, caveats
+    magequery sql --describe products     # also lists every attribute with its label
 
 Examples:
 
@@ -175,6 +180,10 @@ Examples:
                    JOIN orders o ON o.entity_id = i.order_id
                    WHERE o.is_revenue AND o.created_at >= '2026-01-01'
                    GROUP BY 1 ORDER BY qty DESC LIMIT 20"
+
+    # enabled products low on stock, names as the Dutch store view shows them
+    magequery sql --store nl "SELECT sku, name, qty FROM products
+                              WHERE status = 1 AND qty < 5 ORDER BY qty"
 
     # top customers, guests included (they have no customer_id)
     magequery sql "SELECT customer_email, MAX(customer_is_guest) guest, COUNT(*) orders,

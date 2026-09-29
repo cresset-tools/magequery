@@ -64,7 +64,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("sales-rule", "Why a coupon (won't) apply: a cart rule by coupon/id/name"),
             ("catalog-rule", "Catalog price rules: window, scopes, actually applied?"),
             ("tax", "Tax classes, rules, and rates, incl. untaxed classes"),
-            ("sql", "Read-only SQL over Magento-aware virtual tables (orders, …)"),
+            ("sql", "Read-only SQL over Magento-aware virtual tables (orders, products, …)"),
         ],
     ),
     (
@@ -310,8 +310,8 @@ enum Command {
     CatalogRule(CatalogRuleArgs),
     /// Tax classes, rules, and rates — including classes no rule taxes.
     Tax(TaxArgs),
-    /// Read-only SQL over Magento-aware virtual tables: orders, order_items, and any real
-    /// table. Start with `--describe`.
+    /// Read-only SQL over Magento-aware virtual tables: orders, order_items, products, and
+    /// any real table. Start with `--describe`.
     Sql(SqlArgs),
 
     // ── Frontend: presentation ──
@@ -692,6 +692,10 @@ struct SqlArgs {
     /// Abort the statement on the server after this many seconds (0 = no timeout).
     #[arg(long, value_name = "SECS", default_value_t = 30)]
     timeout: u64,
+    /// The store view (code or id) `products` attribute values resolve for, falling back
+    /// to the default value. Default: the default values (admin).
+    #[arg(long, value_name = "CODE")]
+    store: Option<String>,
     #[arg(long)]
     json: bool,
 }
@@ -2969,7 +2973,7 @@ fn sql(mage: &Magento, args: &SqlArgs) -> Result<()> {
     let limit = (args.limit > 0).then_some(args.limit);
 
     if args.print {
-        let x = mage.sql_expand(&stmt, limit)?;
+        let x = mage.sql_expand(&stmt, limit, args.store.as_deref())?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&x)?);
         } else {
@@ -2978,7 +2982,7 @@ fn sql(mage: &Magento, args: &SqlArgs) -> Result<()> {
         return Ok(());
     }
 
-    let r = mage.sql_run(&stmt, limit, args.timeout)?;
+    let r = mage.sql_run(&stmt, limit, args.timeout, args.store.as_deref())?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&r)?);
         return Ok(());
@@ -3100,8 +3104,10 @@ fn sql_describe(mage: &Magento, table: &str, json: bool) -> Result<()> {
         t.grain,
         style::dim(&format!("# from {}{filter}", t.base_table))
     );
-    let shown: Vec<&magequery_core::SqlColumn> =
-        t.columns.iter().filter(|c| c.added || c.note.is_some()).collect();
+    if let Some(w) = &t.warning {
+        println!("  {}", style::err(w));
+    }
+    let shown: Vec<&magequery_core::SqlColumn> = t.columns.iter().filter(|c| c.note.is_some()).collect();
     let wn = shown.iter().map(|c| c.name.len()).max().unwrap_or(0);
     let wt = shown.iter().map(|c| c.col_type.as_deref().unwrap_or("added").len()).max().unwrap_or(0);
     for c in &shown {
@@ -3119,6 +3125,40 @@ fn sql_describe(mage: &Magento, table: &str, json: bool) -> Result<()> {
             println!("  {}  {}", " ".repeat(wn + wt), style::dim(&format!("= {}", c.source)));
         }
     }
+
+    // Attributes (EAV tables): one per line with the admin label, since that is how
+    // people name them ("Brand" is `manufacturer`). `<code>_label` columns fold into
+    // their attribute's line.
+    let has = |name: &str| t.columns.iter().any(|c| c.name == name);
+    let attrs: Vec<&magequery_core::SqlColumn> = t
+        .columns
+        .iter()
+        .filter(|c| c.added && c.note.is_none() && c.col_type.is_some())
+        .filter(|c| !(c.name.ends_with("_label") && has(c.name.trim_end_matches("_label"))))
+        .collect();
+    if !attrs.is_empty() {
+        println!("\n  {}", style::dim(&format!("attributes ({}), resolved for --store:", attrs.len())));
+        let wn = attrs.iter().map(|c| c.name.len()).max().unwrap_or(0);
+        let wt = attrs.iter().map(|c| c.col_type.as_deref().unwrap_or("").len()).max().unwrap_or(0);
+        for c in attrs {
+            let ty = c.col_type.as_deref().unwrap_or("");
+            let label = c.label.as_deref().map(|l| style::string_lit(&format!("\"{l}\""))).unwrap_or_default();
+            let labels_col = format!("{}_label", c.name);
+            let extra = if has(&labels_col) {
+                format!("  {}", style::dim(&format!("+ {labels_col}")))
+            } else {
+                String::new()
+            };
+            println!(
+                "    {}{}  {}{}  {label}{extra}",
+                style::name(&c.name),
+                " ".repeat(wn - c.name.len()),
+                style::kind(ty),
+                " ".repeat(wt - ty.len()),
+            );
+        }
+    }
+
     let rest: Vec<&str> =
         t.columns.iter().filter(|c| !c.added && c.note.is_none()).map(|c| c.name.as_str()).collect();
     if !rest.is_empty() {

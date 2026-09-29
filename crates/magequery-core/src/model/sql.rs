@@ -12,20 +12,25 @@ pub struct SqlTable {
     pub filter: Option<String>,
     /// Added columns first, then the base table's columns (noted ones before the rest).
     pub columns: Vec<SqlColumn>,
+    /// Why the column list is incomplete, e.g. attribute columns need a reachable DB.
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SqlColumn {
     pub name: String,
-    /// `db_schema.xml`'s type for a base column; `None` for an added (computed) one.
+    /// `db_schema.xml`'s type for a base column, the backend type for an attribute;
+    /// `None` for an added (computed) one.
     pub col_type: Option<String>,
     /// Added by the virtual table (vs. passed through from the base table).
     pub added: bool,
-    /// Where the value comes from: `sales_order.base_grand_total`, or the SQL expression
-    /// of an added column.
+    /// Where the value comes from: `sales_order.base_grand_total`, the value table of an
+    /// attribute, or the SQL expression of an added column.
     pub source: String,
     /// How to use it correctly: currency, timezone, what not to sum.
     pub note: Option<String>,
+    /// An attribute's admin label (`Brand` for `manufacturer`).
+    pub label: Option<String>,
 }
 
 /// A statement after virtual-table expansion: exactly what `sql_run` sends.
