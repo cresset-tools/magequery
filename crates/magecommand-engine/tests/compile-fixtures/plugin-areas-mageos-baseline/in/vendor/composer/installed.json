@@ -1,0 +1,14 @@
+{
+    "packages": [
+        {
+            "name": "mage-os/framework",
+            "version": "3.5.0",
+            "type": "magento2-library",
+            "install-path": "../mage-os/framework",
+            "autoload": {
+                "files": ["registration.php"]
+            }
+        }
+    ],
+    "dev": false
+}
