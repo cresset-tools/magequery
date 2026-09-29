@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.18.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.5...magequery-v0.18.0) (2026-09-29)
+
+
+### Features
+
+* **magecommand:** static deploy — the CssUrls package post-processor ([#119](https://github.com/cresset-tools/magequery/issues/119)) ([e060b57](https://github.com/cresset-tools/magequery/commit/e060b570151218ed92a32dd1abe61483436f5358))
+
+
+### Bug Fixes
+
+* **magecommand-less:** at-rule selector scoping follows the less.php version ([#117](https://github.com/cresset-tools/magequery/issues/117)) ([a84b8f9](https://github.com/cresset-tools/magequery/commit/a84b8f9c3707b5c83499b3f846573c8c119e4c84))
+* **magecommand:** static verify — classify a bundle re-split as expected ([#116](https://github.com/cresset-tools/magequery/issues/116)) ([c473e57](https://github.com/cresset-tools/magequery/commit/c473e573184c47d0018508c03442ed7d133744f4))
+* **magequery-core:** read installed.json whose empty autoload maps are [] ([#121](https://github.com/cresset-tools/magequery/issues/121)) ([9f83976](https://github.com/cresset-tools/magequery/commit/9f8397634eae9f7d23ca0f13eb4b7e3ae4157f5d))
+
 ## [0.17.5](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.4...magequery-v0.17.5) (2026-09-03)
 
 
