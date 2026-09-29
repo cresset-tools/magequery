@@ -52,6 +52,10 @@ pub enum Error {
     /// A database operation failed (connection, query, or the `db` feature is off).
     #[error("database: {0}")]
     Db(String),
+
+    /// A `magequery sql` statement was refused before it reached the database.
+    #[error("sql: {0}")]
+    Sql(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -185,6 +185,7 @@ DATA          (persistence & model)
   customer <email> [--id]   quote <id|email>
   invoice|shipment|creditmemo <increment#>   order-statuses [<filter>]   sequences [<entity>]
   sales-rule <coupon|id|name>   catalog-rule [<id|name>]   tax [<filter>]   (live DB)
+  sql <select|-> [--print] [--limit] [--timeout]   sql --describe [<table>]   (live DB)
 
 CONFIG & ADMIN (where settings & permissions live)
   config <path> [--scope] [--db] [--decrypt]    system-config [<filter>]
@@ -1611,6 +1612,43 @@ misconfiguration diagnoses inline:
 Filter narrows all sections (country code exact, rate/rule/class substring). Validated
 on the scratchpad DB: the untaxed-class flag, a three-rate rule incl. a US-CA zip-range
 rate, the unused BE rate, and country filtering.
+
+### `sql` (read-only SQL over virtual tables, live DB, M1 done)
+
+`magequery sql "<SELECT …>"` answers the questions the one-record cards can't: anything
+across many rows (revenue by country, best sellers, top customers). Plain MySQL, plus
+**virtual tables** that expand to `WITH` CTEs over the real schema; the rest of the
+statement is never rewritten and real tables join as-is. Plan and later milestones:
+`.plans/magequery-sql.md`.
+
+- **No SQL parser** (`src/sql.rs`): a tokenizer (strings, backticks, comments) drives the
+  guard (single `SELECT`/`WITH`; refuses `INTO`, writes, locking reads, `/*! */` and
+  `/*+ */`), reference detection, and top-level `LIMIT` detection. A virtual table is
+  referenced by a bare unqualified word (`shop.orders`/`` `orders` `` are real tables);
+  an added column by any word or quoted name, qualified or not. Detection over-includes
+  (an unused CTE or join is harmless), never misses. `*` (not `COUNT(*)`) selects every
+  added column. The statement's own CTEs keep precedence and `RECURSIVE` is preserved.
+- **Virtual tables** are static definitions: base table + alias + optional filter, added
+  columns each with the joins it needs (emitted only when the column is named), and
+  per-column caveats. M1: `orders` (`is_revenue` = processing/complete, `store_code`,
+  `website_id`, billing/shipping country, `status_label`, `customer_group_code`) and
+  `order_items` (`parent_item_id IS NULL`, `simple_product_id` via a configurable-only
+  child join so bundles never multiply rows).
+- **Execution** (`db/sql.rs`): session timeout (`max_statement_time` on MariaDB,
+  `max_execution_time` on MySQL; `--timeout`, default 30s), `START TRANSACTION READ ONLY`,
+  rollback. Cap: `LIMIT cap+1` appended when there is no top-level `LIMIT` (default 200,
+  `--limit 0` lifts it); the extra row flags truncation. JSON cells: ints/floats as
+  numbers, decimals as strings (exact), NULL as null.
+- `--describe` is **static** (base columns from `db_schema.xml`, so it works without a
+  DB): added columns, then noted base columns, then the rest by name. `--print` shows
+  the exact statement that would run.
+- The skill teaches it with three examples; a unit test extracts every
+  `magequery sql "…"` from `SKILL.md` and expands it. Validated on scratchpad MariaDB
+  11.8 and MySQL 8.0 (docker) with synthetic orders (configurable + bundle children,
+  guest, virtual, canceled, closed, USD-on-EUR): all three skill examples exact on both,
+  the read-only transaction confirmed (`@@in_transaction` = 1), and the timeout firing on
+  both servers (MySQL `SLEEP()` returns 1 instead of erroring, which is MySQL's
+  documented behaviour; real queries error with 3024).
 
 ### `admin-users` / `admin-roles` (live DB, done)
 

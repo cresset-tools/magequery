@@ -16,7 +16,8 @@ description: >-
   `widget.xml`, `schema.graphqls`, a layout XML file, a `.phtml` template, a
   `ui_component` file, or a `Setup/Patch` class. Static by default, so it works on a
   checkout that was never set up; `--db` overlays and diffs the live database. It
-  also inspects live orders, products, customers, and carts.
+  also inspects live orders, products, customers, and carts, and answers questions
+  across many orders (revenue, best sellers) with read-only SQL.
 ---
 
 # Inspecting a Magento 2 codebase with magequery
@@ -146,6 +147,42 @@ cache, `setup:upgrade`.
 - What related / up-sell / cross-sell products does a SKU link to (and why isn't a
   link showing)? → `product-links <sku>`. Add `--reverse` for the products that link
   *to* it.
+
+**Questions across many records (reports, lists, totals)**
+The live entity commands look up one record. For anything across many (revenue by
+period or country, best sellers, guest vs registered orders), write SQL with
+`magequery sql`. It adds Magento-aware virtual tables, `orders` and `order_items`,
+that already handle the table prefix, the store and address joins, and configurable
+and bundle child lines. Real tables can be joined as-is. It is read-only, times out
+after 30s (`--timeout`), and shows 200 rows unless the statement has its own `LIMIT`
+or you pass `--limit N` (`--limit 0` for all).
+
+Look at the virtual schema first; the column notes say which amounts to sum, which
+timezone dates are in, and how guests are stored:
+
+    magequery sql --describe              # the virtual tables
+    magequery sql --describe orders       # columns, sources, caveats
+
+Examples:
+
+    # revenue by shipping country, last 90 days
+    magequery sql "SELECT shipping_country, COUNT(*) orders, SUM(base_grand_total) revenue
+                   FROM orders WHERE is_revenue AND created_at >= NOW() - INTERVAL 90 DAY
+                   GROUP BY 1 ORDER BY revenue DESC"
+
+    # best sellers this year (order_items never double-counts configurables or bundles)
+    magequery sql "SELECT i.sku, SUM(i.qty_ordered) qty FROM order_items i
+                   JOIN orders o ON o.entity_id = i.order_id
+                   WHERE o.is_revenue AND o.created_at >= '2026-01-01'
+                   GROUP BY 1 ORDER BY qty DESC LIMIT 20"
+
+    # top customers, guests included (they have no customer_id)
+    magequery sql "SELECT customer_email, MAX(customer_is_guest) guest, COUNT(*) orders,
+                   SUM(base_grand_total) spent FROM orders WHERE is_revenue
+                   GROUP BY 1 ORDER BY spent DESC LIMIT 10"
+
+Add `--print` to see the real SQL a query expands to (a good starting point for a
+query over tables the virtual ones don't cover), and `--json` to parse results.
 
 **The project itself**
 - What am I looking at (version, deploy mode, URLs, theme and frontend stack, search

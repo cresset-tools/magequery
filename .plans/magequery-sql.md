@@ -78,10 +78,10 @@ The schema cannot decide what "revenue" means. Columns carry a one-line caveat t
    focused parsers, no parser crates), a small MySQL tokenizer that respects strings,
    backtick identifiers and comments is enough:
    - reject anything that is not a single `SELECT`/`WITH` statement;
-   - find identifiers following `FROM`/`JOIN` that name a virtual table (a real table of
-     the same name wins only if written with the prefix or backticked — decide in M1);
-   - collect every identifier token in the statement; an EAV attribute is joined iff its
-     code appears. Over-inclusion is harmless (one extra LEFT JOIN), under-inclusion is
+   - a virtual table is referenced by any bare, unqualified word with its name (M1
+     decision: `` `orders` `` and `shop.orders` mean the real table);
+   - collect every identifier token in the statement, qualified or quoted; an added
+     column (later: an EAV attribute) is joined iff its name appears. Over-inclusion is harmless (one extra LEFT JOIN), under-inclusion is
      impossible because any column use must appear as a token.
    `sqlparser-rs` is the fallback if tokenizing proves insufficient; it would be the
    heaviest dependency in core, so it needs a reason.
@@ -136,13 +136,18 @@ Examples:
 Add `--print` to see the real SQL a query expands to, and `--json` to parse results.
 ````
 
-The examples in the skill are executed by a test against the fixture DB, so they
-cannot rot.
+A unit test extracts every `magequery sql "…"` from `SKILL.md` and expands it, so an
+example can't drift out of the guard or name a virtual table that doesn't exist. Running
+them needs a database; there is no DB fixture in the test suite, so M1 ran them by hand on
+scratchpad MariaDB 11.8 and MySQL 8.0 (see CLAUDE.md). The shipped M1 skill uses three
+orders/order_items examples (revenue by country, best sellers, top customers incl.
+guests); the `products` example above joins it in M2.
 
 ## Milestones
 
-- **M1 — orders + order_items.** Tokenizer, statement guard, read-only execution,
-  `--describe`, `--print`, `--limit`, `--json`, skill section. No EAV yet.
+- **M1 — orders + order_items. Done.** Tokenizer, statement guard, read-only execution,
+  `--describe`, `--print`, `--limit`, `--timeout`, `--json`, stdin (`-`), skill section.
+  No EAV yet.
 - **M2 — products (EAV).** Attribute-token detection, store fallback, stock columns.
   Benchmark on the largest catalog we have; pushing `--store` into the join is the
   main lever.
@@ -153,7 +158,11 @@ cannot rot.
 
 ## Open questions
 
-- Name collisions between virtual and real tables (`orders` vs a third-party
-  `orders` table): prefix-wins rule, or a `v.` schema-style qualifier?
+- ~~Name collisions~~ — decided in M1: a bare `orders` is the virtual table; backtick
+  it or qualify it with the schema for a real table of that name. The statement's own
+  CTE of the same name also wins.
+- Real tables are not prefixed automatically: on a prefixed install the agent writes the
+  prefix itself (`--describe` shows it in `base_table`). Worth revisiting if prefixed
+  installs turn out to be common.
 - Should a production-looking `env.php` (non-local host, `MAGE_MODE=production`) warn,
   or require `--yes`? Aggregates over `sales_order` on a busy primary are not free.

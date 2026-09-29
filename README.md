@@ -144,6 +144,27 @@ stores        1 website(s), 1 store(s), 1 store view(s)
 modules       88 enabled, 0 disabled  (88 vendor, 0 app/code)
 ```
 
+## Questions across many records
+
+The live commands look up one record. For reports and lists, `magequery sql` runs a
+read-only SQL statement against the database from `env.php`. It adds virtual tables that
+know Magento's layout: `orders` has the store code, the billing and shipping countries,
+and an `is_revenue` flag, and `order_items` has only the lines a customer saw, so
+configurable and bundle children are never counted twice. Real tables can be joined too.
+
+```console
+$ magequery sql --describe orders     # columns, and which amounts are safe to sum
+$ magequery sql "SELECT shipping_country, COUNT(*) orders, SUM(base_grand_total) revenue
+                 FROM orders WHERE is_revenue GROUP BY 1 ORDER BY revenue DESC"
+shipping_country  orders   revenue
+NL                     1  100.0000
+DE                     1   50.0000
+```
+
+Statements run in a read-only transaction with a 30-second server-side timeout
+(`--timeout`), and show at most 200 rows unless they have their own `LIMIT` (`--limit`).
+`--print` shows the SQL a statement expands to.
+
 ## Notes
 
 Every result ends with a `# file:line` comment. It is written as a trailing comment so a
@@ -172,7 +193,7 @@ Grouped as `magequery --help` shows them.
 **Data**: `schema`, `indexers`, `extension-attributes`, `catalog-attributes`, `fieldset`, `eav`,
 `product`, `product-links`, `price`, `category`, `order`, `customer`, `customer-groups`,
 `quote`, `invoice`, `shipment`, `creditmemo`, `order-statuses`, `sequences`, `sales-rule`,
-`catalog-rule`, `tax`.
+`catalog-rule`, `tax`, `sql`.
 
 **Frontend**: `layout`, `templates`, `widgets`, `email-templates`, `translations`,
 `ui-components`, `cms-page`, `cms-block`.

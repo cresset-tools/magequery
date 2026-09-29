@@ -35,6 +35,7 @@ mod parse;
 mod php;
 mod phparray;
 mod redis;
+mod sql;
 mod queries;
 mod sysconfig;
 mod whatis;
@@ -89,7 +90,7 @@ pub use model::{
 pub use model::{
     CacheConfig, CacheFrontend, CacheType, InjectionSite, LockConfig, MqConsumer, MqHandler,
     MqPublisher, MqRoute, MqTopic, MqTopicRoute, MqVia, QueueBacklog, QueueConfig, QueueConnection,
-    SessionConfig, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses, Whatis,
+    SessionConfig, SqlColumn, SqlExpansion, SqlResult, SqlTable, SystemField, UrlRewrite, UrlRewrites, UseRef, Uses, Whatis,
 };
 pub use model::{CatalogAttribute, CatalogAttributeGroup, ClassRef};
 pub use decrypt::Decryptor;

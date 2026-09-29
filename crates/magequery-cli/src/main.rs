@@ -64,6 +64,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("sales-rule", "Why a coupon (won't) apply: a cart rule by coupon/id/name"),
             ("catalog-rule", "Catalog price rules: window, scopes, actually applied?"),
             ("tax", "Tax classes, rules, and rates, incl. untaxed classes"),
+            ("sql", "Read-only SQL over Magento-aware virtual tables (orders, …)"),
         ],
     ),
     (
@@ -309,6 +310,9 @@ enum Command {
     CatalogRule(CatalogRuleArgs),
     /// Tax classes, rules, and rates — including classes no rule taxes.
     Tax(TaxArgs),
+    /// Read-only SQL over Magento-aware virtual tables: orders, order_items, and any real
+    /// table. Start with `--describe`.
+    Sql(SqlArgs),
 
     // ── Frontend: presentation ──
     /// Layout handle: contributing files and what they do to the page.
@@ -667,6 +671,27 @@ struct QuoteArgs {
     /// A quote entity_id; anything else searches customer emails (active carts first
     /// by recency).
     query: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
+struct SqlArgs {
+    /// One SELECT (or WITH … SELECT) statement; `-` reads it from stdin. Virtual tables
+    /// (see --describe) expand to the real schema; real tables can be joined as-is.
+    query: Option<String>,
+    /// List the virtual tables, or with a name, show one table's columns and caveats.
+    #[arg(long, value_name = "TABLE", num_args = 0..=1, default_missing_value = "")]
+    describe: Option<String>,
+    /// Print the expanded SQL that would run, without running it.
+    #[arg(long)]
+    print: bool,
+    /// Show at most this many rows unless the statement has its own LIMIT (0 = no cap).
+    #[arg(long, default_value_t = 200)]
+    limit: u64,
+    /// Abort the statement on the server after this many seconds (0 = no timeout).
+    #[arg(long, value_name = "SECS", default_value_t = 30)]
+    timeout: u64,
     #[arg(long)]
     json: bool,
 }
@@ -1214,6 +1239,7 @@ fn main() -> Result<()> {
         Command::SalesRule(args) => sales_rule(&mage, &args),
         Command::CatalogRule(args) => catalog_rule(&mage, &args),
         Command::Tax(args) => tax(&mage, &args),
+        Command::Sql(args) => sql(&mage, &args),
         Command::CmsPage(args) => cms(&mage, magequery_core::CmsKind::Page, &args),
         Command::CmsBlock(args) => cms(&mage, magequery_core::CmsKind::Block, &args),
         Command::AdminUsers(args) => admin_users(&mage, &args),
@@ -2919,6 +2945,195 @@ fn sequences(mage: &Magento, args: &SequencesArgs) -> Result<()> {
         "\n{} sequence(s), next increment computed with the default pattern (custom patterns not modeled)",
         seqs.len()
     );
+    Ok(())
+}
+
+fn sql(mage: &Magento, args: &SqlArgs) -> Result<()> {
+    if let Some(table) = &args.describe {
+        return sql_describe(mage, table, args.json);
+    }
+    let stmt = match args.query.as_deref() {
+        Some("-") => {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+                .context("reading the statement from stdin")?;
+            buf
+        }
+        Some(q) => q.to_string(),
+        None => {
+            return Err(anyhow!(
+                "give a SELECT statement, or `magequery sql --describe` to see the virtual tables"
+            ))
+        }
+    };
+    let limit = (args.limit > 0).then_some(args.limit);
+
+    if args.print {
+        let x = mage.sql_expand(&stmt, limit)?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&x)?);
+        } else {
+            println!("{}", x.sql);
+        }
+        return Ok(());
+    }
+
+    let r = mage.sql_run(&stmt, limit, args.timeout)?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&r)?);
+        return Ok(());
+    }
+    print_sql_rows(&r);
+    let mut footer = format!("\n{} row(s) · {} ms", r.rows.len(), r.elapsed_ms);
+    if r.truncated {
+        footer.push_str(&format!(
+            "  (first {} only: raise --limit, or --limit 0 for all)",
+            r.cap.unwrap_or_default()
+        ));
+    }
+    eprintln!("{footer}");
+    Ok(())
+}
+
+/// Cells wider than this are cut with `…` in the table view (`--json` is never cut).
+const SQL_CELL_MAX: usize = 60;
+
+fn print_sql_rows(r: &magequery_core::SqlResult) {
+    use serde_json::Value;
+    let cell = |v: &Value| -> String {
+        let s = match v {
+            Value::Null => "NULL".to_string(),
+            Value::String(s) => s.replace(['\n', '\r', '\t'], " "),
+            other => other.to_string(),
+        };
+        if s.chars().count() > SQL_CELL_MAX {
+            format!("{}…", s.chars().take(SQL_CELL_MAX - 1).collect::<String>())
+        } else {
+            s
+        }
+    };
+    let cells: Vec<Vec<String>> = r.rows.iter().map(|row| row.iter().map(cell).collect()).collect();
+    let widths: Vec<usize> = r
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            cells.iter().map(|row| row[i].chars().count()).chain([name.chars().count()]).max().unwrap_or(0)
+        })
+        .collect();
+    let last = r.columns.len().saturating_sub(1);
+    let header: Vec<String> = r
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let pad = " ".repeat(widths[i] - name.chars().count());
+            if r.numeric.get(i) == Some(&true) {
+                format!("{pad}{}", style::name(name))
+            } else if i == last {
+                style::name(name)
+            } else {
+                format!("{}{pad}", style::name(name))
+            }
+        })
+        .collect();
+    println!("{}", header.join("  "));
+    if r.rows.is_empty() {
+        println!("{}", style::dim("(no rows)"));
+        return;
+    }
+    for (row, texts) in r.rows.iter().zip(&cells) {
+        let line: Vec<String> = row
+            .iter()
+            .zip(texts)
+            .enumerate()
+            .map(|(i, (v, text))| {
+                let pad = " ".repeat(widths[i] - text.chars().count());
+                match v {
+                    Value::Null if i == last => style::dim(text),
+                    Value::Null => format!("{}{pad}", style::dim(text)),
+                    _ if r.numeric.get(i) == Some(&true) => format!("{pad}{}", style::number(text)),
+                    _ if i == last => text.clone(),
+                    _ => format!("{text}{pad}"),
+                }
+            })
+            .collect();
+        println!("{}", line.join("  "));
+    }
+}
+
+fn sql_describe(mage: &Magento, table: &str, json: bool) -> Result<()> {
+    if table.is_empty() {
+        let tables = mage.sql_tables();
+        if json {
+            println!("{}", serde_json::to_string_pretty(&tables)?);
+            return Ok(());
+        }
+        let wn = tables.iter().map(|t| t.name.len()).max().unwrap_or(0);
+        let wg = tables.iter().map(|t| t.grain.len()).max().unwrap_or(0);
+        for t in &tables {
+            let filter = t.filter.as_deref().map(|f| format!(" WHERE {f}")).unwrap_or_default();
+            println!(
+                "{}{}  {}{}  {}",
+                style::name(&t.name),
+                " ".repeat(wn - t.name.len()),
+                t.grain,
+                " ".repeat(wg - t.grain.len()),
+                style::dim(&format!("# from {}{filter}", t.base_table)),
+            );
+        }
+        eprintln!("\n`magequery sql --describe <table>` for its columns and caveats");
+        return Ok(());
+    }
+    let Some(t) = mage.sql_table(table) else {
+        let names: Vec<String> = mage.sql_tables().into_iter().map(|t| t.name).collect();
+        return Err(anyhow!("no virtual table `{table}`; there are: {}", names.join(", ")));
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&t)?);
+        return Ok(());
+    }
+    let filter = t.filter.as_deref().map(|f| format!(" WHERE {f}")).unwrap_or_default();
+    println!(
+        "{}  {}  {}",
+        style::name(&t.name),
+        t.grain,
+        style::dim(&format!("# from {}{filter}", t.base_table))
+    );
+    let shown: Vec<&magequery_core::SqlColumn> =
+        t.columns.iter().filter(|c| c.added || c.note.is_some()).collect();
+    let wn = shown.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    let wt = shown.iter().map(|c| c.col_type.as_deref().unwrap_or("added").len()).max().unwrap_or(0);
+    for c in &shown {
+        let ty = c.col_type.as_deref().unwrap_or("added");
+        let note = c.note.as_deref().map(|n| format!("  {}", style::dim(&format!("# {n}")))).unwrap_or_default();
+        println!(
+            "  {}{}  {}{}{}",
+            style::name(&c.name),
+            " ".repeat(wn - c.name.len()),
+            if c.added { style::keyword(ty) } else { style::kind(ty) },
+            " ".repeat(wt - ty.len()),
+            note,
+        );
+        if c.added {
+            println!("  {}  {}", " ".repeat(wn + wt), style::dim(&format!("= {}", c.source)));
+        }
+    }
+    let rest: Vec<&str> =
+        t.columns.iter().filter(|c| !c.added && c.note.is_none()).map(|c| c.name.as_str()).collect();
+    if !rest.is_empty() {
+        println!("\n  {}", style::dim(&format!("also ({}):", rest.len())));
+        let mut line = String::from("   ");
+        for name in rest {
+            if line.len() + name.len() + 1 > 90 {
+                println!("{line}");
+                line = String::from("   ");
+            }
+            line.push(' ');
+            line.push_str(name);
+        }
+        println!("{line}");
+    }
     Ok(())
 }
 
