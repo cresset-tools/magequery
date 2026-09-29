@@ -1645,7 +1645,19 @@ statement is never rewritten and real tables join as-is. Plan and later mileston
   (exact Magento semantics: a store row wins even when NULL); without `--store`,
   `store_id = 0`. A `select` with table-backed options (no source model, or
   `Eav…Source\Table`) also offers `<code>_label` via `eav_attribute_option_value`, same
-  fallback. `*` selects the `EavSpec::common` set (name, status, visibility, price,
+  fallback. A table-backed `multiselect` (value = comma-separated option ids, left as
+  stored for `FIND_IN_SET`) offers `<code>_labels` instead: a **JSON array** of labels in
+  admin option order (`sort_order`, then id; not selection order), each label with the
+  per-option store fallback, NULL when none is set. Built with `CONCAT('[',
+  GROUP_CONCAT(JSON_QUOTE(…)), ']')` because `JSON_ARRAYAGG` is missing from MariaDB 10.4
+  (still supported by 2.4); a label containing a comma stays one element, and
+  `JSON_CONTAINS` filters it. It is a string in `--json` (MariaDB has no JSON column type
+  to tell us otherwise, so both servers get the same shape). The session sets
+  `group_concat_max_len` to 1 MiB, since the 1 KB default truncates silently (also
+  `website_ids`). `--describe` generates the multiselect notes from the input type.
+  Validated on both servers (sort order ≠ id order, a comma in a label, a store-view
+  value override, a missing NL label falling back): identical output; 100k products
+  filtered by label in 0.5–0.8 s on MariaDB. `*` selects the `EavSpec::common` set (name, status, visibility, price,
   special_price, url_key), never all attributes. Fixed columns (`qty`, `is_in_stock`
   from the default stock item; `attribute_set_name`; `website_ids` as a GROUP_CONCAT
   subquery) beat an attribute of the same name; codes are backtick-quoted so reserved

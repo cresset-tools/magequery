@@ -30,6 +30,10 @@ pub(crate) fn run_select(
     if timeout_secs > 0 {
         c.query_drop(timeout).map_err(clean_err)?;
     }
+    // GROUP_CONCAT truncates silently at 1 KB by default; multiselect labels and
+    // `website_ids` are built with it.
+    c.query_drop("SET SESSION group_concat_max_len = 1048576")
+        .map_err(clean_err)?;
     c.query_drop("START TRANSACTION READ ONLY")
         .map_err(clean_err)?;
 

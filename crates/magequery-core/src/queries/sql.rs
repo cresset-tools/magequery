@@ -1,7 +1,7 @@
 //! `magequery sql`: virtual-table descriptions, expansion, and (live DB) execution.
 
 use super::super::*;
-use crate::sql::{self as vsql, EavColumn, VirtualTable};
+use crate::sql::{self as vsql, EavColumn, OptionLabels, VirtualTable};
 
 impl Magento {
     /// `env.php`'s table prefix, or none when there is no readable `env.php` (expansion
@@ -69,19 +69,36 @@ impl Magento {
             .iter()
             .filter(|a| !vt.columns.iter().any(|c| c.name == a.code))
         {
+            let multi_note = || {
+                format!(
+                    "multiselect: comma-separated option ids as stored, e.g. '12,15'; filter \
+                     with FIND_IN_SET('12', {c}), or read labels from {c}_labels",
+                    c = a.code
+                )
+            };
             attr_cols.push(SqlColumn {
-                note: note_of(&a.code),
+                note: note_of(&a.code)
+                    .or_else(|| (a.options == OptionLabels::Multi).then(multi_note)),
                 source: format!("{} (attribute {})", a.value_table, a.attribute_id),
                 name: a.code.clone(),
                 col_type: Some(a.backend_type.clone()),
                 added: true,
                 label: a.label.clone(),
             });
-            if a.has_option_labels {
+            if let Some(name) = a.options.column(&a.code) {
+                let note = (a.options == OptionLabels::Multi).then(|| {
+                    format!(
+                        "JSON array of the option labels in admin order, e.g. \
+                         [\"Cotton\",\"Linen\"]; NULL when none is set. Filter with \
+                         JSON_CONTAINS({name}, '\"Cotton\"'). Labels follow --store, so a label \
+                         filter matches one language: filter on the ids to match any. A string \
+                         in --json output"
+                    )
+                });
                 attr_cols.push(SqlColumn {
-                    note: None,
+                    note,
                     source: format!("eav_attribute_option_value of {}", a.code),
-                    name: format!("{}_label", a.code),
+                    name,
                     col_type: Some("varchar".to_string()),
                     added: true,
                     label: None,
@@ -118,17 +135,23 @@ impl Magento {
                 .into_iter()
                 .filter_map(|a| {
                     let value_table = a.value_table?;
-                    let has_option_labels = a.frontend_input.as_deref() == Some("select")
-                        && a.source_model.as_ref().is_none_or(|m| {
-                            m.to_string().ends_with("Entity\\Attribute\\Source\\Table")
-                        });
+                    // Labels come from the option table only when no custom source
+                    // model supplies them (status, visibility, … have their own).
+                    let table_options = a.source_model.as_ref().is_none_or(|m| {
+                        m.to_string().ends_with("Entity\\Attribute\\Source\\Table")
+                    });
+                    let options = match a.frontend_input.as_deref() {
+                        Some("select") if table_options => OptionLabels::Single,
+                        Some("multiselect") if table_options => OptionLabels::Multi,
+                        _ => OptionLabels::None,
+                    };
                     Some(EavColumn {
                         code: a.code,
                         attribute_id: a.attribute_id,
                         backend_type: a.backend_type,
                         value_table,
                         label: a.label,
-                        has_option_labels,
+                        options,
                     })
                 })
                 .collect())

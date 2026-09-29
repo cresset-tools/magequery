@@ -70,8 +70,29 @@ pub(crate) struct EavColumn {
     /// The value table, unprefixed (`catalog_product_entity_varchar`).
     pub value_table: String,
     pub label: Option<String>,
-    /// A `select` whose options live in `eav_attribute_option_value`: offers `<code>_label`.
-    pub has_option_labels: bool,
+    pub options: OptionLabels,
+}
+
+/// Whether an attribute's values are option ids with labels in
+/// `eav_attribute_option_value`, and so offer a label column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OptionLabels {
+    None,
+    /// A `select`: one option id; `<code>_label` is its label.
+    Single,
+    /// A `multiselect`: comma-separated option ids; `<code>_labels` is a JSON array.
+    Multi,
+}
+
+impl OptionLabels {
+    /// The label column's name for attribute `code`, if it has one.
+    pub fn column(self, code: &str) -> Option<String> {
+        match self {
+            OptionLabels::None => None,
+            OptionLabels::Single => Some(format!("{code}_label")),
+            OptionLabels::Multi => Some(format!("{code}_labels")),
+        }
+    }
 }
 
 /// Live facts that EAV-backed virtual tables need, loaded by the caller only when
@@ -666,24 +687,22 @@ fn cte_body(vt: &VirtualTable, prefix: &str, a: &Analysis, ctx: &Context) -> Res
             if vt.columns.iter().any(|c| c.name == attr.code) {
                 continue;
             }
-            let label = format!("{}_label", attr.code);
+            let label = attr
+                .options
+                .column(&attr.code)
+                .filter(|l| a.columns.contains(l));
             let want_value = a.columns.contains(&attr.code)
                 || (a.star && spec.common.contains(&attr.code.as_str()));
-            let want_label = attr.has_option_labels && a.columns.contains(&label);
-            if !(want_value || want_label) {
+            if !want_value && label.is_none() {
                 continue;
             }
             let value = attr_value(attr, vt.alias, prefix, ctx.store_id);
             if want_value {
                 select.push(format!("{value} AS {}", quote_ident(&attr.code)));
             }
-            if want_label {
-                select.push(format!(
-                    "(SELECT ov.value FROM {prefix}eav_attribute_option_value ov \
-                     WHERE ov.option_id = {value} AND {}) AS {}",
-                    store_scope("ov", ctx.store_id),
-                    quote_ident(&label)
-                ));
+            if let Some(label) = label {
+                let expr = option_labels(attr, &value, prefix, ctx.store_id);
+                select.push(format!("{expr} AS {}", quote_ident(&label)));
             }
         }
     }
@@ -725,6 +744,31 @@ fn attr_value(attr: &EavColumn, alias: &str, prefix: &str, store_id: u32) -> Str
     )
 }
 
+/// The label column of an option attribute whose raw value is `value`. A `select` gives
+/// the one option's label; a `multiselect` gives a JSON array of labels in the admin's
+/// option order (not selection order), built with `JSON_QUOTE` + `GROUP_CONCAT` because
+/// `JSON_ARRAYAGG` is missing from MariaDB 10.4. Labels fall back per option, like
+/// values. NULL when no option is set.
+fn option_labels(attr: &EavColumn, value: &str, prefix: &str, store_id: u32) -> String {
+    let label = |option: &str| {
+        format!(
+            "(SELECT ov.value FROM {prefix}eav_attribute_option_value ov \
+             WHERE ov.option_id = {option} AND {})",
+            store_scope("ov", store_id)
+        )
+    };
+    match attr.options {
+        OptionLabels::Multi => format!(
+            "(SELECT CONCAT('[', GROUP_CONCAT(JSON_QUOTE({}) ORDER BY o.sort_order, o.option_id \
+             SEPARATOR ','), ']') FROM {prefix}eav_attribute_option o \
+             WHERE o.attribute_id = {} AND FIND_IN_SET(o.option_id, {value}))",
+            label("o.option_id"),
+            attr.attribute_id
+        ),
+        _ => label(value),
+    }
+}
+
 /// The store condition of a store-scoped value lookup (one row per store): the default
 /// row only, or the store's row preferred over the default.
 fn store_scope(alias: &str, store_id: u32) -> String {
@@ -749,13 +793,13 @@ mod tests {
 
     /// A context with a few product attributes, as the live `eav_attribute` rows give.
     fn catalog(store_id: u32) -> Context {
-        let attr = |code: &str, id: u32, backend: &str, labels: bool| EavColumn {
+        let attr = |code: &str, id: u32, backend: &str, labels: OptionLabels| EavColumn {
             code: code.to_string(),
             attribute_id: id,
             backend_type: backend.to_string(),
             value_table: format!("catalog_product_entity_{backend}"),
             label: None,
-            has_option_labels: labels,
+            options: labels,
         };
         let mut ctx = Context {
             store_id,
@@ -764,12 +808,13 @@ mod tests {
         ctx.attributes.insert(
             "catalog_product".to_string(),
             vec![
-                attr("name", 73, "varchar", false),
-                attr("status", 97, "int", false),
-                attr("price", 77, "decimal", false),
-                attr("color", 93, "int", true),
-                attr("qty", 999, "decimal", false),
-                attr("group", 500, "varchar", false),
+                attr("name", 73, "varchar", OptionLabels::None),
+                attr("status", 97, "int", OptionLabels::None),
+                attr("price", 77, "decimal", OptionLabels::None),
+                attr("color", 93, "int", OptionLabels::Single),
+                attr("material", 140, "varchar", OptionLabels::Multi),
+                attr("qty", 999, "decimal", OptionLabels::None),
+                attr("group", 500, "varchar", OptionLabels::None),
             ],
         );
         ctx
@@ -945,6 +990,32 @@ mod tests {
         // The label alone does not select the raw option id.
         assert!(!x.sql.contains("AS `color`,"));
         assert!(!x.sql.ends_with("AS `color`"));
+    }
+
+    #[test]
+    fn multiselect_labels_are_a_json_array_in_option_order() {
+        let x = expand(
+            "SELECT sku, material_labels FROM products",
+            "",
+            None,
+            &catalog(2),
+        )
+        .unwrap();
+        assert!(x.sql.contains(
+            "(SELECT CONCAT('[', GROUP_CONCAT(JSON_QUOTE((SELECT ov.value FROM \
+             eav_attribute_option_value ov WHERE ov.option_id = o.option_id AND ov.store_id IN \
+             (0, 2) ORDER BY ov.store_id DESC LIMIT 1)) ORDER BY o.sort_order, o.option_id \
+             SEPARATOR ','), ']') FROM eav_attribute_option o WHERE o.attribute_id = 140 AND \
+             FIND_IN_SET(o.option_id, (SELECT v.value FROM catalog_product_entity_varchar v"
+        ));
+        assert!(x.sql.ends_with("AS `material_labels`\n  FROM catalog_product_entity e\n)\nSELECT sku, material_labels FROM products"));
+        // The single-select spelling is not a column of a multiselect, and vice versa.
+        assert!(!ok("SELECT material_label FROM products")
+            .sql
+            .contains("AS `material_label`"));
+        assert!(!ok("SELECT color_labels FROM products")
+            .sql
+            .contains("AS `color_labels`"));
     }
 
     #[test]

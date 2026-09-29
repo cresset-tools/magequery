@@ -155,7 +155,8 @@ period or country, best sellers, low stock, products missing a value), write SQL
 `magequery sql`. It adds Magento-aware virtual tables that already handle the table
 prefix, the store and address joins, and configurable and bundle child lines:
 `orders`, `order_items`, and `products`, where **every EAV attribute is a column**
-(`name`, `status`, `color`, …; select attributes also get `<code>_label`). Pass
+(`name`, `status`, `color`, …; a select also gets `<code>_label`, a multiselect
+`<code>_labels` as a JSON array). Pass
 `--store <code>` to read attribute values as that store view shows them. Real tables
 can be joined as-is. It is read-only, times out
 after 30s (`--timeout`), and shows 200 rows unless the statement has its own `LIMIT`
