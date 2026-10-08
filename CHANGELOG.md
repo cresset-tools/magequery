@@ -1,5 +1,56 @@
 # Changelog
 
+## Shipped without a changelog entry
+
+These reached `main` between 2026-09-04 and 2026-09-05 and ship with the next
+release, but release-please never saw them: their commit subjects carried no
+conventional-commit type, so they produced neither an entry nor a version bump.
+Recorded here by hand because the commits are published and cannot be
+relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
+
+### Bug Fixes (di compile)
+
+* **`**` in a parameter default was dropped entirely.** `2 ** 10` lexed as
+  `2 * (*10)`, went opaque, and the default vanished — which turns an optional
+  constructor parameter into a required one, and PHP then treats every earlier
+  optional parameter as required too. ([9170acd69])
+* **An array default containing an enum case was dropped entirely**, with the
+  same consequence. `eval` cannot fold an enum case, and the verbatim fallback
+  had no array arm. ([9170acd69])
+* **A `float`-declared parameter kept an int value for a computed default.**
+  `float $x = 2 ** 8` compiled to `256` where Magento records `256.0`. PHP
+  coerces folded literal arithmetic into the declared type but not an
+  expression touching a named constant. ([8c23d6a55])
+* **Floats in compiled metadata used full round-trip precision.** `0.1 + 0.2`
+  was written `0.30000000000000004`; Magento sets `serialize_precision = 14` in
+  `app/bootstrap.php` before compiling, so it writes `0.3`. ([8c23d6a55])
+* **Intersection type members were emitted in source order.** Laminas sorts
+  them, so `Zebra&Alpha` must render `\Alpha&\Zebra`; 213 intersection
+  signatures exist in a stock install. Also `-0.0` lost its sign.
+  ([dea652636])
+* **Plugin-list keys were not canonicalised.** A miscased built-in
+  (`implements \arrayaccess`) leaked into every generated `*plugin-list.php`
+  as a key of its own and took the built-in's ancestors with it, dropping
+  `Traversable`. `interception.php` already canonicalised; the plugin-list path
+  did not. ([3391bffb7])
+
+### Other
+
+* **`di verify`** no longer reports plugin-list key ORDER as a difference. Those
+  sections are lookup maps that `PluginList` only reads by key, so order is not
+  observable; `--strict-ordering` still demands exact bytes. ([7c51478f3])
+* Oracle-grounded compile fixtures, a verifier that diffs them against a real
+  `setup:di:compile`, and differential fuzzing against the same oracle — which
+  is how the two float bugs above were found. ([9170acd69], [8c23d6a55])
+
+[9170acd69]: https://github.com/cresset-tools/magequery/commit/9170acd69
+[acba229b8]: https://github.com/cresset-tools/magequery/commit/acba229b8
+[3391bffb7]: https://github.com/cresset-tools/magequery/commit/3391bffb7
+[dea652636]: https://github.com/cresset-tools/magequery/commit/dea652636
+[7c51478f3]: https://github.com/cresset-tools/magequery/commit/7c51478f3
+[8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
+
+
 ## [0.17.5](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.4...magequery-v0.17.5) (2026-09-03)
 
 

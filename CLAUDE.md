@@ -1847,6 +1847,24 @@ the DB-backed extras (`eav`, `indexers --db`, `cron --db`, `admin-users`/`admin-
 `queue backlog`, `product`). New ideas go here.
 Backlog: reviews, wishlists, search terms — waiting for a real need.
 
+## Releases: commit subjects are the changelog
+
+`release-please-config.json` drives releases from CONVENTIONAL COMMITS. On every
+push to `main`, release-please scans commits since the last `magequery-v*` tag
+and opens or updates a release PR that bumps `Cargo.toml` and prepends to
+`CHANGELOG.md`.
+
+Only a typed subject is seen. `fix(magecommand): …` and `feat(magecommand): …`
+produce a changelog entry and a version bump; `chore:`, `test:` and `docs:` are
+recorded but release nothing. **A subject with no type at all is ignored
+entirely** — the change ships silently, with no entry and no bump.
+
+That is not hypothetical: seven commits landed in September 2026 with
+sentence-style subjects (`magecommand: …`, `di verify: …`) and six behaviour
+fixes among them reached users with no changelog line. They are listed under
+"Shipped without a changelog entry" in CHANGELOG.md. Write the type prefix even
+when the subject reads worse for it.
+
 ## Build order
 
 1. ~~`ModuleIndex` — parse `config.php` + `module.xml` sequence, classify app/vendor →
