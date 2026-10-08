@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:Api/etc/extension_attributes.xsd">
+    <!-- Leading backslash. Config\Converter keys the map on the RAW `for`
+         value while ExtensionAttributesGenerator looks up the ltrim'd source
+         class, so this never matches: Magento silently drops the attribute
+         and CreditmemoExtension is generated with no accessors at all. -->
+    <extension_attributes for="\Acme\Base\Api\Data\CreditmemoInterface">
+        <attribute code="acme_dropped" type="string"/>
+    </extension_attributes>
+</config>

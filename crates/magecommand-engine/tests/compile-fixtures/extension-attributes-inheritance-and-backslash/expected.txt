@@ -1,0 +1,558 @@
+# magecommand-engine compile fixture — the expected output of compute_outputs()
+# over `in/`, byte for byte. Everything below is generated; edit `in/` instead.
+# Re-bless: MAGECOMMAND_COMPILE_BLESS=1 cargo test -p magecommand-engine --test compile
+# files: 23  findings: 21  unresolved: 0
+
+===== file: code/Acme/Base/Api/Data/CreditmemoExtension.php =====
+<?php
+namespace Acme\Base\Api\Data;
+
+/**
+ * Extension class for @see \Acme\Base\Api\Data\CreditmemoInterface
+ */
+class CreditmemoExtension extends \Magento\Framework\Api\AbstractSimpleObject implements CreditmemoExtensionInterface
+{
+}
+
+===== file: code/Acme/Base/Api/Data/CreditmemoExtensionInterface.php =====
+<?php
+namespace Acme\Base\Api\Data;
+
+/**
+ * ExtensionInterface class for @see \Acme\Base\Api\Data\CreditmemoInterface
+ */
+interface CreditmemoExtensionInterface extends \Magento\Framework\Api\ExtensionAttributesInterface
+{
+}
+
+===== file: code/Acme/Base/Api/Data/OrderExtension.php =====
+<?php
+namespace Acme\Base\Api\Data;
+
+/**
+ * Extension class for @see \Acme\Base\Api\Data\OrderInterface
+ */
+class OrderExtension extends \Magento\Framework\Api\AbstractSimpleObject implements OrderExtensionInterface
+{
+}
+
+===== file: code/Acme/Base/Api/Data/OrderExtensionFactory.php =====
+<?php
+namespace Acme\Base\Api\Data;
+
+/**
+ * Factory class for @see \Acme\Base\Api\Data\OrderExtension
+ */
+class OrderExtensionFactory
+{
+    /**
+     * Object Manager instance
+     *
+     * @var \Magento\Framework\ObjectManagerInterface
+     */
+    protected $_objectManager = null;
+
+    /**
+     * Instance name to create
+     *
+     * @var string
+     */
+    protected $_instanceName = null;
+
+    /**
+     * Factory constructor
+     *
+     * @param \Magento\Framework\ObjectManagerInterface $objectManager
+     * @param string $instanceName
+     */
+    public function __construct(\Magento\Framework\ObjectManagerInterface $objectManager, $instanceName = '\\Acme\\Base\\Api\\Data\\OrderExtension')
+    {
+        $this->_objectManager = $objectManager;
+        $this->_instanceName = $instanceName;
+    }
+
+    /**
+     * Create class instance with specified parameters
+     *
+     * @param array $data
+     * @return \Acme\Base\Api\Data\OrderExtension
+     */
+    public function create(array $data = [])
+    {
+        return $this->_objectManager->create($this->_instanceName, $data);
+    }
+}
+
+===== file: code/Acme/Base/Api/Data/OrderExtensionInterface.php =====
+<?php
+namespace Acme\Base\Api\Data;
+
+/**
+ * ExtensionInterface class for @see \Acme\Base\Api\Data\OrderInterface
+ */
+interface OrderExtensionInterface extends \Magento\Framework\Api\ExtensionAttributesInterface
+{
+}
+
+===== file: code/Acme/Child/Api/Data/SpecialOrderExtension.php =====
+<?php
+namespace Acme\Child\Api\Data;
+
+/**
+ * Extension class for @see \Acme\Child\Api\Data\SpecialOrderInterface
+ */
+class SpecialOrderExtension extends \Magento\Framework\Api\AbstractSimpleObject implements SpecialOrderExtensionInterface
+{
+    /**
+     * @return int|null
+     */
+    public function getAcmePriority()
+    {
+        return $this->_get('acme_priority');
+    }
+
+    /**
+     * @param int $acmePriority
+     * @return $this
+     */
+    public function setAcmePriority($acmePriority)
+    {
+        $this->setData('acme_priority', $acmePriority);
+        return $this;
+    }
+}
+
+===== file: code/Acme/Child/Api/Data/SpecialOrderExtensionInterface.php =====
+<?php
+namespace Acme\Child\Api\Data;
+
+/**
+ * ExtensionInterface class for @see \Acme\Child\Api\Data\SpecialOrderInterface
+ */
+interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\ExtensionAttributesInterface
+{
+    /**
+     * @return int|null
+     */
+    public function getAcmePriority();
+
+    /**
+     * @param int $acmePriority
+     * @return $this
+     */
+    public function setAcmePriority($acmePriority);
+}
+
+===== file: metadata/adminhtml.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
+      ),
+    ),
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
+    'Acme\\Child\\Model\\Builder' => 
+    array (
+      'factory' => 
+      array (
+        '_i_' => 'Acme\\Base\\Api\\Data\\OrderExtensionFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => true,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => true,
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => true,
+  ),
+);
+
+===== file: metadata/adminhtml|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/app_action_list.php =====
+<?php return array (
+);
+
+===== file: metadata/crontab.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
+      ),
+    ),
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
+    'Acme\\Child\\Model\\Builder' => 
+    array (
+      'factory' => 
+      array (
+        '_i_' => 'Acme\\Base\\Api\\Data\\OrderExtensionFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => true,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => true,
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => true,
+  ),
+);
+
+===== file: metadata/crontab|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/frontend.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
+      ),
+    ),
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
+    'Acme\\Child\\Model\\Builder' => 
+    array (
+      'factory' => 
+      array (
+        '_i_' => 'Acme\\Base\\Api\\Data\\OrderExtensionFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => true,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => true,
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => true,
+  ),
+);
+
+===== file: metadata/frontend|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
+      ),
+    ),
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
+    'Acme\\Child\\Model\\Builder' => 
+    array (
+      'factory' => 
+      array (
+        '_i_' => 'Acme\\Base\\Api\\Data\\OrderExtensionFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => true,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => true,
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => true,
+  ),
+);
+
+===== file: metadata/global|graphql|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|webapi_rest|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|webapi_soap|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/graphql.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
+      ),
+    ),
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
+    'Acme\\Child\\Model\\Builder' => 
+    array (
+      'factory' => 
+      array (
+        '_i_' => 'Acme\\Base\\Api\\Data\\OrderExtensionFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => true,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => true,
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => true,
+  ),
+);
+
+===== file: metadata/interception.php =====
+<?php return array (
+  'Acme\\Base\\Api\\Data\\CreditmemoExtension' => false,
+  'Acme\\Base\\Api\\Data\\CreditmemoExtensionInterface' => false,
+  'Acme\\Base\\Api\\Data\\OrderExtension' => false,
+  'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => false,
+  'Acme\\Base\\Api\\Data\\OrderExtensionInterface' => false,
+  'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => false,
+  'Acme\\Child\\Api\\Data\\SpecialOrderExtensionInterface' => false,
+  'Acme\\Child\\Model\\Builder' => false,
+  'Magento\\Framework\\Api\\AbstractSimpleObject' => false,
+  'Magento\\Framework\\Api\\ExtensionAttributesInterface' => false,
+);
+
+===== file: metadata/webapi_rest.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
+      ),
+    ),
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
+    'Acme\\Child\\Model\\Builder' => 
+    array (
+      'factory' => 
+      array (
+        '_i_' => 'Acme\\Base\\Api\\Data\\OrderExtensionFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => true,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => true,
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => true,
+  ),
+);
+
+===== file: metadata/webapi_soap.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
+    'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
+      ),
+    ),
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
+    'Acme\\Child\\Model\\Builder' => 
+    array (
+      'factory' => 
+      array (
+        '_i_' => 'Acme\\Base\\Api\\Data\\OrderExtensionFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => true,
+    'Acme\\Base\\Api\\Data\\OrderExtension' => true,
+    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => true,
+  ),
+);
+
+===== findings =====
+Acme\Base\Api\Data\CreditmemoExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\CreditmemoExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\CreditmemoExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\CreditmemoExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\CreditmemoExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\CreditmemoExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\CreditmemoExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\OrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\OrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\OrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\OrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\OrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\OrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Base\Api\Data\OrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Child\Api\Data\SpecialOrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Child\Api\Data\SpecialOrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Child\Api\Data\SpecialOrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Child\Api\Data\SpecialOrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Child\Api\Data\SpecialOrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Child\Api\Data\SpecialOrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+Acme\Child\Api\Data\SpecialOrderExtension: constructor chain leaves known set at Magento\Framework\Api\AbstractSimpleObject
+
+===== unresolved =====
