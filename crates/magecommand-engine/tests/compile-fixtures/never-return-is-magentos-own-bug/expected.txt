@@ -52,12 +52,35 @@ class Interceptor extends \Acme\Neverr\Model\Hard implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Neverr\\Model\\Hard' => 
+    array (
+      'acme_neverr_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Neverr\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Neverr\\Model\\Hard' => 
+    array (
+      'acme_neverr_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Neverr\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Neverr\\Model\\Hard_boom___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_neverr_p',
+      ),
+    ),
   ),
 );
 
@@ -88,12 +111,35 @@ class Interceptor extends \Acme\Neverr\Model\Hard implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Neverr\\Model\\Hard' => 
+    array (
+      'acme_neverr_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Neverr\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Neverr\\Model\\Hard' => 
+    array (
+      'acme_neverr_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Neverr\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Neverr\\Model\\Hard_boom___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_neverr_p',
+      ),
+    ),
   ),
 );
 
@@ -175,12 +221,35 @@ class Interceptor extends \Acme\Neverr\Model\Hard implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Neverr\\Model\\Hard' => 
+    array (
+      'acme_neverr_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Neverr\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Neverr\\Model\\Hard' => 
+    array (
+      'acme_neverr_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Neverr\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Neverr\\Model\\Hard_boom___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_neverr_p',
+      ),
+    ),
   ),
 );
 
@@ -224,12 +293,35 @@ class Interceptor extends \Acme\Neverr\Model\Hard implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Neverr\\Model\\Hard' => 
+    array (
+      'acme_neverr_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Neverr\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Neverr\\Model\\Hard' => 
+    array (
+      'acme_neverr_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Neverr\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Neverr\\Model\\Hard_boom___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_neverr_p',
+      ),
+    ),
   ),
 );
 
@@ -237,12 +329,35 @@ class Interceptor extends \Acme\Neverr\Model\Hard implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Neverr\\Model\\Hard' => 
+    array (
+      'acme_neverr_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Neverr\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Neverr\\Model\\Hard' => 
+    array (
+      'acme_neverr_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Neverr\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Neverr\\Model\\Hard_boom___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_neverr_p',
+      ),
+    ),
   ),
 );
 

@@ -56,9 +56,15 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
   array (
     'Acme\\Web\\Model\\Renderer' => 
     array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
       'acme_web_trace' => 
       array (
         'sortOrder' => 0,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
         'disabled' => true,
       ),
     ),
@@ -67,10 +73,39 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
   array (
     'Acme\\Web\\Model\\Renderer' => 
     array (
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+        'disabled' => true,
+      ),
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
     ),
   ),
   2 => 
   array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
   ),
 );
 
@@ -103,12 +138,63 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_render_acme_web_cache' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_web_trace',
+      ),
+    ),
   ),
 );
 
@@ -236,12 +322,63 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_render_acme_web_cache' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_web_trace',
+      ),
+    ),
   ),
 );
 
@@ -313,12 +450,63 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_render_acme_web_cache' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_web_trace',
+      ),
+    ),
   ),
 );
 
@@ -326,12 +514,63 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Web\\Model\\Renderer' => 
+    array (
+      'acme_web_cache' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Web\\Plugin\\Cache',
+      ),
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 30,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Web\\Model\\Renderer_render___self' => 
+    array (
+      2 => 'acme_web_cache',
+    ),
+    'Acme\\Web\\Model\\Renderer_version___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_reset___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_web_cache',
+      ),
+    ),
+    'Acme\\Web\\Model\\Renderer_render_acme_web_cache' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_web_trace',
+      ),
+    ),
   ),
 );
 

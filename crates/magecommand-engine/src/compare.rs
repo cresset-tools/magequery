@@ -147,7 +147,7 @@ fn same_content(a: &Path, b: &Path) -> Result<bool> {
 /// True when two files are byte-identical after canonicalizing the block order of
 /// a generated interceptor or proxy — i.e. they differ only in method sequence and
 /// are behaviorally the same PHP class.
-fn same_modulo_ordering(a: &Path, b: &Path) -> Result<bool> {
+pub(crate) fn same_modulo_ordering(a: &Path, b: &Path) -> Result<bool> {
     let bytes_a = fs::read(a).map_err(|e| Error::io(a, e))?;
     let bytes_b = fs::read(b).map_err(|e| Error::io(b, e))?;
     // A plugin-list cache is a different shape from a generated class, and its

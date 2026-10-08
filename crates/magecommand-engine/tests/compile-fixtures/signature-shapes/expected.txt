@@ -98,12 +98,46 @@ class Interceptor extends \Acme\Sig\Model\Hard implements \Magento\Framework\Int
 <?php return array (
   0 => 
   array (
+    'Acme\\Sig\\Model\\Hard' => 
+    array (
+      'acme_sig_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Sig\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Sig\\Model\\Hard' => 
+    array (
+      'acme_sig_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Sig\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Sig\\Model\\Hard_collect___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_sig_p',
+      ),
+    ),
+    'Acme\\Sig\\Model\\Hard_maybe___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_sig_p',
+      ),
+    ),
+    'Acme\\Sig\\Model\\Hard_nothing___self' => 
+    array (
+      2 => 'acme_sig_p',
+    ),
   ),
 );
 
@@ -161,12 +195,46 @@ class Interceptor extends \Acme\Sig\Model\Hard implements \Magento\Framework\Int
 <?php return array (
   0 => 
   array (
+    'Acme\\Sig\\Model\\Hard' => 
+    array (
+      'acme_sig_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Sig\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Sig\\Model\\Hard' => 
+    array (
+      'acme_sig_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Sig\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Sig\\Model\\Hard_collect___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_sig_p',
+      ),
+    ),
+    'Acme\\Sig\\Model\\Hard_maybe___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_sig_p',
+      ),
+    ),
+    'Acme\\Sig\\Model\\Hard_nothing___self' => 
+    array (
+      2 => 'acme_sig_p',
+    ),
   ),
 );
 
@@ -313,12 +381,46 @@ class Interceptor extends \Acme\Sig\Model\Hard implements \Magento\Framework\Int
 <?php return array (
   0 => 
   array (
+    'Acme\\Sig\\Model\\Hard' => 
+    array (
+      'acme_sig_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Sig\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Sig\\Model\\Hard' => 
+    array (
+      'acme_sig_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Sig\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Sig\\Model\\Hard_collect___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_sig_p',
+      ),
+    ),
+    'Acme\\Sig\\Model\\Hard_maybe___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_sig_p',
+      ),
+    ),
+    'Acme\\Sig\\Model\\Hard_nothing___self' => 
+    array (
+      2 => 'acme_sig_p',
+    ),
   ),
 );
 
@@ -373,12 +475,46 @@ class Interceptor extends \Acme\Sig\Model\Hard implements \Magento\Framework\Int
 <?php return array (
   0 => 
   array (
+    'Acme\\Sig\\Model\\Hard' => 
+    array (
+      'acme_sig_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Sig\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Sig\\Model\\Hard' => 
+    array (
+      'acme_sig_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Sig\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Sig\\Model\\Hard_collect___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_sig_p',
+      ),
+    ),
+    'Acme\\Sig\\Model\\Hard_maybe___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_sig_p',
+      ),
+    ),
+    'Acme\\Sig\\Model\\Hard_nothing___self' => 
+    array (
+      2 => 'acme_sig_p',
+    ),
   ),
 );
 
@@ -386,12 +522,46 @@ class Interceptor extends \Acme\Sig\Model\Hard implements \Magento\Framework\Int
 <?php return array (
   0 => 
   array (
+    'Acme\\Sig\\Model\\Hard' => 
+    array (
+      'acme_sig_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Sig\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Sig\\Model\\Hard' => 
+    array (
+      'acme_sig_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Sig\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Sig\\Model\\Hard_collect___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_sig_p',
+      ),
+    ),
+    'Acme\\Sig\\Model\\Hard_maybe___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_sig_p',
+      ),
+    ),
+    'Acme\\Sig\\Model\\Hard_nothing___self' => 
+    array (
+      2 => 'acme_sig_p',
+    ),
   ),
 );
 

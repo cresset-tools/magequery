@@ -61,12 +61,36 @@ class Interceptor extends \Acme\Slash\Model\Port implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Slash\\Model\\Port' => 
+    array (
+      'acme_slash_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => '\\Acme\\Slash\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Slash\\Api\\PortInterface' => NULL,
+    'Acme\\Slash\\Model\\Port' => 
+    array (
+      'acme_slash_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Slash\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Slash\\Model\\Port_open___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_slash_p',
+      ),
+    ),
   ),
 );
 
@@ -105,12 +129,36 @@ class Interceptor extends \Acme\Slash\Model\Port implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Slash\\Model\\Port' => 
+    array (
+      'acme_slash_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => '\\Acme\\Slash\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Slash\\Api\\PortInterface' => NULL,
+    'Acme\\Slash\\Model\\Port' => 
+    array (
+      'acme_slash_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Slash\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Slash\\Model\\Port_open___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_slash_p',
+      ),
+    ),
   ),
 );
 
@@ -209,12 +257,36 @@ class Interceptor extends \Acme\Slash\Model\Port implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Slash\\Model\\Port' => 
+    array (
+      'acme_slash_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => '\\Acme\\Slash\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Slash\\Api\\PortInterface' => NULL,
+    'Acme\\Slash\\Model\\Port' => 
+    array (
+      'acme_slash_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Slash\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Slash\\Model\\Port_open___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_slash_p',
+      ),
+    ),
   ),
 );
 
@@ -259,12 +331,36 @@ class Interceptor extends \Acme\Slash\Model\Port implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Slash\\Model\\Port' => 
+    array (
+      'acme_slash_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => '\\Acme\\Slash\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Slash\\Api\\PortInterface' => NULL,
+    'Acme\\Slash\\Model\\Port' => 
+    array (
+      'acme_slash_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Slash\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Slash\\Model\\Port_open___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_slash_p',
+      ),
+    ),
   ),
 );
 
@@ -272,12 +368,36 @@ class Interceptor extends \Acme\Slash\Model\Port implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Slash\\Model\\Port' => 
+    array (
+      'acme_slash_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => '\\Acme\\Slash\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Slash\\Api\\PortInterface' => NULL,
+    'Acme\\Slash\\Model\\Port' => 
+    array (
+      'acme_slash_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Slash\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Slash\\Model\\Port_open___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_slash_p',
+      ),
+    ),
   ),
 );
 

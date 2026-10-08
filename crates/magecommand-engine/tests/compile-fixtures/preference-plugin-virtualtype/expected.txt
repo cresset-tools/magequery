@@ -91,12 +91,40 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
 <?php return array (
   0 => 
   array (
+    'Acme\\Shop\\Model\\Checkout' => 
+    array (
+      'acme_shop_audit' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Shop\\Plugin\\Audit',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Shop\\Api\\CheckoutInterface' => NULL,
+    'Acme\\Shop\\Model\\Checkout' => 
+    array (
+      'acme_shop_audit' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Shop\\Plugin\\Audit',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Shop\\Model\\Checkout_place___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_shop_audit',
+      ),
+      4 => 
+      array (
+        0 => 'acme_shop_audit',
+      ),
+    ),
   ),
 );
 
@@ -165,12 +193,40 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
 <?php return array (
   0 => 
   array (
+    'Acme\\Shop\\Model\\Checkout' => 
+    array (
+      'acme_shop_audit' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Shop\\Plugin\\Audit',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Shop\\Api\\CheckoutInterface' => NULL,
+    'Acme\\Shop\\Model\\Checkout' => 
+    array (
+      'acme_shop_audit' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Shop\\Plugin\\Audit',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Shop\\Model\\Checkout_place___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_shop_audit',
+      ),
+      4 => 
+      array (
+        0 => 'acme_shop_audit',
+      ),
+    ),
   ),
 );
 
@@ -333,12 +389,40 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
 <?php return array (
   0 => 
   array (
+    'Acme\\Shop\\Model\\Checkout' => 
+    array (
+      'acme_shop_audit' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Shop\\Plugin\\Audit',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Shop\\Api\\CheckoutInterface' => NULL,
+    'Acme\\Shop\\Model\\Checkout' => 
+    array (
+      'acme_shop_audit' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Shop\\Plugin\\Audit',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Shop\\Model\\Checkout_place___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_shop_audit',
+      ),
+      4 => 
+      array (
+        0 => 'acme_shop_audit',
+      ),
+    ),
   ),
 );
 
@@ -406,12 +490,40 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
 <?php return array (
   0 => 
   array (
+    'Acme\\Shop\\Model\\Checkout' => 
+    array (
+      'acme_shop_audit' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Shop\\Plugin\\Audit',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Shop\\Api\\CheckoutInterface' => NULL,
+    'Acme\\Shop\\Model\\Checkout' => 
+    array (
+      'acme_shop_audit' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Shop\\Plugin\\Audit',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Shop\\Model\\Checkout_place___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_shop_audit',
+      ),
+      4 => 
+      array (
+        0 => 'acme_shop_audit',
+      ),
+    ),
   ),
 );
 
@@ -419,12 +531,40 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
 <?php return array (
   0 => 
   array (
+    'Acme\\Shop\\Model\\Checkout' => 
+    array (
+      'acme_shop_audit' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Shop\\Plugin\\Audit',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Shop\\Api\\CheckoutInterface' => NULL,
+    'Acme\\Shop\\Model\\Checkout' => 
+    array (
+      'acme_shop_audit' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Shop\\Plugin\\Audit',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Shop\\Model\\Checkout_place___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_shop_audit',
+      ),
+      4 => 
+      array (
+        0 => 'acme_shop_audit',
+      ),
+    ),
   ),
 );
 

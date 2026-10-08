@@ -85,12 +85,37 @@ class Interceptor extends \Acme\Chain\Model\Leaf implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Chain\\Model\\Leaf' => 
+    array (
+      'acme_chain_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Chain\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Chain\\Model\\Base' => NULL,
+    'Acme\\Chain\\Model\\Middle' => NULL,
+    'Acme\\Chain\\Model\\Leaf' => 
+    array (
+      'acme_chain_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Chain\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Chain\\Model\\Leaf_run___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_chain_p',
+      ),
+    ),
   ),
 );
 
@@ -153,12 +178,37 @@ class Interceptor extends \Acme\Chain\Model\Leaf implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Chain\\Model\\Leaf' => 
+    array (
+      'acme_chain_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Chain\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Chain\\Model\\Base' => NULL,
+    'Acme\\Chain\\Model\\Middle' => NULL,
+    'Acme\\Chain\\Model\\Leaf' => 
+    array (
+      'acme_chain_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Chain\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Chain\\Model\\Leaf_run___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_chain_p',
+      ),
+    ),
   ),
 );
 
@@ -306,12 +356,37 @@ class Interceptor extends \Acme\Chain\Model\Leaf implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Chain\\Model\\Leaf' => 
+    array (
+      'acme_chain_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Chain\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Chain\\Model\\Base' => NULL,
+    'Acme\\Chain\\Model\\Middle' => NULL,
+    'Acme\\Chain\\Model\\Leaf' => 
+    array (
+      'acme_chain_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Chain\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Chain\\Model\\Leaf_run___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_chain_p',
+      ),
+    ),
   ),
 );
 
@@ -357,12 +432,37 @@ class Interceptor extends \Acme\Chain\Model\Leaf implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Chain\\Model\\Leaf' => 
+    array (
+      'acme_chain_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Chain\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Chain\\Model\\Base' => NULL,
+    'Acme\\Chain\\Model\\Middle' => NULL,
+    'Acme\\Chain\\Model\\Leaf' => 
+    array (
+      'acme_chain_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Chain\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Chain\\Model\\Leaf_run___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_chain_p',
+      ),
+    ),
   ),
 );
 
@@ -370,12 +470,37 @@ class Interceptor extends \Acme\Chain\Model\Leaf implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Chain\\Model\\Leaf' => 
+    array (
+      'acme_chain_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Chain\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Chain\\Model\\Base' => NULL,
+    'Acme\\Chain\\Model\\Middle' => NULL,
+    'Acme\\Chain\\Model\\Leaf' => 
+    array (
+      'acme_chain_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Chain\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Chain\\Model\\Leaf_run___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_chain_p',
+      ),
+    ),
   ),
 );
 

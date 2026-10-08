@@ -2146,6 +2146,7 @@ fn compare(
         disabled_types: &disabled_types,
         outside_scan: &outside_scan,
         outside_scan_files: &outside_scan_files,
+        strict_ordering,
     };
     let classified = magecommand_engine::classify(&report, &ctx);
 

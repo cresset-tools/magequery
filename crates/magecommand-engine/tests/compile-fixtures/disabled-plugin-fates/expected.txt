@@ -53,12 +53,52 @@ class Interceptor extends \Acme\Dis\Model\Target implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Dis\\Model\\Target' => 
+    array (
+      'p_kept' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Dis\\Plugin\\Kept',
+      ),
+      'p_off' => 
+      array (
+        'sortOrder' => 20,
+        'disabled' => true,
+        'instance' => 'Acme\\Dis\\Plugin\\Off',
+      ),
+      'p_ghost' => 
+      array (
+        'sortOrder' => 0,
+        'disabled' => true,
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Dis\\Model\\Target' => 
+    array (
+      'p_kept' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Dis\\Plugin\\Kept',
+      ),
+      'p_off' => 
+      array (
+        'sortOrder' => 20,
+        'disabled' => true,
+        'instance' => 'Acme\\Dis\\Plugin\\Off',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Dis\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'p_kept',
+      ),
+    ),
   ),
 );
 
@@ -90,12 +130,52 @@ class Interceptor extends \Acme\Dis\Model\Target implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Dis\\Model\\Target' => 
+    array (
+      'p_kept' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Dis\\Plugin\\Kept',
+      ),
+      'p_off' => 
+      array (
+        'sortOrder' => 20,
+        'disabled' => true,
+        'instance' => 'Acme\\Dis\\Plugin\\Off',
+      ),
+      'p_ghost' => 
+      array (
+        'sortOrder' => 0,
+        'disabled' => true,
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Dis\\Model\\Target' => 
+    array (
+      'p_kept' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Dis\\Plugin\\Kept',
+      ),
+      'p_off' => 
+      array (
+        'sortOrder' => 20,
+        'disabled' => true,
+        'instance' => 'Acme\\Dis\\Plugin\\Off',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Dis\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'p_kept',
+      ),
+    ),
   ),
 );
 
@@ -196,12 +276,52 @@ class Interceptor extends \Acme\Dis\Model\Target implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Dis\\Model\\Target' => 
+    array (
+      'p_kept' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Dis\\Plugin\\Kept',
+      ),
+      'p_off' => 
+      array (
+        'sortOrder' => 20,
+        'disabled' => true,
+        'instance' => 'Acme\\Dis\\Plugin\\Off',
+      ),
+      'p_ghost' => 
+      array (
+        'sortOrder' => 0,
+        'disabled' => true,
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Dis\\Model\\Target' => 
+    array (
+      'p_kept' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Dis\\Plugin\\Kept',
+      ),
+      'p_off' => 
+      array (
+        'sortOrder' => 20,
+        'disabled' => true,
+        'instance' => 'Acme\\Dis\\Plugin\\Off',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Dis\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'p_kept',
+      ),
+    ),
   ),
 );
 
@@ -262,12 +382,52 @@ class Interceptor extends \Acme\Dis\Model\Target implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Dis\\Model\\Target' => 
+    array (
+      'p_kept' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Dis\\Plugin\\Kept',
+      ),
+      'p_off' => 
+      array (
+        'sortOrder' => 20,
+        'disabled' => true,
+        'instance' => 'Acme\\Dis\\Plugin\\Off',
+      ),
+      'p_ghost' => 
+      array (
+        'sortOrder' => 0,
+        'disabled' => true,
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Dis\\Model\\Target' => 
+    array (
+      'p_kept' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Dis\\Plugin\\Kept',
+      ),
+      'p_off' => 
+      array (
+        'sortOrder' => 20,
+        'disabled' => true,
+        'instance' => 'Acme\\Dis\\Plugin\\Off',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Dis\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'p_kept',
+      ),
+    ),
   ),
 );
 
@@ -275,12 +435,52 @@ class Interceptor extends \Acme\Dis\Model\Target implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Dis\\Model\\Target' => 
+    array (
+      'p_kept' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Dis\\Plugin\\Kept',
+      ),
+      'p_off' => 
+      array (
+        'sortOrder' => 20,
+        'disabled' => true,
+        'instance' => 'Acme\\Dis\\Plugin\\Off',
+      ),
+      'p_ghost' => 
+      array (
+        'sortOrder' => 0,
+        'disabled' => true,
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Dis\\Model\\Target' => 
+    array (
+      'p_kept' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Dis\\Plugin\\Kept',
+      ),
+      'p_off' => 
+      array (
+        'sortOrder' => 20,
+        'disabled' => true,
+        'instance' => 'Acme\\Dis\\Plugin\\Off',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Dis\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'p_kept',
+      ),
+    ),
   ),
 );
 
