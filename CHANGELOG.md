@@ -51,6 +51,28 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.18.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.5...magequery-v0.18.0) (2026-10-08)
+
+
+### Features
+
+* **magecommand-php:** fold PHP core constants from a generated stub table ([#126](https://github.com/cresset-tools/magequery/issues/126)) ([730634b](https://github.com/cresset-tools/magequery/commit/730634bbd850e500eb0fe2ae6ac0d5d0f4fc148d))
+* **magecommand:** di verify report leads with the unexplained differences ([#122](https://github.com/cresset-tools/magequery/issues/122)) ([70a6ace](https://github.com/cresset-tools/magequery/commit/70a6ace2798448d38bea807183715e4beb361159))
+* **magecommand:** static deploy — the CssUrls package post-processor ([#119](https://github.com/cresset-tools/magequery/issues/119)) ([e060b57](https://github.com/cresset-tools/magequery/commit/e060b570151218ed92a32dd1abe61483436f5358))
+
+
+### Bug Fixes
+
+* **magecommand-engine:** an unreadable default degrades to reflection, not null ([#124](https://github.com/cresset-tools/magequery/issues/124)) ([9f06e5f](https://github.com/cresset-tools/magequery/commit/9f06e5f853d29c1cc09eb023eea54412ba770244))
+* **magecommand-engine:** seed class constants used as constructor defaults ([#125](https://github.com/cresset-tools/magequery/issues/125)) ([63d5190](https://github.com/cresset-tools/magequery/commit/63d519079955a7db015f9494f4c0d24c3ae86ddf))
+* **magecommand-less:** at-rule selector scoping follows the less.php version ([#117](https://github.com/cresset-tools/magequery/issues/117)) ([a84b8f9](https://github.com/cresset-tools/magequery/commit/a84b8f9c3707b5c83499b3f846573c8c119e4c84))
+* **magecommand-php:** fold PHP_SAPI so the default is not injected as null ([#123](https://github.com/cresset-tools/magequery/issues/123)) ([f8effe8](https://github.com/cresset-tools/magequery/commit/f8effe80d1f1b6ca60f174ce4fc47bbf25042ef5))
+* **magecommand:** an area overlay omitting sortOrder resets it to 0 ([0eca1a4](https://github.com/cresset-tools/magequery/commit/0eca1a47397928a36e447d5a8a03c740c0a1e191))
+* **magecommand:** plugin lists keep global plugins where the framework does ([#120](https://github.com/cresset-tools/magequery/issues/120)) ([c5ae031](https://github.com/cresset-tools/magequery/commit/c5ae031831bab8a33b389361247df38f929d9400))
+* **magecommand:** read plugin-list config scopes the way the generator does ([71a49bf](https://github.com/cresset-tools/magequery/commit/71a49bf4f38504c291e1c8de8346a289b2d8ff9d))
+* **magecommand:** static verify — classify a bundle re-split as expected ([#116](https://github.com/cresset-tools/magequery/issues/116)) ([c473e57](https://github.com/cresset-tools/magequery/commit/c473e573184c47d0018508c03442ed7d133744f4))
+* **magequery-core:** read installed.json whose empty autoload maps are [] ([#121](https://github.com/cresset-tools/magequery/issues/121)) ([9f83976](https://github.com/cresset-tools/magequery/commit/9f8397634eae9f7d23ca0f13eb4b7e3ae4157f5d))
+
 ## [0.17.5](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.4...magequery-v0.17.5) (2026-09-03)
 
 
