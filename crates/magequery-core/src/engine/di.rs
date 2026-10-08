@@ -44,6 +44,13 @@ pub(crate) struct LocatedPlugin {
     /// only a LATER read's replace_recursive appends a field after.
     pub disabled_layer: Option<u8>,
     pub instance_layer: Option<u8>,
+    /// Config layer of the LATEST declaration. `sortOrder` is the one plugin
+    /// field the mapper always writes (defaulting to 0), so unlike the two
+    /// layers above — which record a FIRST appearance — this one has to track
+    /// the most recent, to tell an area overlay re-declaring a plugin from a
+    /// second file in the same scope doing it. See the `sort_order` handling
+    /// in [`merge_file`].
+    pub last_decl_layer: u8,
     /// Raw spelling: `type=` written with a leading backslash (kept verbatim
     /// in the compiled plugin lists' _data).
     pub class_backslash: bool,
@@ -597,7 +604,8 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
     for (target, rp) in &file.plugins {
         let by_name = cfg.plugins.entry(target.clone()).or_default();
         match by_name.get_mut(&rp.name) {
-            // Attribute-level merge: only override fields the new declaration specifies.
+            // Attribute-level merge: only override fields the new declaration
+            // specifies — with the one exception of `sortOrder` below.
             Some(existing) => {
                 if let Some(c) = &rp.class {
                     if existing.class.is_none() {
@@ -606,9 +614,36 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
                     existing.class = Some(c.clone());
                     existing.class_backslash = rp.class_had_backslash;
                 }
-                if let Some(s) = rp.sort_order {
+                // `sortOrder` is NOT an attribute merge across config SCOPES.
+                // Magento reads each scope separately and folds the results
+                // with `array_replace_recursive`
+                // (`PluginListGenerator::merge`), and the mapper writes
+                // `sortOrder` into every plugin it maps, defaulting to 0
+                // (`ObjectManager/Config/Mapper/Dom.php`) — `disabled` and
+                // `instance` it writes only when the attribute is present,
+                // which is why those two inherit an omission and this one does
+                // not. So an area overlay that re-declares a plugin without
+                // `sortOrder` OVERWRITES the global value with 0, reordering
+                // the chain. Within one scope the merge really is XML
+                // (`Config/Dom::_mergeAttributes`) and an omission is left
+                // alone.
+                //
+                // Scoped to the area boundary deliberately. The same fold
+                // applies between `primary` (app/etc/di.xml) and module
+                // `global`, but there the plugin lists read them in the order
+                // global-then-PRIMARY — the generator appends the current scope
+                // last, so app/etc wins — which is the reverse of the order
+                // used here (and of the order the ObjectManager config itself
+                // uses, where a module overrides app/etc; see the
+                // `OperationPool` note on arguments above). Modelling that
+                // asymmetry is a separate change; until then this leaves the
+                // primary/global pair exactly as it was.
+                if p.layer >= 2 && existing.last_decl_layer < 2 {
+                    existing.sort_order = rp.sort_order.unwrap_or(0);
+                } else if let Some(s) = rp.sort_order {
                     existing.sort_order = s;
                 }
+                existing.last_decl_layer = p.layer;
                 if let Some(d) = rp.disabled {
                     if existing.disabled.is_none() {
                         existing.disabled_layer = Some(p.layer);
@@ -635,6 +670,7 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
                         disabled: rp.disabled,
                         disabled_layer: rp.disabled.map(|_| p.layer),
                         instance_layer: rp.class.as_ref().map(|_| p.layer),
+                        last_decl_layer: p.layer,
                         source: src(rp.line),
                         order_key: (area_rank, p.load_order as u32, rp.line),
                     },
@@ -655,6 +691,119 @@ mod export_tests {
             line,
             area: Area::Global,
         }
+    }
+
+    /// One parsed di.xml at a given config layer, as `build()` would produce.
+    fn parsed_at(layer: u8, area: Area, load_order: usize, xml: &str) -> Parsed {
+        Parsed {
+            load_order,
+            area,
+            module: ModuleName::new("Acme_Test"),
+            path: PathBuf::from(format!("etc/l{layer}/di.xml")),
+            layer,
+            // Unwrap and re-wrap: a typo in a test fixture's XML must fail the
+            // test loudly, not be silently skipped the way `build()` skips it.
+            file: Ok(parse::di_xml(xml).expect("fixture xml parses")),
+        }
+    }
+
+    fn plugin_xml(body: &str) -> String {
+        format!(
+            r#"<?xml version="1.0"?>
+<config>
+    <type name="T\Target">
+{body}
+    </type>
+</config>"#
+        )
+    }
+
+    /// Magento reads each config scope SEPARATELY and folds the results with
+    /// `array_replace_recursive`. The mapper
+    /// (`ObjectManager/Config/Mapper/Dom.php`) writes `sortOrder` into every
+    /// plugin it maps, defaulting to 0 — unlike `disabled` and `instance`,
+    /// which it writes only when the attribute is present. So an area overlay
+    /// that re-declares a plugin without `sortOrder` does not inherit the
+    /// global value, it overwrites it with 0 — and the execution chain
+    /// reorders as a result.
+    ///
+    /// Verified against a real `setup:di:compile`: a global `som_d` at 50 with
+    /// a sibling `som_e` at 10, re-declared by `etc/adminhtml/di.xml` with only
+    /// a `type`, comes out of Magento as `som_d`(0) then `som_e`(10).
+    #[test]
+    fn an_area_overlay_omitting_sort_order_resets_it_to_zero() {
+        let global = plugin_xml(
+            r#"        <plugin name="som_d" type="P\Dee" sortOrder="50"/>
+        <plugin name="som_e" type="P\Eee" sortOrder="10"/>"#,
+        );
+        // Re-declares only the type, with no sortOrder.
+        let overlay = plugin_xml(r#"        <plugin name="som_d" type="P\DeeToo"/>"#);
+
+        let parsed = vec![
+            parsed_at(1, Area::Global, 0, &global),
+            parsed_at(2, Area::Adminhtml, 1, &overlay),
+        ];
+        // The overlay merges onto the global config, as `build()` does.
+        let base = merge_area(&parsed, Area::Global, AreaConfig::default());
+        let cfg = merge_area(&parsed, Area::Adminhtml, base);
+        let p = &cfg.plugins[&ClassName::new("T\\Target")];
+
+        assert_eq!(
+            p["som_d"].sort_order, 0,
+            "an overlay omitting sortOrder must reset it to the mapper's \
+             default, not inherit the global 50"
+        );
+        // The type it DID declare still applies, and the untouched sibling
+        // keeps its own sortOrder.
+        assert_eq!(p["som_d"].class, Some(ClassName::new("P\\DeeToo")));
+        assert_eq!(p["som_e"].sort_order, 10);
+
+        // The behavioural consequence: the execution chain reverses.
+        assert_eq!(execution_order(p), ["som_d", "som_e"]);
+
+        // The global list is a SEPARATE merge and must be unaffected — the
+        // same plugin needs 50 there and 0 here, which is only representable
+        // because `build()` merges each area from its own copy of `global`.
+        let g = merge_area(&parsed, Area::Global, AreaConfig::default());
+        let gp = &g.plugins[&ClassName::new("T\\Target")];
+        assert_eq!(gp["som_d"].sort_order, 50);
+        assert_eq!(execution_order(gp), ["som_e", "som_d"]);
+    }
+
+    /// The other half of the rule: WITHIN one scope the merge is XML
+    /// (`Config/Dom::_mergeAttributes`), which only touches attributes the
+    /// override actually writes — so there `sortOrder` really is inherited.
+    /// Verified on the same install: a global `som_same` at 30 re-declared by
+    /// a second module's `etc/di.xml` with only `disabled="true"` keeps 30.
+    #[test]
+    fn a_same_scope_override_omitting_sort_order_inherits_it() {
+        let declare = plugin_xml(r#"        <plugin name="som_d" type="P\Dee" sortOrder="50"/>"#);
+        let redeclare = plugin_xml(r#"        <plugin name="som_d" disabled="true"/>"#);
+        for layer in [1u8, 2] {
+            let area = if layer == 2 { Area::Adminhtml } else { Area::Global };
+            let parsed = vec![
+                parsed_at(layer, area, 0, &declare),
+                parsed_at(layer, area, 1, &redeclare),
+            ];
+            let cfg = merge_area(&parsed, area, AreaConfig::default());
+            let p = &cfg.plugins[&ClassName::new("T\\Target")];
+            assert_eq!(
+                p["som_d"].sort_order, 50,
+                "layer {layer}: two files in ONE scope merge as XML attributes"
+            );
+            assert_eq!(p["som_d"].disabled, Some(true));
+        }
+    }
+
+    /// Magento's execution order for one target: `sortOrder` ascending, ties
+    /// by declaration order.
+    fn execution_order(by_name: &HashMap<String, LocatedPlugin>) -> Vec<&str> {
+        let mut items: Vec<(i32, (u8, u32, u32), &str)> = by_name
+            .iter()
+            .map(|(n, pl)| (pl.sort_order, pl.order_key, n.as_str()))
+            .collect();
+        items.sort_by_key(|(s, k, _)| (*s, *k));
+        items.into_iter().map(|(_, _, n)| n).collect()
     }
 
     fn located(class: &str, line: u32) -> Located {
@@ -689,6 +838,7 @@ mod export_tests {
                 disabled: None,
                 disabled_layer: None,
                 instance_layer: Some(1),
+                last_decl_layer: 1,
                 class_backslash: false,
                 target_backslash: false,
                 source: src(1),
@@ -703,6 +853,7 @@ mod export_tests {
                 disabled: None,
                 disabled_layer: None,
                 instance_layer: Some(1),
+                last_decl_layer: 1,
                 class_backslash: false,
                 target_backslash: false,
                 source: src(2),
@@ -717,6 +868,7 @@ mod export_tests {
                 disabled: Some(true),
                 disabled_layer: Some(1),
                 instance_layer: Some(1),
+                last_decl_layer: 1,
                 class_backslash: false,
                 target_backslash: false,
                 source: src(5),

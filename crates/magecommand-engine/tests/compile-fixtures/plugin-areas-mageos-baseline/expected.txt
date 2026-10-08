@@ -64,7 +64,7 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
       ),
       'acme_web_trace' => 
       array (
-        'sortOrder' => 30,
+        'sortOrder' => 0,
         'instance' => 'Acme\\Web\\Plugin\\Trace',
         'disabled' => true,
       ),
@@ -74,16 +74,16 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
   array (
     'Acme\\Web\\Model\\Renderer' => 
     array (
+      'acme_web_trace' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Web\\Plugin\\Trace',
+        'disabled' => true,
+      ),
       'acme_web_cache' => 
       array (
         'sortOrder' => 10,
         'instance' => 'Acme\\Web\\Plugin\\Cache',
-      ),
-      'acme_web_trace' => 
-      array (
-        'sortOrder' => 30,
-        'instance' => 'Acme\\Web\\Plugin\\Trace',
-        'disabled' => true,
       ),
     ),
   ),
