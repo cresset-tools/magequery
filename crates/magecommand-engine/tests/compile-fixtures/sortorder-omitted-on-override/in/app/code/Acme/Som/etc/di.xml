@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+    <type name="Acme\Som\Model\Target">
+        <plugin name="som_same" type="Acme\Som\Plugin\A" sortOrder="30"/>
+        <plugin name="som_area" type="Acme\Som\Plugin\B" sortOrder="40"/>
+        <plugin name="som_area_live" type="Acme\Som\Plugin\C" sortOrder="50"/>
+    </type>
+</config>

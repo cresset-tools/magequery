@@ -1,0 +1,405 @@
+# magecommand-engine compile fixture — the expected output of compute_outputs()
+# over `in/`, byte for byte. Everything below is generated; edit `in/` instead.
+# Re-bless: MAGECOMMAND_COMPILE_BLESS=1 cargo test -p magecommand-engine --test compile
+# files: 17  findings: 0  unresolved: 0
+
+===== file: code/Acme/Som/Model/Target/Interceptor.php =====
+<?php
+namespace Acme\Som\Model\Target;
+
+/**
+ * Interceptor class for @see \Acme\Som\Model\Target
+ */
+class Interceptor extends \Acme\Som\Model\Target implements \Magento\Framework\Interception\InterceptorInterface
+{
+    use \Magento\Framework\Interception\Interceptor;
+
+    public function __construct()
+    {
+        $this->___init();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function act(int $n): int
+    {
+        $pluginInfo = $this->pluginList->getNext($this->subjectType, 'act');
+        return $pluginInfo ? $this->___callPlugins('act', func_get_args(), $pluginInfo) : parent::act($n);
+    }
+}
+
+===== file: metadata/adminhtml.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Som\\Model\\Target' => NULL,
+    'Acme\\Som\\Plugin\\A' => NULL,
+    'Acme\\Som\\Plugin\\B' => NULL,
+    'Acme\\Som\\Plugin\\C' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Som\\Model\\Target' => 'Acme\\Som\\Model\\Target\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/adminhtml|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_area' => 
+      array (
+        'sortOrder' => 0,
+        'disabled' => true,
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_area_live' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Som\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'som_area_live',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/app_action_list.php =====
+<?php return array (
+);
+
+===== file: metadata/crontab.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Som\\Model\\Target' => NULL,
+    'Acme\\Som\\Plugin\\A' => NULL,
+    'Acme\\Som\\Plugin\\B' => NULL,
+    'Acme\\Som\\Plugin\\C' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Som\\Model\\Target' => 'Acme\\Som\\Model\\Target\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/crontab|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/frontend.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Som\\Model\\Target' => NULL,
+    'Acme\\Som\\Plugin\\A' => NULL,
+    'Acme\\Som\\Plugin\\B' => NULL,
+    'Acme\\Som\\Plugin\\C' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Som\\Model\\Target' => 'Acme\\Som\\Model\\Target\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/frontend|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Som\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'som_area',
+        1 => 'som_area_live',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Som\\Model\\Target' => NULL,
+    'Acme\\Som\\Plugin\\A' => NULL,
+    'Acme\\Som\\Plugin\\B' => NULL,
+    'Acme\\Som\\Plugin\\C' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Som\\Model\\Target' => 'Acme\\Som\\Model\\Target\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/global|graphql|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Som\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'som_area',
+        1 => 'som_area_live',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|webapi_rest|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|webapi_soap|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/graphql.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Som\\Model\\Target' => NULL,
+    'Acme\\Som\\Plugin\\A' => NULL,
+    'Acme\\Som\\Plugin\\B' => NULL,
+    'Acme\\Som\\Plugin\\C' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Som\\Model\\Target' => 'Acme\\Som\\Model\\Target\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/interception.php =====
+<?php return array (
+  'Acme\\Som\\Model\\Target' => true,
+  'Acme\\Som\\Model\\Target\\Interceptor' => false,
+  'Acme\\Som\\Plugin\\A' => false,
+  'Acme\\Som\\Plugin\\B' => false,
+  'Acme\\Som\\Plugin\\C' => false,
+);
+
+===== file: metadata/webapi_rest.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Som\\Model\\Target' => NULL,
+    'Acme\\Som\\Plugin\\A' => NULL,
+    'Acme\\Som\\Plugin\\B' => NULL,
+    'Acme\\Som\\Plugin\\C' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Som\\Model\\Target' => 'Acme\\Som\\Model\\Target\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/webapi_soap.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Som\\Model\\Target' => NULL,
+    'Acme\\Som\\Plugin\\A' => NULL,
+    'Acme\\Som\\Plugin\\B' => NULL,
+    'Acme\\Som\\Plugin\\C' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Som\\Model\\Target' => 'Acme\\Som\\Model\\Target\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== findings =====
+
+===== unresolved =====
