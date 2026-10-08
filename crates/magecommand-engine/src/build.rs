@@ -110,6 +110,35 @@ pub fn compute_outputs_opts(
         }
     }
 
+    // …and the classes named by a CLASS CONSTANT in a CONSTRUCTOR DEFAULT.
+    // Exactly the reasoning of the di.xml `const` seeding above, one level
+    // deeper: PHP evaluates `Foo::BAR` through the autoloader when it reflects
+    // the default, and the autoloader does not care whether the owning module
+    // is enabled. Unseeded, `DefsLookup::class_const` cannot find the owning
+    // class, the default fails to fold, and the whole class's arguments row
+    // degrades to NULL — losing the rows for every OTHER argument too.
+    //
+    // Cheap: only a default that mentions `::` can name a class constant, and
+    // the parse is the same one `eval_default` performs later anyway.
+    for record in defs.classes.values() {
+        let Some(ctor) =
+            record.meta.methods.iter().find(|m| m.name.eq_ignore_ascii_case("__construct"))
+        else {
+            continue;
+        };
+        let ns = record.meta.fqcn.rsplit_once('\\').map(|(n, _)| n).unwrap_or("");
+        for param in &ctor.params {
+            let Some(default) = &param.default else { continue };
+            if !default.contains("::") {
+                continue;
+            }
+            resolve_keys.extend(
+                magecommand_php::constexpr::parse_const_expr(default, ns, &record.meta.uses)
+                    .classes,
+            );
+        }
+    }
+
     let unresolved = defs.extend_hierarchy(magento, root, resolve_keys);
     ilap!(_it, "extend_hierarchy");
 
