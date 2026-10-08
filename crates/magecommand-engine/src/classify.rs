@@ -203,6 +203,9 @@ impl Classified {
 pub struct ClassifyCtx<'a> {
     pub archive: &'a Path,
     pub output: &'a Path,
+    /// `--strict-ordering`: require renamed pairs to be byte-identical rather
+    /// than merely equal once a plugin-list's key order is canonicalized.
+    pub strict_ordering: bool,
     pub disabled_modules: &'a HashSet<String>,
     /// Class keys (escaped `Vendor\\\\Class` metadata form) whose arguments are
     /// statically unresolvable because their constructor chain runs through
@@ -437,7 +440,9 @@ fn plugin_list_scope_order(
     let mut items: Vec<String> = Vec::new();
     let mut claimed_missing: HashSet<String> = HashSet::new();
     let mut claimed_extra: HashSet<String> = HashSet::new();
-    let mut all_verified = true;
+    // Pairs that are a pure rename on paper but differ in content: named in the
+    // explanation, never claimed.
+    let mut unverified: Vec<String> = Vec::new();
 
     for m in missing.iter() {
         let Some(m_scopes) = plugin_list_scopes(m) else { continue };
@@ -449,12 +454,17 @@ fn plugin_list_scope_order(
                 && *e != m
         });
         let Some(e) = hit else { continue };
-        let identical = same_bytes(&ctx.archive.join(m), &ctx.output.join(e));
-        all_verified &= identical;
-        items.push(format!(
-            "{m}  ->  {e}{}",
-            if identical { "" } else { "  (contents also differ)" }
-        ));
+        if !pair_is_equivalent(&ctx.archive.join(m), &ctx.output.join(e), ctx.strict_ordering) {
+            // The RENAME is explained; a content difference is not, and the two
+            // are independent. Claiming the pair here would file a changed file
+            // under a filename group and hide it from `--fail-on-diff`, which
+            // is how six truncated plugin lists per Adobe store went unreported
+            // for the tool's whole life. Leave both paths unclaimed so they are
+            // reported and fail.
+            unverified.push(format!("{m}  ->  {e}"));
+            continue;
+        }
+        items.push(format!("{m}  ->  {e}"));
         claimed_missing.insert(m.clone());
         claimed_extra.insert(e.clone());
     }
@@ -465,10 +475,17 @@ fn plugin_list_scope_order(
     missing.retain(|m| !claimed_missing.contains(m));
     extra.retain(|e| !claimed_extra.contains(e));
 
-    let verified_note = if all_verified {
-        "The paired files are byte-identical — only the cache-id filename differs. "
+    let verified_note = if unverified.is_empty() {
+        "The paired files are byte-identical — only the cache-id filename differs. ".to_owned()
     } else {
-        "Some pairs also differ in content (usually the disabled-module plugin set — see that group). "
+        format!(
+            "{} further pair(s) match by scope set but NOT by content, so they are left \
+unexplained and listed above: {}. A content difference is a separate bug from the name — \
+start by comparing sizes, since a per-area list far smaller than the archive's is missing \
+its global plugin baseline. ",
+            unverified.len(),
+            unverified.join(", ")
+        )
     };
     Some(KnownGroup {
         kind: KnownKind::PluginListScopeOrder,
@@ -476,12 +493,14 @@ fn plugin_list_scope_order(
         explanation: format!(
             "The plugin-list cache filename encodes the config scopes it was compiled from. \
 magecommand sorts those scope names alphabetically (e.g. `global|primary`), matching Mage-OS; \
-the archive lists them in module load order (e.g. `primary|global`). {verified_note}\
+the archive lists them in the order the generator built its scope scheme (e.g. `primary|global`). \
+{verified_note}\
 Deterministic, sorted names mean the same scope set always maps to one cache file regardless of \
-the order scopes are requested in — the fix behind Adobe issue #40408."
+the order scopes are requested in — magento/magento2#40408 by Jakub Winkler, which Mage-OS \
+merged and Adobe did not."
         ),
         items,
-        verified: all_verified,
+        verified: true,
     })
 }
 
@@ -1797,6 +1816,21 @@ fn same_bytes(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Whether a renamed pair carries the same compiled content.
+///
+/// Byte equality, or — unless `--strict-ordering` — equality once a plugin-list's
+/// key order is canonicalized. `PluginList` reads those sections only by key and
+/// never iterates them, so their order is unobservable; the same leniency
+/// `compare_dirs` applies to same-named files has to apply here, or a pure
+/// rename reads as a content bug. What must NOT pass is a real difference in the
+/// entries themselves.
+fn pair_is_equivalent(archive: &Path, output: &Path, strict_ordering: bool) -> bool {
+    if same_bytes(archive, output) {
+        return true;
+    }
+    !strict_ordering && crate::compare::same_modulo_ordering(archive, output).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1817,6 +1851,7 @@ mod tests {
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
+            strict_ordering: false,
         }
     }
 
@@ -1830,22 +1865,52 @@ mod tests {
         }
     }
 
+    // A renamed pair is claimed ONLY when the two files are byte-identical.
+    // Claiming one whose contents differ files a real content bug under a
+    // filename group and hides it from `--fail-on-diff`.
+    // Not run on Windows: the test writes real files, and a plugin-list cache
+    // name joins its scopes with `|`, which is reserved in a Windows filename —
+    // the same reason the `di_compile_*` fixtures are `cfg(not(windows))`.
+    #[cfg(not(windows))]
     #[test]
-    fn pairs_plugin_list_scope_reorder() {
+    fn pairs_plugin_list_scope_reorder_only_when_contents_match() {
         let disabled = HashSet::new();
-        let dir = Path::new("/nonexistent-cmp"); // reads fail -> not byte-verified
+        let dir = std::env::temp_dir().join("mc-classify-plugin-list-pairs");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // A pure rename: same bytes either side.
+        fs::write(dir.join("primary|global|frontend|plugin-list.php"), b"same").unwrap();
+        fs::write(dir.join("frontend|global|primary|plugin-list.php"), b"same").unwrap();
+        // Same scope set, but the output lost its global plugin baseline.
+        fs::write(dir.join("primary|global|crontab|plugin-list.php"), b"baseline+overlay").unwrap();
+        fs::write(dir.join("crontab|global|primary|plugin-list.php"), b"overlay").unwrap();
+
         let r = report(
-            &["primary|global|adminhtml|plugin-list.php"],
-            &["adminhtml|global|primary|plugin-list.php"],
+            &[
+                "primary|global|frontend|plugin-list.php",
+                "primary|global|crontab|plugin-list.php",
+            ],
+            &[
+                "frontend|global|primary|plugin-list.php",
+                "crontab|global|primary|plugin-list.php",
+            ],
             &[],
         );
-        let c = classify(&r, &ctx(&disabled, dir));
+        let c = classify(&r, &ctx(&disabled, &dir));
+
         assert_eq!(c.known.len(), 1);
         assert_eq!(c.known[0].kind, KnownKind::PluginListScopeOrder);
-        assert_eq!(c.known[0].items.len(), 1);
-        assert!(c.missing.is_empty() && c.extra.is_empty());
-        // Files unreadable here, so it can't claim byte-identity.
-        assert!(!c.known[0].verified);
+        assert_eq!(c.known[0].items.len(), 1, "only the identical pair is claimed");
+        assert!(c.known[0].items[0].contains("frontend"));
+        assert!(c.known[0].verified);
+        assert!(c.known[0].explanation.contains("NOT by content"));
+
+        // The truncated pair stays unexplained, so --fail-on-diff fails on it.
+        assert_eq!(c.missing, vec!["primary|global|crontab|plugin-list.php".to_string()]);
+        assert_eq!(c.extra, vec!["crontab|global|primary|plugin-list.php".to_string()]);
+        assert_eq!(c.unexplained_count(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1904,6 +1969,7 @@ mod tests {
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
+            strict_ordering: false,
         };
         let r = report(&[], &[], &["global.php", "crontab.php"]);
         let c = classify(&r, &ctx);
@@ -1965,6 +2031,7 @@ mod tests {
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
+            strict_ordering: false,
         };
         let r = report(&[], &[], &["additions.php", "changed.php", "removed.php"]);
         let c = classify(&r, &ctx);
@@ -2061,6 +2128,7 @@ mod tests {
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
+            strict_ordering: false,
         };
         let r = report(&[], &[], &["A/Interceptor.php", "B/Interceptor.php"]);
         let c = classify(&r, &ctx);
@@ -2107,6 +2175,7 @@ mod tests {
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
+            strict_ordering: false,
         };
         let r = report(&[], &[], &["P/Proxy.php"]);
         let c = classify(&r, &ctx);
@@ -2150,6 +2219,7 @@ mod tests {
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
+            strict_ordering: false,
         };
         let r = report(&[], &[], &["interception.php"]);
         let c = classify(&r, &ctx);
@@ -2181,6 +2251,7 @@ mod tests {
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
+            strict_ordering: false,
         };
         let missing = [
             "code/Bad/Mod/Block/Thing/Interceptor.php",
@@ -2334,6 +2405,7 @@ mod tests {
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
+            strict_ordering: false,
         };
         let c = classify(&report(&missing, &[], &[]), &bare);
         assert_eq!(c.missing, vec!["code/Good/Mod/Model/Type/OnepageFactory.php"]);
@@ -2403,6 +2475,7 @@ mod tests {
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
+            strict_ordering: false,
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &bare);
         assert_eq!(c.changed, vec!["interception.php"]);
@@ -2419,6 +2492,7 @@ mod tests {
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
+            strict_ordering: false,
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &ctx);
         assert!(c.changed.is_empty());
@@ -2590,6 +2664,7 @@ mod tests {
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
+            strict_ordering: false,
         };
         let r = report(&[], &[], &["global.php", "other.php"]);
         let c = classify(&r, &ctx);
