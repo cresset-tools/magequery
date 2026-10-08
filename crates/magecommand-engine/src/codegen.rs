@@ -217,11 +217,16 @@ fn merge_extension_attributes(
                     b"extension_attributes" => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"for" {
-                                current_for = Some(
-                                    String::from_utf8_lossy(&attr.value)
-                                        .trim_start_matches('\\')
-                                        .to_owned(),
-                                );
+                                // VERBATIM, backslash and all. `Config\\Converter`
+                                // stores `$output[$typeName]` with the raw `for`
+                                // value while `ExtensionAttributesGenerator`
+                                // looks up `ltrim($sourceClass, '\\')`, so a
+                                // declaration written `for="\Magento\..."` matches
+                                // nothing and Magento silently drops it. Trimming
+                                // here would merge the two spellings and generate
+                                // accessors the real compile does not have.
+                                current_for =
+                                    Some(String::from_utf8_lossy(&attr.value).into_owned());
                             }
                         }
                     }
@@ -547,6 +552,19 @@ impl<'a> Codegen<'a> {
         }
         self.emitted.insert(name.to_owned(), kind);
         self.emitted_ci.insert(name.to_ascii_lowercase(), kind);
+        // The emitted `FooExtension` declares `implements FooExtensionInterface`,
+        // so the autoloader requests that name the moment the class is loaded
+        // and the real compiler generates it too. Without this the output
+        // contradicts itself: a class implementing an interface that exists
+        // neither in `generated/` nor in source, fatal as soon as it loads.
+        // Emitting is recorded FIRST, and the sibling's own source is
+        // `FooInterface`, so this cannot recurse back here. Where the interface
+        // ships as real source (Magento_Ui's Bookmark, PageBuilder's Template)
+        // `exists_as_source` short-circuits and nothing is written — which is
+        // exactly what the reference compiles do.
+        if kind == GenKind::Extension {
+            self.ensure(&format!("{name}Interface"));
+        }
         true
     }
 

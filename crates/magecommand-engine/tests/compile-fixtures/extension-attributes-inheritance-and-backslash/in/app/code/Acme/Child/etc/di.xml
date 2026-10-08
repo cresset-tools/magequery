@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+    <!-- Injecting the generated factory is what demands `OrderExtension`:
+         classify() strips `Factory`, so the dispatch source is the Extension
+         CLASS and nothing ever names the interface it implements. That is the
+         path that left an orphaned `implements` in the output. -->
+    <type name="Acme\Child\Model\Builder">
+        <arguments>
+            <argument name="factory" xsi:type="object">Acme\Base\Api\Data\OrderExtensionFactory</argument>
+        </arguments>
+    </type>
+</config>
