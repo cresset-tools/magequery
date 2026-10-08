@@ -1346,6 +1346,7 @@ fn static_files(
         symlink: sdf::Symlink::None,
         less_profile: sdf::detect_less_profile(&root).0,
     };
+    let sri = sdf::sri_layout(&magento);
     let packages = match sdf::build_from_magento(&magento, area, themes, locale, &opts) {
         Ok(p) => p,
         Err(e) => {
@@ -1380,6 +1381,17 @@ fn static_files(
             }
             std::fs::write(&path, &f.content)
                 .with_context(|| format!("write {}", path.display()))?;
+        }
+        // The newer Csp's `Integrity` post-processor writes a package's
+        // `sri-hashes.json` as part of deploying that package, so it belongs
+        // here with the package's own files. (The older per-AREA layout is a
+        // cross-package artifact one `static files` invocation cannot own —
+        // it spans every theme and locale — so `static deploy` writes that
+        // one. Hence the summary line below names sri-hashes only when this
+        // run actually produced it.)
+        if sri == sdf::SriLayout::PerPackage {
+            sdf::write_package_sri(&target, &pkg.sri)
+                .with_context(|| format!("write {}", target.join(sdf::SRI_HASHES_FILE_NAME).display()))?;
         }
         for (logical, warning) in &pkg.warnings {
             eprintln!("warning: {logical}: {warning}");
@@ -1424,7 +1436,7 @@ fn static_files(
         );
         println!(
             "{}: {} file(s) ({} copied, {} css-processed, {} less-compiled, \
-             {} requirejs, {} bundle(s), js-translation + sri-hashes) \
+             {} requirejs, {} bundle(s), js-translation{}) \
              {:.1} MB -> {}",
             pkg.theme,
             pkg.files.len(),
@@ -1433,6 +1445,7 @@ fn static_files(
             pkg.count(K::LessCompiled),
             pkg.count(K::RequireJs),
             pkg.count(K::Bundle),
+            if sri == sdf::SriLayout::PerPackage { " + sri-hashes" } else { "" },
             pkg.bytes() as f64 / (1024.0 * 1024.0),
             target.display()
         );

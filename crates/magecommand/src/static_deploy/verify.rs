@@ -6,7 +6,7 @@
 //!
 //! The unit and fixture suites are green whether or not the deploy is faithful:
 //! they exercise pure functions, not a whole package. Every parity defect found
-//! so far — `sri-hashes.json` written per package instead of per area, language
+//! so far — `sri-hashes.json` written in the wrong place for the store, language
 //! packs missing from the js dictionary, PHP float printing, `GLOB_NOSORT`
 //! registration order, a Hyvä plugin dropping `tailwind/` — was invisible to
 //! them and visible only in a full-tree diff against a real deploy. This turns
@@ -23,9 +23,12 @@
 //! ## Buckets
 //!
 //! Files are grouped into the deploy's own units — `<area>/<Vendor>/<theme>/
-//! <locale>` packages, plus the AREA-level artifacts (`sri-hashes.json`) and
-//! the run-level `deployed_version.txt` — because "12 files differ" is not
-//! actionable while "every file under one theme differs" names the bug.
+//! <locale>` packages, plus any area-level artifacts and the run-level
+//! `deployed_version.txt` — because "12 files differ" is not actionable while
+//! "every file under one theme differs" names the bug. A per-package
+//! `sri-hashes.json` buckets with the package it covers (5 segments), and an
+//! older store's `<area>/sri-hashes.json` with its area (2) — see
+//! [`super::files::SriLayout`].
 //!
 //! `deployed_version.txt` holds a per-run timestamp, so it is never a
 //! difference worth reporting and is excluded from the comparison entirely.
@@ -48,7 +51,7 @@ const RUN_SCOPED: &str = "deployed_version.txt";
 pub enum Bucket {
     /// A theme package: `<area>/<Vendor>/<theme>/<locale>`.
     Package(String),
-    /// An area-level artifact (`<area>/sri-hashes.json`).
+    /// An area-level artifact — an older store's `<area>/sri-hashes.json`.
     Area(String),
     /// Anything outside both shapes — reported rather than silently pooled.
     Other,
@@ -450,7 +453,7 @@ pub fn verify(
         resplit_packages.insert(package.clone());
     }
 
-    // The area-level integrity file inherits an accepted re-split, since it
+    // The integrity file inherits an accepted re-split, since it
     // hashes the very bundles that moved.
     for (bucket, entry) in buckets.iter_mut() {
         if !matches!(bucket, Bucket::Area(_)) {

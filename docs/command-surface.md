@@ -222,7 +222,13 @@ static files --theme <VENDOR/NAME>... [--locale <L>] [--out <DIR>]
     locales with a non-empty dictionary is a documented gap), and
     sri-hashes.json (Magento_Csp: sha256-base64 of every deployed .js, keys
     in DEPLOYMENT order — package js, then the requirejs artifacts, then the
-    bundles — PHP default json_encode with escaped slashes). Deployment
+    bundles — PHP default json_encode with escaped slashes). Where that file
+    goes depends on the store's Csp, probed per run: the newer one registers a
+    package post-processor and writes one inside EVERY
+    <area>/<Vendor>/<theme>/<locale> (hashing all the package's .js, the
+    min-resolver included); the older collected on asset creation and wrote one
+    <area>/sri-hashes.json (no min-resolver, which that mechanism never saw);
+    before 2.4.7 there is no such file at all. Deployment
     order itself follows the SOURCE tree's readdir order with modules in
     REGISTRATION order (composer autoload_files.php + app/code sorted — NOT
     config.php order; only sri-hashes key order depends on it).
@@ -287,7 +293,7 @@ static verify --reference <DIR> --output <DIR> [--fail-on-diff] [--strict]
     on a `.min`-sibling cache Magento shares process-wide, so the same input can
     legitimately pack differently — the contract is the module SET, verified
     per package, and one module more or less is still a real difference. The
-    area's `sri-hashes.json` rides along with an accepted re-split, since it
+    `sri-hashes.json` rides along with an accepted re-split, since it
     hashes the very bundles that moved; ONE entry outside a re-split package's
     bundles and the file stays flagged. By default only the packages the OUTPUT contains are
     compared, so verifying a one-theme deploy against a whole `pub/static` reports

@@ -547,6 +547,9 @@ where
 /// `<static root>/<area>/sri-hashes.json` — the ONE integrity file per AREA
 /// (`Csp\Model\SubresourceIntegrity\Storage\File::resolveFilePath`, whose
 /// `$context` is the area name), never a per-package artifact.
+///
+/// The OLDER Csp layout only; the newer one writes a `sri-hashes.json` inside
+/// each package directory instead (see [`DeployInputs::sri_per_package`]).
 pub fn area_sri_path(static_root: &std::path::Path, area: &str) -> PathBuf {
     static_root.join(area).join(files::SRI_HASHES_FILE_NAME)
 }
@@ -597,6 +600,15 @@ pub fn execute_to_disk(
                         &g.locale,
                     )
                     .map_err(|e| err(format!("css url post-process: {e}")))?;
+                    // `Csp\…\PostProcessor\Integrity` runs per package and
+                    // saves under `$package->getPath()`, so the file is a
+                    // sibling of the js it covers. Written here, with the
+                    // package, rather than accumulated: it holds only this
+                    // package's entries.
+                    if inputs.sri == files::SriLayout::PerPackage {
+                        files::write_package_sri(&target, &pkg.sri)
+                            .map_err(|e| err(format!("write package sri-hashes.json: {e}")))?;
+                    }
                     sri.push((g.area.clone(), pkg.sri.clone()));
                     rows.push(TupleStat {
                         area: g.area.clone(),
@@ -619,12 +631,15 @@ pub fn execute_to_disk(
             .collect::<Result<Vec<_>, DeployError>>()
     })?;
 
-    // One `sri-hashes.json` per area at the static root. `RemoveAllAssetIntegrityHashes`
-    // wipes each area's file before a CLI deploy and the run then accumulates
-    // into it, so writing exactly this run's entries reproduces the result.
-    // Each SRI phase runs across EVERY package before the next starts, so the
-    // file lists all packages' published js, THEN all their `requirejs-config.js`,
-    // THEN all their bundles — not one package's three phases at a time.
+    // The OLDER Csp's layout: one `sri-hashes.json` per area at the static
+    // root. `RemoveAllAssetIntegrityHashes` wipes each area's file before a CLI
+    // deploy and the run then accumulates into it, so writing exactly this
+    // run's entries reproduces the result. Each SRI phase runs across EVERY
+    // package before the next starts, so the file lists all packages' published
+    // js, THEN all their `requirejs-config.js`, THEN all their bundles — not
+    // one package's three phases at a time. (`requirejs-min-resolver.js` is
+    // absent here: this mechanism collected on asset creation and never saw
+    // it.)
     let mut by_area: Vec<(String, Vec<&files::PackageSri>)> = Vec::new();
     for (_, groups_sri) in &collected {
         for (area, pkg_sri) in groups_sri {
@@ -636,7 +651,10 @@ pub fn execute_to_disk(
     }
     // Only when the store's Csp ships the SRI writer (2.4.7+); older stores
     // produce no `sri-hashes.json`.
-    for (area, pkgs) in by_area.iter().filter(|_| inputs.sri_supported) {
+    for (area, pkgs) in by_area
+        .iter()
+        .filter(|_| inputs.sri == files::SriLayout::PerArea)
+    {
         let entries: Vec<(String, String)> = pkgs
             .iter()
             .flat_map(|p| p.package.iter())
@@ -775,7 +793,7 @@ mod tests {
             scan_modules: Vec::new(),
             language_packs: Vec::new(),
             min_resolver: String::new(),
-            sri_supported: true,
+            sri: files::SriLayout::PerPackage,
         }
     }
 
@@ -820,7 +838,7 @@ mod tests {
             scan_modules: Vec::new(),
             language_packs: Vec::new(),
             min_resolver: String::new(),
-            sri_supported: true,
+            sri: files::SriLayout::PerPackage,
         };
         let p = plan(&inp, &["en_US".into()], &[], &[], false).unwrap();
         assert_eq!(p.skipped.len(), 1);

@@ -626,6 +626,68 @@ pub fn dictionary_json(entries: &[(&str, &str)]) -> String {
     php_json_encode_map_default(entries)
 }
 
+/// Which `sri-hashes.json` a store's Magento_Csp produces, and where.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SriLayout {
+    /// None at all. Csp has no `SubresourceIntegrity` writer — the feature
+    /// arrived in 2.4.7, and before that a real deploy produces no such file
+    /// (the module is present and enabled either way, so its presence proves
+    /// nothing).
+    None,
+    /// One `<area>/sri-hashes.json` at the static root. Hashes were collected
+    /// by plugins on asset CREATION, which saw `requirejs-config.js` but not
+    /// `requirejs-min-resolver.js`, and the save context was the area.
+    PerArea,
+    /// One `sri-hashes.json` inside every
+    /// `<area>/<Vendor>/<theme>/<locale>` package. The newer Csp registers a
+    /// `Deploy\Package\Package` post-processor that walks each finished
+    /// package and saves under `$package->getPath()`, so it hashes EVERY `.js`
+    /// the package published — the min-resolver included.
+    PerPackage,
+}
+
+/// Probe a store for its [`SriLayout`] by class resolution — the same
+/// technique as the rest of the deploy's version detection, and cheap enough
+/// to do once per run.
+///
+/// `RemoveAllAssetIntegrityHashes` states the newer arrangement outright
+/// ("SRI hashes are now stored by area/vendor/theme/locale", and it deletes
+/// them by glob), so the post-processor's presence IS the layout.
+pub fn sri_layout(magento: &magequery_core::Magento) -> SriLayout {
+    let has = |class: &str| {
+        magento
+            .class_file(&magequery_core::ClassName::new(class))
+            .is_some()
+    };
+    if !has("Magento\\Csp\\Model\\SubresourceIntegrity\\Storage\\File") {
+        return SriLayout::None;
+    }
+    if has("Magento\\Csp\\Model\\Deploy\\Package\\Processor\\PostProcessor\\Integrity") {
+        SriLayout::PerPackage
+    } else {
+        SriLayout::PerArea
+    }
+}
+
+/// Write one package's `sri-hashes.json` beside the js it covers, in
+/// deployment order: the package's own files, then the generated
+/// `requirejs-config.js`, then `requirejs-min-resolver.js`, then the bundles.
+/// [`SriLayout::PerPackage`] only — the caller decides.
+pub fn write_package_sri(target: &Path, sri: &PackageSri) -> std::io::Result<()> {
+    let entries: Vec<(String, String)> = sri
+        .package
+        .iter()
+        .chain(sri.requirejs.iter())
+        .chain(sri.min_resolver.iter())
+        .chain(sri.bundles.iter())
+        .cloned()
+        .collect();
+    std::fs::write(
+        target.join(SRI_HASHES_FILE_NAME),
+        sri_hashes_json(&entries),
+    )
+}
+
 /// `sri-hashes.json`: `path → "sha256-<base64>"` in deployment order.
 pub fn sri_hashes_json(entries: &[(String, String)]) -> String {
     let refs: Vec<(&str, &str)> = entries
@@ -694,6 +756,13 @@ pub struct PackageSri {
     pub package: Vec<(String, String)>,
     /// The generated `requirejs-config.js` (phase 1).
     pub requirejs: Vec<(String, String)>,
+    /// `requirejs-min-resolver.js` (phase 1, after the config). Kept apart
+    /// because only the NEWER Csp hashes it: the `Integrity` package
+    /// post-processor walks every `.js` in the package, where the older
+    /// `GenerateAssetIntegrity` plugged `afterCreateRequireJsConfigAsset` and
+    /// so saw just the config. [`super::deploy::execute_to_disk`] decides
+    /// which, from one store probe.
+    pub min_resolver: Vec<(String, String)>,
     /// The JS bundles, lexicographic (phase 2).
     pub bundles: Vec<(String, String)>,
 }
@@ -711,11 +780,14 @@ pub struct ThemePackage {
     pub files: Vec<PlacedFile>,
     /// Compiler warnings from the LESS entries (logical path, message).
     pub warnings: Vec<(String, String)>,
-    /// This package's contribution to the AREA-level `sri-hashes.json`, split
-    /// by the deploy PHASE that produced it. Not a package file:
-    /// `Csp\…\Storage\File` writes ONE file per area at the static root, and
-    /// each phase runs across EVERY package before the next begins — so the
-    /// final order is all packages' phase 0, then all their phase 1, then all
+    /// This package's `sri-hashes.json` entries, split by the deploy PHASE
+    /// that produced them. Never one of `files`: where it is WRITTEN depends on
+    /// the store's Csp (see [`SriLayout`]). Under
+    /// [`SriLayout::PerPackage`] it lands in the package directory in phase
+    /// order ([`write_package_sri`]); under [`SriLayout::PerArea`] every
+    /// package's phases are concatenated into one `<area>/sri-hashes.json`,
+    /// each phase running across EVERY package before the next begins — so
+    /// that file lists all packages' phase 0, then all their phase 1, then all
     /// their phase 2 (see [`super::deploy::area_sri_path`]).
     pub sri: PackageSri,
 }
@@ -1096,9 +1168,9 @@ fn finalize_theme(
             .and_then(|b| b.rsplit_once('.'))
             .is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("js"))
     };
-    // `requirejs-min-resolver.js` is NOT hashed: `GenerateAssetIntegrity`
-    // plugs only `afterCreateRequireJsConfigAsset`, so of the two requirejs
-    // artifacts just `requirejs-config.js` reaches the collector.
+    // `requirejs-min-resolver.js` is hashed only on the newer Csp, so it is
+    // collected into its own field rather than this one — see
+    // [`PackageSri::min_resolver`].
     let hashed = |f: &&PlacedFile| is_js(f) && f.path != requirejs::MIN_RESOLVER_FILE_NAME;
     let hash_all = |v: Vec<&PlacedFile>| -> Vec<(String, String)> {
         v.into_iter().map(|f| (format!("{prefix}/{}", f.path), sri_hash(&f.content))).collect()
@@ -1118,9 +1190,17 @@ fn finalize_theme(
     let mut bundle_js: Vec<&PlacedFile> =
         files.iter().filter(|f| f.kind == PlacedKind::Bundle).filter(hashed).collect();
     bundle_js.sort_by(|a, b| a.path.cmp(&b.path));
+    // Phase 1's second artifact. `Integrity` reads it off the package like any
+    // other `.js`, so it lands directly after the config.
+    let min_resolver_js: Vec<&PlacedFile> = files
+        .iter()
+        .filter(|f| f.path == requirejs::MIN_RESOLVER_FILE_NAME)
+        .filter(is_js)
+        .collect();
     let sri = PackageSri {
         package: hash_all(package_js),
         requirejs: hash_all(requirejs_js),
+        min_resolver: hash_all(min_resolver_js),
         bundles: hash_all(bundle_js),
     };
 
@@ -1186,7 +1266,7 @@ pub struct DeployInputs {
     /// Whether this store's Magento_Csp ships the SubresourceIntegrity feature
     /// (`Storage\File`, the `sri-hashes.json` writer). Added in 2.4.7; absent
     /// on older stores, which then produce no `sri-hashes.json` at all.
-    pub sri_supported: bool,
+    pub sri: SriLayout,
 }
 
 /// Extension points whose plugins we MODEL. An unrecognized plugin on one of
@@ -1540,11 +1620,7 @@ impl DeployInputs {
         // `sri-hashes.json` is written by `Csp\…\SubresourceIntegrity\Storage\File`,
         // which Magento_Csp only gained in 2.4.7 — older stores (Csp enabled or
         // not) produce no such file. Gate on the writer class resolving.
-        let sri_supported = magento
-            .class_file(&magequery_core::ClassName::new(
-                "Magento\\Csp\\Model\\SubresourceIntegrity\\Storage\\File",
-            ))
-            .is_some();
+        let sri = sri_layout(magento);
         Ok(DeployInputs {
             root: magento.root().to_path_buf(),
             themes,
@@ -1553,7 +1629,7 @@ impl DeployInputs {
             scan_modules,
             language_packs,
             min_resolver,
-            sri_supported,
+            sri,
         })
     }
 
@@ -2019,12 +2095,33 @@ mod tests {
         assert_eq!(by_path(DICTIONARY_FILE_NAME).content, b"[]");
         assert_eq!(by_path("requirejs-min-resolver.js").content, b"RESOLVER");
         assert!(by_path("requirejs-config.js").kind == PlacedKind::RequireJs);
-        // sri: every .js EXCEPT the min-resolver (Magento_Csp plugs only
-        // `afterCreateRequireJsConfigAsset`), full static-relative paths with
-        // escaped slashes, no non-js. It is an AREA-level artifact now, so it
-        // rides on `pkg.sri` rather than being a file inside the package.
+        // sri rides on `pkg.sri`, never as a file inside the package: WHERE it
+        // is written depends on the store's Csp, so the placement is the
+        // caller's call.
         assert!(!pkg.files.iter().any(|f| f.path == SRI_HASHES_FILE_NAME));
-        let sri = sri_hashes_json(
+
+        // PerPackage (newer Csp): `Integrity` walks every `.js` the package
+        // published, so the min-resolver IS hashed — right after the config.
+        // Exercised through the real writer, which is what the deploy calls.
+        let pkg_dir = td.path().join("sri-out");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        write_package_sri(&pkg_dir, &pkg.sri).expect("write package sri");
+        let per_package =
+            std::fs::read_to_string(pkg_dir.join(SRI_HASHES_FILE_NAME)).unwrap();
+        assert!(per_package
+            .contains(r#""frontend\/Acme\/base\/en_US\/legacy-build.min.js":"sha256-"#));
+        assert!(!per_package.contains("spacer.gif"), "only .js is hashed");
+        let a = per_package.find("legacy-build.min.js").unwrap();
+        let b = per_package.find("requirejs-config.js").unwrap();
+        let c = per_package.find("requirejs-min-resolver.js").unwrap();
+        assert!(
+            a < b && b < c,
+            "deployment order: package js, then the generated config, then the min-resolver"
+        );
+
+        // PerArea (older Csp): collection hung off asset CREATION, which saw
+        // the config and never the min-resolver.
+        let per_area = sri_hashes_json(
             &pkg.sri
                 .package
                 .iter()
@@ -2033,14 +2130,11 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>(),
         );
-        assert!(sri.contains(r#""frontend\/Acme\/base\/en_US\/legacy-build.min.js":"sha256-"#));
-        assert!(sri.contains(r#"requirejs-config.js"#));
-        assert!(!sri.contains("requirejs-min-resolver.js"));
-        assert!(!sri.contains("spacer.gif"));
-        // deployment order: package js before the rjs artifacts.
-        let a = sri.find("legacy-build.min.js").unwrap();
-        let b = sri.find("requirejs-config.js").unwrap();
-        assert!(a < b);
+        assert!(per_area.contains("requirejs-config.js"));
+        assert!(
+            !per_area.contains("requirejs-min-resolver.js"),
+            "the older layout must not gain an entry the old mechanism could not see"
+        );
     }
 
     #[test]
