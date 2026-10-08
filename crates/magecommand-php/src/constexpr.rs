@@ -599,8 +599,14 @@ fn internal_class_const(class: &str, name: &str) -> Option<ConstValue> {
     })
 }
 
-/// A small table of the PHP core constants that show up in real di config
-/// and constructor defaults. Extend as the oracle demands.
+/// A small table of the PHP core constants whose value magecommand DECIDES
+/// rather than looks up — each one encodes an assumption about the machine
+/// doing the compiling (POSIX paths, a 64-bit build, the CLI SAPI). It takes
+/// precedence over the generated table, which is consulted as the fallback.
+///
+/// Everything else comes from [`crate::constants_generated`], extracted from
+/// phpstorm-stubs; see that file's generator for why environment-dependent
+/// constants are deliberately absent from it.
 fn global_const(name: &str) -> Option<ConstValue> {
     Some(match name {
         // mcrypt constants: gone from PHP, polyfilled by Magento's legacy
@@ -645,7 +651,22 @@ fn global_const(name: &str) -> Option<ConstValue> {
         "E_USER_DEPRECATED" => ConstValue::Int(16384),
         "PHP_ROUND_HALF_UP" => ConstValue::Int(1),
         "M_PI" => ConstValue::Float(std::f64::consts::PI),
-        _ => return None,
+        _ => return generated_const(name),
+    })
+}
+
+/// The generated phpstorm-stubs table: PHP core and extension constants whose
+/// value is the same on every platform and build. A miss here is an honest
+/// "unknown" — the caller degrades the whole arguments row to NULL so the
+/// runtime reflects the real default, rather than inventing one.
+fn generated_const(name: &str) -> Option<ConstValue> {
+    use crate::constants_generated::{Lit, PHP_CONSTANTS};
+    let idx = PHP_CONSTANTS.binary_search_by(|(n, _)| (*n).cmp(name)).ok()?;
+    Some(match PHP_CONSTANTS[idx].1 {
+        Lit::Int(i) => ConstValue::Int(i),
+        Lit::Float(f) => ConstValue::Float(f),
+        Lit::Str(s) => ConstValue::Str(s.to_owned()),
+        Lit::Bool(b) => ConstValue::Bool(b),
     })
 }
 
@@ -972,6 +993,58 @@ mod tests {
     fn php_sapi_folds_to_the_compile_time_cli() {
         assert_eq!(ev("PHP_SAPI"), ConstValue::Str("cli".into()));
         assert_eq!(ev("PHP_SAPI . '-x'"), ConstValue::Str("cli-x".into()));
+    }
+
+    /// The binary search in `generated_const` is only correct if the generated
+    /// table is sorted — and it is written by a script, so the invariant has to
+    /// be asserted here rather than assumed.
+    #[test]
+    fn the_generated_table_is_sorted_and_unique() {
+        use crate::constants_generated::PHP_CONSTANTS;
+        assert!(PHP_CONSTANTS.len() > 5000, "table looks truncated");
+        for pair in PHP_CONSTANTS.windows(2) {
+            assert!(pair[0].0 < pair[1].0, "unsorted or duplicated at {:?}", pair[0].0);
+        }
+    }
+
+    /// Constants that appear as real constructor defaults in a Magento install.
+    /// Values cross-checked against a live PHP 8.4.
+    #[test]
+    fn core_constants_fold_from_the_generated_table() {
+        assert_eq!(ev("SEEK_SET"), ConstValue::Int(0));
+        assert_eq!(ev("SEEK_END"), ConstValue::Int(2));
+        assert_eq!(ev("LOCK_EX"), ConstValue::Int(2));
+        assert_eq!(ev("STR_PAD_RIGHT"), ConstValue::Int(1));
+        assert_eq!(ev("FTP_BINARY"), ConstValue::Int(2));
+        assert_eq!(ev("SOAP_1_1"), ConstValue::Int(1));
+        assert_eq!(ev("GLOB_ONLYDIR"), ConstValue::Int(1073741824));
+        assert_eq!(ev("FILTER_DEFAULT"), ConstValue::Int(516));
+    }
+
+    /// The hand table owns the compile-environment assumptions and must win,
+    /// even where the stubs also carry the name.
+    #[test]
+    fn the_hand_table_takes_precedence() {
+        assert_eq!(ev("DIRECTORY_SEPARATOR"), ConstValue::Str("/".into()));
+        assert_eq!(ev("PHP_EOL"), ConstValue::Str("\n".into()));
+        assert_eq!(ev("PHP_INT_SIZE"), ConstValue::Int(8));
+        assert_eq!(ev("PHP_SAPI"), ConstValue::Str("cli".into()));
+    }
+
+    /// The whole point of the exclusion list: a value that depends on the
+    /// machine doing the compiling must stay UNRESOLVED, so the row degrades to
+    /// NULL and the runtime reflects the real default. Folding the stubs' value
+    /// would ship a confidently wrong one — `SIGUSR1` is 10 on Linux and 30 on
+    /// macOS, and the stubs say 10.
+    #[test]
+    fn environment_dependent_constants_are_not_folded() {
+        for name in ["SIGUSR1", "SIGTERM", "PHP_VERSION_ID", "PHP_OS", "PHP_OS_FAMILY",
+                     "PHP_BINARY", "PHP_MAXPATHLEN", "STDOUT", "STDIN", "STDERR"] {
+            assert!(
+                eval(&parse_const_expr(name, "", &[]), &EvalCtx::new(&NoLookup, None)).is_err(),
+                "{name} is environment-dependent and must not fold"
+            );
+        }
     }
 
     #[test]
