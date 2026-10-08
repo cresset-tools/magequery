@@ -43,6 +43,10 @@ pub enum KnownKind {
     /// only a disabled module declares it, or names it as a parent class or
     /// implemented interface.
     DisabledModuleReachableType,
+    /// A generated artifact (usually a factory) named after an ENABLED module
+    /// that only a DISABLED module's constructor type-hints — the file-level
+    /// twin of [`KnownKind::DisabledModuleReachableType`].
+    DisabledModuleReachableArtifact,
     /// A metadata DI-config file where the output is a strict superset of the
     /// archive: it only *adds* entries (e.g. the `nonLazyTypes` section and the
     /// `NonLazyTypes` compiler-chain step, a 2.4.9 / PHP 8.4 feature the older
@@ -69,7 +73,56 @@ pub enum KnownKind {
     ObfuscatedVendorSource,
 }
 
+/// The document that explains every [`KnownKind`], one section per kind. The
+/// text report links each group here instead of printing the explanation
+/// inline, so the CLI output stays focused on what still needs investigating.
+pub const DIFFERENCES_DOC_URL: &str =
+    "https://github.com/cresset-tools/magequery/blob/main/docs/di-verify-differences.md";
+
+/// Anchor (in [`DIFFERENCES_DOC_URL`]) of the ordering-only section — the
+/// `reordered` bucket, which is not a [`KnownKind`] but is explained there too.
+pub const ORDERING_ONLY_SLUG: &str = "ordering-only";
+
 impl KnownKind {
+    /// Every kind, for exhaustive checks (e.g. that each has a doc section).
+    pub const ALL: [KnownKind; 11] = [
+        KnownKind::PluginListScopeOrder,
+        KnownKind::DisabledModuleInterceptor,
+        KnownKind::DisabledModuleMetadata,
+        KnownKind::OutsideScanPaths,
+        KnownKind::DisabledModuleReachableType,
+        KnownKind::DisabledModuleReachableArtifact,
+        KnownKind::ExtraMetadata,
+        KnownKind::ClassScannerExcludeRegex,
+        KnownKind::FilenameCasing,
+        KnownKind::GeneratorVersionFormatting,
+        KnownKind::ObfuscatedVendorSource,
+    ];
+
+    /// Stable anchor of this kind's section in [`DIFFERENCES_DOC_URL`]. Each is
+    /// the GitHub heading slug of a `## <slug>` heading, so renaming one means
+    /// renaming the heading too (a unit test holds the two together).
+    pub fn slug(self) -> &'static str {
+        match self {
+            KnownKind::PluginListScopeOrder => "plugin-list-scope-order",
+            KnownKind::DisabledModuleInterceptor => "disabled-module-artifacts",
+            KnownKind::DisabledModuleMetadata => "disabled-module-metadata",
+            KnownKind::OutsideScanPaths => "outside-scan-paths",
+            KnownKind::DisabledModuleReachableType => "disabled-module-reachable-types",
+            KnownKind::DisabledModuleReachableArtifact => "disabled-module-reachable-artifacts",
+            KnownKind::ExtraMetadata => "extra-metadata",
+            KnownKind::ClassScannerExcludeRegex => "class-scanner-exclude-regex",
+            KnownKind::FilenameCasing => "filename-casing",
+            KnownKind::GeneratorVersionFormatting => "generator-version-formatting",
+            KnownKind::ObfuscatedVendorSource => "obfuscated-vendor-source",
+        }
+    }
+
+    /// Link to this kind's explanation.
+    pub fn doc_url(self) -> String {
+        format!("{DIFFERENCES_DOC_URL}#{}", self.slug())
+    }
+
     fn title(self) -> &'static str {
         match self {
             KnownKind::PluginListScopeOrder => "Plugin-list cache filename scope ordering",
@@ -84,6 +137,9 @@ impl KnownKind {
             }
             KnownKind::DisabledModuleReachableType => {
                 "Types reachable only through disabled modules (Magento 2.4.9 behavior)"
+            }
+            KnownKind::DisabledModuleReachableArtifact => {
+                "Generated artifacts only disabled modules asked for"
             }
             KnownKind::ExtraMetadata => {
                 "Extra DI-config metadata (output superset — nonLazyTypes, Magento 2.4.9)"
@@ -468,8 +524,8 @@ fn disabled_reachable_artifacts(
     items.sort();
 
     Some(KnownGroup {
-        kind: KnownKind::DisabledModuleReachableType,
-        title: "Generated artifacts only disabled modules asked for".to_owned(),
+        kind: KnownKind::DisabledModuleReachableArtifact,
+        title: KnownKind::DisabledModuleReachableArtifact.title().to_owned(),
         explanation:
             "These artifacts are named after an ENABLED module, so the disabled-module rule does \
 not recognize them — but the only code that asks for them is switched off. A factory is generated \
@@ -1608,11 +1664,8 @@ pub fn residual_report(
     // but not `blocked`, then again when `outside_scan` was added — because each
     // new set had to be remembered at this call site. A single `expected`
     // parameter makes forgetting one impossible.
-    let empty = HashSet::new();
-    let (sa, _) = strip_expected_entries(archive_text, disabled, expected, &empty);
-    let (sb, _) = strip_expected_entries(output_text, disabled, expected, &empty);
-    let na = canonicalize_class_scanner_regex(&sa);
-    let nb = canonicalize_class_scanner_regex(&sb);
+    let na = normalize_metadata(archive_text, disabled, expected);
+    let nb = normalize_metadata(output_text, disabled, expected);
     let a: Vec<&str> = na.lines().collect();
     let b: Vec<&str> = nb.lines().collect();
 
@@ -1651,6 +1704,90 @@ pub fn residual_report(
      (This file would classify as additive/superset; if compare still flags it, the \
      difference is a pure line-count/order artifact.)"
         .to_string()
+}
+
+/// The classifiers' metadata normalization: strip every expected entry (the
+/// disabled-module ones and the `expected` key union), then canonicalize the
+/// ClassesScanner regex. Shared by [`residual_report`] and [`first_divergence`]
+/// so the two diagnostics can never disagree about what was already explained.
+fn normalize_metadata(text: &str, disabled: &HashSet<String>, expected: &HashSet<String>) -> String {
+    let empty = HashSet::new();
+    let (stripped, _) = strip_expected_entries(text, disabled, expected, &empty);
+    canonicalize_class_scanner_regex(&stripped)
+}
+
+/// Where an unexplained changed file first diverges, as one line from each side.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct Divergence {
+    /// The first archive line the output does not reproduce (`None` when the
+    /// output only adds lines).
+    pub archive_line: Option<String>,
+    /// The output line at that point (`None` when the output ends there).
+    pub output_line: Option<String>,
+}
+
+/// The first genuine difference in one changed file — the one-line answer to
+/// "what actually differs here", printed inline under each unexplained file.
+///
+/// Metadata files (`is_metadata`) get the same normalization the classifiers
+/// apply, then the same in-order subsequence test as [`residual_report`], so the
+/// reported line is a real divergence, never an already-explained disabled-module
+/// entry. Generated code is compared line by line as-is. `None` = no difference
+/// survives normalization.
+pub fn first_divergence(
+    archive_text: &str,
+    output_text: &str,
+    is_metadata: bool,
+    disabled: &HashSet<String>,
+    expected: &HashSet<String>,
+) -> Option<Divergence> {
+    let (na, nb) = if is_metadata {
+        (
+            normalize_metadata(archive_text, disabled, expected),
+            normalize_metadata(output_text, disabled, expected),
+        )
+    } else {
+        (archive_text.to_owned(), output_text.to_owned())
+    };
+    let a: Vec<&str> = na.lines().collect();
+    let b: Vec<&str> = nb.lines().collect();
+
+    if !is_metadata {
+        let i = (0..a.len().max(b.len())).find(|&i| a.get(i) != b.get(i))?;
+        return Some(Divergence {
+            archive_line: a.get(i).map(|l| l.trim().to_owned()),
+            output_line: b.get(i).map(|l| l.trim().to_owned()),
+        });
+    }
+
+    // Greedy forward subsequence match, as in `residual_report`.
+    let mut j = 0usize;
+    let mut matched = Vec::with_capacity(a.len());
+    for a_line in &a {
+        let start = j;
+        while j < b.len() && b[j] != *a_line {
+            j += 1;
+        }
+        if j == b.len() {
+            return Some(Divergence {
+                archive_line: Some(a_line.trim().to_owned()),
+                output_line: b.get(start).map(|l| l.trim().to_owned()),
+            });
+        }
+        matched.push(j);
+        j += 1;
+    }
+    // The archive survives intact: report the first line the output adds.
+    let mut next = 0usize;
+    for (idx, line) in b.iter().enumerate() {
+        if matched.get(next) == Some(&idx) {
+            next += 1;
+        } else {
+            return Some(Divergence { archive_line: None, output_line: Some(line.trim().to_owned()) });
+        }
+    }
+    None
 }
 
 fn same_bytes(a: &Path, b: &Path) -> bool {
@@ -2206,7 +2343,7 @@ mod tests {
         let ctx = ClassifyCtx { disabled_types: &types, ..bare };
         let c = classify(&report(&missing, &[], &[]), &ctx);
         assert!(c.missing.is_empty());
-        assert_eq!(c.known[0].kind, KnownKind::DisabledModuleReachableType);
+        assert_eq!(c.known[0].kind, KnownKind::DisabledModuleReachableArtifact);
 
         // A DIFFERENT type in the evidence set must not claim this file.
         let other = HashSet::from(["good\\mod\\model\\type\\somethingelse".to_string()]);
@@ -2291,6 +2428,56 @@ mod tests {
         // The group names the unescaped type, so the reader can grep for it.
         let g = c.known.iter().find(|g| g.kind == KnownKind::DisabledModuleReachableType).unwrap();
         assert_eq!(g.items, vec!["Good\\Mod\\IfaceOnlyBadImplements"]);
+    }
+
+    #[test]
+    fn every_known_kind_has_a_doc_section() {
+        // GitHub's heading slug: lowercase, punctuation dropped (hyphens kept),
+        // spaces to hyphens. A renamed heading must break this, not the link.
+        let doc = include_str!("../../../docs/di-verify-differences.md");
+        let slugs: HashSet<String> = doc
+            .lines()
+            .filter_map(|l| l.strip_prefix("## "))
+            .map(|h| {
+                h.to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == ' ')
+                    .map(|c| if c == ' ' { '-' } else { c })
+                    .collect()
+            })
+            .collect();
+        for kind in KnownKind::ALL {
+            assert!(slugs.contains(kind.slug()), "no doc section for {kind:?} (#{})", kind.slug());
+        }
+        assert!(slugs.contains(ORDERING_ONLY_SLUG));
+    }
+
+    #[test]
+    fn first_divergence_reports_the_changed_line() {
+        let none = HashSet::new();
+        // Generated code: plain line-by-line.
+        let d = first_divergence("a\nb\nc\n", "a\nX\nc\n", false, &none, &none).unwrap();
+        assert_eq!(d.archive_line.as_deref(), Some("b"));
+        assert_eq!(d.output_line.as_deref(), Some("X"));
+        assert_eq!(first_divergence("a\n", "a\n", false, &none, &none), None);
+
+        // Metadata: a changed value is the archive line the output lacks.
+        let d = first_divergence(
+            "  'A' => 1,\n  'B' => 2,\n",
+            "  'A' => 1,\n  'B' => 3,\n",
+            true,
+            &none,
+            &none,
+        )
+        .unwrap();
+        assert_eq!(d.archive_line.as_deref(), Some("'B' => 2,"));
+        assert_eq!(d.output_line.as_deref(), Some("'B' => 3,"));
+
+        // Metadata, output only adds: no archive line, the first added line.
+        let d = first_divergence("  'A' => 1,\n", "  'A' => 1,\n  'Z' => 9,\n", true, &none, &none)
+            .unwrap();
+        assert_eq!(d.archive_line, None);
+        assert_eq!(d.output_line.as_deref(), Some("'Z' => 9,"));
     }
 
     #[test]

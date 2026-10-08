@@ -54,9 +54,12 @@ Writes `generated/code` and `generated/metadata`.
   Use the default content digest as the cache key; `--stat` (mtime+size) is the
   local `--incremental` short-circuit and is NOT portable across a fresh checkout.
 - Check output against a known-good tree → `di verify --archive <DIR> --output
-  <DIR>`. `--fail-on-diff` exits non-zero unless identical. Interceptors differing
-  only in method order are reported as `reordered`, not `changed`, unless
-  `--strict-ordering`.
+  <DIR>`. `--fail-on-diff` exits non-zero only on UNEXPLAINED differences, which
+  the report lists first (DI config vs generated code, each changed file with its
+  first diverging line); known/expected ones link to
+  docs/di-verify-differences.md. `--show-residual <FILE>` gives more context for
+  one metadata file. Interceptors differing only in method order are reported as
+  `reordered`, not `changed`, unless `--strict-ordering`.
 
 ## Static content — `magecommand static`
 
