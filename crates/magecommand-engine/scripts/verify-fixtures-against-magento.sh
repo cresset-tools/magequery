@@ -35,7 +35,17 @@ FIX="$HERE/../tests/compile-fixtures"
 WORK=${MAGECOMMAND_ORACLE_DIR:-/tmp/magecommand-oracle}
 SANDBOX="$WORK/install"
 
-# Fixtures real Magento cannot compile. Each must say why in its own source.
+# Fixtures this script cannot ground-truth. Each must say why in its own
+# source, so a skip is never a quiet exemption.
+#
+#   never-return-is-magentos-own-bug  Magento's generator emits invalid PHP for
+#     a plugged `never` method, which aborts setup:di:compile outright.
+#   extension-attributes  its golden is computed with NO framework present, so
+#     `OrderExtension extends \Magento\Framework\Api\AbstractSimpleObject`
+#     resolves to nothing and the constructor surface is empty — against a real
+#     install the parent IS there and `data` appears. Both outputs are correct
+#     for their own input; comparing them is the mistake. Leaving it in made
+#     every run report a divergence, which is how a verifier stops being read.
 SKIP_INSTALL=("never-return-is-magentos-own-bug")
 
 skip() { local n=$1; for s in "${SKIP_INSTALL[@]}"; do [ "$n" = "$s" ] && return 0; done; return 1; }
@@ -87,11 +97,33 @@ cat > "$WORK/subset.php" <<'PHP'
 // stable var_export form so two compilers diff exactly.
 $data = require $argv[1];
 $out = [];
+// Generated Extension classes extend \Magento\Framework\Api\AbstractSimpleObject.
+// A fixture golden is computed with NO framework present, so that parent
+// resolves to nothing and the constructor surface comes out empty; against a
+// real install the parent IS there and a `data` argument appears. Both answers
+// are right for their own input, so comparing them is the mistake — it is not
+// a divergence, and reporting it every run is how a verifier stops being read.
+//
+// Excluded by ENTRY rather than by fixture, so the Proxy and Factory coverage
+// in the same fixtures still counts. The proper fix is to commit a minimal
+// AbstractSimpleObject stub into those fixtures' `in/` trees (the technique
+// PR #120 used for PluginListGenerator), which would make them comparable and
+// let this exclusion go.
+$unverifiable = static fn (string $k): bool =>
+    str_contains($k, 'Extension') || str_contains($k, 'ExtensionInterface');
+
 foreach (['arguments', 'preferences', 'instanceTypes', 'nonLazyTypes'] as $sec) {
     if (!isset($data[$sec]) || !is_array($data[$sec])) { continue; }
     $sub = [];
     foreach ($data[$sec] as $k => $v) {
-        if (str_starts_with((string) $k, $argv[2])) { $sub[$k] = $v; }
+        // Match on the NAMESPACE BOUNDARY, not a bare prefix: `Acme\Pref`
+        // also prefixes `Acme\Prefix`, so a bare match pulled another
+        // fixture's entries into this one's comparison and reported a
+        // divergence that was really two fixtures sharing five characters.
+        $k = (string) $k;
+        if (($k === $argv[2] || str_starts_with($k, $argv[2] . '\\')) && !$unverifiable($k)) {
+            $sub[$k] = $v;
+        }
     }
     ksort($sub);
     $out[$sec] = $sub;
@@ -144,4 +176,91 @@ done
 echo
 echo "metadata: $meta_ok verified, $meta_bad divergent"
 echo "code:     $code_ok verified, $code_bad divergent"
-[ $meta_bad -eq 0 ] && [ $code_bad -eq 0 ]
+
+# ---- phase 2: the other plugin-list baseline -------------------------------
+#
+# Some behaviour depends on which FRAMEWORK the store ships, not on its config,
+# and a run against a single unmodified install can only ever see one side of
+# it. The live case is the global-plugin baseline for plugin lists: Magento
+# snapshots it on the `global` pass, which never runs because `primary` already
+# loaded `global`, so every area after frontend starts from an empty base.
+# Mage-OS also snapshots on `primary`, and magecommand branches on whichever
+# guard the store's own generator has.
+#
+# A verifier that never alters the install cannot reach the other branch — and
+# that gap is exactly how the branch came to be wrong for five areas
+# (adminhtml, crontab, webapi_rest, webapi_soap, graphql; crontab's list was
+# 3 KB against a native 334 KB). So: flip the guard in the SANDBOX's vendor
+# tree, recompile both sides, and diff the whole generated tree rather than
+# the fixture namespaces — the fixtures have no vendor/, so they cannot
+# express this at all.
+#
+# Set MAGECOMMAND_SKIP_GUARD_FLIP=1 to stop after phase 1.
+if [ "${MAGECOMMAND_SKIP_GUARD_FLIP:-0}" = "1" ]; then
+    echo
+    echo "guard flip: skipped (MAGECOMMAND_SKIP_GUARD_FLIP=1)"
+    [ $meta_bad -eq 0 ] && [ $code_bad -eq 0 ]
+    exit $?
+fi
+
+GEN=$(ls "$SANDBOX"/vendor/*/framework/Interception/PluginListGenerator.php 2>/dev/null | head -1)
+[ -n "$GEN" ] || GEN=$(ls "$SANDBOX"/lib/internal/Magento/Framework/Interception/PluginListGenerator.php 2>/dev/null | head -1)
+
+guard_bad=0
+if [ -z "${GEN:-}" ]; then
+    echo
+    echo "guard flip: no PluginListGenerator.php found — skipped"
+else
+    echo
+    cp "$GEN" "$WORK/generator.orig"
+    restore_generator() { cp "$WORK/generator.orig" "$GEN"; }
+    trap restore_generator EXIT
+
+    if grep -q "scope === 'primary'" "$GEN"; then
+        echo "guard flip: store has the Mage-OS guard; flipping to Adobe's"
+        python3 - "$GEN" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+p.write_text(s.replace("$scope === 'global' || $scope === 'primary'", "$scope === 'global'", 1))
+PY
+    else
+        echo "guard flip: store has the Adobe guard; flipping to Mage-OS's"
+        python3 - "$GEN" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+s = p.read_text()
+p.write_text(s.replace("if ($scope === 'global') {",
+                       "if ($scope === 'global' || $scope === 'primary') {", 1))
+PY
+    fi
+
+    ( cd "$SANDBOX" && rm -rf generated/code generated/metadata generated/_guard_code generated/_guard_meta )
+    if ! ( cd "$SANDBOX" && bougie run php bin/magento setup:di:compile ) >"$WORK/guard-magento.log" 2>&1; then
+        echo "  flipped compile FAILED:"; grep -iE 'fatal|error' "$WORK/guard-magento.log" | head -3
+        guard_bad=1
+    else
+        mv "$SANDBOX/generated/code" "$SANDBOX/generated/_guard_code"
+        mv "$SANDBOX/generated/metadata" "$SANDBOX/generated/_guard_meta"
+        MC_BIN=${MAGECOMMAND_BIN:-magecommand}
+        "$MC_BIN" di compile --root "$SANDBOX" --force >"$WORK/guard-mc.log" 2>&1 || true
+        gm=0
+        for f in $(cd "$SANDBOX/generated/_guard_meta" && ls); do
+            if ! diff -q "$SANDBOX/generated/_guard_meta/$f" "$SANDBOX/generated/metadata/$f" >/dev/null 2>&1; then
+                gm=$((gm+1)); echo "  METADATA DIVERGES: $f"
+                diff "$SANDBOX/generated/_guard_meta/$f" "$SANDBOX/generated/metadata/$f" | head -6
+            fi
+        done
+        gc=0
+        while IFS= read -r f; do
+            diff -q "$SANDBOX/generated/_guard_code/$f" "$SANDBOX/generated/code/$f" >/dev/null 2>&1 || {
+                gc=$((gc+1)); [ $gc -le 3 ] && echo "  CODE DIVERGES: $f"; }
+        done < <(cd "$SANDBOX/generated/_guard_code" && find . -name '*.php')
+        echo "  flipped guard: $gm metadata divergent, $gc code divergent"
+        [ $gm -eq 0 ] && [ $gc -eq 0 ] || guard_bad=1
+    fi
+    restore_generator
+    trap - EXIT
+fi
+
+[ $meta_bad -eq 0 ] && [ $code_bad -eq 0 ] && [ $guard_bad -eq 0 ]
