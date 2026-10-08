@@ -1,0 +1,331 @@
+# magecommand-engine compile fixture — the expected output of compute_outputs()
+# over `in/`, byte for byte. Everything below is generated; edit `in/` instead.
+# Re-bless: MAGECOMMAND_COMPILE_BLESS=1 cargo test -p magecommand-engine --test compile
+# files: 16  findings: 7  unresolved: 0
+
+===== file: metadata/adminhtml.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => NULL,
+    'Acme\\Time\\Model\\Stamp' => 
+    array (
+      'datetime' => 
+      array (
+        '_v_' => 'now',
+      ),
+      'timezone' => 
+      array (
+        '_vn_' => true,
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
+  ),
+);
+
+===== file: metadata/adminhtml|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/app_action_list.php =====
+<?php return array (
+);
+
+===== file: metadata/crontab.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => NULL,
+    'Acme\\Time\\Model\\Stamp' => 
+    array (
+      'datetime' => 
+      array (
+        '_v_' => 'now',
+      ),
+      'timezone' => 
+      array (
+        '_vn_' => true,
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
+  ),
+);
+
+===== file: metadata/crontab|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/frontend.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => NULL,
+    'Acme\\Time\\Model\\Stamp' => 
+    array (
+      'datetime' => 
+      array (
+        '_v_' => 'now',
+      ),
+      'timezone' => 
+      array (
+        '_vn_' => true,
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
+  ),
+);
+
+===== file: metadata/frontend|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => NULL,
+    'Acme\\Time\\Model\\Stamp' => 
+    array (
+      'datetime' => 
+      array (
+        '_v_' => 'now',
+      ),
+      'timezone' => 
+      array (
+        '_vn_' => true,
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
+  ),
+);
+
+===== file: metadata/global|graphql|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|webapi_rest|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|webapi_soap|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/graphql.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => NULL,
+    'Acme\\Time\\Model\\Stamp' => 
+    array (
+      'datetime' => 
+      array (
+        '_v_' => 'now',
+      ),
+      'timezone' => 
+      array (
+        '_vn_' => true,
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
+  ),
+);
+
+===== file: metadata/interception.php =====
+<?php return array (
+  'Acme\\Time\\Model\\Doc' => false,
+  'Acme\\Time\\Model\\Stamp' => false,
+  'DOMDocument' => false,
+  'DOMNode' => false,
+  'DOMParentNode' => false,
+  'DateTime' => false,
+  'DateTimeInterface' => false,
+);
+
+===== file: metadata/webapi_rest.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => NULL,
+    'Acme\\Time\\Model\\Stamp' => 
+    array (
+      'datetime' => 
+      array (
+        '_v_' => 'now',
+      ),
+      'timezone' => 
+      array (
+        '_vn_' => true,
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
+  ),
+);
+
+===== file: metadata/webapi_soap.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => NULL,
+    'Acme\\Time\\Model\\Stamp' => 
+    array (
+      'datetime' => 
+      array (
+        '_v_' => 'now',
+      ),
+      'timezone' => 
+      array (
+        '_vn_' => true,
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
+  ),
+);
+
+===== findings =====
+Acme\Time\Model\Doc: constructor chain leaves known set at DOMDocument
+Acme\Time\Model\Doc: constructor chain leaves known set at DOMDocument
+Acme\Time\Model\Doc: constructor chain leaves known set at DOMDocument
+Acme\Time\Model\Doc: constructor chain leaves known set at DOMDocument
+Acme\Time\Model\Doc: constructor chain leaves known set at DOMDocument
+Acme\Time\Model\Doc: constructor chain leaves known set at DOMDocument
+Acme\Time\Model\Doc: constructor chain leaves known set at DOMDocument
+
+===== unresolved =====
