@@ -782,8 +782,35 @@ fn internal_iface_parents(name: &str) -> Option<&'static [&'static str]> {
 /// tell a genuinely built-in global-namespace name (`stdClass`) from a
 /// Magento virtual type that merely lives in the global namespace.
 pub fn is_internal_class(fqcn: &str) -> bool {
-    internal_ctor(fqcn).is_some()
+    internal_ctor(fqcn).is_some() || UNMODELLED_INTERNAL_CTOR.contains(&fqcn)
 }
+
+/// Internal PHP classes that DO have a constructor we have not modelled.
+///
+/// They are deliberately absent from [`internal_ctor`], so a userland class
+/// extending one without declaring its own constructor fails the chain walk
+/// and gets a compile finding naming it. Listing them as `&EMPTY` instead —
+/// as they were — claims they take no arguments, which silently emits a wrong
+/// empty row that nothing reports. The reflected signatures are in the commit
+/// that added this list; add one here to [`internal_ctor`] the moment a real
+/// compile demands it, with the oracle to check it against. Guessing ahead of
+/// that risks baking a signature from the wrong PHP version, which ships a
+/// confidently wrong value — strictly worse than an honest NULL.
+const UNMODELLED_INTERNAL_CTOR: &[&str] = &[
+    "Collator",
+    "DOMDocument",
+    "DateInterval",
+    "DateTimeZone",
+    "ErrorException",
+    "IntlDateFormatter",
+    "IteratorIterator",
+    "NumberFormatter",
+    "PDO",
+    "RecursiveIteratorIterator",
+    "ReflectionClass",
+    "SoapClient",
+    "SoapServer",
+];
 
 /// Constructor signatures of internal PHP classes, as reflection reports
 /// them — inherited by userland subclasses that declare none of their own.
@@ -865,6 +892,17 @@ fn internal_ctor(fqcn: &str) -> Option<&'static [ParamMeta]> {
             .get_or_init(|| vec![ParamMeta::synthetic("filename", Some("string"), None)])
             .as_slice()
     };
+    static DATE_TIME_CTOR: OnceLock<Vec<ParamMeta>> = OnceLock::new();
+    let date_time_ctor = || {
+        DATE_TIME_CTOR
+            .get_or_init(|| {
+                vec![
+                    ParamMeta::synthetic("datetime", Some("string"), Some("'now'")),
+                    ParamMeta::synthetic("timezone", Some("?DateTimeZone"), Some("null")),
+                ]
+            })
+            .as_slice()
+    };
     static EMPTY: [ParamMeta; 0] = [];
     Some(match fqcn {
         "SplFileObject" | "SplTempFileObject" => spl_file_object_ctor(),
@@ -880,14 +918,12 @@ fn internal_ctor(fqcn: &str) -> Option<&'static [ParamMeta]> {
         | "BadMethodCallException" | "BadFunctionCallException" | "OverflowException"
         | "UnderflowException" | "TypeError" | "ValueError" | "Error"
         | "JsonException" => exception_ctor(),
+        "DateTime" | "DateTimeImmutable" => date_time_ctor(),
+        // Genuinely constructor-less: reflection reports no constructor, or
+        // one taking no parameters, so an empty row is the right answer.
         "stdClass" | "Directory" | "SessionHandler" | "php_user_filter" | "XMLReader"
         | "XMLWriter" | "Locale" | "SplObjectStorage" | "SplQueue" | "SplStack"
         | "SplPriorityQueue" | "SplDoublyLinkedList" | "SplMinHeap" | "SplMaxHeap"
-        | "DateTime" | "DateTimeImmutable"
-        | "DateTimeZone" | "DateInterval" | "IntlDateFormatter" | "NumberFormatter"
-        | "Collator" | "ReflectionClass" | "SoapClient" | "SoapServer"
-        | "DOMDocument" | "PDO"
-        | "IteratorIterator" | "RecursiveIteratorIterator" | "ErrorException"
         | "Magento\\Framework\\Interception\\Interceptor" => &EMPTY,
         _ => return None,
     })
