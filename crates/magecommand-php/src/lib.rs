@@ -13,6 +13,7 @@
 //! ever. A construct the parser cannot classify is a hard [`ParseIssue`],
 //! never a silent guess; there is no fallback tier behind it.
 
+mod constants_generated;
 pub mod constexpr;
 mod model;
 mod parse;
