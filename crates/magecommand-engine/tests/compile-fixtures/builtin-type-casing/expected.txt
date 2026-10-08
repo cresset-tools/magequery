@@ -52,12 +52,38 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Builtin\\Model\\Bag' => 
+    array (
+      'acme_builtin_watch' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Builtin\\Plugin\\Watch',
+      ),
+    ),
   ),
   1 => 
   array (
+    'ArrayAccess' => NULL,
+    'Countable' => NULL,
+    'Iterator' => NULL,
+    'Acme\\Builtin\\Model\\Bag' => 
+    array (
+      'acme_builtin_watch' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Builtin\\Plugin\\Watch',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Builtin\\Model\\Bag_count___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_builtin_watch',
+      ),
+    ),
   ),
 );
 
@@ -88,12 +114,38 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Builtin\\Model\\Bag' => 
+    array (
+      'acme_builtin_watch' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Builtin\\Plugin\\Watch',
+      ),
+    ),
   ),
   1 => 
   array (
+    'ArrayAccess' => NULL,
+    'Countable' => NULL,
+    'Iterator' => NULL,
+    'Acme\\Builtin\\Model\\Bag' => 
+    array (
+      'acme_builtin_watch' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Builtin\\Plugin\\Watch',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Builtin\\Model\\Bag_count___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_builtin_watch',
+      ),
+    ),
   ),
 );
 
@@ -178,12 +230,38 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Builtin\\Model\\Bag' => 
+    array (
+      'acme_builtin_watch' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Builtin\\Plugin\\Watch',
+      ),
+    ),
   ),
   1 => 
   array (
+    'ArrayAccess' => NULL,
+    'Countable' => NULL,
+    'Iterator' => NULL,
+    'Acme\\Builtin\\Model\\Bag' => 
+    array (
+      'acme_builtin_watch' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Builtin\\Plugin\\Watch',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Builtin\\Model\\Bag_count___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_builtin_watch',
+      ),
+    ),
   ),
 );
 
@@ -230,12 +308,38 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Builtin\\Model\\Bag' => 
+    array (
+      'acme_builtin_watch' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Builtin\\Plugin\\Watch',
+      ),
+    ),
   ),
   1 => 
   array (
+    'ArrayAccess' => NULL,
+    'Countable' => NULL,
+    'Iterator' => NULL,
+    'Acme\\Builtin\\Model\\Bag' => 
+    array (
+      'acme_builtin_watch' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Builtin\\Plugin\\Watch',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Builtin\\Model\\Bag_count___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_builtin_watch',
+      ),
+    ),
   ),
 );
 
@@ -243,12 +347,38 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Builtin\\Model\\Bag' => 
+    array (
+      'acme_builtin_watch' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Builtin\\Plugin\\Watch',
+      ),
+    ),
   ),
   1 => 
   array (
+    'ArrayAccess' => NULL,
+    'Countable' => NULL,
+    'Iterator' => NULL,
+    'Acme\\Builtin\\Model\\Bag' => 
+    array (
+      'acme_builtin_watch' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Builtin\\Plugin\\Watch',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Builtin\\Model\\Bag_count___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_builtin_watch',
+      ),
+    ),
   ),
 );
 

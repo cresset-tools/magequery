@@ -279,51 +279,7 @@ pub fn plugin_instances_across_scopes(
     out
 }
 
-/// Whether the store's own `PluginListGenerator` resets every area after
-/// frontend to the global/primary baseline, rather than to an empty one.
-///
-/// Magento takes that baseline snapshot only on the `global` pass, which never
-/// runs (the `primary` pass already loaded `global`), so every later area's
-/// plugin list holds only its own overlay. Mage-OS fixed it by also taking the
-/// snapshot on `primary` (mage-os/mageos-magento2#299); Adobe's 2.4-develop
-/// still has the bug. Which one a store runs is read from its framework source,
-/// not guessed from a version: a fork can carry either. An unreadable or
-/// missing generator keeps the historical behaviour.
-pub fn resets_areas_to_global_baseline(magento: &Magento) -> bool {
-    let relative = std::path::Path::new("Interception/PluginListGenerator.php");
-    let candidates = magento
-        .library_paths()
-        .iter()
-        .map(|lib| lib.join(relative))
-        .chain(std::iter::once(
-            magento.root().join("lib/internal/Magento/Framework").join(relative),
-        ));
-    for path in candidates {
-        if let Ok(source) = magento.read_source(&path) {
-            return snapshot_guard_includes_primary(&source);
-        }
-    }
-    false
-}
-
-/// True when the `if` guarding `$this->globalScopePluginData = $this->pluginData`
-/// names the `primary` scope. Only the condition is inspected, so the comments
-/// both versions carry above it cannot produce a match.
-fn snapshot_guard_includes_primary(source: &str) -> bool {
-    let Some(assignment) = source.find("$this->globalScopePluginData = $this->pluginData") else {
-        return false;
-    };
-    let before = &source[..assignment];
-    let Some(guard_start) = before.rfind("if (") else {
-        return false;
-    };
-    let guard = &before[guard_start..];
-    let guard = guard.split('{').next().unwrap_or(guard);
-    guard.contains("'primary'") || guard.contains("\"primary\"")
-}
-
 pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
-    let full_baseline = resets_areas_to_global_baseline(magento);
     let global_export = magento.di_export_ref(Area::Global);
     let global_vtypes: HashMap<String, String> = global_export
         .virtual_types
@@ -334,25 +290,17 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
     let mut files = Vec::new();
     let mut findings = Vec::new();
     for (area, _code) in AREA_CODES {
-        // Scope processing: getAllScopes() = [primary, global, areas...].
-        // The global|primary file is written during the PRIMARY pass with
-        // scheme [global, primary]; the frontend file still accumulates on
-        // top of that state. Where the `$scope === 'global'` snapshot never
-        // fires (that write is skipped as already-loaded), every area AFTER
-        // frontend starts from an EMPTY base and contains only its own
-        // overlay — a genuine Magento bug the archive faithfully records.
-        // A framework that also snapshots on `primary` (see
-        // `resets_areas_to_global_baseline`) gives every area the same
-        // global-plus-own-overlay merge frontend gets.
-        let export_owned;
+        // Scope processing: getAllScopes() = [primary, global, areas...], and
+        // `global` always gets a pass of its own — `loadScopedVirtualTypes`
+        // breaks at the CURRENT scope, so the primary pass reads only primary
+        // and leaves global unloaded. The `$scope === 'global'` snapshot into
+        // `globalScopePluginData` therefore always fires, before any area runs,
+        // whether or not the setup operation strips `primary` first. Every area
+        // is reset to that baseline and contributes its own overlay on top,
+        // exactly as frontend does.
         let export: &DiExport = match area {
             Area::Global => global_export,
-            Area::Frontend => magento.di_export_ref(area),
-            _ if full_baseline => magento.di_export_ref(area),
-            _ => {
-                export_owned = magento.di_export_overlay(area);
-                &export_owned
-            }
+            _ => magento.di_export_ref(area),
         };
         // Scope set + filename: scheme starts ['primary','global']; the
         // current scope moves/appends to the end; the ID sorts them.
@@ -438,15 +386,14 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
     }
 
     // Custom-registered areas (postcode-nl's postcode_eu, …). They come AFTER
-    // graphql in getAllScopes, so — like every scope past frontend — each reads
-    // from an EMPTY base and contributes only its own overlay, unless the
-    // framework resets to the global baseline, in which case the plugin data is
-    // the full merge. Seeds are the overlay's virtual types at slot 2 either
-    // way: only the newly read scope seeds (the overlay export holds nothing
-    // else, so there is no source.area filter to apply).
+    // graphql in getAllScopes, and like every other area they are reset to the
+    // global baseline and contribute their own overlay on top. Seeds stay the
+    // OVERLAY's virtual types at slot 2 — only the newly read scope seeds — so
+    // the overlay export is kept for seeding while the plugin data is built
+    // from the merge.
     for code in crate::areaconfig::custom_area_codes(magento) {
         let export = magento.di_export_custom_area_overlay(&code);
-        let merged = full_baseline.then(|| magento.di_export_custom_area(&code));
+        let merged = magento.di_export_custom_area(&code);
         let scopes: Vec<&str> = vec!["primary", "global", code.as_str()];
         let mut sorted = scopes.clone();
         sorted.sort_unstable();
@@ -465,7 +412,7 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
             .collect();
         vtype_seeds.sort();
 
-        let plugin_data = plugin_data_of(merged.as_ref().unwrap_or(&export));
+        let plugin_data = plugin_data_of(&merged);
         let mut state = Inherit {
             defs,
             global_vtypes: &global_vtypes,
@@ -983,35 +930,6 @@ mod tests {
             processed: Vec::new(),
             findings: Vec::new(),
         }
-    }
-
-    /// Adobe's generator, which truncates every area after frontend. The
-    /// comment above the guard mentions "primary" too, and must not count.
-    const GENERATOR_ADOBE: &str = r#"
-                // need global & primary scopes plugin data for other scopes
-                if ($scope === 'global') {
-                    $this->globalScopePluginData = $this->pluginData;
-                }
-                if (count($this->scopePriorityScheme) > 2) {
-"#;
-
-    /// Mage-OS's generator (mage-os/mageos-magento2#299), which also snapshots
-    /// on the `primary` pass.
-    const GENERATOR_MAGEOS: &str = r#"
-                // need global & primary scopes plugin data for other scopes
-                // Capture the global/primary baseline that every subsequent area is reset to
-                // below. 'primary' is included because getAllScopes() lists it before 'global'.
-                if ($scope === 'global' || $scope === 'primary') {
-                    $this->globalScopePluginData = $this->pluginData;
-                }
-                if (count($this->scopePriorityScheme) > 2) {
-"#;
-
-    #[test]
-    fn baseline_snapshot_guard_is_read_from_the_condition_only() {
-        assert!(!snapshot_guard_includes_primary(GENERATOR_ADOBE));
-        assert!(snapshot_guard_includes_primary(GENERATOR_MAGEOS));
-        assert!(!snapshot_guard_includes_primary("<?php class PluginListGenerator {}"));
     }
 
     fn derived_plugin_names<'a>(s: &'a Inherit) -> Vec<&'a str> {

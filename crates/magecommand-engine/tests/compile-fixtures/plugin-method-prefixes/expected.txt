@@ -52,12 +52,65 @@ class Interceptor extends \Acme\Prefix\Model\Subject implements \Magento\Framewo
 <?php return array (
   0 => 
   array (
+    'Acme\\Prefix\\Model\\Subject' => 
+    array (
+      'acme_prefix_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Prefix\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Prefix\\Model\\Subject' => 
+    array (
+      'acme_prefix_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Prefix\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Prefix\\Model\\Subject_getName___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject____self' => 
+    array (
+      2 => 'acme_prefix_p',
+      1 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject_wards___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject_about___self' => 
+    array (
+      2 => 'acme_prefix_p',
+    ),
+    'Acme\\Prefix\\Model\\Subject_x___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
   ),
 );
 
@@ -88,12 +141,65 @@ class Interceptor extends \Acme\Prefix\Model\Subject implements \Magento\Framewo
 <?php return array (
   0 => 
   array (
+    'Acme\\Prefix\\Model\\Subject' => 
+    array (
+      'acme_prefix_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Prefix\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Prefix\\Model\\Subject' => 
+    array (
+      'acme_prefix_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Prefix\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Prefix\\Model\\Subject_getName___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject____self' => 
+    array (
+      2 => 'acme_prefix_p',
+      1 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject_wards___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject_about___self' => 
+    array (
+      2 => 'acme_prefix_p',
+    ),
+    'Acme\\Prefix\\Model\\Subject_x___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
   ),
 );
 
@@ -205,12 +311,65 @@ class Interceptor extends \Acme\Prefix\Model\Subject implements \Magento\Framewo
 <?php return array (
   0 => 
   array (
+    'Acme\\Prefix\\Model\\Subject' => 
+    array (
+      'acme_prefix_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Prefix\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Prefix\\Model\\Subject' => 
+    array (
+      'acme_prefix_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Prefix\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Prefix\\Model\\Subject_getName___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject____self' => 
+    array (
+      2 => 'acme_prefix_p',
+      1 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject_wards___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject_about___self' => 
+    array (
+      2 => 'acme_prefix_p',
+    ),
+    'Acme\\Prefix\\Model\\Subject_x___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
   ),
 );
 
@@ -284,12 +443,65 @@ class Interceptor extends \Acme\Prefix\Model\Subject implements \Magento\Framewo
 <?php return array (
   0 => 
   array (
+    'Acme\\Prefix\\Model\\Subject' => 
+    array (
+      'acme_prefix_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Prefix\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Prefix\\Model\\Subject' => 
+    array (
+      'acme_prefix_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Prefix\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Prefix\\Model\\Subject_getName___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject____self' => 
+    array (
+      2 => 'acme_prefix_p',
+      1 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject_wards___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject_about___self' => 
+    array (
+      2 => 'acme_prefix_p',
+    ),
+    'Acme\\Prefix\\Model\\Subject_x___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
   ),
 );
 
@@ -297,12 +509,65 @@ class Interceptor extends \Acme\Prefix\Model\Subject implements \Magento\Framewo
 <?php return array (
   0 => 
   array (
+    'Acme\\Prefix\\Model\\Subject' => 
+    array (
+      'acme_prefix_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Prefix\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Prefix\\Model\\Subject' => 
+    array (
+      'acme_prefix_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Prefix\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Prefix\\Model\\Subject_getName___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject____self' => 
+    array (
+      2 => 'acme_prefix_p',
+      1 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject_wards___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
+    'Acme\\Prefix\\Model\\Subject_about___self' => 
+    array (
+      2 => 'acme_prefix_p',
+    ),
+    'Acme\\Prefix\\Model\\Subject_x___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'acme_prefix_p',
+      ),
+    ),
   ),
 );
 

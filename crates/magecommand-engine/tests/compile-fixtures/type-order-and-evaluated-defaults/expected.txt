@@ -70,12 +70,49 @@ class Interceptor extends \Acme\Order\Model\Typed implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Order\\Model\\Typed' => 
+    array (
+      'acme_order_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Order\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Order\\Model\\Typed' => 
+    array (
+      'acme_order_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Order\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Order\\Model\\Typed_inter___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
+    'Acme\\Order\\Model\\Typed_uni___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
+    'Acme\\Order\\Model\\Typed_defs___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
   ),
 );
 
@@ -106,12 +143,49 @@ class Interceptor extends \Acme\Order\Model\Typed implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Order\\Model\\Typed' => 
+    array (
+      'acme_order_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Order\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Order\\Model\\Typed' => 
+    array (
+      'acme_order_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Order\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Order\\Model\\Typed_inter___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
+    'Acme\\Order\\Model\\Typed_uni___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
+    'Acme\\Order\\Model\\Typed_defs___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
   ),
 );
 
@@ -207,12 +281,49 @@ class Interceptor extends \Acme\Order\Model\Typed implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Order\\Model\\Typed' => 
+    array (
+      'acme_order_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Order\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Order\\Model\\Typed' => 
+    array (
+      'acme_order_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Order\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Order\\Model\\Typed_inter___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
+    'Acme\\Order\\Model\\Typed_uni___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
+    'Acme\\Order\\Model\\Typed_defs___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
   ),
 );
 
@@ -270,12 +381,49 @@ class Interceptor extends \Acme\Order\Model\Typed implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Order\\Model\\Typed' => 
+    array (
+      'acme_order_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Order\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Order\\Model\\Typed' => 
+    array (
+      'acme_order_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Order\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Order\\Model\\Typed_inter___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
+    'Acme\\Order\\Model\\Typed_uni___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
+    'Acme\\Order\\Model\\Typed_defs___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
   ),
 );
 
@@ -283,12 +431,49 @@ class Interceptor extends \Acme\Order\Model\Typed implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Order\\Model\\Typed' => 
+    array (
+      'acme_order_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Order\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Order\\Model\\Typed' => 
+    array (
+      'acme_order_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Order\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Order\\Model\\Typed_inter___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
+    'Acme\\Order\\Model\\Typed_uni___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
+    'Acme\\Order\\Model\\Typed_defs___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_order_p',
+      ),
+    ),
   ),
 );
 

@@ -70,12 +70,49 @@ class Interceptor extends \Acme\Ref\Model\Store implements \Magento\Framework\In
 <?php return array (
   0 => 
   array (
+    'Acme\\Ref\\Model\\Store' => 
+    array (
+      'acme_ref_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Ref\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Ref\\Model\\Store' => 
+    array (
+      'acme_ref_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Ref\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Ref\\Model\\Store_get___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
+    'Acme\\Ref\\Model\\Store_fill___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
+    'Acme\\Ref\\Model\\Store_each___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
   ),
 );
 
@@ -106,12 +143,49 @@ class Interceptor extends \Acme\Ref\Model\Store implements \Magento\Framework\In
 <?php return array (
   0 => 
   array (
+    'Acme\\Ref\\Model\\Store' => 
+    array (
+      'acme_ref_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Ref\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Ref\\Model\\Store' => 
+    array (
+      'acme_ref_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Ref\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Ref\\Model\\Store_get___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
+    'Acme\\Ref\\Model\\Store_fill___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
+    'Acme\\Ref\\Model\\Store_each___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
   ),
 );
 
@@ -207,12 +281,49 @@ class Interceptor extends \Acme\Ref\Model\Store implements \Magento\Framework\In
 <?php return array (
   0 => 
   array (
+    'Acme\\Ref\\Model\\Store' => 
+    array (
+      'acme_ref_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Ref\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Ref\\Model\\Store' => 
+    array (
+      'acme_ref_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Ref\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Ref\\Model\\Store_get___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
+    'Acme\\Ref\\Model\\Store_fill___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
+    'Acme\\Ref\\Model\\Store_each___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
   ),
 );
 
@@ -270,12 +381,49 @@ class Interceptor extends \Acme\Ref\Model\Store implements \Magento\Framework\In
 <?php return array (
   0 => 
   array (
+    'Acme\\Ref\\Model\\Store' => 
+    array (
+      'acme_ref_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Ref\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Ref\\Model\\Store' => 
+    array (
+      'acme_ref_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Ref\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Ref\\Model\\Store_get___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
+    'Acme\\Ref\\Model\\Store_fill___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
+    'Acme\\Ref\\Model\\Store_each___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
   ),
 );
 
@@ -283,12 +431,49 @@ class Interceptor extends \Acme\Ref\Model\Store implements \Magento\Framework\In
 <?php return array (
   0 => 
   array (
+    'Acme\\Ref\\Model\\Store' => 
+    array (
+      'acme_ref_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Ref\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Ref\\Model\\Store' => 
+    array (
+      'acme_ref_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Ref\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Ref\\Model\\Store_get___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
+    'Acme\\Ref\\Model\\Store_fill___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
+    'Acme\\Ref\\Model\\Store_each___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_ref_p',
+      ),
+    ),
   ),
 );
 

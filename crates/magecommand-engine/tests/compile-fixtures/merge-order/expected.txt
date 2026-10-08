@@ -75,12 +75,36 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\First\\Model\\ThingA' => 
+    array (
+      'shared_plugin' => 
+      array (
+        'sortOrder' => 99,
+        'instance' => 'Acme\\First\\Plugin\\A',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\First\\Api\\ThingInterface' => NULL,
+    'Acme\\First\\Model\\ThingA' => 
+    array (
+      'shared_plugin' => 
+      array (
+        'sortOrder' => 99,
+        'instance' => 'Acme\\First\\Plugin\\A',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\First\\Model\\ThingA_go___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'shared_plugin',
+      ),
+    ),
   ),
 );
 
@@ -133,12 +157,36 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\First\\Model\\ThingA' => 
+    array (
+      'shared_plugin' => 
+      array (
+        'sortOrder' => 99,
+        'instance' => 'Acme\\First\\Plugin\\A',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\First\\Api\\ThingInterface' => NULL,
+    'Acme\\First\\Model\\ThingA' => 
+    array (
+      'shared_plugin' => 
+      array (
+        'sortOrder' => 99,
+        'instance' => 'Acme\\First\\Plugin\\A',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\First\\Model\\ThingA_go___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'shared_plugin',
+      ),
+    ),
   ),
 );
 
@@ -265,12 +313,36 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\First\\Model\\ThingA' => 
+    array (
+      'shared_plugin' => 
+      array (
+        'sortOrder' => 99,
+        'instance' => 'Acme\\First\\Plugin\\A',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\First\\Api\\ThingInterface' => NULL,
+    'Acme\\First\\Model\\ThingA' => 
+    array (
+      'shared_plugin' => 
+      array (
+        'sortOrder' => 99,
+        'instance' => 'Acme\\First\\Plugin\\A',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\First\\Model\\ThingA_go___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'shared_plugin',
+      ),
+    ),
   ),
 );
 
@@ -315,12 +387,36 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\First\\Model\\ThingA' => 
+    array (
+      'shared_plugin' => 
+      array (
+        'sortOrder' => 99,
+        'instance' => 'Acme\\First\\Plugin\\A',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\First\\Api\\ThingInterface' => NULL,
+    'Acme\\First\\Model\\ThingA' => 
+    array (
+      'shared_plugin' => 
+      array (
+        'sortOrder' => 99,
+        'instance' => 'Acme\\First\\Plugin\\A',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\First\\Model\\ThingA_go___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'shared_plugin',
+      ),
+    ),
   ),
 );
 
@@ -328,12 +424,36 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\First\\Model\\ThingA' => 
+    array (
+      'shared_plugin' => 
+      array (
+        'sortOrder' => 99,
+        'instance' => 'Acme\\First\\Plugin\\A',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\First\\Api\\ThingInterface' => NULL,
+    'Acme\\First\\Model\\ThingA' => 
+    array (
+      'shared_plugin' => 
+      array (
+        'sortOrder' => 99,
+        'instance' => 'Acme\\First\\Plugin\\A',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\First\\Model\\ThingA_go___self' => 
+    array (
+      1 => 
+      array (
+        0 => 'shared_plugin',
+      ),
+    ),
   ),
 );
 

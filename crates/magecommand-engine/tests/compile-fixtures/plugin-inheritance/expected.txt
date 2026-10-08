@@ -62,12 +62,70 @@ class Interceptor extends \Acme\Inherit\Model\FileWriter implements \Magento\Fra
 <?php return array (
   0 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter' => 
+    array (
+      'acme_inherit_base' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnBase',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+      'acme_inherit_base' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnBase',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface_write___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_iface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter_write___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_iface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter_target___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_base',
+      ),
+    ),
   ),
 );
 
@@ -99,12 +157,70 @@ class Interceptor extends \Acme\Inherit\Model\FileWriter implements \Magento\Fra
 <?php return array (
   0 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter' => 
+    array (
+      'acme_inherit_base' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnBase',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+      'acme_inherit_base' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnBase',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface_write___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_iface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter_write___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_iface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter_target___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_base',
+      ),
+    ),
   ),
 );
 
@@ -223,12 +339,70 @@ class Interceptor extends \Acme\Inherit\Model\FileWriter implements \Magento\Fra
 <?php return array (
   0 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter' => 
+    array (
+      'acme_inherit_base' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnBase',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+      'acme_inherit_base' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnBase',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface_write___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_iface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter_write___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_iface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter_target___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_base',
+      ),
+    ),
   ),
 );
 
@@ -307,12 +481,70 @@ class Interceptor extends \Acme\Inherit\Model\FileWriter implements \Magento\Fra
 <?php return array (
   0 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter' => 
+    array (
+      'acme_inherit_base' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnBase',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+      'acme_inherit_base' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnBase',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface_write___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_iface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter_write___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_iface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter_target___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_base',
+      ),
+    ),
   ),
 );
 
@@ -320,12 +552,70 @@ class Interceptor extends \Acme\Inherit\Model\FileWriter implements \Magento\Fra
 <?php return array (
   0 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter' => 
+    array (
+      'acme_inherit_base' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnBase',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter' => 
+    array (
+      'acme_inherit_iface' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnIface',
+      ),
+      'acme_inherit_base' => 
+      array (
+        'sortOrder' => 20,
+        'instance' => 'Acme\\Inherit\\Plugin\\OnBase',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Inherit\\Api\\WriterInterface_write___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_iface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter_write___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_iface',
+      ),
+    ),
+    'Acme\\Inherit\\Model\\AbstractWriter_target___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_inherit_base',
+      ),
+    ),
   ),
 );
 

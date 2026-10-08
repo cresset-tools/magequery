@@ -56,9 +56,16 @@ class Interceptor extends \Acme\Som\Model\Target implements \Magento\Framework\I
   array (
     'Acme\\Som\\Model\\Target' => 
     array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
       'som_area' => 
       array (
         'sortOrder' => 0,
+        'instance' => 'Acme\\Som\\Plugin\\B',
         'disabled' => true,
       ),
       'som_area_live' => 
@@ -72,10 +79,22 @@ class Interceptor extends \Acme\Som\Model\Target implements \Magento\Framework\I
   array (
     'Acme\\Som\\Model\\Target' => 
     array (
+      'som_area' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+        'disabled' => true,
+      ),
       'som_area_live' => 
       array (
         'sortOrder' => 0,
         'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
       ),
     ),
   ),
@@ -120,12 +139,58 @@ class Interceptor extends \Acme\Som\Model\Target implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Som\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'som_area',
+        1 => 'som_area_live',
+      ),
+    ),
   ),
 );
 
@@ -234,12 +299,58 @@ class Interceptor extends \Acme\Som\Model\Target implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Som\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'som_area',
+        1 => 'som_area_live',
+      ),
+    ),
   ),
 );
 
@@ -306,12 +417,58 @@ class Interceptor extends \Acme\Som\Model\Target implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Som\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'som_area',
+        1 => 'som_area_live',
+      ),
+    ),
   ),
 );
 
@@ -319,12 +476,58 @@ class Interceptor extends \Acme\Som\Model\Target implements \Magento\Framework\I
 <?php return array (
   0 => 
   array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Som\\Model\\Target' => 
+    array (
+      'som_same' => 
+      array (
+        'sortOrder' => 30,
+        'disabled' => true,
+        'instance' => 'Acme\\Som\\Plugin\\A',
+      ),
+      'som_area' => 
+      array (
+        'sortOrder' => 40,
+        'instance' => 'Acme\\Som\\Plugin\\B',
+      ),
+      'som_area_live' => 
+      array (
+        'sortOrder' => 50,
+        'instance' => 'Acme\\Som\\Plugin\\C',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Som\\Model\\Target_act___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'som_area',
+        1 => 'som_area_live',
+      ),
+    ),
   ),
 );
 

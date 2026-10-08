@@ -61,12 +61,64 @@ class Interceptor extends \Acme\Magic\Model\Wizard implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\Magic\\Model\\Wizard' => 
+    array (
+      'acme_magic_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Magic\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Stringable' => NULL,
+    'Acme\\Magic\\Model\\Wizard' => 
+    array (
+      'acme_magic_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Magic\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Magic\\Model\\Wizard_ordinary___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_toString___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard___call___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_clone___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_sleep___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
   ),
 );
 
@@ -97,12 +149,64 @@ class Interceptor extends \Acme\Magic\Model\Wizard implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\Magic\\Model\\Wizard' => 
+    array (
+      'acme_magic_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Magic\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Stringable' => NULL,
+    'Acme\\Magic\\Model\\Wizard' => 
+    array (
+      'acme_magic_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Magic\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Magic\\Model\\Wizard_ordinary___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_toString___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard___call___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_clone___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_sleep___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
   ),
 );
 
@@ -213,12 +317,64 @@ class Interceptor extends \Acme\Magic\Model\Wizard implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\Magic\\Model\\Wizard' => 
+    array (
+      'acme_magic_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Magic\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Stringable' => NULL,
+    'Acme\\Magic\\Model\\Wizard' => 
+    array (
+      'acme_magic_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Magic\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Magic\\Model\\Wizard_ordinary___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_toString___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard___call___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_clone___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_sleep___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
   ),
 );
 
@@ -291,12 +447,64 @@ class Interceptor extends \Acme\Magic\Model\Wizard implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\Magic\\Model\\Wizard' => 
+    array (
+      'acme_magic_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Magic\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Stringable' => NULL,
+    'Acme\\Magic\\Model\\Wizard' => 
+    array (
+      'acme_magic_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Magic\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Magic\\Model\\Wizard_ordinary___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_toString___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard___call___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_clone___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_sleep___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
   ),
 );
 
@@ -304,12 +512,64 @@ class Interceptor extends \Acme\Magic\Model\Wizard implements \Magento\Framework
 <?php return array (
   0 => 
   array (
+    'Acme\\Magic\\Model\\Wizard' => 
+    array (
+      'acme_magic_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Magic\\Plugin\\P',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Stringable' => NULL,
+    'Acme\\Magic\\Model\\Wizard' => 
+    array (
+      'acme_magic_p' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Magic\\Plugin\\P',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Magic\\Model\\Wizard_ordinary___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_toString___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard___call___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_clone___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
+    'Acme\\Magic\\Model\\Wizard_sleep___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_magic_p',
+      ),
+    ),
   ),
 );
 

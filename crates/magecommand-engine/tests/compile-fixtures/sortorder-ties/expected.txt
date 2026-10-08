@@ -55,12 +55,68 @@ class Interceptor extends \Acme\Tie\Model\Subject implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Tie\\Model\\Subject' => 
+    array (
+      'alpha' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Alpha',
+      ),
+      'bravo' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Bravo',
+      ),
+      'charlie' => 
+      array (
+        'sortOrder' => 5,
+        'instance' => 'Acme\\Tie\\Plugin\\Charlie',
+      ),
+      'delta' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Delta',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Tie\\Model\\Subject' => 
+    array (
+      'charlie' => 
+      array (
+        'sortOrder' => 5,
+        'instance' => 'Acme\\Tie\\Plugin\\Charlie',
+      ),
+      'alpha' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Alpha',
+      ),
+      'bravo' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Bravo',
+      ),
+      'delta' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Delta',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Tie\\Model\\Subject_go___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'charlie',
+        1 => 'alpha',
+        2 => 'bravo',
+        3 => 'delta',
+      ),
+    ),
   ),
 );
 
@@ -94,12 +150,68 @@ class Interceptor extends \Acme\Tie\Model\Subject implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Tie\\Model\\Subject' => 
+    array (
+      'alpha' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Alpha',
+      ),
+      'bravo' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Bravo',
+      ),
+      'charlie' => 
+      array (
+        'sortOrder' => 5,
+        'instance' => 'Acme\\Tie\\Plugin\\Charlie',
+      ),
+      'delta' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Delta',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Tie\\Model\\Subject' => 
+    array (
+      'charlie' => 
+      array (
+        'sortOrder' => 5,
+        'instance' => 'Acme\\Tie\\Plugin\\Charlie',
+      ),
+      'alpha' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Alpha',
+      ),
+      'bravo' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Bravo',
+      ),
+      'delta' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Delta',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Tie\\Model\\Subject_go___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'charlie',
+        1 => 'alpha',
+        2 => 'bravo',
+        3 => 'delta',
+      ),
+    ),
   ),
 );
 
@@ -220,12 +332,68 @@ class Interceptor extends \Acme\Tie\Model\Subject implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Tie\\Model\\Subject' => 
+    array (
+      'alpha' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Alpha',
+      ),
+      'bravo' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Bravo',
+      ),
+      'charlie' => 
+      array (
+        'sortOrder' => 5,
+        'instance' => 'Acme\\Tie\\Plugin\\Charlie',
+      ),
+      'delta' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Delta',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Tie\\Model\\Subject' => 
+    array (
+      'charlie' => 
+      array (
+        'sortOrder' => 5,
+        'instance' => 'Acme\\Tie\\Plugin\\Charlie',
+      ),
+      'alpha' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Alpha',
+      ),
+      'bravo' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Bravo',
+      ),
+      'delta' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Delta',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Tie\\Model\\Subject_go___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'charlie',
+        1 => 'alpha',
+        2 => 'bravo',
+        3 => 'delta',
+      ),
+    ),
   ),
 );
 
@@ -302,12 +470,68 @@ class Interceptor extends \Acme\Tie\Model\Subject implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Tie\\Model\\Subject' => 
+    array (
+      'alpha' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Alpha',
+      ),
+      'bravo' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Bravo',
+      ),
+      'charlie' => 
+      array (
+        'sortOrder' => 5,
+        'instance' => 'Acme\\Tie\\Plugin\\Charlie',
+      ),
+      'delta' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Delta',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Tie\\Model\\Subject' => 
+    array (
+      'charlie' => 
+      array (
+        'sortOrder' => 5,
+        'instance' => 'Acme\\Tie\\Plugin\\Charlie',
+      ),
+      'alpha' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Alpha',
+      ),
+      'bravo' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Bravo',
+      ),
+      'delta' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Delta',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Tie\\Model\\Subject_go___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'charlie',
+        1 => 'alpha',
+        2 => 'bravo',
+        3 => 'delta',
+      ),
+    ),
   ),
 );
 
@@ -315,12 +539,68 @@ class Interceptor extends \Acme\Tie\Model\Subject implements \Magento\Framework\
 <?php return array (
   0 => 
   array (
+    'Acme\\Tie\\Model\\Subject' => 
+    array (
+      'alpha' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Alpha',
+      ),
+      'bravo' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Bravo',
+      ),
+      'charlie' => 
+      array (
+        'sortOrder' => 5,
+        'instance' => 'Acme\\Tie\\Plugin\\Charlie',
+      ),
+      'delta' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Delta',
+      ),
+    ),
   ),
   1 => 
   array (
+    'Acme\\Tie\\Model\\Subject' => 
+    array (
+      'charlie' => 
+      array (
+        'sortOrder' => 5,
+        'instance' => 'Acme\\Tie\\Plugin\\Charlie',
+      ),
+      'alpha' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Alpha',
+      ),
+      'bravo' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Bravo',
+      ),
+      'delta' => 
+      array (
+        'sortOrder' => 10,
+        'instance' => 'Acme\\Tie\\Plugin\\Delta',
+      ),
+    ),
   ),
   2 => 
   array (
+    'Acme\\Tie\\Model\\Subject_go___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'charlie',
+        1 => 'alpha',
+        2 => 'bravo',
+        3 => 'delta',
+      ),
+    ),
   ),
 );
 
