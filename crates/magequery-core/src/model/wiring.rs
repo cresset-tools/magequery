@@ -434,6 +434,28 @@ pub struct PluginDecl {
     pub source: Source,
 }
 
+/// The order `PluginListGenerator` reads config scopes for one plugin list,
+/// as a rank over our config layers (0 primary, 1 module global, 2 area).
+///
+/// It reads module `global` FIRST, then `primary`, then the area overlay —
+/// the reverse of the ObjectManager config, which merges primary first and
+/// lets a module override it. `write()` moves the scope being compiled to the
+/// END of `scopePriorityScheme` and is called with `primary`, not `global`, so
+/// the scheme becomes `[global, primary]` and the area is appended after.
+/// Proved on a real install: a plugin declared in both `app/etc/di.xml` and a
+/// module's `etc/di.xml` resolves to `app/etc`'s `type` and `sortOrder`.
+///
+/// Used by the merge (so the winning scope wins) and by the emitter (so field
+/// and key order match the read order) — one definition, because the two
+/// disagreeing was the bug.
+pub fn plugin_read_rank(layer: u8) -> u8 {
+    match layer {
+        0 => 1, // primary: read second
+        1 => 0, // module global: read first
+        _ => 2, // area overlay: read last
+    }
+}
+
 /// One explicit `shared=` declaration on a `<type>`/`<virtualType>`. Absent
 /// types default to shared in Magento; only written attributes are exported.
 #[derive(Debug, Clone, PartialEq, Eq)]

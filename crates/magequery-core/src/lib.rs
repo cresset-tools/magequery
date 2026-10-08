@@ -43,8 +43,8 @@ pub mod laminas_alias;
 pub use error::{Diagnostic, Error, Result, Severity};
 pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
-    DiExport, DiSummary, ObjectRef, PluginDecl, PreferenceDecl, TypeArgDecl, TypeNodePosition,
-    TypeSharedDecl, VirtualTypeDecl,
+    plugin_read_rank, DiExport, DiSummary, ObjectRef, PluginDecl, PreferenceDecl, TypeArgDecl,
+    TypeNodePosition, TypeSharedDecl, VirtualTypeDecl,
 };
 pub use model::{
     AclResource, AdminRole, AdminRule, AdminUser, ArgItem, ArgValue, Argument, ByArea,

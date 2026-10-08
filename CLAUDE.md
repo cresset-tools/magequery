@@ -330,7 +330,9 @@ Magento's exact bootstrap glob (`App\Arguments\FileResolver\Primary`): `{*di.xml
 level, in glob order (so a project's `app/etc/zz_di.xml` overrides `app/etc/di.xml`) —
 matching Magento's real sequence `extend(primary)` → `configure(global)` →
 `configure(<area>)`, verified against `ObjectManagerFactory`/`Environment\Developer`
-source. Files are read+parsed in parallel (rayon), merged sequentially in load order so
+source. **That holds for the ObjectManager config only.** The compiled *plugin lists* go
+through `PluginListGenerator`, which reads the same scopes through a different resolver
+and in a different order — see the two known divergences below. Files are read+parsed in parallel (rayon), merged sequentially in load order so
 last-wins is deterministic.
 
 - `parse::di_xml` extracts preferences, plugins, and virtualTypes with **exact line
@@ -339,7 +341,36 @@ last-wins is deterministic.
   enclosing `<type>`/`<virtualType>`.
 - Merge rules: preferences & virtualTypes last-wins; **plugins are attribute-level merged
   by name** (a later `<plugin name=.. disabled="true"/>` updates only `disabled`, keeping
-  the earlier `type`) — `RawPlugin` fields are `Option` to make this work.
+  the earlier `type`) — `RawPlugin` fields are `Option` to make this work. One exception:
+  an **area overlay** re-declaring a plugin without `sortOrder` RESETS it to 0 rather than
+  inheriting, because across scopes Magento folds mapped DATA with
+  `array_replace_recursive` and `Mapper/Dom.php` defaults every declaration's `sortOrder`
+  to 0 — while `disabled` and `instance` it writes only when the attribute is present,
+  which is why only `sortOrder` behaves this way. Pinned by
+  `an_area_overlay_omitting_sort_order_resets_it_to_zero` in `engine/di.rs`.
+- **The plugin lists read config scopes differently from the ObjectManager config**, in
+  two independent ways. `PluginListGenerator` does not share a reader with it, so
+  `merge_area` runs TWO passes: everything-but-plugins in config-layer order, then plugins
+  in `plugin_read_rank` order over a narrower file set. Both halves are pinned by
+  `magecommand-engine/tests/plugin_scope_reads.rs` and were ground-truthed whole-file
+  against a real compile. Neither is reachable on a stock install — nothing declares one
+  plugin in both `app/etc/di.xml` and a module's `etc/di.xml`, and there is no second
+  `app/etc/*di.xml` — so the whole-tree oracle comparison stayed clean while both were
+  wrong, which is why the targeted probes were needed:
+  - **Scope ORDER is the reverse.** `PluginListGenerator::write()` moves the scope being
+    compiled to the END of `scopePriorityScheme`, and it is called with `primary`, not
+    `global` — so the reads are global-then-primary and `app/etc/di.xml` WINS the pair,
+    where for the ObjectManager config a module overrides it. `plugin_read_rank` (in
+    `model/wiring.rs`) is the single definition of that order, shared by the merge and by
+    the emitter's field/key ordering — the two disagreeing was the bug. (This is also the
+    real mechanism behind #120: `$scope === 'global'` never fires, so
+    `globalScopePluginData` stays unset and only the FIRST area keeps its baseline.)
+  - **Scope FILES are a narrower glob.** `PluginListGenerator`'s reader is
+    `ObjectManager\Config\Reader\Dom`, whose `App\Config\FileResolver` primary case is
+    `{di.xml,*/di.xml}` — the exact filename. So `app/etc/zz_di.xml` contributes nothing to
+    any plugin list, though its preferences and virtualTypes DO reach `global.php` (both
+    probed). Hence `Job::feeds_plugin_lists` rather than narrowing `primary_di_files`,
+    which would break the half that works.
 - `Source.area` records where a declaration came from: an entry inherited from global keeps
   `area = Global` even when viewed in adminhtml; an override cites the area file. This drives
   honest collapsed-diff output.

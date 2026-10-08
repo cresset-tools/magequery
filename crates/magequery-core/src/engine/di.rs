@@ -14,8 +14,8 @@ use rayon::prelude::*;
 use crate::error::Diagnostic;
 use crate::ids::{Area, ClassName, ModuleName};
 use crate::model::{
-    DiExport, Module, PluginDecl, PreferenceDecl, TypeArgDecl, TypeNodePosition, TypeSharedDecl,
-    VirtualTypeDecl,
+    plugin_read_rank, DiExport, Module, PluginDecl, PreferenceDecl, TypeArgDecl, TypeNodePosition,
+    TypeSharedDecl, VirtualTypeDecl,
 };
 use crate::parse;
 use crate::source::Source;
@@ -44,13 +44,13 @@ pub(crate) struct LocatedPlugin {
     /// only a LATER read's replace_recursive appends a field after.
     pub disabled_layer: Option<u8>,
     pub instance_layer: Option<u8>,
-    /// Config layer of the LATEST declaration. `sortOrder` is the one plugin
-    /// field the mapper always writes (defaulting to 0), so unlike the two
-    /// layers above — which record a FIRST appearance — this one has to track
-    /// the most recent, to tell an area overlay re-declaring a plugin from a
-    /// second file in the same scope doing it. See the `sort_order` handling
-    /// in [`merge_file`].
-    pub last_decl_layer: u8,
+    /// [`plugin_read_rank`] of the LATEST declaration. `sortOrder` is the one
+    /// plugin field the mapper always writes (defaulting to 0), so unlike the
+    /// two layers above — which record a FIRST appearance — this one has to
+    /// track the most recent, to tell a later scope re-declaring a plugin from
+    /// a second file in the SAME scope doing it. See the `sort_order` handling
+    /// in [`merge_file_plugins`].
+    pub last_read_rank: u8,
     /// Raw spelling: `type=` written with a leading backslash (kept verbatim
     /// in the compiled plugin lists' _data).
     pub class_backslash: bool,
@@ -277,6 +277,10 @@ struct Job {
     module: ModuleName,
     path: PathBuf,
     layer: u8,
+    /// Whether `PluginListGenerator`'s reader reads this file. Always true for
+    /// module and area files; for the `primary` scope it reads a NARROWER glob
+    /// than the ObjectManager config does — see [`primary_di_files`].
+    feeds_plugin_lists: bool,
 }
 
 struct Parsed {
@@ -285,6 +289,7 @@ struct Parsed {
     module: ModuleName,
     path: PathBuf,
     layer: u8,
+    feeds_plugin_lists: bool,
     file: Result<parse::DiFile, String>,
 }
 
@@ -296,12 +301,19 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
     // order 0; the sort is stable, so their glob order is preserved).
     let mut jobs: Vec<Job> = Vec::new();
     for path in primary_di_files(root) {
+        // The plugin-list reader's primary glob is `{di.xml,*/di.xml}` — the
+        // EXACT filename — where the ObjectManager config's is
+        // `{*di.xml,*/*di.xml}`. So `app/etc/zz_di.xml` contributes
+        // preferences and virtualTypes but no plugins.
+        let feeds_plugin_lists =
+            path.file_name().and_then(|n| n.to_str()) == Some("di.xml");
         jobs.push(Job {
             load_order: 0,
             area: Area::Global,
             module: ModuleName::new("(primary)"),
             path,
             layer: 0,
+            feeds_plugin_lists,
         });
     }
     for m in modules {
@@ -317,12 +329,20 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
                 module: m.name.clone(),
                 path: global,
                 layer: 1,
+                feeds_plugin_lists: true,
             });
         }
         for area in REAL_AREAS {
             let p = m.path.join("etc").join(area.dir().unwrap()).join("di.xml");
             if p.is_file() {
-                jobs.push(Job { load_order: m.load_order + 1, area, module: m.name.clone(), path: p, layer: 2 });
+                jobs.push(Job {
+                    load_order: m.load_order + 1,
+                    area,
+                    module: m.name.clone(),
+                    path: p,
+                    layer: 2,
+                    feeds_plugin_lists: true,
+                });
             }
         }
     }
@@ -340,6 +360,7 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
                 module: j.module.clone(),
                 path: j.path.clone(),
                 layer: j.layer,
+                feeds_plugin_lists: j.feeds_plugin_lists,
                 file,
             }
         })
@@ -413,13 +434,31 @@ fn primary_di_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Merge every parsed file for `area` into `base`, in module load order.
+/// Merge every parsed file for `area` into `base`.
+///
+/// TWO passes, because Magento builds the ObjectManager config and the plugin
+/// lists with different readers that disagree about this scope pair:
+///
+/// 1. everything but plugins, in config-layer order — `primary` first, then
+///    modules in load order, so a module overrides `app/etc` (the
+///    `OperationPool` behaviour noted in [`merge_file`]);
+/// 2. plugins, in [`plugin_read_rank`] order — modules FIRST, then `primary`,
+///    so `app/etc` wins — and only from the files the plugin-list reader
+///    actually reads.
+///
+/// Both sorts are stable and keyed on load order, so files sharing a load
+/// order (all the `primary` ones) keep their glob order.
 fn merge_area(parsed: &[Parsed], area: Area, mut base: AreaConfig) -> AreaConfig {
     let mut order: Vec<&Parsed> =
         parsed.iter().filter(|p| p.area == area && p.file.is_ok()).collect();
     order.sort_by_key(|p| p.load_order);
-    for p in order {
+    for p in &order {
         merge_file(&mut base, p);
+    }
+    order.retain(|p| p.feeds_plugin_lists);
+    order.sort_by_key(|p| (plugin_read_rank(p.layer), p.load_order));
+    for p in &order {
+        merge_file_plugins(&mut base, p);
     }
     base
 }
@@ -445,6 +484,7 @@ pub(crate) fn merge_custom_area(modules: &[Module], code: &str, base: AreaConfig
                 module: m.name.clone(),
                 path,
                 layer: 2,
+                feeds_plugin_lists: true,
             })
         })
         .collect();
@@ -461,6 +501,7 @@ pub(crate) fn merge_custom_area(modules: &[Module], code: &str, base: AreaConfig
                 module: j.module.clone(),
                 path: j.path.clone(),
                 layer: j.layer,
+                feeds_plugin_lists: j.feeds_plugin_lists,
                 file,
             }
         })
@@ -469,8 +510,14 @@ pub(crate) fn merge_custom_area(modules: &[Module], code: &str, base: AreaConfig
     let mut base = base;
     let mut order: Vec<&Parsed> = parsed.iter().filter(|p| p.file.is_ok()).collect();
     order.sort_by_key(|p| p.load_order);
-    for p in order {
+    for p in &order {
         merge_file(&mut base, p);
+    }
+    // Every file here is one area's overlay, so the two passes differ only in
+    // which fields they touch — but they still have to be two passes, because
+    // the plugin merge is a different function.
+    for p in &order {
+        merge_file_plugins(&mut base, p);
     }
     base
 }
@@ -601,6 +648,29 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
             }
         }
     }
+}
+
+/// Merge one file's `<plugin>` declarations. SEPARATE from [`merge_file`]
+/// because the plugin lists read the same scopes in a different order and
+/// from a different file set than the ObjectManager config does — see
+/// [`plugin_read_rank`] and [`merge_area`].
+fn merge_file_plugins(cfg: &mut AreaConfig, p: &Parsed) {
+    let Ok(file) = &p.file else { return };
+    let src = |line: u32| Source {
+        module: p.module.clone(),
+        file: p.path.clone(),
+        line,
+        area: p.area,
+    };
+    let rank = plugin_read_rank(p.layer);
+    // First-declaration position, stored in `order_key`: global base (0)
+    // before area overlay (1). Keyed on the config LAYER, not the `Area`
+    // enum: layer 2 is assigned only to `etc/<area>/di.xml` overlays
+    // (primary=0, module global=1), so this is identical to
+    // `p.area != Global` for the fixed areas — but it also lets a
+    // custom-registered area (merged with a Global placeholder tag) rank as
+    // an overlay.
+    let area_rank = if p.layer >= 2 { 1 } else { 0 };
     for (target, rp) in &file.plugins {
         let by_name = cfg.plugins.entry(target.clone()).or_default();
         match by_name.get_mut(&rp.name) {
@@ -628,22 +698,15 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
                 // (`Config/Dom::_mergeAttributes`) and an omission is left
                 // alone.
                 //
-                // Scoped to the area boundary deliberately. The same fold
-                // applies between `primary` (app/etc/di.xml) and module
-                // `global`, but there the plugin lists read them in the order
-                // global-then-PRIMARY — the generator appends the current scope
-                // last, so app/etc wins — which is the reverse of the order
-                // used here (and of the order the ObjectManager config itself
-                // uses, where a module overrides app/etc; see the
-                // `OperationPool` note on arguments above). Modelling that
-                // asymmetry is a separate change; until then this leaves the
-                // primary/global pair exactly as it was.
-                if p.layer >= 2 && existing.last_decl_layer < 2 {
+                // "Later" means later in the generator's SCOPE READ order
+                // (module global, then primary, then the area), not in config
+                // layer order — see [`plugin_read_rank`].
+                if rank > existing.last_read_rank {
                     existing.sort_order = rp.sort_order.unwrap_or(0);
                 } else if let Some(s) = rp.sort_order {
                     existing.sort_order = s;
                 }
-                existing.last_decl_layer = p.layer;
+                existing.last_read_rank = rank;
                 if let Some(d) = rp.disabled {
                     if existing.disabled.is_none() {
                         existing.disabled_layer = Some(p.layer);
@@ -653,13 +716,6 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
                 existing.source = src(rp.line);
             }
             None => {
-                // Global base (rank 0) before area overlay (rank 1). Keyed on
-                // the config LAYER, not the `Area` enum: layer 2 is assigned
-                // only to `etc/<area>/di.xml` overlays (primary=0, module
-                // global=1), so this is identical to `p.area != Global` for the
-                // fixed areas — but it also lets a custom-registered area
-                // (merged with a Global placeholder tag) rank as an overlay.
-                let area_rank = if p.layer >= 2 { 1 } else { 0 };
                 by_name.insert(
                     rp.name.clone(),
                     LocatedPlugin {
@@ -670,7 +726,7 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
                         disabled: rp.disabled,
                         disabled_layer: rp.disabled.map(|_| p.layer),
                         instance_layer: rp.class.as_ref().map(|_| p.layer),
-                        last_decl_layer: p.layer,
+                        last_read_rank: rank,
                         source: src(rp.line),
                         order_key: (area_rank, p.load_order as u32, rp.line),
                     },
@@ -679,6 +735,7 @@ fn merge_file(cfg: &mut AreaConfig, p: &Parsed) {
         }
     }
 }
+
 
 #[cfg(test)]
 mod export_tests {
@@ -701,6 +758,7 @@ mod export_tests {
             module: ModuleName::new("Acme_Test"),
             path: PathBuf::from(format!("etc/l{layer}/di.xml")),
             layer,
+            feeds_plugin_lists: true,
             // Unwrap and re-wrap: a typo in a test fixture's XML must fail the
             // test loudly, not be silently skipped the way `build()` skips it.
             file: Ok(parse::di_xml(xml).expect("fixture xml parses")),
@@ -768,6 +826,66 @@ mod export_tests {
         let gp = &g.plugins[&ClassName::new("T\\Target")];
         assert_eq!(gp["som_d"].sort_order, 50);
         assert_eq!(execution_order(gp), ["som_e", "som_d"]);
+    }
+
+    /// The plugin lists read module `global` FIRST and `primary` second, so
+    /// `app/etc/di.xml` wins the pair outright — the reverse of the
+    /// ObjectManager config, which merges primary first so a module can
+    /// override it. See [`plugin_read_rank`].
+    ///
+    /// Verified against a real compile with the primary `<type>` spliced into
+    /// `app/etc/di.xml`: primary declaring `type=Early sortOrder=70` beats a
+    /// module re-declaring `type=Replaced` with no sortOrder, and Magento
+    /// emits `scope_reset(70, Early)`.
+    #[test]
+    fn primary_beats_module_global_for_plugins_but_not_for_arguments() {
+        let primary = plugin_xml(
+            r#"        <plugin name="scope_reset" type="P\Early" sortOrder="70"/>
+        <plugin name="scope_kept" type="P\Late" sortOrder="80"/>"#,
+        );
+        let module = plugin_xml(
+            r#"        <plugin name="scope_reset" type="P\Replaced"/>
+        <plugin name="scope_middle" type="P\Middle" sortOrder="10"/>"#,
+        );
+        let parsed = vec![
+            parsed_at(0, Area::Global, 0, &primary),
+            parsed_at(1, Area::Global, 1, &module),
+        ];
+        let cfg = merge_area(&parsed, Area::Global, AreaConfig::default());
+        let p = &cfg.plugins[&ClassName::new("T\\Target")];
+
+        // Primary wins both fields it declared.
+        assert_eq!(p["scope_reset"].sort_order, 70);
+        assert_eq!(p["scope_reset"].class, Some(ClassName::new("P\\Early")));
+        // The module's own plugin and primary's untouched one both survive.
+        assert_eq!(p["scope_middle"].sort_order, 10);
+        assert_eq!(p["scope_kept"].sort_order, 80);
+        assert_eq!(execution_order(p), ["scope_middle", "scope_reset", "scope_kept"]);
+
+        // `order_key` records the first appearance in the READ order, so a
+        // plugin declared in both scopes takes its `_data` position from the
+        // module read — which is what the emitter's `band()` keys off.
+        assert_eq!(p["scope_reset"].order_key.1, 1, "module load order, not primary's 0");
+        assert_eq!(p["scope_kept"].order_key.1, 0, "primary-only, so primary's slot");
+    }
+
+    /// Primary declaring a plugin the module then re-declares in a LATER read
+    /// is the inverse: there is no later read than primary for the
+    /// global-scope lists, so nothing resets. But an area overlay still does.
+    #[test]
+    fn an_area_overlay_still_resets_a_primary_declared_sort_order() {
+        let primary = plugin_xml(r#"        <plugin name="pp" type="P\A" sortOrder="70"/>"#);
+        let overlay = plugin_xml(r#"        <plugin name="pp" disabled="true"/>"#);
+        let parsed = vec![
+            parsed_at(0, Area::Global, 0, &primary),
+            parsed_at(2, Area::Adminhtml, 1, &overlay),
+        ];
+        let base = merge_area(&parsed, Area::Global, AreaConfig::default());
+        assert_eq!(base.plugins[&ClassName::new("T\\Target")]["pp"].sort_order, 70);
+        let cfg = merge_area(&parsed, Area::Adminhtml, base);
+        let p = &cfg.plugins[&ClassName::new("T\\Target")];
+        assert_eq!(p["pp"].sort_order, 0, "area overlay is read after primary");
+        assert_eq!(p["pp"].class, Some(ClassName::new("P\\A")), "instance still inherits");
     }
 
     /// The other half of the rule: WITHIN one scope the merge is XML
@@ -838,7 +956,7 @@ mod export_tests {
                 disabled: None,
                 disabled_layer: None,
                 instance_layer: Some(1),
-                last_decl_layer: 1,
+                last_read_rank: 0,
                 class_backslash: false,
                 target_backslash: false,
                 source: src(1),
@@ -853,7 +971,7 @@ mod export_tests {
                 disabled: None,
                 disabled_layer: None,
                 instance_layer: Some(1),
-                last_decl_layer: 1,
+                last_read_rank: 0,
                 class_backslash: false,
                 target_backslash: false,
                 source: src(2),
@@ -868,7 +986,7 @@ mod export_tests {
                 disabled: Some(true),
                 disabled_layer: Some(1),
                 instance_layer: Some(1),
-                last_decl_layer: 1,
+                last_read_rank: 0,
                 class_backslash: false,
                 target_backslash: false,
                 source: src(5),
