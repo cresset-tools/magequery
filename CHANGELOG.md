@@ -51,6 +51,16 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.18.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.18.0...magequery-v0.18.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **magecommand:** emit the interface every Extension implements, and keep `for` verbatim ([#130](https://github.com/cresset-tools/magequery/issues/130)) ([74eeef0](https://github.com/cresset-tools/magequery/commit/74eeef06ccb6c078e07417eedcb240bb949baee9))
+* **magecommand:** fold DateTime's inherited constructor, and stop the rest lying ([#131](https://github.com/cresset-tools/magequery/issues/131)) ([6725b66](https://github.com/cresset-tools/magequery/commit/6725b664a0f98a5f625b5b3d90d8dca897f8898d))
+* **magecommand:** give every area its global plugin baseline, and stop di verify excusing it ([#129](https://github.com/cresset-tools/magequery/issues/129)) ([7c4c69d](https://github.com/cresset-tools/magequery/commit/7c4c69d0405f15ab53c34fd20ddc78759cd76a32))
+* **magecommand:** write sri-hashes.json where the store's Csp puts it ([d57b0c6](https://github.com/cresset-tools/magequery/commit/d57b0c6746889b265744a5bd95edf5633d0961b9))
+
 ## [0.18.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.17.5...magequery-v0.18.0) (2026-10-08)
 
 
