@@ -1340,6 +1340,7 @@ dependencies = [
 name = "magecommand"
 version = "0.17.5"
 dependencies = [
+ "anstyle",
  "anyhow",
  "base64 0.22.1",
  "clap",

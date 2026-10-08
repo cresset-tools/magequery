@@ -11,6 +11,8 @@ magecommand-engine = { path = "../magecommand-engine" }
 magecommand-less = { path = "../magecommand-less" }
 magequery-core = { path = "../magequery-core" }
 clap = { version = "4", features = ["derive"] }
+# Report colors (`style` module) — already in the tree via clap.
+anstyle = "1"
 serde_json = "1"
 anyhow = "1"
 # `static files` — sri-hashes.json (Magento_Csp subresource-integrity map):

@@ -65,6 +65,11 @@ di verify --archive <DIR> --output <DIR> [--fail-on-diff] [--sample <N>]
     --fail-on-diff exits non-zero on any UNEXPLAINED diff; --strict-ordering counts
     PHP-reflection method-order differences as changed; --show-residual pinpoints why
     one metadata file stays unexplained. (Was `compare` before the group rename.)
+    The text report lists UNEXPLAINED differences first, split into DI config
+    (metadata) and generated code, each changed file with its first divergence;
+    EXPLAINED groups are one line each, linking to docs/di-verify-differences.md.
+    Colored on a terminal and in GitLab/GitHub CI logs (global --color
+    auto|always|never; NO_COLOR honored; --json never colored).
 
 di watch [--once]
     Long-running compile server: build once, keep the parsed index in memory, and

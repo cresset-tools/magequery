@@ -13,6 +13,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 
 pub mod static_deploy;
+mod style;
 mod watch;
 
 #[derive(Parser)]
@@ -30,6 +31,11 @@ struct Cli {
     /// Machine-readable JSON output.
     #[arg(long, global = true)]
     json: bool,
+
+    /// Color the human-readable reports: `auto` colors a terminal and CI job
+    /// logs (GitLab, GitHub), and honors NO_COLOR. JSON is never colored.
+    #[arg(long, global = true, value_enum, default_value_t, value_name = "WHEN")]
+    color: style::ColorChoice,
 
     #[command(subcommand)]
     command: Command,
@@ -495,6 +501,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
     }
 
     let cli = Cli::parse();
+    style::init(cli.color);
 
     // Dispatched before anything touches a Magento root: the skill describes the
     // binary, not a codebase, so it works from any directory.
@@ -2139,99 +2146,148 @@ fn compare(
 
     println!("{summary}");
 
-    // The genuine, unexplained differences first — the signal.
-    print_bucket("changed", &classified.changed, sample);
-    print_bucket("missing", &classified.missing, sample);
-    print_bucket("extra", &classified.extra, sample);
-
-    // Method-order-only differences: behaviorally identical, so grouped with the
-    // known/expected divergences rather than the signal above.
-    if !report.reordered.is_empty() {
-        // Two shapes land here, so name whichever is actually present rather
-        // than describing interceptors at a plugin-list file.
-        let any_plugin_list = report
-            .reordered
+    // The genuine, unexplained differences first — the signal — split by the
+    // tree they live in, each changed file with its first real divergence.
+    let unexplained = classified.unexplained_count();
+    if unexplained > 0 {
+        let expected: std::collections::HashSet<String> = obfuscation_blocked
             .iter()
-            .any(|f| f.ends_with("plugin-list.php"));
-        let any_class = report
-            .reordered
-            .iter()
-            .any(|f| !f.ends_with("plugin-list.php"));
-        let heading = match (any_class, any_plugin_list) {
-            (true, false) => "Interceptor method order (PHP-version reflection order)",
-            (false, true) => "Plugin-list key order (lookup maps, order carries no meaning)",
-            _ => "Ordering-only differences (method order, plugin-list key order)",
-        };
-        println!("\n  ▸ {heading} ({} file(s))", report.reordered.len());
-        let explanation = match (any_class, any_plugin_list) {
-            (false, true) => "Same entries, byte-identical values, different key order. The \
-                three sections of a plugin-list cache are `_data`, `_inherited` and \
-                `_processed`, and PluginList only ever reads them by key — isset, \
-                array_key_exists, [$type][$code]. None is iterated, so PHP array key order is \
-                not observable. Use --strict-ordering to treat them as `changed`.",
-            (true, false) => "Same method set, byte-identical bodies, different order. PHP's \
-                getMethods() order — which the interceptor generator follows — differs across \
-                PHP versions (8.4 vs 8.5) for trait-using classes. Method order in a PHP class \
-                is behaviorally irrelevant, so these are equivalent. Use --strict-ordering to \
-                treat them as `changed`.",
-            _ => "Same content, different order: generated-class method order (a PHP \
-                reflection-order artifact) or plugin-list key order (a lookup map, never \
-                iterated). Neither is observable at runtime. Use --strict-ordering to treat \
-                them as `changed`.",
-        };
-        for line in wrap_indent(explanation, "    ", 92) {
-            println!("{line}");
-        }
-        for item in report.reordered.iter().take(sample) {
-            println!("      · {item}");
-        }
-        if report.reordered.len() > sample {
-            println!("      · … {} more", report.reordered.len() - sample);
-        }
-    }
-
-    // Then the known/expected differences, each with its explanation.
-    if !classified.known.is_empty() {
+            .chain(&disabled_reachable)
+            .chain(&outside_scan)
+            .cloned()
+            .collect();
         println!(
-            "\nknown & expected differences ({} file(s)) — magecommand targets Mage-OS 3.1.0 / Magento 2.4.9:",
-            classified.known_count()
+            "\n{} matching no known pattern — investigate these",
+            style::fail(&format!("✗ UNEXPLAINED: {unexplained} difference(s)"))
         );
-        for group in &classified.known {
-            println!("\n  ▸ {} ({} file(s))", group.title, group.items.len());
-            for line in wrap_indent(&group.explanation, "    ", 92) {
-                println!("{line}");
+        for tree in [Tree::Metadata, Tree::Code] {
+            let changed = in_tree(&classified.changed, tree);
+            let missing = in_tree(&classified.missing, tree);
+            let extra = in_tree(&classified.extra, tree);
+            let counts: Vec<String> = [
+                (Bucket::Changed, changed.len()),
+                (Bucket::Missing, missing.len()),
+                (Bucket::Extra, extra.len()),
+            ]
+            .iter()
+            .filter(|(_, n)| *n > 0)
+            .map(|(bucket, n)| bucket.paint(&format!("{n} {}", bucket.word())))
+            .collect();
+            if counts.is_empty() {
+                continue;
             }
-            for item in group.items.iter().take(sample) {
-                println!("      · {item}");
+            println!("\n  {}: {}", style::heading(tree.heading()), counts.join(", "));
+            for path in changed.iter().take(sample) {
+                println!("    {}  {}", Bucket::Changed.label(), tree.display(path));
+                let divergence = std::fs::read_to_string(archive.join(path))
+                    .ok()
+                    .zip(std::fs::read_to_string(output.join(path)).ok())
+                    .and_then(|(a, b)| {
+                        magecommand_engine::first_divergence(
+                            &a,
+                            &b,
+                            tree == Tree::Metadata,
+                            &disabled_modules,
+                            &expected,
+                        )
+                    });
+                match divergence {
+                    Some(d) => {
+                        let a = side_line(d.archive_line.as_deref(), "(nothing: output only adds lines)");
+                        let b = side_line(d.output_line.as_deref(), "(ends here)");
+                        println!("               {}", style::removed(&format!("- archive: {a}")));
+                        println!("               {}", style::added(&format!("+ output:  {b}")));
+                    }
+                    None => println!(
+                        "               {}",
+                        style::dim("(no line-level divergence after normalization)")
+                    ),
+                }
             }
-            if group.items.len() > sample {
-                println!("      · … {} more", group.items.len() - sample);
+            if changed.len() > sample {
+                println!("    {}  … {} more", Bucket::Changed.label(), changed.len() - sample);
             }
+            for (bucket, paths) in [(Bucket::Missing, &missing), (Bucket::Extra, &extra)] {
+                for path in paths.iter().take(sample) {
+                    println!("    {}  {}", bucket.label(), tree.display(path));
+                }
+                if paths.len() > sample {
+                    println!("    {}  … {} more", bucket.label(), paths.len() - sample);
+                }
+            }
+        }
+        println!(
+            "\n  {}",
+            style::dim(
+                "missing = only in the archive (the reference compile), extra = only in the magecommand output."
+            )
+        );
+        if let Some(path) = classified
+            .changed
+            .iter()
+            .find(|p| Tree::of(p) == Tree::Metadata)
+        {
+            println!("  More context for one DI-config file:");
+            println!(
+                "    {}",
+                style::heading(&format!(
+                    "magecommand di verify --archive {} --output {} --show-residual {path}",
+                    archive.display(),
+                    output.display()
+                ))
+            );
         }
     }
 
-    // Verdict. Ordering-only differences (`reordered`) are behaviorally benign,
-    // so they never count as unexplained but are surfaced for honesty. They
-    // cover two shapes — generated-class method order and plugin-list key
-    // order — so the note stays neutral rather than naming the wrong one.
+    // Then everything that IS explained: one line per group plus a link to its
+    // write-up, a couple of examples, and --json for the full lists.
     let reordered = report.reordered.len();
-    let reordered_note = if reordered > 0 {
-        format!(", {reordered} ordering-only")
-    } else {
-        String::new()
-    };
-    if report.is_clean() && reordered == 0 {
-        println!("\noutput reproduces the archive exactly");
-    } else if classified.unexplained_count() == 0 {
+    let explained = classified.known_count() + reordered;
+    if explained > 0 {
         println!(
-            "\noutput matches the archive except for {} known/expected{reordered_note} difference(s) explained above",
-            classified.known_count()
+            "\n{} {}",
+            style::pass(&format!("✓ EXPLAINED: {explained} expected difference(s)")),
+            style::dim("(not bugs; --json lists the files)")
+        );
+        const ORDERING_TITLE: &str = "Ordering only (method / plugin-list key order)";
+        // Pad titles (plain, before coloring) so the links form a column.
+        let width = classified
+            .known
+            .iter()
+            .map(|g| g.title.chars().count())
+            .chain((reordered > 0).then(|| ORDERING_TITLE.chars().count()))
+            .max()
+            .unwrap_or(0);
+        for group in &classified.known {
+            print_known_group(group.items.len(), &group.title, width, &group.kind.doc_url());
+        }
+        if reordered > 0 {
+            print_known_group(
+                reordered,
+                ORDERING_TITLE,
+                width,
+                &format!(
+                    "{}#{}",
+                    magecommand_engine::DIFFERENCES_DOC_URL,
+                    magecommand_engine::ORDERING_ONLY_SLUG
+                ),
+            );
+        }
+    }
+
+    // Verdict.
+    if report.is_clean() && reordered == 0 {
+        println!("\n{}", style::pass("OK: output reproduces the archive exactly"));
+    } else if unexplained == 0 {
+        println!(
+            "\n{}",
+            style::pass(&format!("OK: every difference is explained ({explained} expected)"))
         );
     } else {
         println!(
-            "\n{} unexplained difference(s) to investigate; {} known/expected{reordered_note}",
-            classified.unexplained_count(),
-            classified.known_count()
+            "\n{} {}",
+            style::fail(&format!("FAIL: {unexplained} unexplained difference(s)")),
+            style::dim(&format!("· {explained} expected"))
         );
     }
 
@@ -2246,6 +2302,110 @@ fn fail_exit(fail_on_diff: bool, has_diff: bool) -> ExitCode {
     }
 }
 
+/// The two halves of a `generated/` tree, which matter differently: metadata
+/// is how Magento wires objects, code is the PHP that runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tree {
+    Metadata,
+    Code,
+}
+
+impl Tree {
+    /// Whole-tree compares carry a `metadata/`/`code/` prefix. Half-tree
+    /// compares don't; there, metadata files are the lowercase-named ones
+    /// (`global.php`, `primary|global|plugin-list.php`) and code paths start
+    /// with a capitalized vendor directory.
+    fn of(path: &str) -> Tree {
+        if path.starts_with("metadata/") {
+            Tree::Metadata
+        } else if path.starts_with("code/") || path.starts_with(|c: char| c.is_ascii_uppercase()) {
+            Tree::Code
+        } else {
+            Tree::Metadata
+        }
+    }
+
+    fn heading(self) -> &'static str {
+        match self {
+            Tree::Metadata => "DI config (generated/metadata)",
+            Tree::Code => "generated code (generated/code)",
+        }
+    }
+
+    /// A generated-code path is shown with the class it holds, which is what
+    /// you'd search the codebase for.
+    fn display(self, path: &str) -> String {
+        if self == Tree::Metadata {
+            return path.to_owned();
+        }
+        let class = path
+            .strip_prefix("code/")
+            .unwrap_or(path)
+            .strip_suffix(".php")
+            .unwrap_or(path)
+            .replace('/', "\\");
+        format!("{}  {}", style::class(&class), style::dim(&format!("({path})")))
+    }
+}
+
+/// The three kinds of unexplained difference, colored by diff convention.
+#[derive(Clone, Copy)]
+enum Bucket {
+    Changed,
+    Missing,
+    Extra,
+}
+
+impl Bucket {
+    fn word(self) -> &'static str {
+        match self {
+            Bucket::Changed => "changed",
+            Bucket::Missing => "missing",
+            Bucket::Extra => "extra",
+        }
+    }
+
+    fn paint(self, s: &str) -> String {
+        match self {
+            Bucket::Changed => style::changed(s),
+            Bucket::Missing => style::removed(s),
+            Bucket::Extra => style::added(s),
+        }
+    }
+
+    /// The per-line label, padded before coloring so the paths align.
+    fn label(self) -> String {
+        self.paint(&format!("{:<7}", self.word()))
+    }
+}
+
+fn in_tree(paths: &[String], tree: Tree) -> Vec<String> {
+    paths.iter().filter(|p| Tree::of(p) == tree).cloned().collect()
+}
+
+/// One side of a first-divergence pair, truncated: metadata lines can be
+/// thousands of characters (the ClassesScanner regex).
+fn side_line(line: Option<&str>, absent: &str) -> String {
+    const MAX: usize = 140;
+    match line {
+        None => absent.to_owned(),
+        Some(l) if l.chars().count() > MAX => {
+            format!("{}…", l.chars().take(MAX).collect::<String>())
+        }
+        Some(l) => l.to_owned(),
+    }
+}
+
+/// One line per explained group: the count, what it is, and where the
+/// explanation lives. The files themselves are in `--json`.
+fn print_known_group(count: usize, title: &str, width: usize, url: &str) {
+    println!(
+        "  {}  {title:<width$}  {}",
+        style::pass(&format!("{count:>5}")),
+        style::link(url)
+    );
+}
+
 fn print_bucket(label: &str, paths: &[String], sample: usize) {
     if paths.is_empty() {
         return;
@@ -2256,24 +2416,4 @@ fn print_bucket(label: &str, paths: &[String], sample: usize) {
     if paths.len() > sample {
         println!("  {label}: … {} more", paths.len() - sample);
     }
-}
-
-/// Word-wrap `text` to `width` columns, each line prefixed with `indent`.
-fn wrap_indent(text: &str, indent: &str, width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        if !line.is_empty() && line.len() + 1 + word.len() > width {
-            lines.push(format!("{indent}{line}"));
-            line.clear();
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
-    }
-    if !line.is_empty() {
-        lines.push(format!("{indent}{line}"));
-    }
-    lines
 }
