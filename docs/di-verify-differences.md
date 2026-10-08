@@ -33,6 +33,14 @@ comparing against an archive built by an older Magento (2.4.8 or earlier, see
 - Compile from empty, the way CI does. Building the reference into `generated/_code`
   first makes magecommand scan the reference as its class universe, which hides some
   bugs.
+- **Check the archive's age before blaming the output.** A reference compile is a
+  snapshot of the codebase at the moment it ran, so one left lying around drifts: a
+  `composer update` that patches a constructor makes every interceptor for that class
+  differ, and moving the checkout changes the absolute paths the ClassesScanner exclude
+  regex bakes in, which lands as a change in every `metadata/<area>.php`. Both look like
+  magecommand bugs and are not. If the first divergence is a path prefix, or a
+  constructor parameter that the current source really does declare, regenerate the
+  archive.
 
 A divergence that stays unexplained on a store whose Magento matches magecommand's
 target is a magecommand bug. Report it with the first-divergence lines, or the
@@ -78,10 +86,16 @@ usable at all. The one case where the divergence costs something is a process wh
 first plugin-list load is an area rather than `primary`: an unsorted name would hit
 there, a sorted one cannot.
 
-The report pairs each renamed file with its counterpart. A pair that also differs in
-**content** has a second problem, unrelated to the name. Compare sizes first: when every
-area except the first one compiled is a fraction of the archive's, the per-area lists
-are missing their global baseline, which is a magecommand bug and not this one.
+The report pairs each renamed file with its counterpart, and claims a pair only when
+the two files carry the same content — byte-identical, or equal once the key order is
+canonicalized, since `PluginList` reads those sections by key and never iterates them
+(see [ordering only](#ordering-only)). A pair whose contents genuinely differ is **not**
+claimed: both paths stay unexplained and the group's explanation names them. That is a
+second problem, unrelated to the name, and `--fail-on-diff` fails on it.
+
+Compare the file sizes first when one shows up. A per-area list that is a fraction of
+the archive's is missing the global plugin baseline every area is reset to — the shape
+of a bug fixed in #129, where only the first area compiled kept it.
 
 ## Disabled-module artifacts
 
