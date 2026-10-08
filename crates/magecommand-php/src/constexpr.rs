@@ -610,6 +610,15 @@ fn global_const(name: &str) -> Option<ConstValue> {
         "MCRYPT_RIJNDAEL_256" => ConstValue::Str("rijndael-256".to_owned()),
         "MCRYPT_MODE_ECB" => ConstValue::Str("ecb".to_owned()),
         "MCRYPT_MODE_CBC" => ConstValue::Str("cbc".to_owned()),
+        // `setup:di:compile` only ever runs under the CLI SAPI, and the real
+        // compiler reflects the default and bakes whatever PHP_SAPI is in THAT
+        // process — so the oracle always holds 'cli'. Leaving it unresolved was
+        // not merely a missing value: the entry degraded to `_vn_`, which
+        // `Compiled::create` reads as a literal null, so a non-nullable
+        // `string $sapiName = PHP_SAPI` got null injected and fataled at
+        // runtime. Same compile-environment reasoning as DIRECTORY_SEPARATOR
+        // and PHP_INT_SIZE below.
+        "PHP_SAPI" => ConstValue::Str("cli".to_owned()),
         "PHP_INT_MAX" => ConstValue::Int(i64::MAX),
         "PHP_INT_MIN" => ConstValue::Int(i64::MIN),
         "PHP_INT_SIZE" => ConstValue::Int(8),
@@ -953,6 +962,16 @@ mod tests {
             ev("['5' => 'a', 5 => 'b']"),
             ConstValue::Array(vec![(ArrayKey::Int(5), ConstValue::Str("b".into()))])
         );
+    }
+
+    /// `PHP_SAPI` is the SAPI of the process doing the compiling, and
+    /// `setup:di:compile` is always CLI — so the oracle bakes 'cli'. Unresolved,
+    /// the argument degraded to `_vn_` (a literal null to `Compiled::create`),
+    /// which fatals on a non-nullable `string` parameter.
+    #[test]
+    fn php_sapi_folds_to_the_compile_time_cli() {
+        assert_eq!(ev("PHP_SAPI"), ConstValue::Str("cli".into()));
+        assert_eq!(ev("PHP_SAPI . '-x'"), ConstValue::Str("cli-x".into()));
     }
 
     #[test]
