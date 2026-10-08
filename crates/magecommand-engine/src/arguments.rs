@@ -357,12 +357,22 @@ impl<'a> ArgsCtx<'a> {
             .unwrap_or("");
         let optional_tail_start = optional_tail_start(params);
         let mut out: Vec<(PhpKey, PhpValue)> = Vec::with_capacity(params.len());
+        // Set when a default we could not fold actually SURVIVES into the row.
+        // A default the di config then overrides is harmless, so the flag is
+        // cleared again below rather than raised once and kept.
+        let mut unresolvable = false;
         for (idx, param) in params.iter().enumerate() {
             let required = idx < optional_tail_start;
             let class_ty = self.param_class(param, definer_fqcn);
+            let mut from_bad_default = false;
             let mut arg = if !required {
-                let default = self.eval_default(param, definer_ns, definer_uses, definer_fqcn);
-                self.non_object_argument(&default)
+                match self.eval_default(param, definer_ns, definer_uses, definer_fqcn) {
+                    FoldedDefault::Value(default) => self.non_object_argument(&default),
+                    FoldedDefault::Unresolvable => {
+                        from_bad_default = true;
+                        vn_pattern() // placeholder; the whole row is dropped below
+                    }
+                }
             } else if let Some(class) = &class_ty {
                 self.instance_pattern(class)
             } else {
@@ -379,13 +389,24 @@ impl<'a> ArgsCtx<'a> {
             // type's interceptor.
             if let Some(cfg) = map_get(&configured, &param.name).filter(|c| !matches!(c, Cfg::Null))
             {
+                // The configured value replaces the default, so an unfoldable
+                // one no longer reaches the output — except on the `_a_`/`_d_`
+                // branch, which embeds the default as the env-var fallback.
+                from_bad_default = false;
                 arg = if class_ty.is_some() {
                     self.configured_instance(cfg, instance_name, &param.name)
                 } else if let Cfg::Map(entries) = cfg {
                     if let Some(argument) = map_get(entries, "argument") {
                         // ['_a_' => value, '_d_' => default]
-                        let default =
-                            self.eval_default(param, definer_ns, definer_uses, definer_fqcn);
+                        let default = match self
+                            .eval_default(param, definer_ns, definer_uses, definer_fqcn)
+                        {
+                            FoldedDefault::Value(default) => default,
+                            FoldedDefault::Unresolvable => {
+                                from_bad_default = true;
+                                Cfg::Null
+                            }
+                        };
                         PhpValue::Array(vec![
                             (PhpKey::str("_a_"), cfg_to_php(argument)),
                             (PhpKey::str("_d_"), cfg_to_php(&default)),
@@ -397,7 +418,18 @@ impl<'a> ArgsCtx<'a> {
                     self.non_object_argument(cfg)
                 };
             }
+            unresolvable |= from_bad_default;
             out.push((PhpKey::str(param.name.clone()), arg));
+        }
+        // One unreadable default poisons the whole row, because
+        // `Compiled::create` passes the arguments POSITIONALLY
+        // (`array_values($args)`) — dropping or nulling a single entry would
+        // silently shift every later argument into the wrong parameter. A NULL
+        // row instead sends the factory down its runtime-reflection branch,
+        // where PHP reads the real default itself. The class loses its cached
+        // arguments; it never receives a value we invented.
+        if unresolvable {
+            return PhpValue::Null;
         }
         PhpValue::Array(out)
     }
@@ -469,31 +501,36 @@ impl<'a> ArgsCtx<'a> {
         definer_ns: &str,
         definer_uses: &[(String, String)],
         definer_fqcn: &str,
-    ) -> Cfg {
+    ) -> FoldedDefault {
         if param.variadic {
-            return Cfg::Map(Vec::new()); // ClassReader: variadic default = []
+            // ClassReader: variadic default = []
+            return FoldedDefault::Value(Cfg::Map(Vec::new()));
         }
         let Some(default) = &param.default else {
-            return Cfg::Null; // getDefaultValue: null when unavailable
+            // getDefaultValue: null when unavailable. This is the honest null —
+            // the parameter genuinely has no default — not an unreadable one.
+            return FoldedDefault::Value(Cfg::Null);
         };
         let parsed = parse_const_expr(default, definer_ns, definer_uses);
         let lookup = DefsLookup { defs: self.defs };
         match eval(&parsed, &EvalCtx::new(&lookup, Some(definer_fqcn))) {
-            Ok(v) => {
-                coerce_to_declared_float(const_to_cfg(&v), param.ty.as_deref(), &parsed.expr)
-            }
+            Ok(v) => FoldedDefault::Value(coerce_to_declared_float(
+                const_to_cfg(&v),
+                param.ty.as_deref(),
+                &parsed.expr,
+            )),
             Err(e) => {
                 // An enum-case default can't fold (an enum case is an object, not
                 // a scalar) — Magento keeps it as the constant reference. Emit the
                 // verbatim `\Enum::CASE` instead of dropping it to null.
                 if let Some(raw) = self.enum_case_default(&parsed) {
-                    return Cfg::Raw(raw);
+                    return FoldedDefault::Value(Cfg::Raw(raw));
                 }
                 self.finding(format!(
                     "{definer_fqcn}::${}: default '{default}': {}",
                     param.name, e.message
                 ));
-                Cfg::Null
+                FoldedDefault::Unresolvable
             }
         }
     }
@@ -597,6 +634,19 @@ impl<'a> ArgsCtx<'a> {
                 .collect(),
         )
     }
+}
+
+/// The outcome of folding a constructor parameter's default.
+///
+/// The distinction matters: `Value(Cfg::Null)` means the parameter genuinely
+/// has no default (Magento's `getDefaultValue` reports null), while
+/// `Unresolvable` means it HAS one that we could not evaluate statically.
+/// Collapsing the second into the first encodes ignorance as a value — and
+/// `_vn_` is read back as a literal null, so a non-nullable parameter then
+/// fatals at runtime.
+enum FoldedDefault {
+    Value(Cfg),
+    Unresolvable,
 }
 
 fn vn_pattern() -> PhpValue {
