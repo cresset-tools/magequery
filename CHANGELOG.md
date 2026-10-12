@@ -51,6 +51,19 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.19.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.18.1...magequery-v0.19.0) (2026-10-12)
+
+
+### Features
+
+* **magecommand:** report a renamed plugin list that differs as one changed file ([#133](https://github.com/cresset-tools/magequery/issues/133)) ([a14b64f](https://github.com/cresset-tools/magequery/commit/a14b64f6057ce4ccd99f6ff97e5da60704d86927))
+* **magequery:** doctor warns about disabled modules, and `--deny` makes a lint fail ([#134](https://github.com/cresset-tools/magequery/issues/134)) ([64aadcc](https://github.com/cresset-tools/magequery/commit/64aadcc67597ed087a5537b4f9d11cc13b2df515))
+
+
+### Bug Fixes
+
+* **magecommand:** plugin lists at the edges of disabled modules ([#136](https://github.com/cresset-tools/magequery/issues/136)) ([3183d00](https://github.com/cresset-tools/magequery/commit/3183d005f17521ea8ed6f614e92baeff6ad77bb1))
+
 ## [0.18.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.18.0...magequery-v0.18.1) (2026-10-08)
 
 
