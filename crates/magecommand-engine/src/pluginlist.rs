@@ -610,19 +610,31 @@ impl Inherit<'_> {
         // `global|primary|plugin-list.php`.
         let trimmed = type_name.trim_start_matches('\\');
         let key = self.defs.canonical_case(trimmed).unwrap_or(trimmed).to_owned();
+        // A type stored WITHOUT plugins is not cached: Magento's guard is
+        // `!isset($inherited[$type])` and a plugin-less type is stored as
+        // `null`, which `isset` reports as unset. So it is computed again each
+        // time it is reached, and once an ancestor has meanwhile been cached
+        // with a disabled plugin, the second pass inherits it. PHP overwrites
+        // the existing key, so the entry keeps its original position.
+        let mut recompute_at = None;
         if let Some(&i) = self.inherited_index.get(&key) {
-            // CACHE HIT. Magento's `inheritPlugins` returns `$inherited[$type]`
-            // verbatim here — the STORED list, which KEEPS disabled entries.
-            // Only the FIRST-computation return path (below) strips disabled.
-            // So a class whose ancestor was already computed inherits that
-            // ancestor's disabled plugins into its own config; their target
-            // methods still generate (passthrough) interceptor wrappers. This
-            // is order-dependent, faithful to Magento: whether a subclass gets
-            // an ancestor's disabled plugin turns on which was processed first
-            // (seed order below is sorted to make it deterministic).
-            return self.inherited[i].1.clone();
+            if i == usize::MAX {
+                return None; // cycle guard (Magento would recurse forever; none exist)
+            }
+            if let Some(stored) = &self.inherited[i].1 {
+                // CACHE HIT. Magento's `inheritPlugins` returns `$inherited[$type]`
+                // verbatim here — the STORED list, which KEEPS disabled entries.
+                // Only the FIRST-computation return path (below) strips disabled.
+                // So a class whose ancestor was already computed inherits that
+                // ancestor's disabled plugins into its own config; their target
+                // methods still generate (passthrough) interceptor wrappers. This
+                // is order-dependent, faithful to Magento: whether a subclass gets
+                // an ancestor's disabled plugin turns on which was processed first
+                // (seed order below is sorted to make it deterministic).
+                return Some(stored.clone());
+            }
+            recompute_at = Some(i);
         }
-        // Cycle guard (Magento would recurse forever; none exist).
         self.inherited_index.insert(key.clone(), usize::MAX);
 
         let real = chase(self.global_vtypes, &key);
@@ -669,8 +681,16 @@ impl Inherit<'_> {
         // parent's disabled plugins; a child computed after the parent already
         // cached gets them (the cache-hit path above). Order decides.
         let ret = enabled_only(value.as_deref());
-        self.inherited.push((key.clone(), value));
-        self.inherited_index.insert(key, index);
+        match recompute_at {
+            Some(i) => {
+                self.inherited[i].1 = value;
+                self.inherited_index.insert(key, i);
+            }
+            None => {
+                self.inherited.push((key.clone(), value));
+                self.inherited_index.insert(key, index);
+            }
+        }
         ret
     }
 
@@ -980,4 +1000,39 @@ mod tests {
         assert!(!names.contains(&"base_gamma"), "first-computation strips disabled: {names:?}");
         assert!(names.contains(&"derived_delta"));
     }
+
+    /// A type computed WITHOUT plugins is stored as `null`, and Magento's
+    /// `!isset($inherited[$type])` guard treats that as uncached. Mid is first
+    /// reached while Base is being computed for the first time, so it inherits
+    /// nothing and is stored null. When it is reached again, Base is cached
+    /// (with its disabled plugin), so the recomputation inherits it — and the
+    /// entry keeps its original position, as a PHP key overwrite does.
+    #[test]
+    fn plugin_less_type_is_recomputed_once_its_ancestor_is_cached() {
+        let defs = defs([
+            record("<?php class Base { public function gamma() {} }"),
+            record("<?php class Mid extends Base {}"),
+        ]);
+        let vtypes = HashMap::new();
+        let plugin_data: PluginData =
+            vec![("Base".to_owned(), vec![("base_gamma".to_owned(), entry("BasePlugin", true))])];
+
+        let mut s = state(&defs, &vtypes, &plugin_data);
+        s.inherit("Mid");
+        let mid_at = |s: &Inherit| s.inherited.iter().position(|(k, _)| k == "Mid").unwrap();
+        let first = mid_at(&s);
+        assert!(s.inherited[first].1.is_none(), "first pass: Base's disabled plugin is stripped");
+
+        s.inherit("Mid");
+        assert_eq!(mid_at(&s), first, "recomputed in place");
+        let names: Vec<&str> = s.inherited[first]
+            .1
+            .as_ref()
+            .expect("second pass inherits from the cached Base")
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert_eq!(names, ["base_gamma"]);
+    }
+
 }
