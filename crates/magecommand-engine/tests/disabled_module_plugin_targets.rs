@@ -86,10 +86,18 @@ fn plugged_class_of_a_disabled_module_inherits_its_interface_plugins() {
     );
 
     // The disabled module: its class is autoloadable, its config is not read.
+    // It also implements an interface of its own module that nothing plugs —
+    // the shape of the disabled MSI interfaces (an enabled module plugs an MSI
+    // condition class; its MSI interface has no plugins of its own).
+    put(
+        root,
+        "app/code/Acme/Gone/Api/MarkerInterface.php",
+        "<?php\nnamespace Acme\\Gone\\Api;\n\ninterface MarkerInterface\n{\n}\n",
+    );
     put(
         root,
         "app/code/Acme/Gone/Controller/Router.php",
-        "<?php\nnamespace Acme\\Gone\\Controller;\n\nclass Router implements \\Acme\\Base\\Api\\RouterInterface\n{\n    public function match($request)\n    {\n        return null;\n    }\n}\n",
+        "<?php\nnamespace Acme\\Gone\\Controller;\n\nclass Router implements \\Acme\\Base\\Api\\RouterInterface, \\Acme\\Gone\\Api\\MarkerInterface\n{\n    public function match($request)\n    {\n        return null;\n    }\n}\n",
     );
 
     after_match_plugin(root, "app/code/Acme/Rewrite/Plugin/Router.php", "Acme\\Rewrite\\Plugin", "Router");
@@ -115,6 +123,11 @@ fn plugged_class_of_a_disabled_module_inherits_its_interface_plugins() {
     let entry = inherited_entry(global, "Acme\\Gone\\Controller\\Router");
     assert!(entry.contains("'rewrite'"), "own plugin kept:\n{entry}");
     assert!(entry.contains("'csp_aware'"), "interface plugin inherited:\n{entry}");
+
+    // Walking the target's parents also records each plugin-less ancestor, as
+    // `$inherited[$type] = null` — present in the file, not absent.
+    let marker = inherited_entry(global, "Acme\\Gone\\Api\\MarkerInterface");
+    assert!(marker.trim_start().starts_with("NULL"), "plugin-less ancestor is a NULL entry:\n{marker}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
