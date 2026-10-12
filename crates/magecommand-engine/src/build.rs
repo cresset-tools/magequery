@@ -85,9 +85,15 @@ pub fn compute_outputs_opts(
     let mut _it = std::time::Instant::now();
 
     // Reflect the ancestor closure of every scanned class, plus the DI names the
-    // scan walk can't reach on its own: preference TARGETS and PLUGIN CLASSES
+    // scan walk can't reach on its own: preference TARGETS, PLUGIN CLASSES
     // (Magento reflects a plugin class via autoload during interception, even
-    // when its file sits in a scan-excluded path).
+    // when its file sits in a scan-excluded path) and PLUGIN TARGETS. The
+    // plugin-list generator asks `Relations` for a target's parents through the
+    // autoloader too, which does not care whether the owning module is enabled:
+    // an enabled module's plugin on a DISABLED module's class still inherits
+    // every plugin declared on that class's interfaces. Unseeded, the target
+    // had no record, so no parents — on one store an Amasty router plugged by
+    // an enabled module lost the Csp plugin it inherits from RouterInterface.
     let mut resolve_keys: Vec<String> = Vec::new();
     for (area, _) in AREA_CODES {
         let export = magento.di_export_ref(area);
@@ -95,6 +101,7 @@ pub fn compute_outputs_opts(
         resolve_keys.extend(
             export.plugins.iter().filter_map(|p| p.class.as_ref()).map(|c| c.as_str().to_owned()),
         );
+        resolve_keys.extend(export.plugins.iter().map(|p| p.target.as_str().to_owned()));
     }
     // …and the classes named by `xsi:type="const"` argument values. PHP evaluates
     // `\Magento\Paypal\Model\Config::METHOD_WPP_EXPRESS` through the AUTOLOADER, which
