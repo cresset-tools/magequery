@@ -8,6 +8,9 @@
 //! * **Warning** — probably-forgotten wiring: classes that look like commands/observers/
 //!   plugins but are registered nowhere, queues nothing consumes. Could be intentional
 //!   dead code, so they never fail CI by themselves.
+//!
+//! A shop that has cleaned a warning up can make it blocking with
+//! [`DoctorReport::deny`] (`doctor --deny <lint>`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -22,6 +25,7 @@ pub(crate) fn run(mage: &Magento, source_filter: Option<ModuleSource>) -> Doctor
     let mut d = Doctor { mage, findings: Vec::new(), seen: HashSet::new() };
 
     d.check_module_set();
+    d.check_disabled_modules();
     d.check_sequence_cycles();
     d.check_di();
     d.check_observers();
@@ -173,6 +177,122 @@ impl Doctor<'_> {
                     m.path.display()
                 ),
                 None,
+            );
+        }
+    }
+
+    // ---------- disabled modules ----------
+
+    /// Installed modules switched off in config.php, and enabled DI config that
+    /// reaches into them. A disabled module's code is still on the autoloader,
+    /// so whether it takes part — in a class hierarchy, a plugin list, a
+    /// compile — depends on which tool you ask; `setup:di:compile`, the runtime
+    /// and static compilers disagree at exactly these edges. Removing the module
+    /// with composer leaves nothing to disagree about. Warnings: disabling is
+    /// common (MSI especially) and works; `--deny` makes them blocking.
+    fn check_disabled_modules(&mut self) {
+        let disabled: Vec<&Module> = self.mage.modules().iter().filter(|m| !m.enabled).collect();
+        if disabled.is_empty() {
+            return;
+        }
+        let config_php = self.mage.root().join("app/etc/config.php");
+        let config_text = self.mage.read_source(&config_php).ok().unwrap_or_default();
+        for m in &disabled {
+            let needle = format!("'{}'", m.name);
+            let line = config_text
+                .lines()
+                .position(|l| l.contains(&needle))
+                .map_or(0, |i| i as u32 + 1);
+            let source = Source {
+                module: m.name.clone(),
+                file: config_php.clone(),
+                line,
+                area: Area::Global,
+            };
+            self.warn_on(
+                DoctorLint::ModuleDisabled,
+                &m.name,
+                format!(
+                    "module {} is installed but disabled in config.php; remove it with composer \
+(`composer remove`, or `replace` for Magento's own modules) instead",
+                    m.name
+                ),
+                Some(source),
+            );
+        }
+
+        // Which disabled module owns a class: by its file, longest module path
+        // first (bundled-module packages nest), as `whatis` does. Only classes
+        // whose vendor segment matches a disabled module's are looked up, so
+        // the stat calls stay few.
+        let vendors: HashSet<&str> =
+            disabled.iter().filter_map(|m| m.name.as_str().split('_').next()).collect();
+        let mut owner_cache: HashMap<ClassName, Option<String>> = HashMap::new();
+        let mut owner = |class: &ClassName| -> Option<String> {
+            if let Some(hit) = owner_cache.get(class) {
+                return hit.clone();
+            }
+            let vendor = class.as_str().split('\\').next().unwrap_or("");
+            let hit = vendors
+                .contains(vendor)
+                .then(|| self.mage.index.resolver.file_for(class))
+                .flatten()
+                .and_then(|file| {
+                    disabled
+                        .iter()
+                        .filter(|m| file.starts_with(&m.path))
+                        .max_by_key(|m| m.path.as_os_str().len())
+                        .map(|m| m.name.to_string())
+                });
+            owner_cache.insert(class.clone(), hit.clone());
+            hit
+        };
+
+        // (class referenced, how, where) for every DI reference to a class.
+        let mut refs: Vec<(ClassName, String, Source)> = Vec::new();
+        for &area in Area::ALL.iter() {
+            let cfg = self.mage.di_index().config(area);
+            for (for_, located) in &cfg.preferences {
+                refs.push((for_.clone(), "declares a preference for".into(), located.source.clone()));
+                refs.push((located.value.clone(), "prefers".into(), located.source.clone()));
+            }
+            for (name, vt) in &cfg.virtual_types {
+                refs.push((vt.value.clone(), format!("bases virtual type {name} on"), vt.source.clone()));
+            }
+            for (target, by_name) in &cfg.plugins {
+                for (pname, lp) in by_name {
+                    if lp.disabled.unwrap_or(false) {
+                        continue;
+                    }
+                    refs.push((target.clone(), format!("declares plugin `{pname}` on"), lp.source.clone()));
+                    if let Some(class) = &lp.class {
+                        refs.push((class.clone(), format!("uses as plugin `{pname}`"), lp.source.clone()));
+                    }
+                }
+            }
+            for (target, args) in &cfg.type_args {
+                for (arg_name, la) in args {
+                    let mut objects = HashSet::new();
+                    collect_arg_objects(&la.value, &mut objects);
+                    for class in objects {
+                        refs.push((class, format!("injects into {target} ${arg_name}"), la.source.clone()));
+                    }
+                }
+            }
+        }
+        for (class, how, source) in refs {
+            let class = ClassName::new(class.as_str().trim_end_matches("\\Proxy"));
+            let Some(module) = owner(&class) else { continue };
+            // A disabled module's own files are never merged, so the declarer is
+            // always enabled; still, never blame a module for its own classes.
+            if source.module.as_str() == module {
+                continue;
+            }
+            self.warn_on(
+                DoctorLint::DisabledModuleReferenced,
+                &class,
+                format!("{} {how} {class}, a class of disabled module {module}", source.module),
+                Some(source),
             );
         }
     }

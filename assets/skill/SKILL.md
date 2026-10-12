@@ -166,7 +166,9 @@ cache, `setup:upgrade`.
 
 **Health and whole-class views**
 - Is anything in the merged config broken (missing classes, cycles, forgotten
-  wiring)? → `magequery doctor` (exits non-zero on errors only, so it fits CI).
+  wiring)? → `magequery doctor` (exits non-zero on errors only, so it fits CI;
+  `--deny <lint>` makes a warning such as `module-disabled` or
+  `disabled-module-referenced` fail too).
 - Everything about one class in a single view → `whatis '<Class>'`.
 - Which setup patches exist or are pending? → `patches [--db|--pending]`.
 

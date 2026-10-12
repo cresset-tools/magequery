@@ -102,7 +102,7 @@ pub struct Whatis {
 
 /// A `doctor` lint identifier — what kind of problem a finding is.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum DoctorLint {
     ModuleMissingOnDisk,
@@ -126,6 +126,20 @@ pub enum DoctorLint {
     ObserverUnregistered,
     PluginUnregistered,
     TemplateFileMissing,
+    /// An installed module switched off in `config.php` (`=> 0`) rather than removed.
+    ModuleDisabled,
+    /// Enabled DI config pointing at a class that lives in a disabled module.
+    DisabledModuleReferenced,
+}
+
+impl std::str::FromStr for DoctorLint {
+    type Err = String;
+
+    /// Parse the kebab-case name a finding is reported under (`module-disabled`).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_value(serde_json::Value::String(s.to_owned()))
+            .map_err(|_| format!("unknown doctor lint `{s}`"))
+    }
 }
 
 /// One `doctor` finding. Errors are things that break at runtime (dangling references,
@@ -150,6 +164,20 @@ pub struct DoctorReport {
 }
 
 impl DoctorReport {
+    /// Treat these lints as errors: their findings are upgraded to
+    /// [`Severity::Error`](crate::error::Severity), so they fail the run. How a
+    /// shop makes a warning it has cleaned up blocking in its own CI.
+    pub fn deny(&mut self, lints: &[DoctorLint]) {
+        for f in &mut self.findings {
+            if lints.contains(&f.lint) {
+                f.severity = crate::error::Severity::Error;
+            }
+        }
+        let rank = |s: crate::error::Severity| if s == crate::error::Severity::Error { 0 } else { 1 };
+        self.findings
+            .sort_by(|a, b| rank(a.severity).cmp(&rank(b.severity)).then_with(|| a.message.cmp(&b.message)));
+    }
+
     pub fn errors(&self) -> usize {
         self.findings
             .iter()

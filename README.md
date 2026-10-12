@@ -107,7 +107,10 @@ plugins (3)  run order
 
 `doctor` checks every merged config reference against what exists on disk. It reports broken
 references, cycles, and wiring that looks forgotten, and exits non-zero only on errors, so
-you can run it in CI.
+you can run it in CI. It also warns about modules disabled in `config.php` and config that
+reaches into them: remove such modules with composer instead, since tools disagree about
+how a disabled module's code takes part. Pass `--deny <lint>` to make a warning fail the
+run once you have cleaned it up, e.g. `--deny disabled-module-referenced`.
 
 ```console
 $ magequery doctor

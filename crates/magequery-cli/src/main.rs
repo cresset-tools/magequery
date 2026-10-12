@@ -435,6 +435,11 @@ struct DoctorArgs {
     /// cover the whole merged configuration.
     #[arg(long, value_enum)]
     source: Option<SourceFilter>,
+    /// Treat a lint as an error, so its findings fail the run (repeatable), e.g.
+    /// `--deny module-disabled --deny disabled-module-referenced`. For CI, once a
+    /// shop has cleaned a warning up.
+    #[arg(long, value_name = "LINT")]
+    deny: Vec<magequery_core::DoctorLint>,
     #[arg(long)]
     json: bool,
 }
@@ -8681,7 +8686,8 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
         SourceFilter::App => ModuleSource::App,
         SourceFilter::Vendor => ModuleSource::Vendor,
     });
-    let report = mage.doctor(source);
+    let mut report = mage.doctor(source);
+    report.deny(&args.deny);
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -8707,7 +8713,7 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
         );
     }
 
-    // Errors fail the run (CI-able); warnings alone don't.
+    // Errors fail the run (CI-able); warnings alone don't, unless --deny'd.
     use std::io::Write;
     std::io::stdout().flush().ok();
     if report.errors() > 0 {

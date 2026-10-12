@@ -1286,6 +1286,66 @@ mod handle_tests {
         );
     }
 
+    /// A module switched off in config.php is reported on its config.php line, and
+    /// an enabled module's plugin on one of its classes is reported where it is
+    /// declared; `deny` turns both into errors.
+    #[test]
+    fn doctor_flags_disabled_modules_and_references_into_them() {
+        let tree = TempTree::new("doctor-disabled");
+        let write = |rel: &str, content: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write(
+            "app/etc/config.php",
+            "<?php\nreturn ['modules' => [\n'Acme_Gone' => 0,\n'Acme_Widget' => 1,\n]];\n",
+        );
+        write("app/code/Acme/Gone/etc/module.xml", r#"<config><module name="Acme_Gone"/></config>"#);
+        write(
+            "app/code/Acme/Gone/Controller/Router.php",
+            "<?php\nnamespace Acme\\Gone\\Controller;\nclass Router {}\n",
+        );
+        write("app/code/Acme/Widget/etc/module.xml", r#"<config><module name="Acme_Widget"/></config>"#);
+        write(
+            "app/code/Acme/Widget/Plugin/Router.php",
+            "<?php\nnamespace Acme\\Widget\\Plugin;\nclass Router { public function afterMatch($s, $r) { return $r; } }\n",
+        );
+        write(
+            "app/code/Acme/Widget/etc/di.xml",
+            r#"<config>
+    <type name="Acme\Gone\Controller\Router">
+        <plugin name="rewrite" type="Acme\Widget\Plugin\Router"/>
+    </type>
+</config>"#,
+        );
+
+        let magento = super::Magento::open(&tree.0).unwrap();
+        let mut report = magento.doctor(None);
+        let find = |report: &crate::model::DoctorReport, lint| {
+            report.findings.iter().find(|f| f.lint == lint).cloned().expect("lint fires")
+        };
+        use crate::model::DoctorLint::{DisabledModuleReferenced, ModuleDisabled};
+
+        let disabled = find(&report, ModuleDisabled);
+        assert_eq!(disabled.subject.as_deref(), Some("Acme_Gone"));
+        assert_eq!(disabled.source.as_ref().map(|s| s.line), Some(3), "anchored on config.php");
+        assert_eq!(disabled.severity, crate::Severity::Warning);
+
+        let referenced = find(&report, DisabledModuleReferenced);
+        assert_eq!(referenced.subject.as_deref(), Some("Acme\\Gone\\Controller\\Router"));
+        assert!(referenced.message.starts_with("Acme_Widget declares plugin `rewrite` on"), "{}", referenced.message);
+        assert!(referenced.message.ends_with("disabled module Acme_Gone"), "{}", referenced.message);
+        assert_eq!(referenced.source.as_ref().map(|s| s.line), Some(3), "anchored on the <plugin>");
+        assert_eq!(report.errors(), 0, "warnings only by default: {:?}", report.findings);
+
+        report.deny(&["disabled-module-referenced".parse().unwrap()]);
+        assert_eq!(find(&report, DisabledModuleReferenced).severity, crate::Severity::Error);
+        assert_eq!(find(&report, ModuleDisabled).severity, crate::Severity::Warning);
+        assert_eq!(report.findings[0].lint, DisabledModuleReferenced, "errors sort first");
+        assert!("nope".parse::<crate::model::DoctorLint>().is_err());
+    }
+
     /// The buffer overlay wins over disk: the same root answers differently when a
     /// di.xml is overlaid — the editor's unsaved state, analyzed without saving.
     #[test]

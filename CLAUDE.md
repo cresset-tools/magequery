@@ -974,9 +974,12 @@ for the preference join).
 
 ### `doctor` (cross-index lints, done)
 
-`magequery doctor [--source app|vendor]` — everything the merged config references that
-doesn't exist, structural breakage, and probably-forgotten wiring. Pure projection over the
-existing indexes (~90–140ms); exits 1 on **errors** only, so warnings can't fail CI.
+`magequery doctor [--source app|vendor] [--deny <lint>…]` — everything the merged config
+references that doesn't exist, structural breakage, and probably-forgotten wiring. Pure
+projection over the existing indexes (~90–140ms); exits 1 on **errors** only, so warnings
+can't fail CI — unless a lint is passed to `--deny` (repeatable), which upgrades its findings
+to errors (`DoctorReport::deny`, so `--json` agrees with the exit code). That's how a shop
+makes a warning it has cleaned up blocking in its own MR pipeline.
 `doctor.rs` in core, `Magento::doctor(source?) -> DoctorReport` (typed `DoctorLint` +
 `Severity` per finding, provenance where there is one).
 
@@ -991,6 +994,19 @@ classes under `Console/`/`Observer/`/`Plugin/` that are concrete, match their ba
 wired **nowhere**. `--source` restricts only these scans; candidates are verified by
 resolving the conventional class name back through PSR-4 to the same file (namespace-
 diverging modules are skipped, never misreported).
+
+**Disabled modules** (warnings): `module-disabled` — an installed module set to `0` in
+config.php (anchored on that line); advise `composer remove`, or `replace` for Magento's own
+(MSI), instead. `disabled-module-referenced` — enabled di.xml (any area) whose plugin
+target, plugin class, preference source/target, virtualType base, or injected argument
+object is a class whose **file** lives in a disabled module (owner = longest module-path
+prefix, as `whatis`; only classes whose vendor segment matches a disabled module are
+resolved, so it stays cheap). The why: a disabled module's code is still autoloadable, so
+whether it takes part in a hierarchy, a plugin list or a compile depends on the tool —
+`setup:di:compile`, the runtime and magecommand disagree at exactly these edges (a store
+with MSI + an Amasty module disabled surfaced three such magecommand divergences at
+once). Not yet covered: an enabled class *inheriting* from a disabled module's
+class/interface (needs a hierarchy walk per class).
 
 The false-positive war is the design (doctor must not cry wolf) — `class_known` accepts:
 global-namespace names (PHP built-ins like `DateTime`), virtual types, generated code
