@@ -90,8 +90,31 @@ The report pairs each renamed file with its counterpart, and claims a pair only 
 the two files carry the same content — byte-identical, or equal once the key order is
 canonicalized, since `PluginList` reads those sections by key and never iterates them
 (see [ordering only](#ordering-only)). A pair whose contents genuinely differ is **not**
-claimed: both paths stay unexplained and the group's explanation names them. That is a
-second problem, unrelated to the name, and `--fail-on-diff` fails on it.
+claimed. It is still one file, so it is reported as one unexplained `changed` entry
+under the archive's name, with the name magecommand wrote it under alongside:
+
+```
+changed  metadata/primary|global|webapi_rest|plugin-list.php
+           written as global|primary|webapi_rest|plugin-list.php (expected: magecommand sorts the scope names)
+           3 type(s) with differing entries:
+             changed  Magento\Sales\Model\ResourceModel\Order\Collection\AbstractCollection
+             missing  Magento\InventorySalesApi\Api\IsProductSalableInterface  (disabled module Magento_InventorySalesApi)
+             changed  Amasty\ShopbySeo\Controller\Router  (disabled module Amasty_ShopbySeo)
+           - archive: 'Magento\\Sales\\…\\AbstractCollection' =>
+           + output:  'Magento\\Sales\\…\\AbstractCollection' => NULL,
+```
+
+The name is accounted for; the content is a second problem, unrelated to it, and
+`--fail-on-diff` fails on it. The report names every type whose entry differs (the
+order of entries is ignored: `PluginList` only looks them up by key), and tags the
+types of modules disabled in `app/etc/config.php`. Those tags matter: plugins that
+reach into a disabled module — an enabled module plugging a disabled module's class,
+or a disabled module's interface still on a class hierarchy — are the interactions
+magecommand most often gets wrong, and they are bugs to report, not expected
+differences. Better still, don't ship disabled modules: `composer remove` them, or
+`replace` Magento's own (MSI). The `-`/`+` lines are the first real content difference
+outside those disabled-module entries. (`--json` lists these pairs as
+`classified.renamed_changed`.)
 
 Compare the file sizes first when one shows up. A per-area list that is a fraction of
 the archive's is missing the global plugin baseline every area is reset to — the shape

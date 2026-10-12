@@ -184,6 +184,23 @@ pub struct Classified {
     pub missing: Vec<String>,
     pub extra: Vec<String>,
     pub changed: Vec<String>,
+    /// Plugin-list files whose rename is the expected one (magecommand always
+    /// sorts the scope names) but whose CONTENT differs. Unexplained, like
+    /// `changed`: the name is accounted for, the content is a real bug.
+    pub renamed_changed: Vec<RenamedChange>,
+}
+
+/// One file the two trees store under different names for a known reason,
+/// whose content nevertheless differs. Reported as a single changed file
+/// rather than as an unrelated `missing` + `extra` pair, which hides that the
+/// two are the same file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct RenamedChange {
+    /// The path in the archive (the reference compile).
+    pub archive: String,
+    /// The path in the magecommand output.
+    pub output: String,
 }
 
 impl Classified {
@@ -194,7 +211,7 @@ impl Classified {
 
     /// Differences that matched no known pattern — the real signal.
     pub fn unexplained_count(&self) -> usize {
-        self.missing.len() + self.extra.len() + self.changed.len()
+        self.missing.len() + self.extra.len() + self.changed.len() + self.renamed_changed.len()
     }
 }
 
@@ -260,11 +277,13 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
     let mut extra: Vec<String> = report.extra.clone();
     let mut changed: Vec<String> = report.changed.clone();
     let mut known: Vec<KnownGroup> = Vec::new();
+    let mut renamed_changed: Vec<RenamedChange> = Vec::new();
 
     // 1. Plugin-list scope ordering: pair a missing `a|b|…|plugin-list.php`
     //    with an extra file whose scope tokens are the same multiset in a
-    //    different order.
-    if let Some(group) = plugin_list_scope_order(&mut missing, &mut extra, ctx) {
+    //    different order. A pair whose content also differs is taken out of
+    //    missing/extra too, but stays unexplained as one renamed change.
+    if let Some(group) = plugin_list_scope_order(&mut missing, &mut extra, &mut renamed_changed, ctx) {
         known.push(group);
     }
 
@@ -414,7 +433,7 @@ payment module. Verified against the disabled modules' own source, one PHP heade
         known.push(group);
     }
 
-    Classified { known, missing, extra, changed }
+    Classified { known, missing, extra, changed, renamed_changed }
 }
 
 /// Scope tokens of a plugin-list cache filename, e.g.
@@ -435,14 +454,12 @@ fn plugin_list_scopes(rel: &str) -> Option<Vec<String>> {
 fn plugin_list_scope_order(
     missing: &mut Vec<String>,
     extra: &mut Vec<String>,
+    renamed_changed: &mut Vec<RenamedChange>,
     ctx: &ClassifyCtx,
 ) -> Option<KnownGroup> {
     let mut items: Vec<String> = Vec::new();
     let mut claimed_missing: HashSet<String> = HashSet::new();
     let mut claimed_extra: HashSet<String> = HashSet::new();
-    // Pairs that are a pure rename on paper but differ in content: named in the
-    // explanation, never claimed.
-    let mut unverified: Vec<String> = Vec::new();
 
     for m in missing.iter() {
         let Some(m_scopes) = plugin_list_scopes(m) else { continue };
@@ -454,39 +471,37 @@ fn plugin_list_scope_order(
                 && *e != m
         });
         let Some(e) = hit else { continue };
-        if !pair_is_equivalent(&ctx.archive.join(m), &ctx.output.join(e), ctx.strict_ordering) {
+        let e = e.clone();
+        claimed_missing.insert(m.clone());
+        claimed_extra.insert(e.clone());
+        if !pair_is_equivalent(&ctx.archive.join(m), &ctx.output.join(&e), ctx.strict_ordering) {
             // The RENAME is explained; a content difference is not, and the two
-            // are independent. Claiming the pair here would file a changed file
-            // under a filename group and hide it from `--fail-on-diff`, which
-            // is how six truncated plugin lists per Adobe store went unreported
-            // for the tool's whole life. Leave both paths unclaimed so they are
-            // reported and fail.
-            unverified.push(format!("{m}  ->  {e}"));
+            // are independent. Filing the pair under this group would hide a
+            // content bug from `--fail-on-diff`, which is how six truncated
+            // plugin lists per Adobe store went unreported for the tool's whole
+            // life. Listing it as an unrelated missing + extra hides that the
+            // two are one file. So it becomes one unexplained renamed change.
+            renamed_changed.push(RenamedChange { archive: m.clone(), output: e });
             continue;
         }
         items.push(format!("{m}  ->  {e}"));
-        claimed_missing.insert(m.clone());
-        claimed_extra.insert(e.clone());
     }
 
+    missing.retain(|m| !claimed_missing.contains(m));
+    extra.retain(|e| !claimed_extra.contains(e));
     if items.is_empty() {
         return None;
     }
-    missing.retain(|m| !claimed_missing.contains(m));
-    extra.retain(|e| !claimed_extra.contains(e));
 
-    let verified_note = if unverified.is_empty() {
-        "The paired files are byte-identical — only the cache-id filename differs. ".to_owned()
-    } else {
-        format!(
-            "{} further pair(s) match by scope set but NOT by content, so they are left \
-unexplained and listed above: {}. A content difference is a separate bug from the name — \
-start by comparing sizes, since a per-area list far smaller than the archive's is missing \
-its global plugin baseline. ",
-            unverified.len(),
-            unverified.join(", ")
-        )
-    };
+    let mut verified_note =
+        "The paired files are byte-identical — only the cache-id filename differs. ".to_owned();
+    if !renamed_changed.is_empty() {
+        verified_note.push_str(&format!(
+            "{} further pair(s) are the same rename but differ in content; they are listed as \
+unexplained renamed changes. ",
+            renamed_changed.len()
+        ));
+    }
     Some(KnownGroup {
         kind: KnownKind::PluginListScopeOrder,
         title: KnownKind::PluginListScopeOrder.title().to_owned(),
@@ -1754,6 +1769,25 @@ pub struct Divergence {
 /// reported line is a real divergence, never an already-explained disabled-module
 /// entry. Generated code is compared line by line as-is. `None` = no difference
 /// survives normalization.
+/// [`first_divergence`] for a plugin-list cache: both sides are first put in
+/// the canonical section-entry order `--strict-ordering`-free comparison uses
+/// (`compare::canonical_map_order`), so the reported line is a real content
+/// difference rather than the first of many entries that merely sit elsewhere.
+/// Falls back to the raw text when a side isn't plugin-list shaped.
+pub fn first_plugin_list_divergence(
+    archive_text: &str,
+    output_text: &str,
+    disabled: &HashSet<String>,
+    expected: &HashSet<String>,
+) -> Option<Divergence> {
+    let canonical = |text: &str| {
+        crate::compare::canonical_map_order(text.as_bytes())
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_else(|| text.to_owned())
+    };
+    first_divergence(&canonical(archive_text), &canonical(output_text), true, disabled, expected)
+}
+
 pub fn first_divergence(
     archive_text: &str,
     output_text: &str,
@@ -1903,14 +1937,40 @@ mod tests {
         assert_eq!(c.known[0].items.len(), 1, "only the identical pair is claimed");
         assert!(c.known[0].items[0].contains("frontend"));
         assert!(c.known[0].verified);
-        assert!(c.known[0].explanation.contains("NOT by content"));
+        assert!(c.known[0].explanation.contains("differ in content"));
 
-        // The truncated pair stays unexplained, so --fail-on-diff fails on it.
-        assert_eq!(c.missing, vec!["primary|global|crontab|plugin-list.php".to_string()]);
-        assert_eq!(c.extra, vec!["crontab|global|primary|plugin-list.php".to_string()]);
-        assert_eq!(c.unexplained_count(), 2);
+        // The truncated pair stays unexplained, so --fail-on-diff fails on it,
+        // but as ONE renamed change rather than an unrelated missing + extra.
+        assert!(c.missing.is_empty() && c.extra.is_empty());
+        assert_eq!(
+            c.renamed_changed,
+            vec![RenamedChange {
+                archive: "primary|global|crontab|plugin-list.php".to_string(),
+                output: "crontab|global|primary|plugin-list.php".to_string(),
+            }]
+        );
+        assert_eq!(c.unexplained_count(), 1);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Entries that merely sit in another order must not be reported as the
+    // divergence of a plugin list: the type blocks are canonicalized first, so
+    // the line shown is the real content difference.
+    #[test]
+    fn plugin_list_divergence_skips_entry_order() {
+        let entry = |ty: &str, body: &str| format!("    '{ty}' => \n    array (\n{body}    ),\n");
+        let plugin = |name: &str| format!("      '{name}' => \n      array (\n        'sortOrder' => 0,\n      ),\n");
+        let file = |entries: &[String]| {
+            format!("<?php return array (\n  0 => \n  array (\n{}  ),\n);\n", entries.concat())
+        };
+        // `A` loses its plugin in the output; `B` only moves.
+        let archive = file(&[entry("A", &plugin("pa")), entry("B", &plugin("pb"))]);
+        let output = file(&[entry("B", &plugin("pb")), entry("A", "")]);
+
+        let none = HashSet::new();
+        let d = first_plugin_list_divergence(&archive, &output, &none, &none).unwrap();
+        assert_eq!(d.archive_line.as_deref(), Some("'pa' =>"));
     }
 
     #[test]

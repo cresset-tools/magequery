@@ -2174,12 +2174,70 @@ fn compare(
             "\n{} matching no known pattern — investigate these",
             style::fail(&format!("✗ UNEXPLAINED: {unexplained} difference(s)"))
         );
+        // The first real divergence between two versions of one file.
+        let no_entries = std::collections::HashSet::new();
+        let print_divergence = |archive_rel: &str, output_rel: &str, tree: Tree| {
+            let texts = std::fs::read_to_string(archive.join(archive_rel))
+                .ok()
+                .zip(std::fs::read_to_string(output.join(output_rel)).ok());
+            // `disabled`/`expected` empty = compare every entry as-is.
+            let diverge = |disabled: &std::collections::HashSet<String>,
+                           expected: &std::collections::HashSet<String>| {
+                texts.as_ref().and_then(|(a, b)| {
+                    if output_rel.ends_with("plugin-list.php") {
+                        magecommand_engine::first_plugin_list_divergence(a, b, disabled, expected)
+                    } else {
+                        magecommand_engine::first_divergence(a, b, tree == Tree::Metadata, disabled, expected)
+                    }
+                })
+            };
+            let print = |d: magecommand_engine::Divergence| {
+                let a = side_line(d.archive_line.as_deref(), "(nothing: output only adds lines)");
+                let b = side_line(d.output_line.as_deref(), "(ends here)");
+                println!("               {}", style::removed(&format!("- archive: {a}")));
+                println!("               {}", style::added(&format!("+ output:  {b}")));
+            };
+            // A plugin list is a set of lookup maps keyed by type: name the types
+            // whose entries differ, flagging those of disabled modules, then show
+            // the first real line difference.
+            if output_rel.ends_with("plugin-list.php") {
+                if let Some(entries) =
+                    texts.as_ref().and_then(|(a, b)| magecommand_engine::map_entry_diff(a, b))
+                {
+                    print_entry_diffs(&entries, &disabled_modules, sample);
+                    if let Some(d) = diverge(&disabled_modules, &expected) {
+                        print(d);
+                    }
+                    return;
+                }
+            }
+            if let Some(d) = diverge(&disabled_modules, &expected) {
+                print(d);
+            } else if let Some(d) = diverge(&no_entries, &no_entries) {
+                // Every difference left is an entry the other rules expect to
+                // differ — types of disabled modules, or ones unresolvable
+                // statically — yet the file as a whole matched no rule. Say so,
+                // and show the first one: it is the lead.
+                println!(
+                    "               {}",
+                    style::dim("only entries for disabled-module or statically unresolvable types differ; the first:")
+                );
+                print(d);
+            } else {
+                println!("               {}", style::dim("(no line-level divergence after normalization)"));
+            }
+        };
         for tree in [Tree::Metadata, Tree::Code] {
             let changed = in_tree(&classified.changed, tree);
+            let renamed: Vec<&magecommand_engine::RenamedChange> = classified
+                .renamed_changed
+                .iter()
+                .filter(|r| Tree::of(&r.archive) == tree)
+                .collect();
             let missing = in_tree(&classified.missing, tree);
             let extra = in_tree(&classified.extra, tree);
             let counts: Vec<String> = [
-                (Bucket::Changed, changed.len()),
+                (Bucket::Changed, changed.len() + renamed.len()),
                 (Bucket::Missing, missing.len()),
                 (Bucket::Extra, extra.len()),
             ]
@@ -2193,33 +2251,27 @@ fn compare(
             println!("\n  {}: {}", style::heading(tree.heading()), counts.join(", "));
             for path in changed.iter().take(sample) {
                 println!("    {}  {}", Bucket::Changed.label(), tree.display(path));
-                let divergence = std::fs::read_to_string(archive.join(path))
-                    .ok()
-                    .zip(std::fs::read_to_string(output.join(path)).ok())
-                    .and_then(|(a, b)| {
-                        magecommand_engine::first_divergence(
-                            &a,
-                            &b,
-                            tree == Tree::Metadata,
-                            &disabled_modules,
-                            &expected,
-                        )
-                    });
-                match divergence {
-                    Some(d) => {
-                        let a = side_line(d.archive_line.as_deref(), "(nothing: output only adds lines)");
-                        let b = side_line(d.output_line.as_deref(), "(ends here)");
-                        println!("               {}", style::removed(&format!("- archive: {a}")));
-                        println!("               {}", style::added(&format!("+ output:  {b}")));
-                    }
-                    None => println!(
-                        "               {}",
-                        style::dim("(no line-level divergence after normalization)")
-                    ),
-                }
+                print_divergence(path, path, tree);
             }
             if changed.len() > sample {
                 println!("    {}  … {} more", Bucket::Changed.label(), changed.len() - sample);
+            }
+            // A plugin-list file whose name differs only because magecommand
+            // sorts the scope names: one file, so one entry, with the rename
+            // called out as expected and the CONTENT divergence as the finding.
+            for r in renamed.iter().take(sample) {
+                println!("    {}  {}", Bucket::Changed.label(), tree.display(&r.archive));
+                println!(
+                    "               {}",
+                    style::dim(&format!(
+                        "written as {} (expected: magecommand sorts the scope names)",
+                        r.output.rsplit('/').next().unwrap_or(&r.output)
+                    ))
+                );
+                print_divergence(&r.archive, &r.output, tree);
+            }
+            if renamed.len() > sample {
+                println!("    {}  … {} more", Bucket::Changed.label(), renamed.len() - sample);
             }
             for (bucket, paths) in [(Bucket::Missing, &missing), (Bucket::Extra, &extra)] {
                 for path in paths.iter().take(sample) {
@@ -2390,6 +2442,52 @@ impl Bucket {
     /// The per-line label, padded before coloring so the paths align.
     fn label(self) -> String {
         self.paint(&format!("{:<7}", self.word()))
+    }
+}
+
+/// The types whose plugin-list entries differ, one line each (a type changed in
+/// several sections is listed once), tagged when the type belongs to a module
+/// disabled in config.php — the interactions magecommand gets wrong most often.
+fn print_entry_diffs(
+    entries: &[magecommand_engine::EntryDiff],
+    disabled_modules: &std::collections::HashSet<String>,
+    sample: usize,
+) {
+    // The processed-chain section keys a type per method (`Foo_match___self`):
+    // fold those into the type, so a type is listed once.
+    let type_of = |key: &str| -> String {
+        match key.strip_suffix("___self").and_then(|k| k.rsplit_once('_')) {
+            Some((ty, _method)) => ty.to_owned(),
+            None => key.to_owned(),
+        }
+    };
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<(String, &magecommand_engine::EntryDiff)> = entries
+        .iter()
+        .map(|e| (type_of(&e.key), e))
+        .filter(|(ty, _)| seen.insert(ty.clone()))
+        .collect();
+    println!(
+        "               {}",
+        style::dim(&format!("{} type(s) with differing entries:", unique.len()))
+    );
+    for (ty, e) in unique.iter().take(sample) {
+        let class = ty.replace("\\\\", "\\");
+        let module: String = class.split('\\').take(2).collect::<Vec<_>>().join("_");
+        let tag = if disabled_modules.contains(&module) {
+            style::changed(&format!("  (disabled module {module})"))
+        } else {
+            String::new()
+        };
+        let bucket = match e.change {
+            magecommand_engine::EntryChange::Missing => Bucket::Missing,
+            magecommand_engine::EntryChange::Extra => Bucket::Extra,
+            _ => Bucket::Changed,
+        };
+        println!("                 {}  {}{tag}", bucket.label(), style::class(&class));
+    }
+    if unique.len() > sample {
+        println!("                 … {} more (--json lists the files)", unique.len() - sample);
     }
 }
 

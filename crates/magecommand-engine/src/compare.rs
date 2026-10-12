@@ -189,6 +189,42 @@ pub(crate) fn same_modulo_ordering(a: &Path, b: &Path) -> Result<bool> {
 /// blank-line-separated method blocks.
 pub(crate) fn canonical_map_order(bytes: &[u8]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(bytes).ok()?;
+    let mut out: Vec<String> = Vec::new();
+    let mut entries: Vec<Vec<String>> = Vec::new();
+    let flush = |entries: &mut Vec<Vec<String>>, out: &mut Vec<String>| {
+        entries.sort();
+        for e in entries.drain(..) {
+            out.extend(e);
+        }
+    };
+    for segment in map_segments(text)? {
+        match segment {
+            MapSegment::Entry(e) => entries.push(e),
+            MapSegment::Line(l) => {
+                flush(&mut entries, &mut out);
+                out.push(l);
+            }
+        }
+    }
+    flush(&mut entries, &mut out);
+    let mut joined = out.join("\n");
+    joined.push('\n');
+    Some(joined.into_bytes())
+}
+
+/// One piece of a `var_export`-shaped map file: a top-level entry (every line
+/// of it, key and value), or a structural line between entries (the section
+/// headers and closers).
+enum MapSegment {
+    Line(String),
+    Entry(Vec<String>),
+}
+
+/// Split a `var_export`-shaped metadata file into its top-level section
+/// entries and the lines between them. `None` for anything not of that shape
+/// (no `<?php return array (` header, or not a single entry in it), so callers
+/// fall back to strict bytes rather than declaring two unrelated files equal.
+fn map_segments(text: &str) -> Option<Vec<MapSegment>> {
     if !text.starts_with("<?php return array (") {
         return None;
     }
@@ -219,23 +255,15 @@ pub(crate) fn canonical_map_order(bytes: &[u8]) -> Option<Vec<u8>> {
         }
         d
     };
-    let mut out: Vec<String> = Vec::new();
-    let mut entries: Vec<Vec<String>> = Vec::new();
+    let mut segments: Vec<MapSegment> = Vec::new();
     let mut open_depth = 0i32;
     let mut in_entry = false;
-    let mut saw_section = false;
-    let flush = |entries: &mut Vec<Vec<String>>, out: &mut Vec<String>, saw: &mut bool| {
-        if !entries.is_empty() {
-            entries.sort();
-            for e in entries.drain(..) {
-                out.extend(e);
-            }
-            *saw = true;
-        }
-    };
+    let mut saw_entry = false;
     for line in text.lines() {
         if in_entry {
-            entries.last_mut().expect("entry open").push(line.to_owned());
+            if let Some(MapSegment::Entry(e)) = segments.last_mut() {
+                e.push(line.to_owned());
+            }
             open_depth += depth_of(line);
             if open_depth <= 0 && line.trim_end().ends_with(',') {
                 in_entry = false;
@@ -243,23 +271,87 @@ pub(crate) fn canonical_map_order(bytes: &[u8]) -> Option<Vec<u8>> {
             continue;
         }
         if opens_entry(line) {
-            entries.push(vec![line.to_owned()]);
+            segments.push(MapSegment::Entry(vec![line.to_owned()]));
+            saw_entry = true;
             open_depth = depth_of(line);
             in_entry = !(open_depth <= 0 && line.trim_end().ends_with(','));
             continue;
         }
-        flush(&mut entries, &mut out, &mut saw_section);
-        out.push(line.to_owned());
+        segments.push(MapSegment::Line(line.to_owned()));
     }
-    flush(&mut entries, &mut out, &mut saw_section);
-    // Nothing map-shaped in it — fall back to strict bytes rather than
-    // declaring two unrelated files equivalent.
-    if !saw_section {
-        return None;
+    saw_entry.then_some(segments)
+}
+
+/// How one top-level entry of a map-shaped metadata file differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryChange {
+    /// Only in the archive.
+    Missing,
+    /// Only in the output.
+    Extra,
+    /// In both, with a different value.
+    Changed,
+}
+
+/// One differing top-level entry: which section it sits in (`0`, `1`, … in
+/// file order), its key as written (escaped, without quotes), and how.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct EntryDiff {
+    pub section: usize,
+    pub key: String,
+    pub change: EntryChange,
+}
+
+/// The top-level entries in which two `var_export`-shaped metadata files (a
+/// plugin-list cache, `global.php`, …) differ, keyed per section, in file
+/// order. Entry ORDER is ignored: the sections are lookup maps. `None` when
+/// either side is not map-shaped.
+pub fn map_entry_diff(archive: &str, output: &str) -> Option<Vec<EntryDiff>> {
+    // section -> key -> entry text
+    type Sections = Vec<Vec<(String, String)>>;
+    let sections = |text: &str| -> Option<Sections> {
+        let mut out: Sections = Vec::new();
+        let mut in_section = false;
+        for segment in map_segments(text)? {
+            match segment {
+                MapSegment::Line(_) => in_section = false,
+                MapSegment::Entry(lines) => {
+                    if !in_section {
+                        out.push(Vec::new());
+                        in_section = true;
+                    }
+                    let head = lines[0].trim_start();
+                    let key = head.split(" => ").next().unwrap_or(head).trim_matches('\'').to_owned();
+                    out.last_mut().expect("section open").push((key, lines.join("\n")));
+                }
+            }
+        }
+        Some(out)
+    };
+    let (a, b) = (sections(archive)?, sections(output)?);
+    let mut diffs = Vec::new();
+    for section in 0..a.len().max(b.len()) {
+        let empty = Vec::new();
+        let sa = a.get(section).unwrap_or(&empty);
+        let sb = b.get(section).unwrap_or(&empty);
+        let in_b: std::collections::HashMap<&str, &str> =
+            sb.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let in_a: std::collections::HashSet<&str> = sa.iter().map(|(k, _)| k.as_str()).collect();
+        for (key, value) in sa {
+            let change = match in_b.get(key.as_str()) {
+                None => EntryChange::Missing,
+                Some(other) if other != value => EntryChange::Changed,
+                Some(_) => continue,
+            };
+            diffs.push(EntryDiff { section, key: key.clone(), change });
+        }
+        for (key, _) in sb.iter().filter(|(k, _)| !in_a.contains(k.as_str())) {
+            diffs.push(EntryDiff { section, key: key.clone(), change: EntryChange::Extra });
+        }
     }
-    let mut joined = out.join("\n");
-    joined.push('\n');
-    Some(joined.into_bytes())
+    Some(diffs)
 }
 
 /// Canonicalize a generated interceptor or proxy by sorting its blank-line
@@ -313,6 +405,28 @@ pub(crate) fn canonical_method_order(bytes: &[u8]) -> Option<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+
+    // Entries are compared per section by key: order is ignored, and each
+    // differing key is reported once as missing / extra / changed.
+    #[test]
+    fn map_entry_diff_reports_keys_not_order() {
+        let archive = "<?php return array (\n  0 => \n  array (\n    'A' => 1,\n    'B' => 2,\n    'C' => 3,\n  ),\n  1 => \n  array (\n    'A' => \n    array (\n      'p' => 0,\n    ),\n  ),\n);\n";
+        let output = "<?php return array (\n  0 => \n  array (\n    'C' => 3,\n    'B' => 9,\n    'D' => 4,\n  ),\n  1 => \n  array (\n    'A' => NULL,\n  ),\n);\n";
+        let d = map_entry_diff(archive, output).unwrap();
+        let got: Vec<(usize, &str, EntryChange)> =
+            d.iter().map(|e| (e.section, e.key.as_str(), e.change)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, "A", EntryChange::Missing),
+                (0, "B", EntryChange::Changed),
+                (0, "D", EntryChange::Extra),
+                (1, "A", EntryChange::Changed),
+            ]
+        );
+        assert!(map_entry_diff("not php", output).is_none());
+    }
+
     use super::*;
     use std::fs;
 
