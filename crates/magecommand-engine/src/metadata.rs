@@ -383,6 +383,26 @@ pub fn clear_generated_dir(root: &Path, subdir: &str) -> Result<()> {
     }
 }
 
+/// Remove Magento's `var/.regenerate` flag after writing a fresh tree.
+///
+/// `magento/magento-composer-installer` touches that flag on every
+/// `composer install`, and the next `bin/magento` call to boot sees it in
+/// `GeneratedFiles::cleanGeneratedFiles()` and deletes `generated/code`,
+/// `generated/metadata` and `var/cache`. With `bin/magento`, that call is
+/// `setup:di:compile` itself: it consumes the flag and then compiles. A
+/// magecommand tree never passes through that boot, so a build that compiles
+/// after `composer install` would see its output wiped by the next
+/// `bin/magento` command (a static deploy, say). Consuming the flag here is
+/// what `setup:di:compile` would have done. Returns whether a flag was removed.
+pub fn consume_regenerate_flag(root: &Path) -> Result<bool> {
+    let flag = root.join("var/.regenerate");
+    match fs::remove_file(&flag) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(Error::io(&flag, e)),
+    }
+}
+
 fn collect_leaf_files(root: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -464,5 +484,16 @@ mod tests {
         assert!(!root.path().join("generated/code").exists());
         // A missing dir is fine (idempotent).
         clear_generated_dir(root.path(), "code").unwrap();
+    }
+
+    #[test]
+    fn consume_regenerate_flag_removes_it_once() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("var")).unwrap();
+        fs::write(root.path().join("var/.regenerate"), "").unwrap();
+        assert!(consume_regenerate_flag(root.path()).unwrap());
+        assert!(!root.path().join("var/.regenerate").exists());
+        // No flag (or no var/ at all) is fine.
+        assert!(!consume_regenerate_flag(root.path()).unwrap());
     }
 }

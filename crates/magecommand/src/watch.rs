@@ -78,6 +78,9 @@ pub fn watch(root: Option<PathBuf>, _json: bool, once: bool) -> anyhow::Result<E
     let mut pristine = Definitions::scan(&magento, &root, &scan_generated);
     let out = compute(&magento, &pristine, &root);
     let written = metadata::write_generated(&root, &out.files)?;
+    // A `composer install` touches var/.regenerate; the next bin/magento boot
+    // would then wipe this tree. setup:di:compile consumes it, so do we.
+    metadata::consume_regenerate_flag(&root)?;
     let mut prev: HashMap<String, String> = out.files.iter().cloned().collect();
     eprintln!(
         "watch: initial build — {} files in {:.1}s",
@@ -155,6 +158,7 @@ pub fn watch(root: Option<PathBuf>, _json: bool, once: bool) -> anyhow::Result<E
         }
         let out = compute(&magento, &pristine, &root);
         let stats = metadata::write_generated_delta(&root, &out.files, &prev)?;
+        metadata::consume_regenerate_flag(&root)?;
         prev = out.files.iter().cloned().collect();
         eprintln!(
             "watch: recompiled in {:.0}ms — wrote {} · deleted {} · unchanged {}{}",

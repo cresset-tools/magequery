@@ -1759,6 +1759,9 @@ fn compile(
             );
             lap!("input digest (short-circuit check)");
             if current == prev.inputs_digest {
+                // The tree on disk is current, so it must survive the next
+                // `bin/magento` boot just like a fresh write (see below).
+                consume_regenerate_flag(&root)?;
                 if json {
                     println!("{{\"status\":\"up-to-date\",\"reason\":\"no input changed\"}}");
                 } else {
@@ -1908,6 +1911,7 @@ fn compile(
         };
         magecommand_engine::manifest::Manifest::new(&bp, digest).save(&root)?;
         lap!("write manifest + input digest");
+        consume_regenerate_flag(&root)?;
         println!("wrote {written} generated/ file(s)");
         warn_case_collapse(&root, &out.files);
         if !out.findings.is_empty() {
@@ -1919,6 +1923,19 @@ fn compile(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Remove `var/.regenerate` so the next `bin/magento` boot keeps the tree we
+/// just wrote (see `metadata::consume_regenerate_flag`), and say so on stderr:
+/// a build log should show why the flag a `composer install` left is gone.
+fn consume_regenerate_flag(root: &std::path::Path) -> anyhow::Result<()> {
+    if magecommand_engine::metadata::consume_regenerate_flag(root)? {
+        eprintln!(
+            "note: removed var/.regenerate, as setup:di:compile does, so the next \
+             bin/magento command keeps generated/"
+        );
+    }
+    Ok(())
 }
 
 /// After a bulk write, surface case-collision hazards in the output tree.

@@ -46,7 +46,9 @@ Writes `generated/code` and `generated/metadata`.
   `--dry-run` reports without writing; `--incremental` skips the whole compile
   when no input changed (stat fingerprint); `--fused` emits fused interceptors
   with inlined plugin chains instead of stock runtime-dispatch ones
-  (global-only classes for now).
+  (global-only classes for now). Like `setup:di:compile`, it removes
+  `var/.regenerate` (left by `composer install`), so the next `bin/magento`
+  command does not wipe `generated/`.
 - Stay compiled while editing → `di watch`. Builds once, keeps the parsed index in
   memory, recompiles on change and writes only the delta. Long-running.
 - Cache `generated/` in CI → `di digest`. The compile is a pure function of the
