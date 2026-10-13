@@ -51,6 +51,13 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.19.2](https://github.com/cresset-tools/magequery/compare/magequery-v0.19.1...magequery-v0.19.2) (2026-10-13)
+
+
+### Bug Fixes
+
+* **magecommand:** match the admin static deploy on the transitional Csp ([#139](https://github.com/cresset-tools/magequery/issues/139)) ([b38c46f](https://github.com/cresset-tools/magequery/commit/b38c46f41789995f11459de6acf5ff962735b9bd))
+
 ## [0.19.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.19.0...magequery-v0.19.1) (2026-10-13)
 
 
