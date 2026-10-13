@@ -12,8 +12,10 @@
 //! - an **`after`** plugin receives the previous result and appends to it, so a
 //!   chain of them applies in execution order (ascending `sortOrder`);
 //! - an **`around`** plugin appends once `$proceed` has returned, so the
-//!   innermost runs first — reverse execution order — and all of those land
-//!   before any `after` sees the array.
+//!   innermost runs first — reverse execution order;
+//! - an `after` plugin runs at the around LEVEL it is declared inside, so one
+//!   declared between two arounds appends after the inner around and before
+//!   the outer one.
 //!
 //! Reversing unconditionally (right only for `around`) shipped a real store's
 //! two `after` plugins backwards. The rest of the static suite is gated on an
@@ -25,13 +27,18 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-struct Fixture(PathBuf);
+/// The fixture's module names, in declaration (= execution) order.
+const MODULES: [&str; 3] = ["First", "Second", "Third"];
+
+/// The root, and how many plugin modules it has.
+struct Fixture(PathBuf, usize);
 
 impl Fixture {
-    /// A root with a frontend theme and two modules that each append one
-    /// exclude. `kinds` picks the interception kind per module, so the same
-    /// fixture covers the after-chain, the around-chain, and a mix.
-    fn new(name: &str, kinds: [&str; 2]) -> Self {
+    /// A root with a frontend theme and one module per entry of `kinds`, each
+    /// appending one exclude (`acme1…`, `acme2…`, … in declaration order).
+    /// `kinds` picks the interception kind per module, so the same fixture
+    /// covers the after-chain, the around-chain, and mixes.
+    fn new(name: &str, kinds: &[&str]) -> Self {
         let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("mq-excl-{name}"));
         let _ = std::fs::remove_dir_all(&root);
         let w = |rel: &str, content: &str| {
@@ -40,9 +47,13 @@ impl Fixture {
             std::fs::write(p, content).unwrap();
         };
 
+        let modules: Vec<(&str, &str)> =
+            MODULES.iter().copied().zip(kinds.iter().copied()).collect();
+        let listed: Vec<String> =
+            modules.iter().map(|(m, _)| format!("'Acme_{m}' => 1")).collect();
         w(
             "app/etc/config.php",
-            "<?php\nreturn ['modules' => ['Acme_First' => 1, 'Acme_Second' => 1]];\n",
+            &format!("<?php\nreturn ['modules' => [{}]];\n", listed.join(", ")),
         );
         w(
             "app/design/frontend/Acme/theme/theme.xml",
@@ -57,8 +68,8 @@ impl Fixture {
         w("lib/web/mage/requirejs/mixins.js", "// mixins stub\n");
 
         // Declaration order in config.php is the tie-break for equal sortOrder,
-        // so `First` executes before `Second`.
-        for (i, (module, kind)) in [("First", kinds[0]), ("Second", kinds[1])].iter().enumerate() {
+        // so `First` executes before `Second`, and so on.
+        for (i, (module, kind)) in modules.iter().enumerate() {
             let literal = format!("acme{}.example.com", i + 1);
             w(
                 &format!("app/code/Acme/{module}/etc/module.xml"),
@@ -97,7 +108,7 @@ impl Fixture {
                 ),
             );
         }
-        Fixture(root)
+        Fixture(root, kinds.len())
     }
 
     /// The excludes as they appear in the emitted resolver, in order.
@@ -117,9 +128,10 @@ impl Fixture {
         let js = std::fs::read_to_string(self.0.join("out/requirejs-min-resolver.js"))
             .expect("resolver emitted");
         let mut found = Vec::new();
-        for token in ["acme1.example.com", "acme2.example.com"] {
-            if let Some(at) = js.find(token) {
-                found.push((at, token.to_owned()));
+        for i in 1..=self.1 {
+            let token = format!("acme{i}.example.com");
+            if let Some(at) = js.find(&token) {
+                found.push((at, token));
             }
         }
         found.sort();
@@ -136,7 +148,7 @@ impl Drop for Fixture {
 /// The regression: two `after` plugins apply in EXECUTION order.
 #[test]
 fn after_plugins_append_in_execution_order() {
-    let fx = Fixture::new("after", ["after", "after"]);
+    let fx = Fixture::new("after", &["after", "after"]);
     assert_eq!(
         fx.exclude_order(),
         vec!["acme1.example.com", "acme2.example.com"],
@@ -149,7 +161,7 @@ fn after_plugins_append_in_execution_order() {
 /// just the original bug pointing the other way.
 #[test]
 fn around_plugins_append_innermost_first() {
-    let fx = Fixture::new("around", ["around", "around"]);
+    let fx = Fixture::new("around", &["around", "around"]);
     assert_eq!(
         fx.exclude_order(),
         vec!["acme2.example.com", "acme1.example.com"],
@@ -161,10 +173,25 @@ fn around_plugins_append_innermost_first() {
 /// append precedes the after one regardless of declaration order.
 #[test]
 fn around_appends_land_before_after_appends() {
-    let fx = Fixture::new("mixed", ["after", "around"]);
+    let fx = Fixture::new("mixed", &["after", "around"]);
     assert_eq!(
         fx.exclude_order(),
         vec!["acme2.example.com", "acme1.example.com"],
         "the around append lands while the chain unwinds, before the after plugin sees the array"
+    );
+}
+
+/// An `after` between two arounds runs INSIDE the outer one: Magento files it
+/// under the first around's level, so it appends once the inner around has
+/// returned and before the outer around appends. The shape of a real store
+/// (an around, then an after, then an around, all at sortOrder 0), whose
+/// misplaced append changed `requirejs-min-resolver.js` and every bundle.
+#[test]
+fn an_after_between_arounds_runs_inside_the_outer_one() {
+    let fx = Fixture::new("between", &["around", "after", "around"]);
+    assert_eq!(
+        fx.exclude_order(),
+        vec!["acme3.example.com", "acme2.example.com", "acme1.example.com"],
+        "inner around, then the after at its level, then the outer around"
     );
 }

@@ -637,6 +637,15 @@ pub enum SriLayout {
     /// One `<area>/sri-hashes.json` at the static root. Hashes were collected
     /// by plugins on asset CREATION, which saw `requirejs-config.js` but not
     /// `requirejs-min-resolver.js`, and the save context was the area.
+    ///
+    /// The transitional Csp (100.4.7-p3, on 2.4.8 patch releases) lands here
+    /// too: its `Integrity` post-processor hashes each package's own files but
+    /// saves them into the AREA's repository, and the creation plugins still
+    /// add `requirejs-config.js` and the bundles. The phases come out in the
+    /// same order. Its post-processor runs inside each `-j` worker, so a real
+    /// parallel deploy can lose whole packages' entries to a load/merge/save
+    /// race; we write the complete file a race-free run produces, and
+    /// `static verify` recognizes the race.
     PerArea,
     /// One `sri-hashes.json` inside every
     /// `<area>/<Vendor>/<theme>/<locale>` package. The newer Csp registers a
@@ -662,11 +671,31 @@ pub fn sri_layout(magento: &magequery_core::Magento) -> SriLayout {
     if !has("Magento\\Csp\\Model\\SubresourceIntegrity\\Storage\\File") {
         return SriLayout::None;
     }
-    if has("Magento\\Csp\\Model\\Deploy\\Package\\Processor\\PostProcessor\\Integrity") {
-        SriLayout::PerPackage
-    } else {
-        SriLayout::PerArea
+    let post_processor = magequery_core::ClassName::new(
+        "Magento\\Csp\\Model\\Deploy\\Package\\Processor\\PostProcessor\\Integrity",
+    );
+    let Some(file) = magento.class_file(&post_processor) else {
+        return SriLayout::PerArea;
+    };
+    // A transitional Csp (100.4.7-p3, on 2.4.8 patch releases) already has the
+    // post-processor but still saves into the AREA's repository:
+    //
+    //     $area = explode('/', $package->getPath())[0];
+    //     $this->repositoryPool->get($area)->saveBunch($collectedData);
+    //
+    // and keeps the asset-creation plugins wired, so its file is the area
+    // layout, phases and all.
+    match magento.read_source(&file) {
+        Ok(src) if saves_into_area_repository(&src) => SriLayout::PerArea,
+        _ => SriLayout::PerPackage,
     }
+}
+
+/// Whether a Csp `Integrity` post-processor's source saves into the area's
+/// repository (the transitional Csp) rather than the package's.
+fn saves_into_area_repository(src: &str) -> bool {
+    let compact: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains("explode('/',$package->getPath())[0]")
 }
 
 /// Write one package's `sri-hashes.json` beside the js it covers, in
@@ -2283,5 +2312,17 @@ mod tests {
             package_dir(Path::new("/srv/pub/static"), "frontend", "Magento/luma", "en_US"),
             PathBuf::from("/srv/pub/static/frontend/Magento/luma/en_US")
         );
+    }
+
+    /// The transitional Csp's post-processor saves into the area's repository;
+    /// the newer one into the package's. Whitespace must not matter.
+    #[test]
+    fn the_transitional_integrity_post_processor_is_told_apart() {
+        let transitional = "$area = explode('/', $package->getPath())[0];\n\
+                            $this->repositoryPool->get($area)->saveBunch($collectedData);";
+        assert!(saves_into_area_repository(transitional));
+        assert!(saves_into_area_repository("$area = explode( '/' , $package->getPath() )[0];"));
+        let newer = "$this->repositoryPool->get($package->getPath())->saveBunch($collectedData);";
+        assert!(!saves_into_area_repository(newer));
     }
 }

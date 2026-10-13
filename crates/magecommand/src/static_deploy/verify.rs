@@ -99,6 +99,11 @@ pub struct BucketReport {
     /// `strict`: the modules and their sources are identical, so there is no
     /// stricter reading under which these are a defect.
     pub resplit: Vec<String>,
+    /// An area `sri-hashes.json` whose reference copy lost whole packages'
+    /// entries to Magento's parallel deploy — see [`area_sri_explained`].
+    /// Clean: every hash the reference kept matches ours, and ours is the
+    /// complete file a race-free run writes.
+    pub sri_race: Vec<String>,
     /// Present in both, byte-identical.
     pub identical: usize,
 }
@@ -110,6 +115,7 @@ impl BucketReport {
             + self.changed.len()
             + self.equivalent.len()
             + self.resplit.len()
+            + self.sri_race.len()
             + self.missing.len()
     }
 
@@ -143,6 +149,7 @@ impl VerifyReport {
             t.changed.extend(b.changed.iter().cloned());
             t.equivalent.extend(b.equivalent.iter().cloned());
             t.resplit.extend(b.resplit.iter().cloned());
+            t.sri_race.extend(b.sri_race.iter().cloned());
             t.identical += b.identical;
         }
         t
@@ -322,55 +329,93 @@ fn bundle_scope_equivalent(reference: &Path, output: &Path, package: &str) -> bo
     })
 }
 
-/// Whether an area's `sri-hashes.json` differs ONLY in entries for bundles of
-/// packages already accepted as a re-split.
+/// How an area's `sri-hashes.json` differs, when every difference has a
+/// known, benign cause. `None` keeps the file flagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AreaSri {
+    /// Only entries for bundles of packages already accepted as a re-split.
+    Resplit,
+    /// The reference also lost whole packages' entries to Magento's parallel
+    /// workers (possibly on top of re-split bundles).
+    Race,
+}
+
+/// Classify a differing area `sri-hashes.json`.
 ///
-/// The integrity file hashes every deployed `.js`, bundles included, so once a
-/// package's bundles are accepted as the same modules in a different split,
-/// their hashes necessarily differ too — and the area file inherits that. On
-/// one store it was the single remaining difference in an otherwise byte-exact
-/// two-locale deploy, and it is a consequence of a difference already judged
-/// benign, not a second finding.
+/// **Re-split bundles.** The integrity file hashes every deployed `.js`,
+/// bundles included, so once a package's bundles are accepted as the same
+/// modules in a different split, their hashes necessarily differ too — and the
+/// area file inherits that. On one store it was the single remaining
+/// difference in an otherwise byte-exact two-locale deploy, and it is a
+/// consequence of a difference already judged benign, not a second finding.
 ///
-/// Fails closed: ONE entry outside a re-split package's `js/bundle/`, or any
-/// change to a non-bundle hash, and the file stays flagged.
-fn sri_differs_only_by_resplit_bundles(
+/// **The parallel race.** On the transitional Csp (see
+/// [`super::files::SriLayout::PerArea`]), each package's own `.js` hashes are
+/// saved by the `Integrity` post-processor INSIDE the worker process that
+/// deployed the package (`-j` > 1): load the area file, merge, save. Two
+/// workers that load before either saves race, and the last save wins, so the
+/// reference file can lack every own-file entry of whole packages. The entries
+/// the parent process adds afterwards (`requirejs-config.js`, the bundles)
+/// survive. Accepted only in exactly that shape: for each package we have
+/// entries for and the reference does not, the reference has NONE of that
+/// package's own-file entries.
+///
+/// Fails closed: a changed hash outside a re-split package's `js/bundle/`, an
+/// entry only the reference has, or a package that lost only SOME of its
+/// entries, and the file stays flagged.
+fn area_sri_explained(
     reference: &Path,
     output: &Path,
     rel: &str,
     resplit_packages: &BTreeSet<String>,
-) -> bool {
-    if !rel.ends_with("sri-hashes.json") || resplit_packages.is_empty() {
-        return false;
+) -> Option<AreaSri> {
+    if !rel.ends_with("sri-hashes.json") {
+        return None;
     }
-    let (Ok(a), Ok(b)) = (
-        std::fs::read_to_string(reference.join(rel)),
-        std::fs::read_to_string(output.join(rel)),
-    ) else {
-        return false;
-    };
-    let (Ok(a), Ok(b)) = (
-        serde_json::from_str::<BTreeMap<String, String>>(&a),
-        serde_json::from_str::<BTreeMap<String, String>>(&b),
-    ) else {
-        return false;
-    };
-    let accepted = |key: &str| {
+    let a = std::fs::read_to_string(reference.join(rel)).ok()?;
+    let b = std::fs::read_to_string(output.join(rel)).ok()?;
+    let a = serde_json::from_str::<BTreeMap<String, String>>(&a).ok()?;
+    let b = serde_json::from_str::<BTreeMap<String, String>>(&b).ok()?;
+    let package_of = |key: &str| key.splitn(5, '/').take(4).collect::<Vec<_>>().join("/");
+    let resplit_bundle = |key: &str| {
         resplit_packages
             .iter()
             .any(|pkg| key.starts_with(&format!("{pkg}/js/bundle/")))
     };
-    let mut any = false;
+    // Written by the parent process after the workers finish, so never raced:
+    // the package-root requirejs files (a module's own
+    // `Vendor_Module/requirejs-config.js` is an ordinary package file) and the
+    // bundles.
+    let parent_phase = |key: &str| {
+        let in_package = key.splitn(5, '/').nth(4).unwrap_or("");
+        in_package == "requirejs-config.js"
+            || in_package == "requirejs-min-resolver.js"
+            || is_bundle_file(key)
+    };
+
+    let (mut resplit, mut raced) = (false, BTreeSet::new());
     for key in a.keys().chain(b.keys()) {
-        if a.get(key) == b.get(key) {
-            continue;
+        match (a.get(key), b.get(key)) {
+            (Some(x), Some(y)) if x == y => {}
+            _ if resplit_bundle(key) => resplit = true,
+            (None, Some(_)) if !parent_phase(key) => {
+                raced.insert(package_of(key));
+            }
+            _ => return None,
         }
-        if !accepted(key) {
-            return false;
-        }
-        any = true;
     }
-    any
+    // A raced package lost ALL of its own-file entries, or it was not a race.
+    for package in &raced {
+        let prefix = format!("{package}/");
+        if a.keys().any(|k| k.starts_with(&prefix) && !parent_phase(k)) {
+            return None;
+        }
+    }
+    match (raced.is_empty(), resplit) {
+        (false, _) => Some(AreaSri::Race),
+        (true, true) => Some(AreaSri::Resplit),
+        (true, false) => None,
+    }
 }
 
 /// Is `rel` one of a package's bundle files?
@@ -453,22 +498,22 @@ pub fn verify(
         resplit_packages.insert(package.clone());
     }
 
-    // The integrity file inherits an accepted re-split, since it
-    // hashes the very bundles that moved.
+    // The integrity file inherits an accepted re-split, since it hashes the
+    // very bundles that moved, and may have lost entries to Magento's own
+    // parallel workers.
     for (bucket, entry) in buckets.iter_mut() {
         if !matches!(bucket, Bucket::Area(_)) {
             continue;
         }
-        let moved: Vec<String> = entry
-            .changed
-            .iter()
-            .filter(|rel| {
-                sri_differs_only_by_resplit_bundles(reference, output, rel, &resplit_packages)
-            })
-            .cloned()
-            .collect();
-        entry.changed.retain(|rel| !moved.contains(rel));
-        entry.resplit.extend(moved);
+        let mut still_changed = Vec::new();
+        for rel in entry.changed.drain(..) {
+            match area_sri_explained(reference, output, &rel, &resplit_packages) {
+                Some(AreaSri::Resplit) => entry.resplit.push(rel),
+                Some(AreaSri::Race) => entry.sri_race.push(rel),
+                None => still_changed.push(rel),
+            }
+        }
+        entry.changed = still_changed;
         entry.resplit.sort();
     }
 
@@ -754,5 +799,83 @@ mod tests {
         w(&a, "frontend/Magento/blank/nl_NL/css/x.css", ".a{}");
         assert!(verify(&a, &td.path().join("nope"), false, false).is_err());
         assert!(verify(&td.path().join("nope"), &a, false, false).is_err());
+    }
+
+    const EN: &str = "adminhtml/Acme/admin/en_US";
+    const NL: &str = "adminhtml/Acme/admin/nl_NL";
+
+    /// The transitional Csp's parallel race: two workers both loaded the area
+    /// file before either saved, so the reference lost every own-file entry of
+    /// `nl_NL`. The parent's later entries (`requirejs-config.js`) survived.
+    /// Ours is the complete file, and every hash the reference kept matches.
+    #[test]
+    fn an_area_sri_that_lost_whole_packages_to_the_race_is_explained() {
+        let td = tempfile::tempdir().unwrap();
+        let (r, o) = (td.path().join("ref"), td.path().join("out"));
+        let (en_js, nl_js) = (format!("{EN}/A_M/js/a.js"), format!("{NL}/A_M/js/a.js"));
+        // A module's own requirejs-config.js is an ordinary package file.
+        let nl_module_cfg = format!("{NL}/A_M/requirejs-config.js");
+        let (en_cfg, nl_cfg) =
+            (format!("{EN}/requirejs-config.js"), format!("{NL}/requirejs-config.js"));
+        sri(&r, &[(&en_js, "sha256-en"), (&en_cfg, "sha256-c1"), (&nl_cfg, "sha256-c2")]);
+        sri(
+            &o,
+            &[
+                (&en_js, "sha256-en"),
+                (&nl_js, "sha256-nl"),
+                (&nl_module_cfg, "sha256-m"),
+                (&en_cfg, "sha256-c1"),
+                (&nl_cfg, "sha256-c2"),
+            ],
+        );
+
+        let rep = verify(&r, &o, false, false).unwrap();
+        let totals = rep.totals();
+        assert!(totals.changed.is_empty(), "the race is explained: {:?}", totals.changed);
+        assert_eq!(totals.sri_race, vec!["adminhtml/sri-hashes.json".to_string()]);
+        assert!(rep.is_clean());
+    }
+
+    /// Negative control: a race drops a package's WHOLE block. A package that
+    /// kept some of its entries and lost others is a real difference.
+    #[test]
+    fn an_area_sri_missing_part_of_a_package_still_fails() {
+        let td = tempfile::tempdir().unwrap();
+        let (r, o) = (td.path().join("ref"), td.path().join("out"));
+        let (a, b) = (format!("{NL}/A_M/js/a.js"), format!("{NL}/A_M/js/b.js"));
+        sri(&r, &[(&a, "sha256-a")]);
+        sri(&o, &[(&a, "sha256-a"), (&b, "sha256-b")]);
+
+        let totals = verify(&r, &o, false, false).unwrap().totals();
+        assert!(totals.changed.iter().any(|p| p.ends_with("sri-hashes.json")));
+        assert!(totals.sri_race.is_empty());
+    }
+
+    /// Negative control: the parent process writes the package-root
+    /// `requirejs-config.js` after the workers finish, so the race never loses
+    /// it; a reference without it is a real difference.
+    #[test]
+    fn an_area_sri_missing_a_parent_phase_entry_still_fails() {
+        let td = tempfile::tempdir().unwrap();
+        let (r, o) = (td.path().join("ref"), td.path().join("out"));
+        let nl_cfg = format!("{NL}/requirejs-config.js");
+        sri(&r, &[]);
+        sri(&o, &[(&nl_cfg, "sha256-c")]);
+
+        let totals = verify(&r, &o, false, false).unwrap().totals();
+        assert!(totals.changed.iter().any(|p| p.ends_with("sri-hashes.json")));
+    }
+
+    /// Negative control: a hash the reference kept must match ours.
+    #[test]
+    fn an_area_sri_race_does_not_excuse_a_changed_hash() {
+        let td = tempfile::tempdir().unwrap();
+        let (r, o) = (td.path().join("ref"), td.path().join("out"));
+        let (en_js, nl_js) = (format!("{EN}/A_M/js/a.js"), format!("{NL}/A_M/js/a.js"));
+        sri(&r, &[(&en_js, "sha256-one")]);
+        sri(&o, &[(&en_js, "sha256-two"), (&nl_js, "sha256-nl")]);
+
+        let totals = verify(&r, &o, false, false).unwrap().totals();
+        assert!(totals.changed.iter().any(|p| p.ends_with("sri-hashes.json")));
     }
 }

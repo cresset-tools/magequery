@@ -435,17 +435,25 @@ pub fn min_resolver_excludes(config: &ConfigSet, modules: &[ModuleRef]) -> Vec<S
 /// caller instead of being silently dropped or half-applied.
 ///
 /// Ordering depends on the INTERCEPTION KIND, which is why the plugin's own
-/// source decides it:
+/// source decides it, and on where each plugin sits in Magento's chain:
 ///
 /// - an **`after`** plugin receives the previous result and appends to it, so a
 ///   chain of them applies in execution order (ascending `sortOrder`);
 /// - an **`around`** plugin appends after `$proceed` returns, so the innermost
-///   runs first — reverse execution order — and all of those land before any
-///   `after` plugin sees the array.
+///   runs first — reverse execution order;
+/// - and an `after` plugin belongs to the around LEVEL it is declared inside.
+///   `PluginList::_inheritPlugins` walks the plugins in execution order and
+///   files each one under the most recent `around` before it (`__self` when
+///   there is none); `___callPlugins` then runs a level's `after` plugins once
+///   that level's `around` has returned. So an `after` declared after an
+///   `around` runs INSIDE it, before the outer `around` appends.
+///   [`exclude_chain`] evaluates exactly that.
 ///
 /// Reversing unconditionally (correct only for `around`) emitted a real store's
-/// two `after` plugins backwards, so `requirejs-min-resolver.js` — and every JS
-/// bundle that embeds it — differed from the real deploy.
+/// two `after` plugins backwards, and appending every `after` behind every
+/// `around` misplaced an `after` that sits between two arounds. Either way
+/// `requirejs-min-resolver.js` — and every JS bundle that embeds it — differed
+/// from the real deploy.
 pub fn plugin_min_excludes(
     magento: &magequery_core::Magento,
 ) -> (Vec<String>, Vec<String>) {
@@ -461,8 +469,9 @@ pub fn plugin_min_excludes(
         }
     }
 
-    // Walked in EXECUTION order; each plugin's appends are bucketed by kind.
-    let (mut arounds, mut afters, mut unknown) = (Vec::new(), Vec::new(), Vec::new());
+    // Walked in EXECUTION order (`di_export` sorts by sortOrder, then
+    // declaration order); each plugin keeps its kind for the chain.
+    let (mut chain, mut unknown) = (Vec::new(), Vec::new());
     for class in classes.iter() {
         let Some(file) = magento.class_file(class) else {
             unknown.push(format!("{} (source not found)", class.as_str()));
@@ -473,25 +482,58 @@ pub fn plugin_min_excludes(
             continue;
         };
         match literal_exclude_appends(&src) {
-            Some(vals) => {
-                if src.contains("function aroundGetExcludes") {
-                    arounds.push(vals);
-                } else {
-                    afters.extend(vals);
-                }
-            }
+            Some(vals) => chain.push(ExcludePlugin {
+                around: src.contains("function aroundGetExcludes"),
+                appends: vals,
+            }),
             None => unknown.push(class.as_str().to_string()),
         }
     }
 
-    // The around chain unwinds innermost-first, and every `after` plugin runs
-    // once that chain has returned.
-    let mut excludes: Vec<String> = Vec::new();
-    for vals in arounds.into_iter().rev() {
-        excludes.extend(vals);
+    (exclude_chain(&chain), unknown)
+}
+
+/// One `getExcludes` plugin, as far as the exclude list cares: its kind and
+/// the literals it appends.
+struct ExcludePlugin {
+    around: bool,
+    appends: Vec<String>,
+}
+
+/// The appends of `plugins` (in execution order) as Magento's interceptor
+/// applies them, after the config's own excludes.
+///
+/// `PluginList::_inheritPlugins` files every plugin under a LEVEL: the most
+/// recent `around` before it, or `__self`. An `around` plugin becomes its
+/// level's `around` and opens the next level; an `after` plugin joins its
+/// level's after-list. `___callPlugins` on a level then calls that level's
+/// `around` (whose `$proceed` runs the next level), or the original method,
+/// and runs the level's after-list on the result. Since every plugin here
+/// appends to the result it gets, a level yields: the next level's list, then
+/// the level's `around` appends, then its after-list's appends in order.
+fn exclude_chain(plugins: &[ExcludePlugin]) -> Vec<String> {
+    // levels[0] is `__self`; levels[i + 1] is opened by the i-th around.
+    let mut levels: Vec<(Option<&ExcludePlugin>, Vec<&ExcludePlugin>)> = vec![(None, Vec::new())];
+    for p in plugins {
+        let current = levels.len() - 1;
+        if p.around {
+            levels[current].0 = Some(p);
+            levels.push((None, Vec::new()));
+        } else {
+            levels[current].1.push(p);
+        }
     }
-    excludes.extend(afters);
-    (excludes, unknown)
+    // Unwind from the innermost level outwards.
+    let mut excludes: Vec<String> = Vec::new();
+    for (around, afters) in levels.iter().rev() {
+        if let Some(a) = around {
+            excludes.extend(a.appends.iter().cloned());
+        }
+        for p in afters {
+            excludes.extend(p.appends.iter().cloned());
+        }
+    }
+    excludes
 }
 
 /// Extract the `$result[] = '<literal>';` appends a `*GetExcludes` plugin makes
