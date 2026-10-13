@@ -51,6 +51,13 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.19.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.19.0...magequery-v0.19.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* **magecommand:** consume var/.regenerate, so bin/magento keeps the compiled tree ([#137](https://github.com/cresset-tools/magequery/issues/137)) ([174e601](https://github.com/cresset-tools/magequery/commit/174e6015b149def6545e49cb041492fcc16fb093))
+
 ## [0.19.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.18.1...magequery-v0.19.0) (2026-10-12)
 
 
