@@ -292,10 +292,10 @@ static verify --reference <DIR> --output <DIR> [--fail-on-diff] [--strict]
     split across different files is `re-split` (clean): bundle boundaries depend
     on a `.min`-sibling cache Magento shares process-wide, so the same input can
     legitimately pack differently — the contract is the module SET, verified
-    per package, and one module more or less is still a real difference. The
-    `sri-hashes.json` rides along with an accepted re-split, since it
-    hashes the very bundles that moved; ONE entry outside a re-split package's
-    bundles and the file stays flagged. By default only the packages the OUTPUT contains are
+    per package, and one module more or less is still a real difference.
+    `sri-hashes.json` is checked for presence only: Magento's parallel workers
+    overwrite each other's entries in it, so the reference differs between two
+    runs of the same tree, and its content says nothing about ours. By default only the packages the OUTPUT contains are
     compared, so verifying a one-theme deploy against a whole `pub/static` reports
     that theme rather than every other — --all requires full coverage.
     --fail-on-diff exits non-zero on any difference.

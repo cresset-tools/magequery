@@ -697,7 +697,7 @@ fn static_verify(
                     "changed": r.changed,
                     "equivalent": r.equivalent,
                     "resplit": r.resplit,
-                    "sri_race": r.sri_race,
+                    "sri_unchecked": r.sri_unchecked,
                     "missing": r.missing,
                     "extra": r.extra,
                 })
@@ -716,7 +716,7 @@ fn static_verify(
                 "changed": totals.changed.len(),
                 "equivalent": totals.equivalent.len(),
                 "resplit": totals.resplit.len(),
-                "sri_race": totals.sri_race.len(),
+                "sri_unchecked": totals.sri_unchecked.len(),
                 "missing": totals.missing.len(),
                 "extra": totals.extra.len(),
             },
@@ -728,7 +728,7 @@ fn static_verify(
             // Only name a bucket that has something to say; a clean run then
             // prints just the totals line.
             if r.changed.is_empty() && r.missing.is_empty() && r.extra.is_empty()
-                && r.equivalent.is_empty() && r.resplit.is_empty() && r.sri_race.is_empty()
+                && r.equivalent.is_empty() && r.resplit.is_empty()
             {
                 continue;
             }
@@ -751,10 +751,6 @@ fn static_verify(
             // Never hidden, but marked as not-a-defect outside --strict.
             show("bundle re-split (.min-sibling cache scope)", &r.resplit);
             show(
-                "integrity file: the reference lost packages to Magento's parallel workers",
-                &r.sri_race,
-            );
-            show(
                 if strict { "equivalent (counted: --strict)" } else { "equivalent (formatting only)" },
                 &r.equivalent,
             );
@@ -775,8 +771,8 @@ fn static_verify(
         if !totals.equivalent.is_empty() {
             line.push_str(&format!(" · equivalent {}", totals.equivalent.len()));
         }
-        if !totals.sri_race.is_empty() {
-            line.push_str(&format!(" · sri race {}", totals.sri_race.len()));
+        if !totals.sri_unchecked.is_empty() {
+            line.push_str(&format!(" · sri-hashes.json not compared {}", totals.sri_unchecked.len()));
         }
         if !report.not_deployed.is_empty() {
             println!(
