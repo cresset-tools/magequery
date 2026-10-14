@@ -51,6 +51,14 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.19.3](https://github.com/cresset-tools/magequery/compare/magequery-v0.19.2...magequery-v0.19.3) (2026-10-14)
+
+
+### Bug Fixes
+
+* **magecommand:** count a module dropped from config.php as disabled ([#141](https://github.com/cresset-tools/magequery/issues/141)) ([38e0e50](https://github.com/cresset-tools/magequery/commit/38e0e505b31d14e23329f83df7cf82364041d95b))
+* **magecommand:** stop static verify comparing sri-hashes.json content ([#144](https://github.com/cresset-tools/magequery/issues/144)) ([3df371b](https://github.com/cresset-tools/magequery/commit/3df371b2e374c1de2fe0d6102eb184e363b91cf9))
+
 ## [0.19.2](https://github.com/cresset-tools/magequery/compare/magequery-v0.19.1...magequery-v0.19.2) (2026-10-13)
 
 
