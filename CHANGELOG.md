@@ -51,6 +51,14 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.19.4](https://github.com/cresset-tools/magequery/compare/magequery-v0.19.3...magequery-v0.19.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* **magequery:** read a quoted or boolean module value in config.php ([#147](https://github.com/cresset-tools/magequery/issues/147)) ([420e672](https://github.com/cresset-tools/magequery/commit/420e672550f1cc8c7df1d9302c691dce5806bc27))
+* **magequery:** read config.php's modules node in either quote style ([#143](https://github.com/cresset-tools/magequery/issues/143)) ([#145](https://github.com/cresset-tools/magequery/issues/145)) ([d187283](https://github.com/cresset-tools/magequery/commit/d18728362bce54b0327ef2fe6e659559032c044e))
+
 ## [0.19.3](https://github.com/cresset-tools/magequery/compare/magequery-v0.19.2...magequery-v0.19.3) (2026-10-14)
 
 
