@@ -28,7 +28,7 @@ pub mod reflect;
 pub mod pluginlist;
 pub mod phpexport;
 
-pub use classify::{classify, disabled_module_types, outside_scan_artifacts, outside_scan_types, disabled_reachable_types, obfuscation_blocked_classes, residual_report, first_divergence, first_plugin_list_divergence, Classified, ClassifyCtx, Divergence, KnownGroup, KnownKind, RenamedChange, DIFFERENCES_DOC_URL, ORDERING_ONLY_SLUG};
+pub use classify::{classify, disabled_module_names, disabled_module_types, outside_scan_artifacts, outside_scan_types, disabled_reachable_types, obfuscation_blocked_classes, residual_report, first_divergence, first_plugin_list_divergence, Classified, ClassifyCtx, Divergence, KnownGroup, KnownKind, RenamedChange, DIFFERENCES_DOC_URL, ORDERING_ONLY_SLUG};
 pub use compare::{compare_dirs, map_entry_diff, CompareReport, EntryChange, EntryDiff};
 
 /// Errors the engine can return.

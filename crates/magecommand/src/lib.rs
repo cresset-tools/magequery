@@ -2045,16 +2045,8 @@ fn compare(
         let root = std::path::absolute(root.unwrap_or_else(|| PathBuf::from("."))).unwrap_or_default();
         magequery_core::Magento::open(&root).ok()
     };
-    let disabled_modules: std::collections::HashSet<String> = magento
-        .as_ref()
-        .map(|m| {
-            m.modules()
-                .iter()
-                .filter(|md| !md.enabled)
-                .map(|md| md.name.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
+    let disabled_modules: std::collections::HashSet<String> =
+        magecommand_engine::disabled_module_names(magento.as_ref());
 
     // Diagnostic mode: pinpoint one file's residual difference and stop. It must
     // apply the SAME normalizations the classifiers do — including the

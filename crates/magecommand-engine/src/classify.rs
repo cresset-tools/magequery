@@ -1130,6 +1130,9 @@ pub fn outside_scan_types(
 /// disabled module contributes its own parents when that file is parsed, and a
 /// chain leaving the disabled set lands on an enabled class whose ancestry the
 /// compile already walks.
+///
+/// "Disabled" here is [`disabled_module_names`]'s two shapes — switched off in
+/// `config.php`, or dropped from it entirely — not just the `=> 0` half.
 pub fn disabled_module_types(
     magento: Option<&magequery_core::Magento>,
     disabled: &HashSet<String>,
@@ -1139,6 +1142,36 @@ pub fn disabled_module_types(
         return HashSet::new();
     }
     disabled_module_type_closure(magento, disabled)
+}
+
+/// Every module the compile will NOT compile, by name — the single definition
+/// of "off" the classifiers share.
+///
+/// A module is off in two shapes, and nothing downstream can tell them apart:
+/// `'Vendor_Module' => 0` in `app/etc/config.php`, or **no entry at all**. The
+/// second is how a module is normally switched off once its package stays
+/// installed — `composer remove` is a separate decision, so the line goes and
+/// the code stays on disk. Only the first reaches [`Magento::modules`]; the
+/// second is reported apart as `module_check().on_disk_not_in_config`, so
+/// reading `!enabled` alone makes a whole removed module invisible here, and
+/// every artifact only it asked for lands unexplained.
+///
+/// [`Magento::modules`]: magequery_core::Magento::modules
+pub fn disabled_module_names(magento: Option<&magequery_core::Magento>) -> HashSet<String> {
+    let Some(magento) = magento else { return HashSet::new() };
+    magento
+        .modules()
+        .iter()
+        .filter(|m| !m.enabled)
+        .map(|m| m.name.to_string())
+        .chain(
+            magento
+                .module_check()
+                .on_disk_not_in_config
+                .iter()
+                .map(|m| m.name.to_string()),
+        )
+        .collect()
 }
 
 fn disabled_module_type_closure(
@@ -1152,6 +1185,18 @@ fn disabled_module_type_closure(
         .iter()
         .filter(|m| !m.enabled && disabled.contains(&m.name.to_string()))
         .map(|m| m.path.clone())
+        // A module dropped from config.php never reaches `modules()` at all —
+        // see [`disabled_module_names`]. Its source is still on disk and still
+        // the reason the archive holds artifacts nothing enabled asks for, so
+        // it has to be walked like any other switched-off module.
+        .chain(
+            magento
+                .module_check()
+                .on_disk_not_in_config
+                .iter()
+                .filter(|m| disabled.contains(&m.name.to_string()))
+                .map(|m| m.path.clone()),
+        )
         .collect();
 
     let mut reached: HashSet<String> = dirs
@@ -2482,6 +2527,51 @@ mod tests {
         let ctx = ClassifyCtx { disabled_types: &other, ..bare };
         let c = classify(&report(&missing, &[], &[]), &ctx);
         assert_eq!(c.missing, vec!["code/Good/Mod/Model/Type/OnepageFactory.php"]);
+    }
+
+    #[test]
+    fn a_module_dropped_from_config_php_still_counts_as_off() {
+        // Switching a module off by DELETING its config.php line — the normal
+        // move once the package stays installed — is the shape that broke.
+        // Such a module is absent from `modules()` altogether, so reading
+        // `!enabled` alone made it invisible, and the factories only its
+        // constructors type-hint went out unexplained.
+        let root = tempfile::tempdir().unwrap();
+        let write = |rel: String, c: &str| {
+            let p = root.path().join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        write(
+            "app/etc/config.php".to_owned(),
+            "<?php\nreturn ['modules' => ['Acme_On' => 1, 'Acme_Zero' => 0]];\n",
+        );
+        for m in ["On", "Zero", "Gone"] {
+            write(
+                format!("app/code/Acme/{m}/etc/module.xml"),
+                &format!("<?xml version=\"1.0\"?>\n<config><module name=\"Acme_{m}\"/></config>\n"),
+            );
+            write(format!("app/code/Acme/{m}/registration.php"), "<?php\n");
+        }
+        // The only constructor asking for the factory lives in the dropped
+        // module, and the factory is named after an ENABLED one — so nothing
+        // but this evidence can explain it.
+        write(
+            "app/code/Acme/Gone/Controller/AddToCart.php".to_owned(),
+            "<?php\nnamespace Acme\\Gone\\Controller;\nclass AddToCart {\n    public function __construct(\\Magento\\Checkout\\Model\\SessionFactory $f) {}\n}\n",
+        );
+
+        let magento = magequery_core::Magento::open(root.path()).unwrap();
+        let names = disabled_module_names(Some(&magento));
+        assert!(names.contains("Acme_Zero"), "`=> 0` is off: {names:?}");
+        assert!(names.contains("Acme_Gone"), "no entry at all is off too: {names:?}");
+        assert!(!names.contains("Acme_On"));
+
+        let types = disabled_module_types(Some(&magento), &names);
+        assert!(
+            types.contains("magento\\checkout\\model\\sessionfactory"),
+            "the dropped module's type-hint is evidence: {types:?}"
+        );
     }
 
     #[test]

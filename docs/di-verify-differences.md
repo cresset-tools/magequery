@@ -128,6 +128,12 @@ enabled modules, and magecommand does the same. An archive from 2.4.8 or earlier
 every module on disk, whether it was enabled or not. Leaving them out is the
 improvement: no code gets generated that can never run.
 
+A module counts as disabled here — and in the three sections below — in either of the two
+shapes `config.php` can express: `'Vendor_Module' => 0`, **or no entry at all**. Deleting
+the line while the package stays installed is the ordinary way to switch a module off, so
+the two have to mean the same thing; `magequery modules --check` lists the second kind as
+`unregistered`.
+
 ## Disabled-module metadata
 
 *DI config.* Metadata files (`<area>.php`, `interception.php`) that are byte-identical once
