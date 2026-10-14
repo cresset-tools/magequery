@@ -54,7 +54,13 @@ pub(crate) fn config_php_modules(src: &str) -> Result<Vec<(ModuleName, bool)>, S
         if name.is_empty() {
             continue;
         }
-        let enabled = v.trim() == "1";
+        // The value carries the same risk as the key: a hand-edited `=> '1'` read as
+        // disabled would switch a live module off in every answer, silently. PHP's own
+        // truthiness is wider than this, but config.php's vocabulary is not — Magento
+        // writes the bare ints 0 and 1, and the only other spellings a human reaches for
+        // are those quoted, or `true`/`false`. Everything else stays disabled, as before.
+        let value = v.trim().trim_matches(['\'', '"']).trim();
+        let enabled = value == "1" || value.eq_ignore_ascii_case("true");
         out.push((ModuleName::new(name), enabled));
     }
     Ok(out)
@@ -197,6 +203,65 @@ return [
 ];
 "#;
         assert_eq!(parse(src), [("Acme_One".to_owned(), true)]);
+    }
+
+    /// A quoted value is the key bug's twin: `'Acme_One' => '1'` is enabled in PHP, and
+    /// reading it as disabled drops a live module from every answer without a word.
+    #[test]
+    fn a_quoted_value_still_means_enabled() {
+        let src = r#"<?php
+return [
+    'modules' => [
+        'Acme_One' => '1',
+        'Acme_Two' => "1",
+        'Acme_Off' => '0',
+        'Acme_Plain' => 1,
+    ]
+];
+"#;
+        assert_eq!(
+            parse(src),
+            [
+                ("Acme_One".to_owned(), true),
+                ("Acme_Two".to_owned(), true),
+                ("Acme_Off".to_owned(), false),
+                ("Acme_Plain".to_owned(), true),
+            ]
+        );
+    }
+
+    /// `true`/`false` are what a hand edit reaches for when it does not reach for 1/0.
+    #[test]
+    fn a_bareword_boolean_value_is_honored() {
+        let src = r#"<?php
+return ['modules' => ['Acme_On' => true, 'Acme_Off' => false, 'Acme_Shouty' => TRUE]];
+"#;
+        assert_eq!(
+            parse(src),
+            [
+                ("Acme_On".to_owned(), true),
+                ("Acme_Off".to_owned(), false),
+                ("Acme_Shouty".to_owned(), true),
+            ]
+        );
+    }
+
+    /// Deliberately NOT PHP truthiness: `2` and a non-empty string are truthy in PHP, but
+    /// nothing writes them here, and guessing a module into the enabled set is the costlier
+    /// mistake. Anything outside the known vocabulary stays disabled.
+    #[test]
+    fn an_unrecognized_value_stays_disabled() {
+        let src = r#"<?php
+return ['modules' => ['Acme_Odd' => 2, 'Acme_Weird' => 'yes', 'Acme_Null' => null]];
+"#;
+        assert_eq!(
+            parse(src),
+            [
+                ("Acme_Odd".to_owned(), false),
+                ("Acme_Weird".to_owned(), false),
+                ("Acme_Null".to_owned(), false),
+            ]
+        );
     }
 
     /// No `modules` node at all is still an error — in either spelling.
