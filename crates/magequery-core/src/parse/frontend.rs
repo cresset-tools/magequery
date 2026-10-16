@@ -28,15 +28,67 @@ pub(crate) struct RawLayoutOp {
     pub line: u32,
 }
 
+/// How a layout file assigns a template to a block.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum RawTemplateVia {
+    /// `template="…"` on a block or reference.
+    Attribute,
+    /// `<arguments><argument name="template" xsi:type="string">`, which
+    /// `Template::_construct` hands to `setTemplate()`.
+    Argument,
+    /// `<action method="setTemplate">` with a string first argument.
+    SetTemplateAction,
+}
+
+/// One template assignment in a layout file, attributed to the enclosing block.
+pub(crate) struct RawTemplateAssign {
+    pub block: String,
+    pub template: String,
+    pub via: RawTemplateVia,
+    /// The `<action ifconfig=>` flag the assignment depends on.
+    pub ifconfig: Option<String>,
+    pub line: u32,
+}
+
+/// One parsed layout file.
+#[derive(Default)]
+pub(crate) struct RawLayout {
+    pub ops: Vec<RawLayoutOp>,
+    pub templates: Vec<RawTemplateAssign>,
+}
+
+/// An open `<argument>` whose text is a template reference.
+struct PendingTemplateArg {
+    block: String,
+    via: RawTemplateVia,
+    ifconfig: Option<String>,
+    line: u32,
+    text: String,
+}
+
+/// An open `<action method="setTemplate">`. Only its first argument is the template:
+/// Magento passes action arguments positionally, whatever their `name`.
+struct OpenSetTemplate {
+    block: String,
+    ifconfig: Option<String>,
+    seen_argument: bool,
+}
+
 /// Parse one layout XML: blocks/containers declared, references modified or removed,
-/// `<update handle=>` includes, and `<move>`s — each with its enclosing element.
-pub(crate) fn layout_xml(xml: &str) -> Vec<RawLayoutOp> {
+/// `<update handle=>` includes, and `<move>`s — each with its enclosing element — plus
+/// every template assignment (attribute, `template` argument, `setTemplate` action).
+pub(crate) fn layout_xml(xml: &str) -> RawLayout {
     let lines = LineMap::new(xml);
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
     let mut out: Vec<RawLayoutOp> = Vec::new();
+    let mut templates: Vec<RawTemplateAssign> = Vec::new();
     // Names of the enclosing block/container/reference elements.
     let mut stack: Vec<String> = Vec::new();
+    let mut action: Option<OpenSetTemplate> = None;
+    // The block whose direct `<arguments>` is open.
+    let mut arguments_of: Option<String> = None;
+    let mut pending: Option<PendingTemplateArg> = None;
 
     loop {
         let ev = reader.read_event_into(&mut buf);
@@ -44,6 +96,46 @@ pub(crate) fn layout_xml(xml: &str) -> Vec<RawLayoutOp> {
         match ev {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
+                match local_name(&e).as_str() {
+                    "action" => {
+                        let set_template = attr(&e, b"method")
+                            .is_some_and(|m| m.eq_ignore_ascii_case("setTemplate"));
+                        action = stack.last().filter(|_| set_template).map(|block| {
+                            OpenSetTemplate {
+                                block: block.clone(),
+                                ifconfig: attr(&e, b"ifconfig"),
+                                seen_argument: false,
+                            }
+                        });
+                    }
+                    "arguments" => arguments_of = stack.last().cloned(),
+                    "argument" => {
+                        let string = xsi_type(&e).as_deref() == Some("string");
+                        if let Some(a) = action.as_mut() {
+                            if !a.seen_argument && string {
+                                pending = Some(PendingTemplateArg {
+                                    block: a.block.clone(),
+                                    via: RawTemplateVia::SetTemplateAction,
+                                    ifconfig: a.ifconfig.clone(),
+                                    line,
+                                    text: String::new(),
+                                });
+                            }
+                            a.seen_argument = true;
+                        } else if let Some(block) = &arguments_of {
+                            if string && attr(&e, b"name").as_deref() == Some("template") {
+                                pending = Some(PendingTemplateArg {
+                                    block: block.clone(),
+                                    via: RawTemplateVia::Argument,
+                                    ifconfig: None,
+                                    line,
+                                    text: String::new(),
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                }
                 if let Some(op) = layout_op(&e, line, &stack) {
                     let named = matches!(
                         op.kind,
@@ -59,24 +151,70 @@ pub(crate) fn layout_xml(xml: &str) -> Vec<RawLayoutOp> {
                 }
             }
             Ok(Event::Empty(e)) => {
+                // A self-closing argument has no value but still takes the first slot.
+                if local_name(&e) == "argument" {
+                    if let Some(a) = action.as_mut() {
+                        a.seen_argument = true;
+                    }
+                }
                 if let Some(op) = layout_op(&e, line, &stack) {
                     out.push(op);
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if let Some(p) = pending.as_mut() {
+                    p.text.push_str(&t.unescape().unwrap_or_default());
+                }
+            }
+            Ok(Event::CData(t)) => {
+                if let Some(p) = pending.as_mut() {
+                    p.text.push_str(&String::from_utf8_lossy(&t));
                 }
             }
             Ok(Event::End(e)) => {
                 let name = e.name();
                 let raw = name.as_ref();
                 let local = raw.rsplit(|&b| b == b':').next().unwrap_or(raw);
-                if matches!(local, b"block" | b"container" | b"referenceBlock" | b"referenceContainer")
-                {
-                    stack.pop();
+                match local {
+                    b"block" | b"container" | b"referenceBlock" | b"referenceContainer" => {
+                        stack.pop();
+                    }
+                    b"action" => action = None,
+                    b"arguments" => arguments_of = None,
+                    b"argument" => {
+                        if let Some(p) = pending.take() {
+                            let template = p.text.trim();
+                            if !template.is_empty() {
+                                templates.push(RawTemplateAssign {
+                                    block: p.block,
+                                    template: template.to_string(),
+                                    via: p.via,
+                                    ifconfig: p.ifconfig,
+                                    line: p.line,
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             _ => {}
         }
         buf.clear();
     }
-    out
+    // `template="…"` on the element itself.
+    for op in &out {
+        if let Some(t) = &op.template {
+            templates.push(RawTemplateAssign {
+                block: op.name.clone(),
+                template: t.clone(),
+                via: RawTemplateVia::Attribute,
+                ifconfig: None,
+                line: op.line,
+            });
+        }
+    }
+    RawLayout { ops: out, templates }
 }
 
 fn layout_op(e: &BytesStart, line: u32, stack: &[String]) -> Option<RawLayoutOp> {
@@ -142,7 +280,7 @@ mod layout_tests {
                 <move element="child" destination="wrap" after="-"/>
             </body>
         </page>"#;
-        let ops = layout_xml(xml);
+        let ops = layout_xml(xml).ops;
         let by = |n: &str| ops.iter().find(|o| o.name == n).unwrap();
 
         assert!(matches!(by("catalog_product_opengraph").kind, RawLayoutOpKind::Update));
@@ -155,6 +293,60 @@ mod layout_tests {
         assert_eq!((mv.name.as_str(), mv.parent.as_deref()), ("child", Some("wrap")));
         // update, 2 referenceBlocks, referenceContainer, container, 2 blocks, move.
         assert_eq!(ops.len(), 8);
+    }
+
+    #[test]
+    fn template_assignments_in_every_form() {
+        let xml = r#"<page xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+            <body>
+                <referenceBlock name="result.category">
+                    <action method="setTemplate">
+                        <argument name="template" xsi:type="string">M::result/category.phtml</argument>
+                    </action>
+                </referenceBlock>
+                <referenceBlock name="header.search">
+                    <action ifconfig="a/b/c" method="setTemplate">
+                        <argument name="tpl" xsi:type="string"> M::form.mini.phtml </argument>
+                    </action>
+                    <action method="setTitle">
+                        <argument name="template" xsi:type="string">not/a/template.phtml</argument>
+                    </action>
+                </referenceBlock>
+                <referenceBlock name="overlay" template="M::overlay.phtml"/>
+                <block class="A\B" name="hyva.style">
+                    <arguments>
+                        <argument name="template" xsi:type="string">M::args.phtml</argument>
+                        <argument name="other" xsi:type="string">M::ignored.phtml</argument>
+                        <argument name="view_model" xsi:type="object">A\Vm</argument>
+                    </arguments>
+                </block>
+                <referenceBlock name="second.arg">
+                    <action method="setTemplate">
+                        <argument name="first" xsi:type="helper" helper="A\H::get"/>
+                        <argument name="second" xsi:type="string">M::not-first.phtml</argument>
+                    </action>
+                </referenceBlock>
+            </body>
+        </page>"#;
+        let parsed = layout_xml(xml);
+        let mut got: Vec<_> = parsed
+            .templates
+            .iter()
+            .map(|t| (t.block.as_str(), t.template.as_str(), t.via, t.ifconfig.as_deref(), t.line))
+            .collect();
+        got.sort_by_key(|g| g.4);
+        use super::RawTemplateVia as V;
+        assert_eq!(
+            got,
+            vec![
+                ("result.category", "M::result/category.phtml", V::SetTemplateAction, None, 5),
+                ("header.search", "M::form.mini.phtml", V::SetTemplateAction, Some("a/b/c"), 10),
+                ("overlay", "M::overlay.phtml", V::Attribute, None, 16),
+                ("hyva.style", "M::args.phtml", V::Argument, None, 19),
+            ]
+        );
+        // The setTemplate actions add no ops of their own.
+        assert_eq!(parsed.ops.len(), 5);
     }
 }
 
