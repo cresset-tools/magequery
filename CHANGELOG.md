@@ -51,6 +51,13 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.20.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.19.4...magequery-v0.20.0) (2026-10-16)
+
+
+### Features
+
+* **magequery:** add sql, read-only SQL over Magento-aware virtual tables ([2e0a4b9](https://github.com/cresset-tools/magequery/commit/2e0a4b9139c4e71cee9ead70856abd3dc31b9c29))
+
 ## [0.19.4](https://github.com/cresset-tools/magequery/compare/magequery-v0.19.3...magequery-v0.19.4) (2026-10-14)
 
 
