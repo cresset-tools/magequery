@@ -1147,9 +1147,15 @@ handle = 53 files, 12ms.
 
 `magequery templates [<Vendor_Module::path.phtml>] [--area]` catalogs every `.phtml`
 under enabled modules' `view/{base,frontend,adminhtml}/templates` trees and every theme's
-`<Vendor_Module>/templates` overrides, then joins them to `template=` assignments from the
-layout index. Short module-layout references (`template="path.phtml"`) normalize to the
-owning module's full reference. No arg lists references with file/use counts; an exact or
+`<Vendor_Module>/templates` overrides, then joins them to every layout template
+assignment, in all three forms: the `template=` attribute, a block's
+`<arguments><argument name="template" xsi:type="string">` (which `Template::_construct`
+hands to `setTemplate()`), and `<action method="setTemplate">`. The action's *first*
+string argument counts whatever its `name`, because Magento passes action arguments
+positionally. Each usage records its form (`via`) and the action's `ifconfig`, rendered
+`[only if <path>]`. That conditional form is how third-party blocks are usually rethemed,
+so missing it reported live overrides as dead code. Short module-layout references
+(`template="path.phtml"`) normalize to the owning module's full reference. No arg lists references with file/use counts; an exact or
 single substring match shows module file, every theme override candidate, and each layout
 handle/block/class use with provenance. Missing files and templates unused by layout XML are
 reported honestly. Theme application depends on active-theme state, so candidates are listed,

@@ -397,7 +397,24 @@ pub struct TemplateUsage {
     pub handle: String,
     pub block: String,
     pub class: Option<ClassName>,
+    pub via: TemplateAssignment,
+    /// `<action ifconfig=>`: the assignment only applies while this config flag is set.
+    pub ifconfig: Option<String>,
     pub source: Source,
+}
+
+/// How a layout file assigns a template to a block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TemplateAssignment {
+    /// `template="…"` on a `<block>` or `<referenceBlock>`.
+    Attribute,
+    /// `<arguments><argument name="template" xsi:type="string">`, which the block's
+    /// `_construct` hands to `setTemplate()`.
+    Argument,
+    /// `<action method="setTemplate">` with a string argument.
+    SetTemplateAction,
 }
 
 /// How a PHP class binds a template, bypassing layout XML entirely.
