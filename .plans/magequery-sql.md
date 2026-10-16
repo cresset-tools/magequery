@@ -153,6 +153,14 @@ guests); the `products` example above joins it in M2.
   than joins (MySQL's 61-table join cap; one unique-key lookup per value), store
   fallback, `<code>_label` for table-backed selects, stock / attribute set / website
   columns, `--store`. Benchmarked at 100k products on MariaDB and MySQL (see CLAUDE.md).
+  Follow-up: table-backed multiselects offer `<code>_labels`, a JSON array of labels in
+  admin order (a string in `--json` on both servers, deliberately: MariaDB has no JSON
+  column type to tell them apart).
+
+M1 and M2 landed on 2026-10-16, released as the first `feat(magequery)` after them.
+Commits under this directory need Conventional Commit subjects: release-please skipped
+the `magequery sql: …` ones.
+
 - **M3 — customers, quotes, categories, sales documents.** Mostly definitions, reusing
   M2's EAV path.
 - **M4 — acceptance.** Walk the magento2-mcp read-tool list; each answered by one
