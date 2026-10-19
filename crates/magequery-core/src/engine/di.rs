@@ -474,8 +474,11 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
 fn primary_di_files(root: &Path) -> Vec<PathBuf> {
     let etc = root.join("app/etc");
     let entries = |dir: &Path| -> Vec<PathBuf> {
-        let mut v: Vec<PathBuf> =
-            std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
+        let mut v: Vec<PathBuf> = crate::fsutil::read_dir_entries(dir)
+            .into_iter()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
         v.sort();
         v
     };

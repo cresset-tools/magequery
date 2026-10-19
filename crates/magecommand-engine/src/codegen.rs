@@ -638,14 +638,14 @@ impl<'a> Codegen<'a> {
         let mut files = Vec::new();
         let app_etc = self.root.join("app/etc");
         let mut primary: Vec<PathBuf> = Vec::new();
-        if let Ok(entries) = fs::read_dir(&app_etc) {
-            for entry in entries.flatten() {
+        if let Ok(entries) = magequery_core::fsutil::read_dir_entries(&app_etc) {
+            for entry in entries {
                 let path = entry.path();
                 if path.is_file() && is_di_xml(&path) {
                     primary.push(path);
                 } else if path.is_dir() {
-                    if let Ok(subs) = fs::read_dir(&path) {
-                        for sub in subs.flatten() {
+                    if let Ok(subs) = magequery_core::fsutil::read_dir_entries(&path) {
+                        for sub in subs {
                             let sub = sub.path();
                             if sub.is_file() && is_di_xml(&sub) {
                                 primary.push(sub);
