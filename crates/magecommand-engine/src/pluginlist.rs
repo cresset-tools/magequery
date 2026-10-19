@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use magequery_core::{plugin_read_rank, Area, DiExport, Magento, PluginDecl};
+use magequery_core::{Area, DiExport, Magento, PluginDecl};
 
 use crate::areaconfig::AREA_CODES;
 use crate::definitions::Definitions;
@@ -28,13 +28,7 @@ struct Entry {
 
 impl Entry {
     fn from_decl(d: &PluginDecl) -> Entry {
-        // Within one scope read the mapper always emits
-        // [sortOrder, disabled, instance]; a field arriving from a LATER
-        // read appends after the existing ones.
-        let disabled_before_instance = match (d.disabled_layer, d.instance_layer) {
-            (Some(dl), Some(il)) => plugin_read_rank(dl) <= plugin_read_rank(il),
-            _ => true,
-        };
+        let disabled_before_instance = d.disabled_before_instance;
         Entry {
             sort_order: d.sort_order,
             disabled: d.disabled_attr,

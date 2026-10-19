@@ -426,6 +426,11 @@ pub struct PluginDecl {
     pub class_backslash: bool,
     /// The enclosing type node's spelling at first declaration.
     pub target_backslash: bool,
+    /// The compiled plugin entry lists `disabled` before `instance`. True
+    /// when both come from one mapped `<plugin>` node; when a later scope
+    /// read, or the other spelling of the type (`X` vs `\X`), adds the
+    /// second field, it is appended after the first.
+    pub disabled_before_instance: bool,
     /// First-declaration position: config layer (0 global / 1 area overlay),
     /// module load order, line — Magento's insertion order for plugin maps.
     pub decl_layer: u8,
