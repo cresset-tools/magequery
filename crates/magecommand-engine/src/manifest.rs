@@ -201,4 +201,50 @@ mod tests {
         // Missing → None, not an error.
         assert!(Manifest::load(dir.path().join("nope").as_path(), "/srv/shop").is_none());
     }
+
+    /// `app/etc/env.php` is deployment state, not a compile input: db/cache/
+    /// session endpoints, the crypt key, the `system` overlay. Nothing on the
+    /// compile path reads it, so it must not move the digest — otherwise the
+    /// same commit fingerprints differently in every environment and the
+    /// content digest is useless as a cross-build key.
+    #[test]
+    fn env_php_does_not_move_the_input_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let put = |rel: &str, body: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+        };
+
+        put("app/etc/config.php", "<?php\nreturn ['modules' => ['Acme_Env' => 1]];\n");
+        put(
+            "app/code/Acme/Env/etc/module.xml",
+            r#"<?xml version="1.0"?>
+<config><module name="Acme_Env"/></config>
+"#,
+        );
+        put("app/etc/env.php", "<?php\nreturn ['db' => ['host' => 'staging-db']];\n");
+
+        let magento = magequery_core::Magento::open(root).expect("open synthetic root");
+        let digest = |m: &magequery_core::Magento| input_digest(m, root, FingerprintMode::Content);
+        let before = digest(&magento);
+
+        // A different environment: same code, its own credentials.
+        put("app/etc/env.php", "<?php\nreturn ['db' => ['host' => 'production-db']];\n");
+        assert_eq!(before, digest(&magento), "env.php contents must not move the digest");
+
+        // Absent entirely (a fresh checkout) is the same input as present.
+        std::fs::remove_file(root.join("app/etc/env.php")).unwrap();
+        assert_eq!(before, digest(&magento), "env.php presence must not move the digest");
+
+        // Control: a real input still does.
+        put(
+            "app/code/Acme/Env/etc/di.xml",
+            r#"<?xml version="1.0"?>
+<config><preference for="Acme\Env\Api\Thing" type="Acme\Env\Model\Thing"/></config>
+"#,
+        );
+        assert_ne!(before, digest(&magento), "a di.xml change must move the digest");
+    }
 }

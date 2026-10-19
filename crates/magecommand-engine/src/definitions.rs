@@ -959,12 +959,23 @@ pub(crate) fn collect_included(base: &Path, dir: &Path, kind: PathKind, out: &mu
 /// drives DI (di.xml, module.xml, extension_attributes.xml, …), under the SAME
 /// roots and the SAME exclusion rules as [`Definitions::scan`] so the set
 /// matches exactly what the compile consumes — plus the deployment/composer
-/// files (config.php, env.php, installed.json, composer.json/lock) and the
-/// primary `app/etc` di. Deliberately NOT `generated/code` (that is output).
+/// files (config.php, installed.json, composer.json/lock) and the primary
+/// `app/etc` di. Deliberately NOT `generated/code` (that is output), and
+/// deliberately NOT `app/etc/env.php` (see below).
 ///
 /// Soundness over speed: over-covering (e.g. a module's `events.xml`, which DI
 /// compile ignores) only causes an unnecessary recompile; UNDER-covering would
 /// serve a stale result. Returned sorted + deduped for a stable digest.
+///
+/// `env.php` is the one deliberate SUBTRACTION from that rule, because it is
+/// not an input at all: it holds db/cache/session/queue endpoints, the crypt
+/// key and the `system` config overlay, and nothing on the compile path reads
+/// any of it (the engine uses only `modules`, `library_paths`, `class_file`,
+/// `root` and the di exports). Including it made the digest environment-
+/// specific — the same commit fingerprints differently per environment because
+/// each writes its own credentials — which defeats [`crate::manifest::FingerprintMode::Content`]
+/// as a cross-build key and forced a recompile every time a deploy rewrote the
+/// file.
 pub fn compile_input_files(magento: &Magento, root: &Path) -> Vec<PathBuf> {
     use rayon::prelude::*;
     let mut roots: Vec<(PathBuf, PathKind)> = Vec::new();
@@ -998,7 +1009,6 @@ pub fn compile_input_files(magento: &Magento, root: &Path) -> Vec<PathBuf> {
         .collect();
     for rel in [
         "app/etc/config.php",
-        "app/etc/env.php",
         "vendor/composer/installed.json",
         "composer.json",
         "composer.lock",
@@ -1008,6 +1018,10 @@ pub fn compile_input_files(magento: &Magento, root: &Path) -> Vec<PathBuf> {
             files.push(p);
         }
     }
+    // The `app/etc` walk above picks up every `.php` there, env.php among them.
+    // Drop it: it is deployment state, never a compile input (see the fn doc).
+    let env_php = root.join("app/etc/env.php");
+    files.retain(|p| p != &env_php);
     files.sort();
     files.dedup();
     files
