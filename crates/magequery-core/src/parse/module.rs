@@ -13,27 +13,39 @@ pub(crate) fn config_php_modules(src: &str) -> Result<Vec<(ModuleName, bool)>, S
         .filter_map(|needle| src.find(needle))
         .min()
         .ok_or("no `modules` key found in config.php")?;
-    let open = src[key..]
-        .find('[')
-        .map(|i| key + i)
-        .ok_or("malformed 'modules' entry (no opening `[`)")?;
+    // The value opens with either short `[` (what Magento writes) or long `array (` — the
+    // form PHP's own `var_export` produces, valid in any case and spacing. Read the opener
+    // right after the `=>` rather than searching ahead for a `[`: a long-form file has
+    // none, and a search would run off into whatever array came next.
+    let arrow = src[key..]
+        .find("=>")
+        .map(|i| key + i + 2)
+        .ok_or("malformed 'modules' entry (no `=>`)")?;
+    let rest = src[arrow..].trim_start();
+    let (open, open_b, close_b) = if rest.starts_with('[') {
+        (src.len() - rest.len(), b'[', b']')
+    } else if rest.get(..5).is_some_and(|w| w.eq_ignore_ascii_case("array"))
+        && rest[5..].trim_start().starts_with('(')
+    {
+        (src.len() - rest[5..].trim_start().len(), b'(', b')')
+    } else {
+        return Err("malformed 'modules' entry (no opening `[` or `array(`)".into());
+    };
 
     // The modules block is flat (values are 0/1, keys are simple quoted identifiers),
-    // so a bracket-depth scan from the opening `[` reaches the matching `]` safely.
+    // so a depth scan over the opener's own bracket pair reaches the matching close safely.
     let bytes = src.as_bytes();
     let mut depth = 0i32;
     let mut close = None;
     for (offset, &b) in bytes[open..].iter().enumerate() {
-        match b {
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(open + offset);
-                    break;
-                }
+        if b == open_b {
+            depth += 1;
+        } else if b == close_b {
+            depth -= 1;
+            if depth == 0 {
+                close = Some(open + offset);
+                break;
             }
-            _ => {}
         }
     }
     let close = close.ok_or("unterminated 'modules' array")?;
@@ -262,6 +274,48 @@ return ['modules' => ['Acme_Odd' => 2, 'Acme_Weird' => 'yes', 'Acme_Null' => nul
                 ("Acme_Null".to_owned(), false),
             ]
         );
+    }
+
+    /// The long-array form PHP's `var_export` writes (`array (`), and the other spellings
+    /// PHP accepts for it. A file in this shape has no `[` at all, so the scan used to fail
+    /// with "no opening `[`" and `Magento::open` refused to run.
+    #[test]
+    fn long_array_syntax_is_parsed() {
+        for opener in ["array (", "array(", "ARRAY(", "Array  ("] {
+            let src = format!(
+                "<?php\nreturn {opener}'modules' => {opener}'Acme_Zebra' => 1, 'Acme_Alpha' => 0,),);\n"
+            );
+            assert_eq!(
+                parse(&src),
+                [("Acme_Zebra".to_owned(), true), ("Acme_Alpha".to_owned(), false)],
+                "opener {opener:?}"
+            );
+        }
+    }
+
+    /// Each array closes on its own bracket pair, so long form nested in a short top level
+    /// (and the reverse) must parse like either pure form, and stop at the right close.
+    #[test]
+    fn long_and_short_array_syntax_mix() {
+        let long_inner = "<?php\nreturn ['modules' => array('Acme_One' => 1), 'x' => [1]];\n";
+        assert_eq!(parse(long_inner), [("Acme_One".to_owned(), true)]);
+        let long_outer = "<?php\nreturn array('modules' => ['Acme_One' => 1], 'x' => array(1));\n";
+        assert_eq!(parse(long_outer), [("Acme_One".to_owned(), true)]);
+    }
+
+    /// The whole file exactly as `var_export` lays it out: the value on the line after the
+    /// `=>`, and a trailing comma inside every array.
+    #[test]
+    fn a_var_export_written_file_is_parsed() {
+        let src = "<?php\nreturn array (\n  'modules' => \n  array (\n    'A_B' => 1,\n  ),\n);\n";
+        assert_eq!(parse(src), [("A_B".to_owned(), true)]);
+    }
+
+    /// A `modules` value that is neither opener is an error, not a silently empty list.
+    #[test]
+    fn a_modules_value_that_is_not_an_array_is_an_error() {
+        let err = config_php_modules("<?php\nreturn ['modules' => null];\n").unwrap_err();
+        assert!(err.contains("no opening"), "unexpected error: {err}");
     }
 
     /// No `modules` node at all is still an error — in either spelling.
