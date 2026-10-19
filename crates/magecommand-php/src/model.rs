@@ -69,6 +69,22 @@ pub struct ClassMeta {
     /// class is reflectable (autoload) but NOT an interceptor/factory/proxy
     /// candidate — it must stay out of `Definitions.scanned`/`from_scan`.
     pub conditional: bool,
+    /// The `class_exists(…)` guard of the branch this declaration sits in,
+    /// when the branch condition is one we can read (see [`ClassGuard`]).
+    /// `None` for an unguarded declaration or an unreadable condition.
+    pub guard: Option<ClassGuard>,
+}
+
+/// A branch condition of the shape `[!]class_exists(X::class)` (also
+/// `interface_exists`/`trait_exists`/`enum_exists`, and a string literal
+/// argument). The branch runs iff `X` is loadable == `requires`; an `else`
+/// branch carries the inverted guard of its `if`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ClassGuard {
+    /// FQCN tested, without a leading backslash.
+    pub class: String,
+    pub requires: bool,
 }
 
 /// `use A, B { A::m insteadof B; }` — A's `m` wins; B (and any further

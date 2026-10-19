@@ -1,0 +1,489 @@
+# magecommand-engine compile fixture — the expected output of compute_outputs()
+# over `in/`, byte for byte. Everything below is generated; edit `in/` instead.
+# Re-bless: MAGECOMMAND_COMPILE_BLESS=1 cargo test -p magecommand-engine --test compile
+# files: 17  findings: 0  unresolved: 1
+
+===== file: code/Acme/Guard/Model/DepFactory.php =====
+<?php
+namespace Acme\Guard\Model;
+
+/**
+ * Factory class for @see \Acme\Guard\Model\Dep
+ */
+class DepFactory
+{
+    /**
+     * Object Manager instance
+     *
+     * @var \Magento\Framework\ObjectManagerInterface
+     */
+    protected $_objectManager = null;
+
+    /**
+     * Instance name to create
+     *
+     * @var string
+     */
+    protected $_instanceName = null;
+
+    /**
+     * Factory constructor
+     *
+     * @param \Magento\Framework\ObjectManagerInterface $objectManager
+     * @param string $instanceName
+     */
+    public function __construct(\Magento\Framework\ObjectManagerInterface $objectManager, $instanceName = '\\Acme\\Guard\\Model\\Dep')
+    {
+        $this->_objectManager = $objectManager;
+        $this->_instanceName = $instanceName;
+    }
+
+    /**
+     * Create class instance with specified parameters
+     *
+     * @param array $data
+     * @return \Acme\Guard\Model\Dep
+     */
+    public function create(array $data = [])
+    {
+        return $this->_objectManager->create($this->_instanceName, $data);
+    }
+}
+
+===== file: metadata/adminhtml.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Guard\\Model\\AbsentShim' => NULL,
+    'Acme\\Guard\\Model\\Dep' => NULL,
+    'Acme\\Guard\\Model\\DepFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\NegatedShim' => 
+    array (
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\PresentShim' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\DepFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/adminhtml|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/app_action_list.php =====
+<?php return array (
+);
+
+===== file: metadata/crontab.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Guard\\Model\\AbsentShim' => NULL,
+    'Acme\\Guard\\Model\\Dep' => NULL,
+    'Acme\\Guard\\Model\\DepFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\NegatedShim' => 
+    array (
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\PresentShim' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\DepFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/crontab|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/frontend.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Guard\\Model\\AbsentShim' => NULL,
+    'Acme\\Guard\\Model\\Dep' => NULL,
+    'Acme\\Guard\\Model\\DepFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\NegatedShim' => 
+    array (
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\PresentShim' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\DepFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/frontend|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Guard\\Model\\AbsentShim' => NULL,
+    'Acme\\Guard\\Model\\Dep' => NULL,
+    'Acme\\Guard\\Model\\DepFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\NegatedShim' => 
+    array (
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\PresentShim' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\DepFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/global|graphql|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|webapi_rest|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|webapi_soap|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/graphql.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Guard\\Model\\AbsentShim' => NULL,
+    'Acme\\Guard\\Model\\Dep' => NULL,
+    'Acme\\Guard\\Model\\DepFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\NegatedShim' => 
+    array (
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\PresentShim' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\DepFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/interception.php =====
+<?php return array (
+  'Acme\\Guard\\Model\\AbsentShim' => false,
+  'Acme\\Guard\\Model\\Dep' => false,
+  'Acme\\Guard\\Model\\DepFactory' => false,
+  'Acme\\Guard\\Model\\NegatedShim' => false,
+  'Acme\\Guard\\Model\\PresentShim' => false,
+);
+
+===== file: metadata/webapi_rest.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Guard\\Model\\AbsentShim' => NULL,
+    'Acme\\Guard\\Model\\Dep' => NULL,
+    'Acme\\Guard\\Model\\DepFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\NegatedShim' => 
+    array (
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\PresentShim' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\DepFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/webapi_soap.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Guard\\Model\\AbsentShim' => NULL,
+    'Acme\\Guard\\Model\\Dep' => NULL,
+    'Acme\\Guard\\Model\\DepFactory' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'instanceName' => 
+      array (
+        '_v_' => '\\Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\NegatedShim' => 
+    array (
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\Dep',
+      ),
+    ),
+    'Acme\\Guard\\Model\\PresentShim' => 
+    array (
+      'objectManager' => 
+      array (
+        '_i_' => 'Magento\\Framework\\ObjectManagerInterface',
+      ),
+      'dep' => 
+      array (
+        '_i_' => 'Acme\\Guard\\Model\\DepFactory',
+      ),
+    ),
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== findings =====
+
+===== unresolved =====
+Magento\Framework\ObjectManagerInterface

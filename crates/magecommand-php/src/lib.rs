@@ -20,7 +20,7 @@ mod parse;
 mod scan;
 
 pub use model::*;
-pub use parse::parse_file;
+pub use parse::{parse_file, parse_file_with};
 
 #[cfg(test)]
 mod tests {
@@ -56,6 +56,7 @@ else:
     }
 endif;
 "#;
+        // `parse_file` keeps the first declaration, guards unevaluated.
         // Only one declaration survives dedup — the if-branch — and it is NOT
         // conditional (no braces around it), so the scan will include it.
         let c = one(src);
@@ -64,6 +65,147 @@ endif;
         let ctor = c.methods.iter().find(|m| m.name == "__construct").unwrap();
         assert_eq!(ctor.params.len(), 2, "the if-branch constructor is kept");
         assert_eq!(ctor.params[1].name, "dep");
+    }
+
+    /// Parse `src` with `loadable` answering every guard, expecting one
+    /// surviving declaration.
+    fn one_with(src: &str, loadable: impl Fn(&str) -> bool) -> ClassMeta {
+        let meta = parse_file_with(src.as_bytes(), loadable);
+        assert!(
+            meta.issues.is_empty(),
+            "unexpected issues: {:?}",
+            meta.issues
+        );
+        assert_eq!(meta.declarations.len(), 1, "expected one declaration");
+        meta.declarations.into_iter().next().unwrap()
+    }
+
+    const ALT_SHIM: &str = r#"<?php
+namespace App;
+use Magento\Framework\ObjectManagerInterface;
+use App\Dep\Factory as DepFactory;
+if (class_exists(DepFactory::class)):
+    class Proxy {
+        public function __construct(ObjectManagerInterface $om, Dep $dep) {}
+    }
+else:
+    class Proxy {
+    }
+endif;
+"#;
+
+    #[test]
+    fn alt_syntax_guard_records_the_resolved_class() {
+        let meta = parse_file_with(ALT_SHIM.as_bytes(), |_| true);
+        let c = &meta.declarations[0];
+        assert_eq!(
+            c.guard,
+            Some(ClassGuard {
+                class: "App\\Dep\\Factory".into(),
+                requires: true
+            })
+        );
+    }
+
+    #[test]
+    fn alt_syntax_guard_on_a_missing_class_keeps_the_else_branch() {
+        // TIG PostNL's SourceItemsDataBySkuProxy on a store without MSI: PHP
+        // defines the constructor-less `else` class, so Magento compiles NULL.
+        let c = one_with(ALT_SHIM, |_| false);
+        assert!(
+            c.methods.is_empty(),
+            "the else-branch class has no constructor"
+        );
+        assert_eq!(
+            c.guard,
+            Some(ClassGuard {
+                class: "App\\Dep\\Factory".into(),
+                requires: false
+            })
+        );
+    }
+
+    #[test]
+    fn braced_guard_on_a_missing_class_keeps_the_else_branch() {
+        let src = r#"<?php
+namespace Acme\Shim;
+if (\class_exists('\\Vendor\\Real\\Base')) {
+    class Shim extends \Vendor\Real\Base {}
+} else {
+    class Shim {}
+}"#;
+        let c = one_with(src, |c| {
+            assert_eq!(c, "Vendor\\Real\\Base", "the string argument, unescaped");
+            false
+        });
+        assert!(c.extends.is_empty(), "the else-branch stub");
+        assert!(c.conditional);
+    }
+
+    #[test]
+    fn negated_guard_inverts_the_branch() {
+        let src = r#"<?php
+namespace A;
+if (!interface_exists(\B\I::class)):
+    class C { public function __construct(int $x) {} }
+else:
+    class C {}
+endif;
+"#;
+        assert_eq!(
+            one_with(src, |_| false).methods.len(),
+            1,
+            "the `if` branch runs"
+        );
+        assert!(
+            one_with(src, |_| true).methods.is_empty(),
+            "the `else` branch runs"
+        );
+    }
+
+    #[test]
+    fn a_compound_condition_or_elseif_is_unguarded_and_keeps_the_first() {
+        // Conditions we can't read decide nothing: the first declaration wins,
+        // as before guards were evaluated.
+        let compound = r#"<?php
+namespace A;
+if (class_exists(\B\X::class) && PHP_VERSION_ID > 80000) {
+    class C { public function m() {} }
+} else {
+    class C {}
+}"#;
+        let c = one_with(compound, |_| false);
+        assert_eq!(c.methods.len(), 1);
+        assert_eq!(c.guard, None);
+
+        let elseif = r#"<?php
+namespace A;
+if (class_exists(\B\X::class)):
+    class C {}
+elseif (class_exists(\B\Y::class)):
+    class C { public function m() {} }
+else:
+    class C { public function n() {} }
+endif;
+"#;
+        // X missing: the `if` doesn't hold; the elseif and the else after it
+        // are unguarded, so the elseif (the next declaration) is kept.
+        let c = one_with(elseif, |_| false);
+        assert_eq!(c.methods[0].name, "m");
+    }
+
+    #[test]
+    fn a_guard_ends_at_endif() {
+        let src = r#"<?php
+namespace A;
+if (class_exists(\B\X::class)):
+    class C {}
+endif;
+class D {}
+"#;
+        let meta = parse_file_with(src.as_bytes(), |_| true);
+        let d = meta.declarations.iter().find(|d| d.fqcn == "A\\D").unwrap();
+        assert_eq!(d.guard, None);
     }
 
     #[test]
