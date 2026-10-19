@@ -51,6 +51,16 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.20.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.20.0...magequery-v0.20.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **magecommand:** compile the branch a class_exists() guard actually takes ([#150](https://github.com/cresset-tools/magequery/issues/150)) ([8aa5107](https://github.com/cresset-tools/magequery/commit/8aa5107f36dc25ae5125bfe2264f2ed27796bf9b))
+* **magecommand:** fold a plugin's two type spellings the way the plugin list does ([#151](https://github.com/cresset-tools/magequery/issues/151)) ([2b4dc90](https://github.com/cresset-tools/magequery/commit/2b4dc90df53598aa2407c7727e49bb7191ae9841))
+* **magequery:** count setTemplate actions and template arguments as template uses ([#148](https://github.com/cresset-tools/magequery/issues/148)) ([228fe28](https://github.com/cresset-tools/magequery/commit/228fe28c275be71f24162719d439ace90ef7dd18))
+* **magequery:** read config.php's modules node in long array() syntax ([#153](https://github.com/cresset-tools/magequery/issues/153)) ([8d3e804](https://github.com/cresset-tools/magequery/commit/8d3e8048f72836c2873fcb5a0ae4527ec21ad047))
+
 ## [0.20.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.19.4...magequery-v0.20.0) (2026-10-16)
 
 
