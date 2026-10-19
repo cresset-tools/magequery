@@ -253,6 +253,9 @@ Two honesty notes worth knowing before you read a result as a defect:
   dead code — check the PHP section, which says
   "rendered from PHP, not layout XML" when that is what is happening. Only
   "(not referenced by layout XML)" *plus* "(and no PHP binds it)" means unused.
+  Layout uses cover `template=`, a `template` block argument, and
+  `<action method="setTemplate">`. A use tagged `[only if <config/path>]` applies
+  only while that `ifconfig` flag is set, so check it with `config <path>`.
 - Area-aware commands default to **frontend** (`ui-components` to adminhtml). A miss
   in the wrong area names the right one — "Found in adminhtml — pass
   `--area adminhtml`" — so read the error rather than assuming the thing is absent.

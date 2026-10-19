@@ -237,7 +237,7 @@ impl LayoutIndex {
 
         // Parse everything in parallel; job order (modules in load order, themes after)
         // is preserved by the collect.
-        let parsed: Vec<Vec<parse::RawLayoutOp>> = jobs
+        let parsed: Vec<parse::RawLayout> = jobs
             .par_iter()
             .map(|j| {
                 vfs.read_to_string(&j.path)
@@ -249,13 +249,14 @@ impl LayoutIndex {
         let mut handles: HashMap<(Area, String), Vec<LayoutContribution>> = HashMap::new();
         let mut included_by: HashMap<(Area, String), Vec<String>> = HashMap::new();
         let mut templates: HashMap<(Area, String), Template> = HashMap::new();
-        for (job, raw_ops) in jobs.iter().zip(parsed) {
+        for (job, raw) in jobs.iter().zip(parsed) {
             for &area in &job.areas {
                 let module = match &job.layer {
                     LayoutLayer::Module(m) => m.clone(),
                     LayoutLayer::Theme(t) => ModuleName::new(t.as_str()),
                 };
-                let ops: Vec<LayoutOp> = raw_ops
+                let ops: Vec<LayoutOp> = raw
+                    .ops
                     .iter()
                     .map(|r| LayoutOp {
                         kind: layout_kind(r.kind),
@@ -279,23 +280,41 @@ impl LayoutIndex {
                             list.push(job.handle.clone());
                         }
                     }
-                    if let Some(raw) = op.template.as_deref() {
-                        let reference = normalize_template_ref(&job.owner_module, raw);
-                        let template = templates
-                            .entry((area, reference.clone()))
-                            .or_insert_with(|| Template {
-                                reference,
-                                area,
-                                files: Vec::new(),
-                                usages: Vec::new(),
-                            });
-                        template.usages.push(TemplateUsage {
-                            handle: job.handle.clone(),
-                            block: op.name.clone(),
-                            class: op.class.clone(),
-                            source: op.source.clone(),
+                }
+                for assign in &raw.templates {
+                    let reference = normalize_template_ref(&job.owner_module, &assign.template);
+                    // The class is known when this file declares the block itself.
+                    let class = ops
+                        .iter()
+                        .find(|o| o.kind == LayoutOpKind::Block && o.name == assign.block)
+                        .and_then(|o| o.class.clone());
+                    let template = templates
+                        .entry((area, reference.clone()))
+                        .or_insert_with(|| Template {
+                            reference,
+                            area,
+                            files: Vec::new(),
+                            usages: Vec::new(),
                         });
-                    }
+                    template.usages.push(TemplateUsage {
+                        handle: job.handle.clone(),
+                        block: assign.block.clone(),
+                        class,
+                        via: match assign.via {
+                            parse::RawTemplateVia::Attribute => TemplateAssignment::Attribute,
+                            parse::RawTemplateVia::Argument => TemplateAssignment::Argument,
+                            parse::RawTemplateVia::SetTemplateAction => {
+                                TemplateAssignment::SetTemplateAction
+                            }
+                        },
+                        ifconfig: assign.ifconfig.clone(),
+                        source: Source {
+                            module: module.clone(),
+                            file: job.path.clone(),
+                            line: assign.line,
+                            area,
+                        },
+                    });
                 }
                 handles.entry((area, job.handle.clone())).or_default().push(LayoutContribution {
                     layer: job.layer.clone(),

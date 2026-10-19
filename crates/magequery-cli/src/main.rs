@@ -2137,11 +2137,24 @@ fn render_template(mage: &Magento, template: &magequery_core::Template, root: &P
                 .as_ref()
                 .map(|c| format!("  {}", style::class(c.as_str())))
                 .unwrap_or_default();
+            let via = match usage.via {
+                magequery_core::TemplateAssignment::Attribute => "",
+                magequery_core::TemplateAssignment::Argument => "  via template argument",
+                magequery_core::TemplateAssignment::SetTemplateAction => "  via setTemplate action",
+                // `TemplateAssignment` is #[non_exhaustive]; a new form renders neutrally.
+                _ => "",
+            };
+            let condition = usage
+                .ifconfig
+                .as_ref()
+                .map(|path| format!("  {}", style::number(&format!("[only if {path}]"))))
+                .unwrap_or_default();
             println!(
-                "  {}  {}{}  {}",
+                "  {}  {}{}{}{condition}  {}",
                 style::name(&usage.handle),
                 style::target(&usage.block),
                 class,
+                style::dim(via),
                 style::path(&short_loc(&usage.source, root)),
             );
         }
