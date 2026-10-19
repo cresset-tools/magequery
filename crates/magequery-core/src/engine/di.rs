@@ -62,6 +62,63 @@ pub(crate) struct LocatedPlugin {
     /// plugin was first declared — `(area_rank, module load_order, line)`. Global (rank 0)
     /// before area overlay (rank 1); set on first insert, preserved across attribute merges.
     pub order_key: (u8, u32, u32),
+    /// The compiled entry lists `disabled` before `instance` (see [`PluginFold`]).
+    pub disabled_before_instance: bool,
+    /// The fold of the scope reads before the current one.
+    pub base: Option<PluginFold>,
+    /// The current scope read's declarations, one per type-node spelling,
+    /// in node order.
+    pub parts: Vec<PluginPart>,
+}
+
+/// One scope read's declarations of a plugin under ONE spelling of its type
+/// (`X` or `\X`). Within a spelling the XML merge is attribute-level; the
+/// two spellings are distinct `<type>` nodes, so each is mapped on its own.
+#[derive(Clone)]
+pub(crate) struct PluginPart {
+    pub target_backslash: bool,
+    /// Where this spelling's `<type>` node sits in the scope read's merged
+    /// DOM ([`AreaConfig::node_positions`]): the fold runs in this order,
+    /// which is the order a spelling FIRST appears in any file, for any
+    /// plugin or argument — not the order this plugin's files load.
+    pub node_pos: u32,
+    pub sort_order: Option<i32>,
+    pub disabled: Option<bool>,
+    /// The class and whether `type=` carried a leading backslash.
+    pub class: Option<(ClassName, bool)>,
+}
+
+/// A plugin entry as `PluginListGenerator::merge` builds it: every mapped
+/// entry (each spelling of each scope read, in that order) folded with
+/// `array_replace_recursive`. The mapper writes `sortOrder` always (default
+/// 0) and `disabled`/`instance` only when present, in that order; the fold
+/// keeps existing keys in place and appends new ones.
+#[derive(Clone)]
+pub(crate) struct PluginFold {
+    pub sort_order: i32,
+    pub disabled: Option<bool>,
+    pub class: Option<(ClassName, bool)>,
+    pub disabled_first: bool,
+}
+
+impl PluginFold {
+    fn fold(base: Option<PluginFold>, part: &PluginPart) -> PluginFold {
+        let disabled_first = match &base {
+            Some(b) if b.disabled.is_some() != b.class.is_some() => b.disabled.is_some(),
+            Some(b) if b.disabled.is_some() => b.disabled_first,
+            _ => true,
+        };
+        PluginFold {
+            sort_order: part.sort_order.unwrap_or(0),
+            disabled: part.disabled.or(base.as_ref().and_then(|b| b.disabled)),
+            class: part.class.clone().or(base.and_then(|b| b.class)),
+            disabled_first,
+        }
+    }
+
+    fn of(base: Option<PluginFold>, parts: &[PluginPart]) -> Option<PluginFold> {
+        parts.iter().fold(base, |acc, part| Some(PluginFold::fold(acc, part)))
+    }
 }
 
 #[derive(Clone)]
@@ -155,6 +212,7 @@ impl AreaConfig {
                         instance_layer: plugin.instance_layer,
                         class_backslash: plugin.class_backslash,
                         target_backslash: plugin.target_backslash,
+                        disabled_before_instance: plugin.disabled_before_instance,
                         decl_layer: plugin.order_key.0,
                         decl_load_order: plugin.order_key.1,
                         decl_line: plugin.order_key.2,
@@ -671,48 +729,94 @@ fn merge_file_plugins(cfg: &mut AreaConfig, p: &Parsed) {
     // custom-registered area (merged with a Global placeholder tag) rank as
     // an overlay.
     let area_rank = if p.layer >= 2 { 1 } else { 0 };
+    let layer = (p.layer as usize).min(2);
     for (target, rp) in &file.plugins {
+        let spelled = if rp.target_backslash {
+            format!("\\{}", target.as_str())
+        } else {
+            target.as_str().to_owned()
+        };
+        let node_pos = cfg
+            .node_positions
+            .get(&spelled)
+            .and_then(|slots| slots[layer])
+            .unwrap_or(u32::MAX);
         let by_name = cfg.plugins.entry(target.clone()).or_default();
         match by_name.get_mut(&rp.name) {
-            // Attribute-level merge: only override fields the new declaration
-            // specifies — with the one exception of `sortOrder` below.
+            // Attribute-level merge within one spelling of the target in one
+            // scope read; a fold (`PluginFold`) across spellings and reads.
             Some(existing) => {
-                if let Some(c) = &rp.class {
-                    if existing.class.is_none() {
-                        existing.instance_layer = Some(p.layer);
-                    }
-                    existing.class = Some(c.clone());
-                    existing.class_backslash = rp.class_had_backslash;
+                if rp.class.is_some() && existing.class.is_none() {
+                    existing.instance_layer = Some(p.layer);
                 }
-                // `sortOrder` is NOT an attribute merge across config SCOPES.
-                // Magento reads each scope separately and folds the results
-                // with `array_replace_recursive`
-                // (`PluginListGenerator::merge`), and the mapper writes
-                // `sortOrder` into every plugin it maps, defaulting to 0
+                if rp.disabled.is_some() && existing.disabled.is_none() {
+                    existing.disabled_layer = Some(p.layer);
+                }
+                // `sortOrder` is NOT an attribute merge across config SCOPES,
+                // nor across the two spellings of a type (`X` and `\X`).
+                // Magento maps each scope read, and each `<type>` node in it,
+                // separately and folds the results with
+                // `array_replace_recursive` (`PluginListGenerator::merge`
+                // ltrims the type name first). The mapper writes `sortOrder`
+                // into every plugin it maps, defaulting to 0
                 // (`ObjectManager/Config/Mapper/Dom.php`) — `disabled` and
                 // `instance` it writes only when the attribute is present,
                 // which is why those two inherit an omission and this one does
                 // not. So an area overlay that re-declares a plugin without
                 // `sortOrder` OVERWRITES the global value with 0, reordering
-                // the chain. Within one scope the merge really is XML
+                // the chain. Within one node the merge really is XML
                 // (`Config/Dom::_mergeAttributes`) and an omission is left
                 // alone.
                 //
                 // "Later" means later in the generator's SCOPE READ order
                 // (module global, then primary, then the area), not in config
-                // layer order — see [`plugin_read_rank`].
+                // layer order — see [`plugin_read_rank`]. Within a read, the
+                // spellings fold in node order: the order each spelling first
+                // appears, which is not file order.
                 if rank > existing.last_read_rank {
-                    existing.sort_order = rp.sort_order.unwrap_or(0);
-                } else if let Some(s) = rp.sort_order {
-                    existing.sort_order = s;
+                    existing.base = PluginFold::of(existing.base.take(), &existing.parts);
+                    existing.parts.clear();
                 }
                 existing.last_read_rank = rank;
-                if let Some(d) = rp.disabled {
-                    if existing.disabled.is_none() {
-                        existing.disabled_layer = Some(p.layer);
+                let part = match existing
+                    .parts
+                    .iter_mut()
+                    .position(|part| part.target_backslash == rp.target_backslash)
+                {
+                    Some(i) => &mut existing.parts[i],
+                    None => {
+                        let at = existing.parts.partition_point(|part| part.node_pos <= node_pos);
+                        existing.parts.insert(
+                            at,
+                            PluginPart {
+                                target_backslash: rp.target_backslash,
+                                node_pos,
+                                sort_order: None,
+                                disabled: None,
+                                class: None,
+                            },
+                        );
+                        &mut existing.parts[at]
                     }
-                    existing.disabled = Some(d);
+                };
+                if let Some(s) = rp.sort_order {
+                    part.sort_order = Some(s);
                 }
+                if let Some(d) = rp.disabled {
+                    part.disabled = Some(d);
+                }
+                if let Some(c) = &rp.class {
+                    part.class = Some((c.clone(), rp.class_had_backslash));
+                }
+                let fold = PluginFold::of(existing.base.clone(), &existing.parts)
+                    .expect("at least one part");
+                existing.sort_order = fold.sort_order;
+                existing.disabled = fold.disabled;
+                if let Some((c, backslash)) = fold.class {
+                    existing.class = Some(c);
+                    existing.class_backslash = backslash;
+                }
+                existing.disabled_before_instance = fold.disabled_first;
                 existing.source = src(rp.line);
             }
             None => {
@@ -729,6 +833,15 @@ fn merge_file_plugins(cfg: &mut AreaConfig, p: &Parsed) {
                         last_read_rank: rank,
                         source: src(rp.line),
                         order_key: (area_rank, p.load_order as u32, rp.line),
+                        disabled_before_instance: true,
+                        base: None,
+                        parts: vec![PluginPart {
+                            target_backslash: rp.target_backslash,
+                            node_pos,
+                            sort_order: rp.sort_order,
+                            disabled: rp.disabled,
+                            class: rp.class.clone().map(|c| (c, rp.class_had_backslash)),
+                        }],
                     },
                 );
             }
@@ -961,6 +1074,9 @@ mod export_tests {
                 target_backslash: false,
                 source: src(1),
                 order_key: (0, 1, 1),
+                disabled_before_instance: true,
+                base: None,
+                parts: Vec::new(),
             },
         );
         by_name.insert(
@@ -976,6 +1092,9 @@ mod export_tests {
                 target_backslash: false,
                 source: src(2),
                 order_key: (0, 2, 2),
+                disabled_before_instance: true,
+                base: None,
+                parts: Vec::new(),
             },
         );
         by_name.insert(
@@ -991,6 +1110,9 @@ mod export_tests {
                 target_backslash: false,
                 source: src(5),
                 order_key: (0, 3, 5),
+                disabled_before_instance: true,
+                base: None,
+                parts: Vec::new(),
             },
         );
         config.plugins.insert(ClassName::new("T\\Target"), by_name);

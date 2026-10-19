@@ -349,6 +349,12 @@ last-wins is deterministic.
   to 0 — while `disabled` and `instance` it writes only when the attribute is present,
   which is why only `sortOrder` behaves this way. Pinned by
   `an_area_overlay_omitting_sort_order_resets_it_to_zero` in `engine/di.rs`.
+  The same fold applies WITHIN one scope between the two spellings of a type
+  (`<type name="\X">` and `<type name="X">` are distinct DOM nodes, mapped
+  separately and folded in node order — not file order), which also decides
+  the compiled field order (`[sortOrder, instance, disabled]` when the type
+  and the disable come from different spellings). `PluginPart`/`PluginFold`
+  in `engine/di.rs`; ground-truthed by `tests/plugin_type_spellings.rs`.
 - **The plugin lists read config scopes differently from the ObjectManager config**, in
   two independent ways. `PluginListGenerator` does not share a reader with it, so
   `merge_area` runs TWO passes: everything-but-plugins in config-layer order, then plugins
