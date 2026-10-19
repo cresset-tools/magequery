@@ -242,7 +242,7 @@ impl Definitions {
             .par_iter()
             .filter_map(|(path, kind)| {
                 let src = fs::read(path).ok()?;
-                let meta = magecommand_php::parse_file(&src);
+                let meta = magecommand_php::parse_file_with(&src, |c| guard_loadable(magento, c));
                 Some(
                     meta.declarations
                         .into_iter()
@@ -493,7 +493,8 @@ impl Definitions {
                 unresolved.push(name);
                 continue;
             };
-            for decl in magecommand_php::parse_file(&src).declarations {
+            let meta = magecommand_php::parse_file_with(&src, |c| guard_loadable(magento, c));
+            for decl in meta.declarations {
                 queue.extend(decl.extends.iter().cloned());
                 queue.extend(decl.implements.iter().cloned());
                 self.canonical
@@ -1060,6 +1061,23 @@ fn excluded(base: &Path, path: &Path, kind: PathKind) -> bool {
         PathKind::Setup => comps.iter().any(|c| c.starts_with("Test")),
         PathKind::Generated => false,
     }
+}
+
+/// Whether `class_exists($name)` holds during a compile, for picking the
+/// branch of a `class_exists(…)`-guarded declaration (TIG PostNL's
+/// `SourceItemsDataBySkuProxy`: the `if` branch needs MSI, the `else` branch
+/// has no constructor). The autoload maps resolve it, or it is a name the
+/// generator autoloader creates (`…Factory`, `\Proxy`, …) from a source
+/// class that itself holds. A bare global name is a PHP built-in we can't
+/// see, so it holds, as `parse_file` assumes.
+fn guard_loadable(magento: &Magento, name: &str) -> bool {
+    if !name.contains('\\') {
+        return true;
+    }
+    if magento.class_file(&magequery_core::ClassName::new(name.to_owned())).is_some() {
+        return true;
+    }
+    crate::codegen::classify(name).is_some_and(|(_, source)| guard_loadable(magento, &source))
 }
 
 #[cfg(test)]

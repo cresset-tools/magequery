@@ -9,22 +9,63 @@ use crate::model::*;
 use crate::scan::Cursor;
 
 /// Parse one PHP source file. Never panics; never reads anything but `src`.
+///
+/// A name declared more than once (both branches of a `class_exists(…)`
+/// guard) keeps its FIRST declaration. Callers that can answer "is this
+/// class loadable" use [`parse_file_with`] to keep the branch PHP would run.
 pub fn parse_file(src: &[u8]) -> FileMeta {
+    parse(src, None)
+}
+
+/// [`parse_file`], choosing between same-name declarations by evaluating
+/// their [`ClassGuard`]s with `loadable`.
+///
+/// A `class_exists(…)` guard declares one name in both branches, and PHP
+/// defines whichever branch runs. Per name, the first declaration whose guard
+/// holds is kept (an unguarded or unreadable-condition declaration always
+/// holds); when none holds, the first is kept.
+pub fn parse_file_with(src: &[u8], loadable: impl Fn(&str) -> bool) -> FileMeta {
+    parse(src, Some(&loadable))
+}
+
+fn parse(src: &[u8], loadable: Option<&dyn Fn(&str) -> bool>) -> FileMeta {
     let mut p = Parser {
         cur: Cursor::new(src),
         ns: String::new(),
         uses: HashMap::new(),
+        guards: Vec::new(),
         out: FileMeta::default(),
     };
     // Everything before the first open tag is HTML.
     p.cur.skip_html_until_open_tag();
     p.top_level();
-    // A `class_exists(…)` guard declares the same name in both branches; PHP
-    // defines whichever branch runs. We keep the FIRST (the `if` branch, the
-    // real implementation the shim's dependency-present path takes).
-    let mut seen: HashMap<String, ()> = HashMap::new();
-    p.out.declarations.retain(|d| seen.insert(d.fqcn.clone(), ()).is_none());
+    let holds = |d: &ClassMeta| match (&d.guard, loadable) {
+        (Some(g), Some(loadable)) => loadable(&g.class) == g.requires,
+        _ => true,
+    };
+    let mut chosen: HashMap<String, usize> = HashMap::new();
+    for (i, d) in p.out.declarations.iter().enumerate() {
+        match chosen.get(&d.fqcn) {
+            None => {
+                chosen.insert(d.fqcn.clone(), i);
+            }
+            Some(&j) if !holds(&p.out.declarations[j]) && holds(d) => {
+                chosen.insert(d.fqcn.clone(), i);
+            }
+            Some(_) => {}
+        }
+    }
+    let mut i = 0;
+    p.out.declarations.retain(|d| {
+        let keep = chosen.get(&d.fqcn) == Some(&i);
+        i += 1;
+        keep
+    });
     p.out
+}
+
+fn invert(g: ClassGuard) -> ClassGuard {
+    ClassGuard { requires: !g.requires, ..g }
 }
 
 const BUILTIN_TYPES: [&str; 17] = [
@@ -37,6 +78,9 @@ struct Parser<'a> {
     ns: String,
     /// lowercased alias -> FQCN (PHP alias lookup is case-insensitive).
     uses: HashMap<String, String>,
+    /// The guards of the enclosing `if`/`else` branches, innermost last
+    /// (`None` = a branch whose condition we can't read).
+    guards: Vec<Option<ClassGuard>>,
     out: FileMeta,
 }
 
@@ -61,6 +105,8 @@ impl<'a> Parser<'a> {
         let mut is_final = false;
         let mut is_readonly = false;
         let mut pending_attrs: Vec<String> = Vec::new();
+        // The guard of the braced `if` block that just closed, for its `else`.
+        let mut last_if: Option<ClassGuard> = None;
         loop {
             self.cur.skip_insignificant();
             let Some(b) = self.cur.peek() else { return };
@@ -134,11 +180,23 @@ impl<'a> Parser<'a> {
                         // DOES record it (unlike a braced `if { class }`, at depth
                         // 1, which it skips). So we eat the `:` and let the class
                         // parse inline as a normal top-level declaration.
+                        //
+                        // Each branch records its `class_exists(…)` guard, so
+                        // `parse_file_with` can pick the branch PHP would run.
+                        // An `elseif`, and anything after one, is unguarded:
+                        // its branch also depends on the earlier conditions.
                         "if" | "elseif" => {
                             pending_attrs.clear();
-                            self.skip_paren_condition();
-                            if !self.eat_alt_syntax_colon() {
-                                self.descend_if_braced();
+                            let guard = self.paren_condition_guard();
+                            let guard = if word == "if" { guard } else { None };
+                            if self.eat_alt_syntax_colon() {
+                                if word == "elseif" {
+                                    self.guards.pop();
+                                }
+                                self.guards.push(guard);
+                            } else {
+                                last_if = guard.clone();
+                                self.descend_if_braced(guard);
                             }
                         }
                         "else" => {
@@ -146,9 +204,18 @@ impl<'a> Parser<'a> {
                             // the `:` and continues inline; `else if …` leaves the
                             // `if` for the next iteration's handler.
                             pending_attrs.clear();
-                            if !self.eat_alt_syntax_colon() {
-                                self.descend_if_braced();
+                            if self.eat_alt_syntax_colon() {
+                                let inverted = self.guards.pop().flatten().map(invert);
+                                self.guards.push(inverted);
+                            } else {
+                                let inverted = last_if.take().map(invert);
+                                self.descend_if_braced(inverted);
                             }
+                        }
+                        "endif" => {
+                            pending_attrs.clear();
+                            self.guards.pop();
+                            self.cur.skip_statement();
                         }
                         _ => {
                             // declare(...), const, expressions — top-level code
@@ -164,13 +231,77 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Skip a `( … )` control-structure condition if one is next.
-    fn skip_paren_condition(&mut self) {
+    /// Skip a `( … )` control-structure condition if one is next, returning
+    /// its guard when the whole condition is `[!]class_exists(X::class)` (or
+    /// `interface_exists`/`trait_exists`/`enum_exists`, or a string argument).
+    fn paren_condition_guard(&mut self) -> Option<ClassGuard> {
         self.cur.skip_insignificant();
-        if self.cur.peek() == Some(b'(') {
-            self.cur.bump();
-            self.cur.skip_parens_body(1);
+        if self.cur.peek() != Some(b'(') {
+            return None;
         }
+        self.cur.bump();
+        let start = self.cur.pos;
+        let guard = self.read_exists_call();
+        self.cur.pos = start;
+        self.cur.skip_parens_body(1);
+        guard
+    }
+
+    /// Read `[!]class_exists(X::class[, …])` followed by the condition's
+    /// closing `)`. Leaves the cursor anywhere; the caller rewinds.
+    fn read_exists_call(&mut self) -> Option<ClassGuard> {
+        self.cur.skip_insignificant();
+        let mut requires = true;
+        while self.cur.peek() == Some(b'!') {
+            self.cur.bump();
+            requires = !requires;
+            self.cur.skip_insignificant();
+        }
+        let func = self.read_qualified_name()?;
+        let func = func.rsplit('\\').next().unwrap_or(&func).to_ascii_lowercase();
+        if !matches!(
+            func.as_str(),
+            "class_exists" | "interface_exists" | "trait_exists" | "enum_exists"
+        ) {
+            return None;
+        }
+        self.cur.skip_insignificant();
+        if self.cur.peek() != Some(b'(') {
+            return None;
+        }
+        self.cur.bump();
+        self.cur.skip_insignificant();
+        let class = match self.cur.peek()? {
+            q @ (b'\'' | b'"') => {
+                let open = self.cur.pos;
+                if q == b'\'' {
+                    self.cur.skip_single_quoted();
+                } else {
+                    self.cur.skip_double_quoted(q);
+                }
+                let raw = std::str::from_utf8(&self.cur.src[open + 1..self.cur.pos - 1]).ok()?;
+                if raw.contains('$') {
+                    return None;
+                }
+                raw.replace("\\\\", "\\").trim_start_matches('\\').to_owned()
+            }
+            _ => {
+                let name = self.read_qualified_name()?;
+                self.cur.skip_insignificant();
+                if !self.cur.starts_with(b"::") {
+                    return None;
+                }
+                self.cur.pos += 2;
+                if !self.cur.eat_keyword("class") {
+                    return None;
+                }
+                self.resolve(&name)
+            }
+        };
+        // The optional autoload flag, then the call's and the condition's `)`.
+        self.cur.skip_parens_body(1);
+        self.cur.skip_insignificant();
+        (self.cur.peek() == Some(b')')).then_some(ClassGuard { class, requires })
     }
 
     /// Consume a `:` that opens an alternative-syntax block (`if (…): … endif;`),
@@ -191,11 +322,13 @@ impl<'a> Parser<'a> {
     /// If a `{` follows, descend into the block scanning for declarations
     /// (consuming through its matching `}`). A braceless body is left for the
     /// main loop — a braceless `if (x) class C {}` still registers `C`.
-    fn descend_if_braced(&mut self) {
+    fn descend_if_braced(&mut self, guard: Option<ClassGuard>) {
         self.cur.skip_insignificant();
         if self.cur.peek() == Some(b'{') {
             self.cur.bump();
+            self.guards.push(guard);
             self.scan_declarations(true);
+            self.guards.pop();
         }
     }
 
@@ -448,6 +581,7 @@ impl<'a> Parser<'a> {
             offset,
             uses: self.uses.iter().map(|(a, f)| (a.clone(), f.clone())).collect(),
             conditional,
+            guard: self.guards.last().cloned().flatten(),
         };
 
         self.cur.skip_insignificant();
