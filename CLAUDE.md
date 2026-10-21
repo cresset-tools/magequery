@@ -1154,15 +1154,23 @@ handle = 53 files, 12ms.
 
 `magequery templates [<Vendor_Module::path.phtml>] [--area]` catalogs every `.phtml`
 under enabled modules' `view/{base,frontend,adminhtml}/templates` trees and every theme's
-`<Vendor_Module>/templates` overrides, then joins them to every layout template
-assignment, in all three forms: the `template=` attribute, a block's
+`<Vendor_Module>/templates` overrides, then joins them to layout template assignments in
+three forms: the `template=` attribute, a block's first direct
 `<arguments><argument name="template" xsi:type="string">` (which `Template::_construct`
-hands to `setTemplate()`), and `<action method="setTemplate">`. The action's *first*
-string argument counts whatever its `name`, because Magento passes action arguments
-positionally. Each usage records its form (`via`) and the action's `ifconfig`, rendered
-`[only if <path>]`. That conditional form is how third-party blocks are usually rethemed,
-so missing it reported live overrides as dead code. Short module-layout references
+hands to `setTemplate()`), and `<action method="setTemplate">`. For the action, the
+*first* argument counts when it is a string, whatever its `name`: Magento passes action
+arguments positionally, so a later string argument is not the template. Assignments
+Magento never applies are skipped: those on a `<referenceBlock remove="true">`, and those
+on a name that is declared only as a container — core's `root` and `backend.page`, which
+come from `page_layout/` files, so those are read for container names. Each usage
+records its form (`via`), the class of the element that assigned it, and its `ifconfig`
+— the action's own, else the nearest enclosing `<block ifconfig=>`, which removes the
+block while the flag is off — rendered `[only if <path>]`. `ifconfig=""`/`"0"` is no
+condition, as in PHP. Not covered: templates bound through other layout values, such as
+the pricing `<item name="render_template">`, `renderer_template` arguments or
+`setMethodFormTemplate`; those still read as unreferenced. Short module-layout references
 (`template="path.phtml"`) normalize to the owning module's full reference. No arg lists references with file/use counts; an exact or
+
 single substring match shows module file, every theme override candidate, and each layout
 handle/block/class use with provenance. Missing files and templates unused by layout XML are
 reported honestly. Theme application depends on active-theme state, so candidates are listed,

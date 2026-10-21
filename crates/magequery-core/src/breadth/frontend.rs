@@ -191,9 +191,15 @@ impl LayoutIndex {
             areas: Vec<Area>,
             handle: String,
             path: PathBuf,
+            /// A `page_layout/` file: read only for the containers it declares.
+            page_layout: bool,
         }
         let mut jobs: Vec<Job> = Vec::new();
-        let mut push_dir = |layer: &LayoutLayer, owner_module: &ModuleName, areas: &[Area], dir: PathBuf| {
+        let mut push_dir = |layer: &LayoutLayer,
+                            owner_module: &ModuleName,
+                            areas: &[Area],
+                            dir: PathBuf,
+                            page_layout: bool| {
             let Ok(entries) = std::fs::read_dir(&dir) else { return };
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -207,6 +213,7 @@ impl LayoutIndex {
                     areas: areas.to_vec(),
                     handle: handle.to_string(),
                     path,
+                    page_layout,
                 });
             }
         };
@@ -214,11 +221,12 @@ impl LayoutIndex {
         for m in modules.iter().filter(|m| m.enabled) {
             let layer = LayoutLayer::Module(m.name.clone());
             for (sub, areas) in [
-                ("view/base/layout", vec![Area::Frontend, Area::Adminhtml]),
-                ("view/frontend/layout", vec![Area::Frontend]),
-                ("view/adminhtml/layout", vec![Area::Adminhtml]),
+                ("view/base", vec![Area::Frontend, Area::Adminhtml]),
+                ("view/frontend", vec![Area::Frontend]),
+                ("view/adminhtml", vec![Area::Adminhtml]),
             ] {
-                push_dir(&layer, &m.name, &areas, m.path.join(sub));
+                push_dir(&layer, &m.name, &areas, m.path.join(sub).join("layout"), false);
+                push_dir(&layer, &m.name, &areas, m.path.join(sub).join("page_layout"), true);
             }
         }
         for (id, dir) in themes {
@@ -228,10 +236,8 @@ impl LayoutIndex {
             let Ok(entries) = std::fs::read_dir(dir) else { continue };
             for entry in entries.flatten() {
                 let owner_module = ModuleName::new(entry.file_name().to_string_lossy().as_ref());
-                let sub = entry.path().join("layout");
-                if sub.is_dir() {
-                    push_dir(&layer, &owner_module, &[area], sub);
-                }
+                push_dir(&layer, &owner_module, &[area], entry.path().join("layout"), false);
+                push_dir(&layer, &owner_module, &[area], entry.path().join("page_layout"), true);
             }
         }
 
@@ -246,10 +252,33 @@ impl LayoutIndex {
             })
             .collect();
 
+        // Names declared as containers and as blocks, per area. A `<referenceBlock>` can
+        // name a container (`root` and `backend.page` come from page layouts), and
+        // Magento runs actions and applies templates for blocks only.
+        let mut containers: HashSet<(Area, &str)> = HashSet::new();
+        let mut blocks: HashSet<(Area, &str)> = HashSet::new();
+        for (job, raw) in jobs.iter().zip(&parsed) {
+            for &area in &job.areas {
+                for op in &raw.ops {
+                    match op.kind {
+                        parse::RawLayoutOpKind::Container => containers.insert((area, &op.name)),
+                        parse::RawLayoutOpKind::Block => blocks.insert((area, &op.name)),
+                        _ => false,
+                    };
+                }
+            }
+        }
+        let is_container = |area: Area, name: &str| {
+            containers.contains(&(area, name)) && !blocks.contains(&(area, name))
+        };
+
         let mut handles: HashMap<(Area, String), Vec<LayoutContribution>> = HashMap::new();
         let mut included_by: HashMap<(Area, String), Vec<String>> = HashMap::new();
         let mut templates: HashMap<(Area, String), Template> = HashMap::new();
-        for (job, raw) in jobs.iter().zip(parsed) {
+        for (job, raw) in jobs.iter().zip(&parsed) {
+            if job.page_layout {
+                continue;
+            }
             for &area in &job.areas {
                 let module = match &job.layer {
                     LayoutLayer::Module(m) => m.clone(),
@@ -282,12 +311,21 @@ impl LayoutIndex {
                     }
                 }
                 for assign in &raw.templates {
+                    if !assign.declared && is_container(area, &assign.block) {
+                        continue;
+                    }
                     let reference = normalize_template_ref(&job.owner_module, &assign.template);
-                    // The class is known when this file declares the block itself.
-                    let class = ops
-                        .iter()
-                        .find(|o| o.kind == LayoutOpKind::Block && o.name == assign.block)
-                        .and_then(|o| o.class.clone());
+                    // The assigning element's own class, else the class this file
+                    // declares the named block with.
+                    let class = assign.class.clone().or_else(|| {
+                        ops.iter()
+                            .find(|o| {
+                                o.kind == LayoutOpKind::Block
+                                    && !o.name.is_empty()
+                                    && o.name == assign.block
+                            })
+                            .and_then(|o| o.class.clone())
+                    });
                     let template = templates
                         .entry((area, reference.clone()))
                         .or_insert_with(|| Template {
@@ -543,6 +581,104 @@ mod template_tests {
         assert_eq!(template.usages[0].handle, "acme_index");
         assert!(matches!(template.files[0].layer, LayoutLayer::Module(_)));
         assert!(matches!(template.files[1].layer, LayoutLayer::Theme(_)));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn usages_carry_form_condition_and_class_and_skip_containers() {
+        use crate::model::TemplateAssignment as Via;
+        let root = std::env::temp_dir().join(format!(
+            "magequery-template-usage-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let module_root = root.join("Acme/Widget");
+        let page_layout = module_root.join("view/base/page_layout/empty.xml");
+        let layout = module_root.join("view/frontend/layout/acme_index.xml");
+        for file in [&page_layout, &layout] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        }
+        std::fs::write(
+            &page_layout,
+            r#"<layout><container name="root"><container name="after.body.start"/></container></layout>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &layout,
+            r#"<page xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><body>
+                <referenceBlock name="root">
+                    <action method="setTemplate">
+                        <argument name="template" xsi:type="string">Acme_Widget::popup.phtml</argument>
+                    </action>
+                </referenceBlock>
+                <referenceBlock class="Acme\Widget\Stock" name="stock" template="Acme_Widget::stock.phtml"/>
+                <block class="Acme\Widget\First" template="Acme_Widget::first.phtml"/>
+                <block class="Acme\Widget\Second" template="Acme_Widget::second.phtml"/>
+                <block class="Acme\Widget\Form" name="form" ifconfig="acme/general/active">
+                    <arguments>
+                        <argument name="template" xsi:type="string">Acme_Widget::form.phtml</argument>
+                    </arguments>
+                </block>
+                <referenceBlock name="header">
+                    <action ifconfig="acme/search/enabled" method="setTemplate">
+                        <argument name="template" xsi:type="string">Acme_Widget::search.phtml</argument>
+                    </action>
+                </referenceBlock>
+                <referenceBlock name="gone" remove="true" template="Acme_Widget::gone.phtml"/>
+            </body></page>"#,
+        )
+        .unwrap();
+
+        let module = Module {
+            name: ModuleName::new("Acme_Widget"),
+            enabled: true,
+            source: ModuleSource::App,
+            path: module_root,
+            sequence: Vec::new(),
+            load_order: 0,
+        };
+        let index = LayoutIndex::build(&[module], &Vfs::default(), &[]);
+        let usage = |path: &str| {
+            let t = index.template(&format!("Acme_Widget::{path}"), Area::Frontend);
+            let usages = t.map(|t| t.usages).unwrap_or_default();
+            assert!(usages.len() <= 1, "{path}: {} usages", usages.len());
+            usages.into_iter().next().map(|u| {
+                (u.block, u.class.map(|c| c.as_str().to_string()), u.via, u.ifconfig)
+            })
+        };
+        let some = |block: &str, class: Option<&str>, via, ifconfig: Option<&str>| {
+            Some((
+                block.to_string(),
+                class.map(str::to_string),
+                via,
+                ifconfig.map(str::to_string),
+            ))
+        };
+
+        // `root` is a container: Magento never runs the action.
+        assert_eq!(usage("popup.phtml"), None);
+        assert_eq!(usage("gone.phtml"), None);
+        assert_eq!(
+            usage("stock.phtml"),
+            some("stock", Some("Acme\\Widget\\Stock"), Via::Attribute, None)
+        );
+        assert_eq!(usage("first.phtml"), some("", Some("Acme\\Widget\\First"), Via::Attribute, None));
+        assert_eq!(
+            usage("second.phtml"),
+            some("", Some("Acme\\Widget\\Second"), Via::Attribute, None)
+        );
+        assert_eq!(
+            usage("form.phtml"),
+            some("form", Some("Acme\\Widget\\Form"), Via::Argument, Some("acme/general/active"))
+        );
+        assert_eq!(
+            usage("search.phtml"),
+            some("header", None, Via::SetTemplateAction, Some("acme/search/enabled"))
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

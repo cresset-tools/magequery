@@ -2138,12 +2138,17 @@ fn render_template(mage: &Magento, template: &magequery_core::Template, root: &P
                 .map(|c| format!("  {}", style::class(c.as_str())))
                 .unwrap_or_default();
             let via = match usage.via {
-                magequery_core::TemplateAssignment::Attribute => "",
-                magequery_core::TemplateAssignment::Argument => "  via template argument",
-                magequery_core::TemplateAssignment::SetTemplateAction => "  via setTemplate action",
-                // `TemplateAssignment` is #[non_exhaustive]; a new form renders neutrally.
-                _ => "",
-            };
+                magequery_core::TemplateAssignment::Attribute => None,
+                magequery_core::TemplateAssignment::Argument => Some("  via template argument"),
+                magequery_core::TemplateAssignment::SetTemplateAction => {
+                    Some("  via setTemplate action")
+                }
+                // `TemplateAssignment` is #[non_exhaustive]: never pass a new form off
+                // as a plain `template=` attribute.
+                _ => Some("  via layout"),
+            }
+            .map(style::dim)
+            .unwrap_or_default();
             let condition = usage
                 .ifconfig
                 .as_ref()
@@ -2154,7 +2159,7 @@ fn render_template(mage: &Magento, template: &magequery_core::Template, root: &P
                 style::name(&usage.handle),
                 style::target(&usage.block),
                 class,
-                style::dim(via),
+                via,
                 style::path(&short_loc(&usage.source, root)),
             );
         }

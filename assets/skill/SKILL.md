@@ -254,8 +254,13 @@ Two honesty notes worth knowing before you read a result as a defect:
   "rendered from PHP, not layout XML" when that is what is happening. Only
   "(not referenced by layout XML)" *plus* "(and no PHP binds it)" means unused.
   Layout uses cover `template=`, a `template` block argument, and
-  `<action method="setTemplate">`. A use tagged `[only if <config/path>]` applies
-  only while that `ifconfig` flag is set, so check it with `config <path>`.
+  `<action method="setTemplate">`; templates bound through other layout values
+  (pricing `render_template` items, `renderer_template` arguments) are not counted,
+  so search the layout XML before deleting one. A use tagged
+  `[only if <config/path>]` applies only while that `ifconfig` flag is set. Check
+  it with `config <path> --db`: these flags are admin toggles, and without `--db`
+  you see only the `config.xml` default.
+
 - Area-aware commands default to **frontend** (`ui-components` to adminhtml). A miss
   in the wrong area names the right one — "Found in adminhtml — pass
   `--area adminhtml`" — so read the error rather than assuming the thing is absent.

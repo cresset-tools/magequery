@@ -23,7 +23,7 @@ pub(crate) struct RawLayoutOp {
     pub template: Option<String>,
     /// The enclosing named element (or `Move`'s destination).
     pub parent: Option<String>,
-    /// `remove="true"` on a reference.
+    /// `remove="true"` on a reference (any PHP boolean true: `1`, `yes`, `on`).
     pub remove: bool,
     pub line: u32,
 }
@@ -36,16 +36,24 @@ pub(crate) enum RawTemplateVia {
     /// `<arguments><argument name="template" xsi:type="string">`, which
     /// `Template::_construct` hands to `setTemplate()`.
     Argument,
-    /// `<action method="setTemplate">` with a string first argument.
+    /// `<action method="setTemplate">` whose first argument is a string.
     SetTemplateAction,
 }
 
-/// One template assignment in a layout file, attributed to the enclosing block.
+/// One template assignment in a layout file, attributed to the element it targets.
 pub(crate) struct RawTemplateAssign {
     pub block: String,
+    /// `class=` on the assigning element, when it states one.
+    pub class: Option<ClassName>,
+    /// The target is a `<block>` declared right here, so it is certainly a block.
+    /// Otherwise it is a `<referenceBlock>` whose name may turn out to be a container,
+    /// which Magento never hands a template.
+    pub declared: bool,
     pub template: String,
     pub via: RawTemplateVia,
-    /// The `<action ifconfig=>` flag the assignment depends on.
+    /// The `ifconfig` flag the assignment depends on: the action's own, else that of
+    /// the nearest enclosing `<block ifconfig=>`, which removes the block (and all it
+    /// renders) while the flag is off.
     pub ifconfig: Option<String>,
     pub line: u32,
 }
@@ -57,9 +65,73 @@ pub(crate) struct RawLayout {
     pub templates: Vec<RawTemplateAssign>,
 }
 
+/// An open block, container or reference, as template assignments inside it see it.
+#[derive(Clone)]
+struct Frame {
+    name: String,
+    /// A block or a reference to one; containers never take a template.
+    block: bool,
+    declared: bool,
+    class: Option<ClassName>,
+    /// Effective `<block ifconfig=>`, inherited by everything nested inside.
+    ifconfig: Option<String>,
+    /// `<referenceBlock remove="true">`: Magento drops its actions, arguments and
+    /// attributes without reading them.
+    removed: bool,
+}
+
+impl Frame {
+    fn of(op: &RawLayoutOp, e: &BytesStart, parent: Option<&Frame>) -> Option<Frame> {
+        let block = match op.kind {
+            RawLayoutOpKind::Block | RawLayoutOpKind::ReferenceBlock => true,
+            RawLayoutOpKind::Container | RawLayoutOpKind::ReferenceContainer => false,
+            RawLayoutOpKind::Update | RawLayoutOpKind::Move => return None,
+        };
+        let own = (op.kind == RawLayoutOpKind::Block)
+            .then(|| config_flag(attr(e, b"ifconfig")))
+            .flatten();
+        Some(Frame {
+            name: op.name.clone(),
+            block,
+            declared: op.kind == RawLayoutOpKind::Block,
+            class: op.class.clone(),
+            ifconfig: own.or_else(|| parent.and_then(|p| p.ifconfig.clone())),
+            removed: op.kind == RawLayoutOpKind::ReferenceBlock && op.remove,
+        })
+    }
+
+    /// Whether Magento applies a template assigned here at all.
+    fn takes_template(&self) -> bool {
+        self.block && !self.removed
+    }
+
+    fn assign(&self, template: String, via: RawTemplateVia, ifconfig: Option<String>, line: u32) -> RawTemplateAssign {
+        RawTemplateAssign {
+            block: self.name.clone(),
+            class: self.class.clone(),
+            declared: self.declared,
+            template,
+            via,
+            ifconfig: ifconfig.or_else(|| self.ifconfig.clone()),
+            line,
+        }
+    }
+}
+
+/// An `ifconfig` value Magento actually checks: `Generator\Block` and the visibility
+/// condition both skip the check when PHP's `empty()` holds, i.e. for `""` and `"0"`.
+fn config_flag(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.is_empty() && v != "0")
+}
+
+/// PHP `filter_var(…, FILTER_VALIDATE_BOOLEAN)`, which `Reader\Block` applies to `remove`.
+fn php_true(value: Option<&str>) -> bool {
+    value.is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "on" | "yes"))
+}
+
 /// An open `<argument>` whose text is a template reference.
 struct PendingTemplateArg {
-    block: String,
+    frame: Frame,
     via: RawTemplateVia,
     ifconfig: Option<String>,
     line: u32,
@@ -69,26 +141,48 @@ struct PendingTemplateArg {
 /// An open `<action method="setTemplate">`. Only its first argument is the template:
 /// Magento passes action arguments positionally, whatever their `name`.
 struct OpenSetTemplate {
-    block: String,
+    frame: Frame,
     ifconfig: Option<String>,
     seen_argument: bool,
 }
 
+/// Trim XML whitespace only, as PHP's `trim` does — not Unicode spaces such as U+00A0,
+/// which Magento would keep and then fail to resolve.
+fn trim_xml(s: &str) -> &str {
+    s.trim_matches(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\0' | '\x0B'))
+}
+
 /// Parse one layout XML: blocks/containers declared, references modified or removed,
 /// `<update handle=>` includes, and `<move>`s — each with its enclosing element — plus
-/// every template assignment (attribute, `template` argument, `setTemplate` action).
+/// every template assignment (attribute, `template` argument, `setTemplate` action)
+/// that targets a block.
 pub(crate) fn layout_xml(xml: &str) -> RawLayout {
     let lines = LineMap::new(xml);
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
     let mut out: Vec<RawLayoutOp> = Vec::new();
     let mut templates: Vec<RawTemplateAssign> = Vec::new();
-    // Names of the enclosing block/container/reference elements.
-    let mut stack: Vec<String> = Vec::new();
+    // The enclosing block/container/reference elements.
+    let mut stack: Vec<Frame> = Vec::new();
     let mut action: Option<OpenSetTemplate> = None;
-    // The block whose direct `<arguments>` is open.
-    let mut arguments_of: Option<String> = None;
+    // The block whose `<arguments>` is open. Magento reads only a block's first direct
+    // `<arguments>` child, so a later sibling, or one nested deeper, is not recorded.
+    let mut arguments_of: Option<Frame> = None;
+    // Depth (in `stack`) of blocks whose first `<arguments>` has been seen.
+    let mut arguments_seen: Vec<usize> = Vec::new();
+    // Elements open inside the innermost frame, and the count each enclosing frame had.
+    let mut depth_in_block: usize = 0;
+    let mut outer_depths: Vec<usize> = Vec::new();
     let mut pending: Option<PendingTemplateArg> = None;
+
+    // A block/reference element's own `template=` attribute.
+    let attribute_use = |op: &RawLayoutOp, frame: &Frame, templates: &mut Vec<RawTemplateAssign>| {
+        if let Some(t) = op.template.as_deref().filter(|t| !t.is_empty()) {
+            if frame.takes_template() {
+                templates.push(frame.assign(t.to_string(), RawTemplateVia::Attribute, None, op.line));
+            }
+        }
+    };
 
     loop {
         let ev = reader.read_event_into(&mut buf);
@@ -96,25 +190,43 @@ pub(crate) fn layout_xml(xml: &str) -> RawLayout {
         match ev {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
+                if let Some(op) = layout_op(&e, line, &stack) {
+                    if let Some(frame) = Frame::of(&op, &e, stack.last()) {
+                        attribute_use(&op, &frame, &mut templates);
+                        stack.push(frame);
+                        outer_depths.push(depth_in_block);
+                        depth_in_block = 0;
+                    }
+                    out.push(op);
+                    buf.clear();
+                    continue;
+                }
+                let direct = depth_in_block == 0;
+                depth_in_block += 1;
                 match local_name(&e).as_str() {
-                    "action" => {
+                    "action" if direct => {
                         let set_template = attr(&e, b"method")
                             .is_some_and(|m| m.eq_ignore_ascii_case("setTemplate"));
-                        action = stack.last().filter(|_| set_template).map(|block| {
-                            OpenSetTemplate {
-                                block: block.clone(),
-                                ifconfig: attr(&e, b"ifconfig"),
+                        action = stack
+                            .last()
+                            .filter(|f| set_template && f.takes_template())
+                            .map(|frame| OpenSetTemplate {
+                                frame: frame.clone(),
+                                ifconfig: config_flag(attr(&e, b"ifconfig")),
                                 seen_argument: false,
-                            }
-                        });
+                            });
                     }
-                    "arguments" => arguments_of = stack.last().cloned(),
+                    "arguments" if direct => {
+                        let first = !arguments_seen.contains(&stack.len());
+                        arguments_seen.push(stack.len());
+                        arguments_of = stack.last().filter(|f| first && f.takes_template()).cloned();
+                    }
                     "argument" => {
                         let string = xsi_type(&e).as_deref() == Some("string");
                         if let Some(a) = action.as_mut() {
                             if !a.seen_argument && string {
                                 pending = Some(PendingTemplateArg {
-                                    block: a.block.clone(),
+                                    frame: a.frame.clone(),
                                     via: RawTemplateVia::SetTemplateAction,
                                     ifconfig: a.ifconfig.clone(),
                                     line,
@@ -122,10 +234,14 @@ pub(crate) fn layout_xml(xml: &str) -> RawLayout {
                                 });
                             }
                             a.seen_argument = true;
-                        } else if let Some(block) = &arguments_of {
-                            if string && attr(&e, b"name").as_deref() == Some("template") {
+                        } else if let Some(frame) = &arguments_of {
+                            // Only an argument directly inside `<arguments>`.
+                            if depth_in_block == 2
+                                && string
+                                && attr(&e, b"name").as_deref() == Some("template")
+                            {
                                 pending = Some(PendingTemplateArg {
-                                    block: block.clone(),
+                                    frame: frame.clone(),
                                     via: RawTemplateVia::Argument,
                                     ifconfig: None,
                                     line,
@@ -136,29 +252,20 @@ pub(crate) fn layout_xml(xml: &str) -> RawLayout {
                     }
                     _ => {}
                 }
-                if let Some(op) = layout_op(&e, line, &stack) {
-                    let named = matches!(
-                        op.kind,
-                        RawLayoutOpKind::Block
-                            | RawLayoutOpKind::Container
-                            | RawLayoutOpKind::ReferenceBlock
-                            | RawLayoutOpKind::ReferenceContainer
-                    );
-                    if named {
-                        stack.push(op.name.clone());
-                    }
-                    out.push(op);
-                }
             }
             Ok(Event::Empty(e)) => {
-                // A self-closing argument has no value but still takes the first slot.
-                if local_name(&e) == "argument" {
+                if let Some(op) = layout_op(&e, line, &stack) {
+                    if let Some(frame) = Frame::of(&op, &e, stack.last()) {
+                        attribute_use(&op, &frame, &mut templates);
+                    }
+                    out.push(op);
+                } else if local_name(&e) == "argument" {
+                    // A self-closing argument has no value but still takes the first slot.
                     if let Some(a) = action.as_mut() {
                         a.seen_argument = true;
                     }
-                }
-                if let Some(op) = layout_op(&e, line, &stack) {
-                    out.push(op);
+                } else if depth_in_block == 0 && local_name(&e) == "arguments" {
+                    arguments_seen.push(stack.len());
                 }
             }
             Ok(Event::Text(t)) => {
@@ -176,22 +283,31 @@ pub(crate) fn layout_xml(xml: &str) -> RawLayout {
                 let raw = name.as_ref();
                 let local = raw.rsplit(|&b| b == b':').next().unwrap_or(raw);
                 match local {
-                    b"block" | b"container" | b"referenceBlock" | b"referenceContainer" => {
+                    b"block" | b"container" | b"referenceBlock" | b"referenceContainer"
+                        if depth_in_block == 0 =>
+                    {
+                        arguments_seen.retain(|&d| d != stack.len());
                         stack.pop();
+                        depth_in_block = outer_depths.pop().unwrap_or(0);
+                        buf.clear();
+                        continue;
                     }
-                    b"action" => action = None,
-                    b"arguments" => arguments_of = None,
+                    _ => {}
+                }
+                depth_in_block = depth_in_block.saturating_sub(1);
+                match local {
+                    b"action" if depth_in_block == 0 => action = None,
+                    b"arguments" if depth_in_block == 0 => arguments_of = None,
                     b"argument" => {
                         if let Some(p) = pending.take() {
-                            let template = p.text.trim();
+                            let template = trim_xml(&p.text);
                             if !template.is_empty() {
-                                templates.push(RawTemplateAssign {
-                                    block: p.block,
-                                    template: template.to_string(),
-                                    via: p.via,
-                                    ifconfig: p.ifconfig,
-                                    line: p.line,
-                                });
+                                templates.push(p.frame.assign(
+                                    template.to_string(),
+                                    p.via,
+                                    p.ifconfig,
+                                    p.line,
+                                ));
                             }
                         }
                     }
@@ -202,23 +318,11 @@ pub(crate) fn layout_xml(xml: &str) -> RawLayout {
         }
         buf.clear();
     }
-    // `template="…"` on the element itself.
-    for op in &out {
-        if let Some(t) = &op.template {
-            templates.push(RawTemplateAssign {
-                block: op.name.clone(),
-                template: t.clone(),
-                via: RawTemplateVia::Attribute,
-                ifconfig: None,
-                line: op.line,
-            });
-        }
-    }
     RawLayout { ops: out, templates }
 }
 
-fn layout_op(e: &BytesStart, line: u32, stack: &[String]) -> Option<RawLayoutOp> {
-    let parent = stack.last().cloned();
+fn layout_op(e: &BytesStart, line: u32, stack: &[Frame]) -> Option<RawLayoutOp> {
+    let parent = stack.last().map(|f| f.name.clone());
     let kind = match local_name(e).as_str() {
         "block" => RawLayoutOpKind::Block,
         "container" => RawLayoutOpKind::Container,
@@ -254,7 +358,7 @@ fn layout_op(e: &BytesStart, line: u32, stack: &[String]) -> Option<RawLayoutOp>
         class: attr(e, b"class").map(ClassName::new),
         template: attr(e, b"template"),
         parent,
-        remove: attr(e, b"remove").as_deref() == Some("true"),
+        remove: php_true(attr(e, b"remove").as_deref()),
         line,
     })
 }
@@ -348,7 +452,74 @@ mod layout_tests {
         // The setTemplate actions add no ops of their own.
         assert_eq!(parsed.ops.len(), 5);
     }
+
+    /// Assignments Magento never applies, and conditions it does or does not check.
+    #[test]
+    fn template_assignments_follow_magento_semantics() {
+        let xml = "<page xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"><body>
+            <block class=\"A\\Outer\" name=\"outer\" ifconfig=\"a/b/c\">
+                <block name=\"inner\" template=\"M::inner.phtml\"/>
+            </block>
+            <block name=\"off\" ifconfig=\"0\" template=\"M::off.phtml\"/>
+            <referenceBlock name=\"empty.flag\">
+                <action ifconfig=\"\" method=\"setTemplate\">
+                    <argument name=\"t\" xsi:type=\"string\">M::empty.phtml</argument>
+                </action>
+            </referenceBlock>
+            <referenceBlock name=\"twice\">
+                <arguments>
+                    <argument name=\"view_model\" xsi:type=\"object\">V</argument>
+                </arguments>
+                <arguments>
+                    <argument name=\"template\" xsi:type=\"string\">M::second-arguments.phtml</argument>
+                </arguments>
+            </referenceBlock>
+            <block name=\"ui\">
+                <uiComponent name=\"u\">
+                    <visibilityCondition name=\"v\" className=\"C\">
+                        <arguments>
+                            <argument name=\"template\" xsi:type=\"string\">M::condition.phtml</argument>
+                        </arguments>
+                    </visibilityCondition>
+                </uiComponent>
+            </block>
+            <referenceContainer name=\"content\">
+                <action method=\"setTemplate\">
+                    <argument name=\"t\" xsi:type=\"string\">M::container.phtml</argument>
+                </action>
+            </referenceContainer>
+            <referenceBlock name=\"dropped\" remove=\"1\">
+                <action method=\"setTemplate\">
+                    <argument name=\"t\" xsi:type=\"string\">M::dropped.phtml</argument>
+                </action>
+            </referenceBlock>
+            <referenceBlock name=\"nbsp\">
+                <arguments>
+                    <argument name=\"template\" xsi:type=\"string\">M::nbsp.phtml&#160;</argument>
+                </arguments>
+            </referenceBlock>
+        </body></page>";
+        let parsed = layout_xml(xml);
+        let got: Vec<_> = parsed
+            .templates
+            .iter()
+            .map(|t| (t.block.as_str(), t.template.as_str(), t.ifconfig.as_deref(), t.declared))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                // A nested block disappears with its `ifconfig` parent.
+                ("inner", "M::inner.phtml", Some("a/b/c"), true),
+                // PHP's `empty()` holds for "0" and "": no condition.
+                ("off", "M::off.phtml", None, true),
+                ("empty.flag", "M::empty.phtml", None, false),
+                // Kept verbatim (U+00A0 is not XML whitespace), so it resolves to no file.
+                ("nbsp", "M::nbsp.phtml\u{a0}", None, false),
+            ]
+        );
+    }
 }
+
 
 // ---------- ui components (view/<area>/ui_component/<name>.xml) ----------
 

@@ -398,8 +398,10 @@ pub struct TemplateUsage {
     pub block: String,
     pub class: Option<ClassName>,
     pub via: TemplateAssignment,
-    /// `<action ifconfig=>`: the assignment only applies while this config flag is set.
+    /// The `ifconfig` flag the assignment depends on: `<action ifconfig=>`, else the
+    /// nearest enclosing `<block ifconfig=>`.
     pub ifconfig: Option<String>,
+
     pub source: Source,
 }
 
@@ -413,7 +415,7 @@ pub enum TemplateAssignment {
     /// `<arguments><argument name="template" xsi:type="string">`, which the block's
     /// `_construct` hands to `setTemplate()`.
     Argument,
-    /// `<action method="setTemplate">` with a string argument.
+    /// `<action method="setTemplate">` whose first argument is a string.
     SetTemplateAction,
 }
 
