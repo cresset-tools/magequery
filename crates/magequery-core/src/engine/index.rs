@@ -355,11 +355,11 @@ fn scan(
         return; // a module root does not contain nested modules
     }
 
-    let entries = match std::fs::read_dir(dir) {
+    let entries = match crate::fsutil::read_dir_entries(dir) {
         Ok(e) => e,
         Err(_) => return,
     };
-    for entry in entries.flatten() {
+    for entry in entries {
         let ft = match entry.file_type() {
             Ok(ft) => ft,
             Err(_) => continue,

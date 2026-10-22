@@ -932,10 +932,10 @@ fn internal_ctor(fqcn: &str) -> Option<&'static [ParamMeta]> {
 
 
 pub(crate) fn collect_included(base: &Path, dir: &Path, kind: PathKind, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
+    let Ok(entries) = magequery_core::fsutil::read_dir_entries(dir) else {
         return;
     };
-    for entry in entries.flatten() {
+    for entry in entries {
         let path = entry.path();
         let Ok(ft) = entry.file_type() else { continue };
         if excluded(base, &path, kind) {
@@ -1029,10 +1029,10 @@ pub fn compile_input_files(magento: &Magento, root: &Path) -> Vec<PathBuf> {
 
 /// Like [`collect_included`] but keeps `.php` AND `.xml` — the DI config is XML.
 fn collect_input_files(base: &Path, dir: &Path, kind: PathKind, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
+    let Ok(entries) = magequery_core::fsutil::read_dir_entries(dir) else {
         return;
     };
-    for entry in entries.flatten() {
+    for entry in entries {
         let path = entry.path();
         let Ok(ft) = entry.file_type() else { continue };
         if excluded(base, &path, kind) {

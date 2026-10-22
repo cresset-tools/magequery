@@ -1136,13 +1136,14 @@ pub(crate) fn setup_overrides(
     // dropped entirely — invisible on the all-vendor oracle, but every store
     // with app/code modules diverged on all seven area files.
     let app_code = root.join("app/code");
-    if let Ok(vendor_dirs) = std::fs::read_dir(&app_code) {
-        for vendor_ent in vendor_dirs.flatten() {
+    if let Ok(vendor_dirs) = magequery_core::fsutil::read_dir_entries(&app_code) {
+        for vendor_ent in vendor_dirs {
             if !vendor_ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 continue;
             }
-            if let Ok(module_dirs) = std::fs::read_dir(vendor_ent.path()) {
-                for mod_ent in module_dirs.flatten() {
+            if let Ok(module_dirs) = magequery_core::fsutil::read_dir_entries(&vendor_ent.path())
+            {
+                for mod_ent in module_dirs {
                     let dir = mod_ent.path();
                     if dir.join("registration.php").is_file() {
                         registration_dirs.push(dir);
@@ -1169,6 +1170,22 @@ pub(crate) fn setup_overrides(
 
     // getExcludedModulePaths: group by base path, then vendor dir, keeping
     // encounter order; only the BASE PATH is preg_quoted.
+    //
+    // ENCOUNTER ORDER IS FILESYSTEM ORDER, and that is faithful, not sloppy.
+    // app/code modules reach the ComponentRegistrar through
+    // `app/etc/NonComposerComponentRegistration.php`, which globs them with
+    // GLOB_NOSORT — "Sorting is disabled intentionally for performance
+    // improvement", in Magento's own words. So PHP registers them in whatever
+    // order the filesystem hands back, and the regexes it bakes into
+    // `metadata/<area>.php` carry that order. Sorting here would read as
+    // tidier and would diverge from the oracle on any store whose directory
+    // order is not alphabetical.
+    //
+    // The consequence is worth stating plainly: this one part of the compile
+    // output is NOT portable across filesystems — two machines that enumerate
+    // `app/code` differently produce different bytes, from Magento and from
+    // us alike. `tests/readdir_order.rs` pins everything else as
+    // order-independent, so a new dependence cannot creep in unnoticed.
     let mut base_order: Vec<String> = Vec::new();
     let mut groups: HashMap<String, (Vec<String>, HashMap<String, Vec<String>>)> = HashMap::new();
     for path in &module_paths {

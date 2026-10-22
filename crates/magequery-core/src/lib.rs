@@ -17,6 +17,7 @@
 //! ```
 
 pub mod error;
+pub mod fsutil;
 pub mod ids;
 pub mod model;
 pub mod source;
