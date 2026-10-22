@@ -51,6 +51,14 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.20.2](https://github.com/cresset-tools/magequery/compare/magequery-v0.20.1...magequery-v0.20.2) (2026-10-22)
+
+
+### Bug Fixes
+
+* **magecommand:** stop fingerprinting env.php, it is not a compile input ([#154](https://github.com/cresset-tools/magequery/issues/154)) ([fc7ec83](https://github.com/cresset-tools/magequery/commit/fc7ec83de5cc43a377532020bf2aee4d893e3bb3))
+* **magequery:** only count template uses Magento applies, and keep their conditions and class ([384fb02](https://github.com/cresset-tools/magequery/commit/384fb02e27efbce488195ad3ae2a23bee5e0d379))
+
 ## [0.20.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.20.0...magequery-v0.20.1) (2026-10-19)
 
 
