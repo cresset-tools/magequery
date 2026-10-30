@@ -434,16 +434,28 @@ struct WhatisArgs {
 
 #[derive(clap::Args)]
 struct DoctorArgs {
-    /// Restrict the unregistered-code scans (commands/observers/plugins that exist on
-    /// disk but are wired nowhere) to app or vendor modules. The reference checks always
-    /// cover the whole merged configuration.
+    /// Only report findings declared in your own code (`app`: everything outside
+    /// vendor/, so app/code, app/design and app/etc) or in installed packages
+    /// (`vendor`). The checks still read the whole merged configuration.
     #[arg(long, value_enum)]
     source: Option<SourceFilter>,
-    /// Treat a lint as an error, so its findings fail the run (repeatable), e.g.
-    /// `--deny module-disabled --deny disabled-module-referenced`. For CI, once a
-    /// shop has cleaned a warning up.
-    #[arg(long, value_name = "LINT")]
+    /// Treat a lint as an error, so its findings fail the run (repeatable). Takes the
+    /// code each finding is printed with (`--deny E1004` for `warn[E1004]`) or the
+    /// lint's name (`module-disabled`). For CI, once a shop has cleaned a warning up.
+    #[arg(long, value_name = "CODE")]
     deny: Vec<magequery_core::DoctorLint>,
+    /// Explain a finding's code (`--explain E2007`): what triggers it, why it matters,
+    /// and how to fix it. Without a code, list every code. Needs no Magento root.
+    #[arg(long, value_name = "CODE", num_args = 0..=1, default_missing_value = "")]
+    explain: Option<String>,
+    /// Fail the run (exit 1) on warnings too, not only on errors. Infos never fail it.
+    #[arg(long)]
+    strict: bool,
+    /// Only report findings located here: a path prefix (`app/code/Acme`,
+    /// `app/design/frontend/Acme`), a module (`Acme_Widget`), or a vendor (`Acme` = its
+    /// modules and themes). Repeatable. The exit code follows the filtered findings.
+    #[arg(long = "in", value_name = "PATH|MODULE|VENDOR")]
+    in_: Vec<String>,
     #[arg(long)]
     json: bool,
 }
@@ -1184,6 +1196,8 @@ fn main() -> Result<()> {
             return magequery_lsp::run_stdio()
                 .map_err(|e| anyhow::anyhow!("lsp server: {e}"));
         }
+        // Explaining a code is documentation, not a scan: it works from any directory.
+        Command::Doctor(DoctorArgs { explain: Some(code), .. }) => return doctor_explain(code),
         _ => {}
     }
 
@@ -8961,6 +8975,7 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
     });
     let mut report = mage.doctor(source);
     report.deny(&args.deny);
+    report.retain_in(root, &args.in_);
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -8968,9 +8983,12 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
         println!("{}", style::ok("OK, nothing to report"));
     } else {
         for f in &report.findings {
+            // The lint code rides on the severity (`warn[module-disabled]`, as rustc's
+            // `error[E0308]`): the name `--deny` takes.
             let tag = match f.severity {
-                magequery_core::Severity::Error => style::err("error"),
-                magequery_core::Severity::Warning => style::area("warn "),
+                magequery_core::Severity::Error => style::err(&format!("error[{}]", f.code)),
+                magequery_core::Severity::Warning => style::area(&format!("warn[{}]", f.code)),
+                magequery_core::Severity::Info => style::dim(&format!("info[{}]", f.code)),
             };
             let loc = f
                 .source
@@ -8978,21 +8996,56 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
                 .map(|s| format!("   {}", style::path(&short_loc(s, root))))
                 .unwrap_or_default();
             println!("{tag}  {}{loc}", f.message);
+            print_chain(&f.chain, "    ", root);
         }
         eprintln!(
-            "\n{} error(s), {} warning(s)",
+            "\n{} error(s), {} warning(s), {} info; `magequery doctor --explain <code>` explains a code",
             report.errors(),
             report.warnings(),
+            report.infos(),
         );
     }
 
-    // Errors fail the run (CI-able); warnings alone don't, unless --deny'd.
+    // Errors fail the run (CI-able); warnings alone don't, unless --deny'd or --strict.
     use std::io::Write;
     std::io::stdout().flush().ok();
-    if report.errors() > 0 {
+    if report.errors() > 0 || (args.strict && report.warnings() > 0) {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// `doctor --explain [CODE]`: one code's full explanation, or (empty) every code's
+/// summary.
+fn doctor_explain(code: &str) -> Result<()> {
+    use magequery_core::DoctorLint;
+    if code.is_empty() {
+        for lint in DoctorLint::ALL {
+            println!("{}  {}  {}", style::name(lint.code()), lint.summary(), style::dim(&lint.to_string()));
+        }
+        return Ok(());
+    }
+    let lint: DoctorLint = code.parse().map_err(|e: String| anyhow!(e))?;
+    println!("{}  {}  {}\n", style::name(lint.code()), lint.summary(), style::dim(&lint.to_string()));
+    println!("{}", lint.explanation());
+    Ok(())
+}
+
+/// A doctor finding's reachability chain as a tree under the finding: each step points
+/// (`▶`) at the reference or fact it rests on.
+fn print_chain(nodes: &[magequery_core::ChainNode], indent: &str, root: &Path) {
+    for (i, n) in nodes.iter().enumerate() {
+        let last = i + 1 == nodes.len();
+        let branch = if last { "└─▶ " } else { "├─▶ " };
+        let loc = n
+            .source
+            .as_ref()
+            .map(|s| format!("   {}", style::path(&short_loc(s, root))))
+            .unwrap_or_default();
+        println!("{indent}{}{}{loc}", style::dim(branch), n.message);
+        let child_indent = format!("{indent}{}", if last { "    ".into() } else { style::dim("│   ") });
+        print_chain(&n.children, &child_indent, root);
+    }
 }
 
 fn modules_check(mage: &Magento, json: bool) -> Result<()> {

@@ -215,7 +215,13 @@ query over tables the virtual ones don't cover), and `--json` to parse results.
 - Is anything in the merged config broken (missing classes, cycles, forgotten
   wiring)? → `magequery doctor` (exits non-zero on errors only, so it fits CI;
   `--deny <lint>` makes a warning such as `module-disabled` or
-  `disabled-module-referenced` fail too).
+  `disabled-module-referenced` fail too). A missing class is an `error` only when
+  something buildable asks for it; unreachable ones are `warn` (stale config) or
+  `info` (optional integration), and the `└─▶` chain under each finding says why.
+  Scope to your own code with `--source app`, or narrower with `--in app/code/Acme`,
+  `--in Acme_Module` or `--in Acme`. Each finding prints a stable code
+  (`warn[E5003]`): `magequery doctor --explain E5003` explains it (bare `--explain` lists
+  all), `--deny E5003` fails on that kind, `--strict` fails on every warning.
 - Everything about one class in a single view → `whatis '<Class>'`.
 - Which setup patches exist or are pending? → `patches [--db|--pending]`.
 

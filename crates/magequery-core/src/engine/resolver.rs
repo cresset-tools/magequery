@@ -189,9 +189,42 @@ impl ClassResolver {
             || self.psr0.iter().any(|(p, _)| name.starts_with(p.as_str()))
     }
 
+    /// The longest autoload prefix of at least two namespace segments (`Vendor\Package\`)
+    /// covering `class` — i.e. the installed package that would provide it. One-segment
+    /// and empty prefixes (the root project's catch-all `"": "app/code/"`) cover every
+    /// name, so they say nothing about whether the class's package is installed.
+    pub(crate) fn provider_prefix(&self, class: &ClassName) -> Option<&str> {
+        let name = class.as_str();
+        self.prefixes
+            .iter()
+            .chain(self.psr0.iter())
+            .map(|(p, _)| p.as_str())
+            .filter(|p| p.matches('\\').count() >= 2)
+            .find(|p| name.starts_with(p))
+    }
+
     /// Whether the class resolves to an existing source file.
     pub fn exists(&self, class: &ClassName) -> bool {
         self.file_for(class).is_some()
+    }
+
+    /// The constructor parameter names the object manager would pass to `class`: its own
+    /// `__construct`, else the nearest parent's. `Some(vec![])` = no constructor anywhere
+    /// in a fully resolved chain; `None` = unknown (a file in the chain is unreadable).
+    pub(crate) fn constructor_params(&self, class: &ClassName) -> Option<Vec<String>> {
+        let mut cur = class.clone();
+        let mut seen = HashSet::new();
+        while seen.insert(cur.clone()) {
+            let src = self.vfs.read_to_string(&self.file_for(&cur)?).ok()?;
+            if let Some(params) = php::constructor_params(&src) {
+                return Some(params);
+            }
+            match self.header(&cur)?.extends.first() {
+                Some(parent) => cur = parent.clone(),
+                None => return Some(Vec::new()),
+            }
+        }
+        None
     }
 
     /// Whether `class` is a concrete controller action: an instantiable class (not an

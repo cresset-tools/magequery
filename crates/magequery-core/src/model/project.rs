@@ -114,6 +114,9 @@ pub enum DoctorLint {
     VirtualTypeCycle,
     PluginClassMissing,
     DiArgumentClassMissing,
+    /// An argument name or array item key declared twice in one di.xml element: the
+    /// later declaration silently replaces the earlier.
+    DuplicateArgumentKey,
     ObserverClassMissing,
     CronInstanceMissing,
     WebapiServiceMissing,
@@ -132,22 +135,104 @@ pub enum DoctorLint {
     DisabledModuleReferenced,
 }
 
-impl std::str::FromStr for DoctorLint {
-    type Err = String;
-
-    /// Parse the kebab-case name a finding is reported under (`module-disabled`).
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        serde_json::from_value(serde_json::Value::String(s.to_owned()))
-            .map_err(|_| format!("unknown doctor lint `{s}`"))
+/// The kebab-case name a finding is reported under: what `doctor --deny` takes.
+impl std::fmt::Display for DoctorLint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::String(name)) => f.write_str(&name),
+            _ => write!(f, "{self:?}"),
+        }
     }
 }
 
-/// One `doctor` finding. Errors are things that break at runtime (dangling references,
-/// cycles, module-set drift); warnings are probably-forgotten wiring (unregistered
-/// commands/observers/plugins, unconsumed queues) that may be intentional.
+impl DoctorLint {
+    /// Every lint, in code order.
+    pub const ALL: [DoctorLint; 24] = [
+        Self::ModuleMissingOnDisk,
+        Self::ModuleNotRegistered,
+        Self::SequenceCycle,
+        Self::ModuleDisabled,
+        Self::DisabledModuleReferenced,
+        Self::PreferenceTargetMissing,
+        Self::PreferenceCycle,
+        Self::VirtualTypeBaseMissing,
+        Self::VirtualTypeCycle,
+        Self::PluginClassMissing,
+        Self::DiArgumentClassMissing,
+        Self::DuplicateArgumentKey,
+        Self::ObserverClassMissing,
+        Self::CronInstanceMissing,
+        Self::WebapiServiceMissing,
+        Self::AclResourceUnknown,
+        Self::CommandClassMissing,
+        Self::MqHandlerMissing,
+        Self::QueueNoConsumer,
+        Self::GraphqlResolverMissing,
+        Self::TemplateFileMissing,
+        Self::CommandUnregistered,
+        Self::ObserverUnregistered,
+        Self::PluginUnregistered,
+    ];
+
+    /// The lint's stable code, printed with every finding (`warn[E5003]`) and accepted
+    /// by `doctor --deny`. Grouped by what is checked: `E1xxx` the module set, `E2xxx` DI,
+    /// `E3xxx` entry points, `E4xxx` frontend, `E5xxx` code wired nowhere. A code belongs
+    /// to the lint, not the severity, and is never reused: a new lint takes the next
+    /// number in its group.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::ModuleMissingOnDisk => "E1001",
+            Self::ModuleNotRegistered => "E1002",
+            Self::SequenceCycle => "E1003",
+            Self::ModuleDisabled => "E1004",
+            Self::DisabledModuleReferenced => "E1005",
+            Self::PreferenceTargetMissing => "E2001",
+            Self::PreferenceCycle => "E2002",
+            Self::VirtualTypeBaseMissing => "E2003",
+            Self::VirtualTypeCycle => "E2004",
+            Self::PluginClassMissing => "E2005",
+            Self::DiArgumentClassMissing => "E2006",
+            Self::DuplicateArgumentKey => "E2007",
+            Self::ObserverClassMissing => "E3001",
+            Self::CronInstanceMissing => "E3002",
+            Self::WebapiServiceMissing => "E3003",
+            Self::AclResourceUnknown => "E3004",
+            Self::CommandClassMissing => "E3005",
+            Self::MqHandlerMissing => "E3006",
+            Self::QueueNoConsumer => "E3007",
+            Self::GraphqlResolverMissing => "E3008",
+            Self::TemplateFileMissing => "E4001",
+            Self::CommandUnregistered => "E5001",
+            Self::ObserverUnregistered => "E5002",
+            Self::PluginUnregistered => "E5003",
+        }
+    }
+}
+
+impl std::str::FromStr for DoctorLint {
+    type Err = String;
+
+    /// Parse a lint's code (`E1004`, any case) or the kebab-case name it serializes as
+    /// (`module-disabled`).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(lint) = Self::ALL.into_iter().find(|l| l.code().eq_ignore_ascii_case(s)) {
+            return Ok(lint);
+        }
+        serde_json::from_value(serde_json::Value::String(s.to_owned()))
+            .map_err(|_| format!("unknown doctor lint `{s}` (a code like E1004, or a name like module-disabled)"))
+    }
+}
+
+/// One `doctor` finding. Errors are things that break at runtime (dangling references
+/// something live can reach, cycles, module-set drift); warnings are probably-forgotten
+/// wiring (unregistered commands/observers/plugins, unconsumed queues, stale references
+/// nothing can reach) that may be intentional; infos are unreachable references into a
+/// package that isn't installed (optional integrations).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorFinding {
     pub lint: DoctorLint,
+    /// The lint's stable code ([`DoctorLint::code`]).
+    pub code: &'static str,
     pub severity: crate::error::Severity,
     pub message: String,
     /// The declaring file, when the finding has one.
@@ -155,6 +240,21 @@ pub struct DoctorFinding {
     /// The thing the finding is *about* — the missing/unregistered class, the module,
     /// the ACL id — structured so tooling (LSP quick fixes) never parses `message`.
     pub subject: Option<String>,
+    /// Why the severity is what it is, for missing-class findings: the path by which
+    /// something live builds the missing class (an error), or every dead end that keeps
+    /// it from ever being built (a warning or info).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<ChainNode>,
+}
+
+/// One step of a [`DoctorFinding::chain`]: a reference to (or fact about) a class, with
+/// the steps that explain it underneath.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ChainNode {
+    pub message: String,
+    pub source: Option<Source>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ChainNode>,
 }
 
 /// The `doctor` result: findings sorted errors-first.
@@ -173,19 +273,65 @@ impl DoctorReport {
                 f.severity = crate::error::Severity::Error;
             }
         }
-        let rank = |s: crate::error::Severity| if s == crate::error::Severity::Error { 0 } else { 1 };
+        self.sort();
+    }
+
+    /// Errors first, then warnings, then infos; by message within a severity.
+    pub(crate) fn sort(&mut self) {
+        use crate::error::Severity;
+        let rank = |s: Severity| match s {
+            Severity::Error => 0,
+            Severity::Warning => 1,
+            Severity::Info => 2,
+        };
         self.findings
             .sort_by(|a, b| rank(a.severity).cmp(&rank(b.severity)).then_with(|| a.message.cmp(&b.message)));
     }
 
     pub fn errors(&self) -> usize {
-        self.findings
-            .iter()
-            .filter(|f| f.severity == crate::error::Severity::Error)
-            .count()
+        self.count(crate::error::Severity::Error)
     }
     pub fn warnings(&self) -> usize {
-        self.findings.len() - self.errors()
+        self.count(crate::error::Severity::Warning)
+    }
+    pub fn infos(&self) -> usize {
+        self.count(crate::error::Severity::Info)
+    }
+    fn count(&self, severity: crate::error::Severity) -> usize {
+        self.findings.iter().filter(|f| f.severity == severity).count()
+    }
+
+    /// Keep only the findings located in one of `scopes`. A scope is a root-relative
+    /// path prefix (`app/code/Acme`, `app/design/frontend/Acme`), a module
+    /// (`Acme_Widget`), a module vendor (`Acme` = every `Acme_*` module), or a theme or
+    /// theme vendor (`frontend/Acme/base`, `Acme`). Findings without a source match on
+    /// their subject (the module, for module-set drift).
+    pub fn retain_in(&mut self, root: &std::path::Path, scopes: &[String]) {
+        if scopes.is_empty() {
+            return;
+        }
+        self.findings.retain(|f| scopes.iter().any(|scope| finding_in(f, root, scope)));
+    }
+}
+
+fn finding_in(f: &DoctorFinding, root: &std::path::Path, scope: &str) -> bool {
+    let scope = scope.trim_start_matches("./").trim_end_matches('/');
+    let module_matches = |module: &str| {
+        module == scope
+            || module.strip_prefix(scope).is_some_and(|rest| rest.starts_with('_'))
+            // Theme ids (`frontend/Acme/base`): the vendor or the vendor/name.
+            || module.split_once('/').is_some_and(|(_, theme)| {
+                theme == scope
+                    || theme.strip_prefix(scope).is_some_and(|rest| rest.starts_with('/'))
+            })
+    };
+    match &f.source {
+        Some(source) => {
+            let file = source.file.strip_prefix(root).unwrap_or(&source.file);
+            let file = file.strip_prefix(".").unwrap_or(file);
+            file.starts_with(scope) || module_matches(source.module.as_str())
+        }
+        None => f.subject.as_deref().is_some_and(module_matches),
     }
 }
 

@@ -62,6 +62,9 @@ pub enum Error {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
+    /// Worth knowing, nothing to fix here: `doctor` uses it for dangling references into
+    /// a package that isn't installed (an optional integration nothing can reach).
+    Info,
     Warning,
     Error,
 }

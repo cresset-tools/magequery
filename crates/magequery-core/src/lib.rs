@@ -50,7 +50,7 @@ pub use model::{
 };
 pub use model::{
     AclResource, AdminRole, AdminRule, AdminUser, ArgItem, ArgValue, Argument, ByArea,
-    ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
+    ChainNode, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ConsoleCommand, ControllerAction, CronJob, CronJobLive, CronJobs, CronRun,
     DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
     DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, EavAttribute, EavAttributeCard,
@@ -523,8 +523,9 @@ impl Magento {
     /// exist (classes, ACL resources), structural problems (preference/virtual-type/
     /// `<sequence>` cycles, module-set drift), and probably-forgotten wiring (command/
     /// observer/plugin classes registered nowhere, queues nothing consumes). Errors break
-    /// at runtime; warnings may be intentional. `source` restricts the *unregistered-code*
-    /// scans to app or vendor modules (the reference checks always cover everything).
+    /// at runtime; warnings may be intentional. `source` keeps only the findings declared
+    /// in the project's own code (`App`: anything outside `vendor/`) or in installed
+    /// packages (`Vendor`); the checks still read the whole merged configuration.
     pub fn doctor(&self, source: Option<model::ModuleSource>) -> DoctorReport {
         doctor::run(self, source)
     }
@@ -1238,6 +1239,183 @@ mod handle_tests {
         let luma =
             themes.iter().filter(|(id, _)| id.as_str() == "frontend/Magento/luma").count();
         assert_eq!(luma, 1, "root-level theme not double-discovered: {themes:?}");
+    }
+
+    /// A missing class is an error only when something buildable asks for it. Otherwise
+    /// it's stale config (its package is installed: warning) or an optional integration
+    /// (no installed package provides it: info), and the chain says which dead end.
+    #[test]
+    fn missing_class_severity_follows_reachability() {
+        let tree = TempTree::new("doctor-reach");
+        let write = |rel: &str, content: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        // A real store's root catch-all: every namespace is covered, so a class no package
+        // provides is verifiably missing rather than "maybe in a classmap".
+        write("composer.json", r#"{"autoload": {"psr-0": {"": ["app/code/"]}}}"#);
+        write("app/etc/config.php", "<?php\nreturn ['modules' => ['Acme_Widget' => 1]];\n");
+        write(
+            "app/code/Acme/Widget/etc/module.xml",
+            r#"<config><module name="Acme_Widget"/></config>"#,
+        );
+        write(
+            "app/code/Acme/Widget/Model/Pool.php",
+            "<?php\nnamespace Acme\\Widget\\Model;\n\nclass Pool\n{\n    public function __construct(array $items = []) {}\n}\n",
+        );
+        write(
+            "app/code/Acme/Widget/etc/di.xml",
+            r#"<config>
+    <type name="Acme\Widget\Model\Pool">
+        <arguments>
+            <argument name="items" xsi:type="array">
+                <item name="live" xsi:type="object">Acme\Widget\Model\Gone</item>
+            </argument>
+            <argument name="unused" xsi:type="object">Acme\Widget\Model\AlsoGone</argument>
+        </arguments>
+    </type>
+    <type name="Acme\Widget\Model\Removed">
+        <arguments>
+            <argument name="x" xsi:type="object">Acme\Widget\Model\Leftover</argument>
+        </arguments>
+    </type>
+    <virtualType name="AcmeExportEntity" type="Other\ExportCore\Config\Entity"/>
+    <type name="Other\ExportCore\Config\EntityPool">
+        <arguments>
+            <argument name="entities" xsi:type="array">
+                <item name="acme" xsi:type="object">AcmeExportEntity</item>
+            </argument>
+        </arguments>
+    </type>
+</config>"#,
+        );
+
+        let magento = super::Magento::open(&tree.0).unwrap();
+        let report = magento.doctor(None);
+        let finding = |subject: &str| {
+            report
+                .findings
+                .iter()
+                .find(|f| f.subject.as_deref() == Some(subject))
+                .unwrap_or_else(|| panic!("no finding about {subject}"))
+        };
+        let messages = |f: &crate::model::DoctorFinding| {
+            fn walk(nodes: &[crate::model::ChainNode], out: &mut Vec<String>) {
+                for n in nodes {
+                    out.push(n.message.clone());
+                    walk(&n.children, out);
+                }
+            }
+            let mut out = Vec::new();
+            walk(&f.chain, &mut out);
+            out
+        };
+
+        // Pool exists and takes $items: the array item is built.
+        let live = finding("Acme\\Widget\\Model\\Gone");
+        assert_eq!(live.severity, crate::Severity::Error);
+        assert_eq!(
+            messages(live),
+            ["Acme\\Widget\\Model\\Pool exists", "Acme\\Widget\\Model\\Pool's constructor takes $items"]
+        );
+
+        // Pool has no $unused parameter: never passed.
+        let unused = finding("Acme\\Widget\\Model\\AlsoGone");
+        assert_eq!(unused.severity, crate::Severity::Warning);
+        assert_eq!(messages(unused), ["Acme\\Widget\\Model\\Pool's constructor has no $unused parameter"]);
+
+        // The configured type itself is gone, but its package (Acme\Widget) is installed.
+        let stale = finding("Acme\\Widget\\Model\\Leftover");
+        assert_eq!(stale.severity, crate::Severity::Warning);
+        assert!(messages(stale)[0].contains("Acme\\Widget\\Model\\Removed does not exist (its package Acme\\Widget is installed"));
+
+        // Only a missing pool asks for the virtual type, and nothing provides Other\ExportCore.
+        let optional = finding("Other\\ExportCore\\Config\\Entity");
+        assert_eq!(optional.severity, crate::Severity::Info);
+        let chain = messages(optional);
+        assert_eq!(chain[0], "injected as $entities into Other\\ExportCore\\Config\\EntityPool");
+        assert!(chain[1].contains("no installed package provides Other\\ExportCore: an optional integration"));
+
+        // --in keeps findings by path or module; a foreign vendor keeps nothing.
+        let mut scoped = report.clone();
+        scoped.retain_in(&tree.0, &["app/code/Acme/Widget/etc".to_string()]);
+        assert_eq!(scoped.findings.len(), report.findings.len());
+        let mut by_vendor = report.clone();
+        by_vendor.retain_in(&tree.0, &["Acme".to_string()]);
+        assert_eq!(by_vendor.findings.len(), report.findings.len());
+        let mut other = report.clone();
+        other.retain_in(&tree.0, &["Acm".to_string(), "Other".to_string()]);
+        assert!(other.findings.is_empty());
+
+        // Everything here is declared under app/: --source keeps it all or nothing.
+        let app = magento.doctor(Some(crate::model::ModuleSource::App));
+        assert_eq!(app.findings.len(), report.findings.len());
+        assert!(magento.doctor(Some(crate::model::ModuleSource::Vendor)).findings.is_empty());
+
+        // The printed code is the name --deny parses.
+        let lint = crate::model::DoctorLint::VirtualTypeBaseMissing;
+        assert_eq!(lint.to_string(), "virtual-type-base-missing");
+        assert_eq!(lint.to_string().parse::<crate::model::DoctorLint>(), Ok(lint));
+    }
+
+    /// A key repeated in one file is an error only when the later declaration replaces a
+    /// different value: same-key arrays merge item by item, identical values lose nothing.
+    #[test]
+    fn duplicate_argument_keys_follow_dom_merge() {
+        let tree = TempTree::new("doctor-dup-keys");
+        let write = |rel: &str, content: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        write("app/etc/config.php", "<?php\nreturn ['modules' => ['Acme_Widget' => 1]];\n");
+        write(
+            "app/code/Acme/Widget/etc/module.xml",
+            r#"<config><module name="Acme_Widget"/></config>"#,
+        );
+        write(
+            "app/code/Acme/Widget/etc/di.xml",
+            r#"<config>
+    <type name="Acme\Widget\Model\CommandList">
+        <arguments>
+            <argument name="commands" xsi:type="array">
+                <item name="fix" xsi:type="object">Acme\Widget\Console\Fix</item>
+                <item name="fix" xsi:type="object">Acme\Widget\Console\Check</item>
+                <item name="same" xsi:type="string">x</item>
+                <item name="same" xsi:type="string">x</item>
+            </argument>
+        </arguments>
+    </type>
+    <type name="Acme\Widget\Model\CommandList">
+        <arguments>
+            <argument name="commands" xsi:type="array">
+                <item name="other" xsi:type="object">Acme\Widget\Console\Other</item>
+            </argument>
+        </arguments>
+    </type>
+</config>"#,
+        );
+
+        let magento = super::Magento::open(&tree.0).unwrap();
+        let dups: Vec<_> = magento
+            .doctor(None)
+            .findings
+            .into_iter()
+            .filter(|f| f.lint == crate::model::DoctorLint::DuplicateArgumentKey)
+            .collect();
+        assert_eq!(dups.len(), 1, "{:?}", dups.iter().map(|f| &f.message).collect::<Vec<_>>());
+        let dup = &dups[0];
+        assert_eq!(dup.subject.as_deref(), Some("fix"));
+        assert_eq!(dup.source.as_ref().unwrap().line, 6);
+        let chain: Vec<_> = dup.chain.iter().map(|n| n.message.as_str()).collect();
+        assert_eq!(
+            chain,
+            [
+                "declared as Acme\\Widget\\Console\\Fix: dropped",
+                "declared as Acme\\Widget\\Console\\Check: kept"
+            ]
+        );
     }
 
     /// The two per-file lints fire: a layout template no file provides, and a plugin

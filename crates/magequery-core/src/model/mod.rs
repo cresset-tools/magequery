@@ -7,6 +7,7 @@ use crate::source::Source;
 
 mod project;
 pub use project::*;
+mod doctor_lints;
 mod wiring;
 pub use wiring::*;
 mod runtime;
