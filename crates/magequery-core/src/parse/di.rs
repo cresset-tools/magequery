@@ -407,4 +407,32 @@ mod di_argument_tests {
         };
         assert_eq!(text, "hello");
     }
+
+    /// Attribute values are entity-decoded like their text: an operator map
+    /// keys its items by the operator itself (`<item name="&lt;=&gt;">`), and
+    /// the compiled config writes `'<=>'`, not `'&lt;=&gt;'`.
+    #[test]
+    fn item_names_are_entity_decoded() {
+        let xml = r#"<?xml version="1.0"?>
+<config>
+  <type name="Foo\Bar">
+    <arguments>
+      <argument name="operators" xsi:type="array">
+        <item name="&lt;=&gt;" xsi:type="string">:field &lt;=&gt; ?</item>
+        <item name="&amp;" xsi:type="string">and</item>
+      </argument>
+    </arguments>
+  </type>
+</config>"#;
+        let di = di_xml(xml).unwrap();
+        let RawArg::Array(items) = &di.arguments[0].2 else {
+            panic!("operators must parse as an Array");
+        };
+        let keys: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
+        assert_eq!(keys, ["<=>", "&"]);
+        let RawArg::Scalar { text, .. } = &items[0].value else {
+            panic!("item must be a scalar string");
+        };
+        assert_eq!(text, ":field <=> ?");
+    }
 }
