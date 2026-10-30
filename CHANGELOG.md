@@ -51,6 +51,13 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.20.3](https://github.com/cresset-tools/magequery/compare/magequery-v0.20.2...magequery-v0.20.3) (2026-10-30)
+
+
+### Bug Fixes
+
+* **magecommand:** key interception.php by the name as given, not the declared case ([#157](https://github.com/cresset-tools/magequery/issues/157)) ([6a09eb9](https://github.com/cresset-tools/magequery/commit/6a09eb96e791520922879b4b1cb2546aabe85825))
+
 ## [0.20.2](https://github.com/cresset-tools/magequery/compare/magequery-v0.20.1...magequery-v0.20.2) (2026-10-22)
 
 
