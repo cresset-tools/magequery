@@ -1428,6 +1428,7 @@ dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
  "mysql",
+ "mysql_common",
  "quick-xml",
  "rayon",
  "serde",

@@ -21,16 +21,16 @@ pub(crate) fn fetch_queue_backlog(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<Vec<DbQueueCounts>, String> {
-    use mysql::prelude::Queryable;
     use std::collections::HashMap;
 
     let mut c = connect(conn)?;
     let p = table_prefix;
 
-    let names: Vec<String> =
-        c.query(format!("SELECT name FROM {p}queue")).map_err(clean_err)?;
+    // `queue.name` is nullable in the schema; a nameless queue can't be reported.
+    let names: Vec<Option<String>> = c.query(format!("SELECT name FROM {p}queue"))?;
     let mut by_name: HashMap<String, DbQueueCounts> = names
         .into_iter()
+        .flatten()
         .map(|queue| {
             (
                 queue.clone(),
@@ -47,14 +47,13 @@ pub(crate) fn fetch_queue_backlog(
         })
         .collect();
 
-    let counts: Vec<(String, u8, u64)> = c
+    let counts: Vec<(Option<String>, u8, u64)> = c
         .query(format!(
             "SELECT q.name, s.status, COUNT(*) FROM {p}queue_message_status s \
              JOIN {p}queue q ON q.id = s.queue_id GROUP BY q.name, s.status"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     for (name, status, n) in counts {
-        let Some(e) = by_name.get_mut(&name) else { continue };
+        let Some(e) = name.and_then(|name| by_name.get_mut(&name)) else { continue };
         let n = n as u32;
         match status {
             2 => e.new = n,
@@ -66,15 +65,14 @@ pub(crate) fn fetch_queue_backlog(
         }
     }
 
-    let oldest: Vec<(String, Option<i64>)> = c
+    let oldest: Vec<(Option<String>, Option<i64>)> = c
         .query(format!(
             "SELECT q.name, TIMESTAMPDIFF(SECOND, MIN(s.updated_at), NOW()) \
              FROM {p}queue_message_status s JOIN {p}queue q ON q.id = s.queue_id \
              WHERE s.status IN (2, 5) GROUP BY q.name"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     for (name, secs) in oldest {
-        if let Some(e) = by_name.get_mut(&name) {
+        if let Some(e) = name.and_then(|name| by_name.get_mut(&name)) {
             e.oldest_waiting_secs = secs;
         }
     }
@@ -105,7 +103,6 @@ pub(crate) fn fetch_cron_stats(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<Vec<DbCronStat>, String> {
-    use mysql::prelude::Queryable;
     use std::collections::HashMap;
 
     let mut c = connect(conn)?;
@@ -133,8 +130,7 @@ pub(crate) fn fetch_cron_stats(
         .query(format!(
             "SELECT job_code, status, COUNT(*) FROM {p}cron_schedule \
              GROUP BY job_code, status"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     for (code, status, n) in counts {
         let s = stat(&mut by_code, &code);
         let n = n as u32;
@@ -158,8 +154,7 @@ pub(crate) fn fetch_cron_stats(
              JOIN (SELECT job_code, MAX(executed_at) me FROM {p}cron_schedule \
                    WHERE executed_at IS NOT NULL GROUP BY job_code) m \
              ON m.job_code = s.job_code AND s.executed_at = m.me"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     for (code, status, run, secs, duration) in last {
         let s = stat(&mut by_code, &code);
         if s.last_status.is_none() {
@@ -176,8 +171,7 @@ pub(crate) fn fetch_cron_stats(
              JOIN (SELECT job_code, MAX(schedule_id) mi FROM {p}cron_schedule \
                    WHERE status = 'error' GROUP BY job_code) m \
              ON m.mi = s.schedule_id"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     for (code, msg) in errors {
         stat(&mut by_code, &code).last_error = msg.filter(|m| !m.is_empty());
     }
@@ -186,8 +180,7 @@ pub(crate) fn fetch_cron_stats(
         .query(format!(
             "SELECT job_code, CAST(MIN(scheduled_at) AS CHAR) FROM {p}cron_schedule \
              WHERE status = 'pending' GROUP BY job_code"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     for (code, at) in next {
         stat(&mut by_code, &code).next_scheduled = at;
     }
@@ -209,7 +202,6 @@ pub(crate) fn fetch_cron_history(
     String,
 > {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     c.exec(
         format!(
@@ -222,7 +214,6 @@ pub(crate) fn fetch_cron_history(
         ),
         params! { "code" => job_code },
     )
-    .map_err(clean_err)
 }
 
 /// Seconds since the last *successful* cron job finished, per the DB server's own clock
@@ -231,13 +222,11 @@ pub(crate) fn fetch_cron_last_success(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<Option<i64>, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     c.query_first(format!(
         "SELECT TIMESTAMPDIFF(SECOND, MAX(finished_at), NOW()) FROM {table_prefix}cron_schedule \
          WHERE status = 'success'"
     ))
-    .map_err(clean_err)
     .map(Option::flatten)
 }
 
@@ -247,11 +236,10 @@ pub(crate) fn fetch_scope_counts(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<(usize, usize, usize), String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
-    let count = |c: &mut mysql::Conn, sql: String| -> Result<usize, String> {
-        Ok(c.query_first::<u64, _>(sql).map_err(clean_err)?.unwrap_or(0) as usize)
+    let count = |c: &mut Db, sql: String| -> Result<usize, String> {
+        Ok(c.query_first::<u64>(sql)?.unwrap_or(0) as usize)
     };
     let websites = count(&mut c, format!("SELECT COUNT(*) FROM {p}store_website WHERE website_id > 0"))?;
     let groups = count(&mut c, format!("SELECT COUNT(*) FROM {p}store_group WHERE group_id > 0"))?;

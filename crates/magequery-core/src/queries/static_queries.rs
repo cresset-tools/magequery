@@ -37,7 +37,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let rows = db::fetch_cron_history(conn, &cfg.table_prefix, job_code, limit)
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(rows
             .into_iter()
             .map(|(status, scheduled_at, executed_at, finished_at, duration_secs, messages)| {
@@ -59,7 +59,7 @@ impl Magento {
     fn attach_cron_live(&self, jobs: &mut [CronJob]) -> Result<Vec<String>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let stats = db::fetch_cron_stats(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let stats = db::fetch_cron_stats(conn, &cfg.table_prefix).live(self)?;
         for job in jobs.iter_mut() {
             let s = stats.iter().find(|s| s.job_code == job.name);
             job.live = Some(match s {
@@ -272,7 +272,7 @@ impl Magento {
     fn fetch_live_schema(&self) -> Result<std::collections::HashMap<String, Vec<String>>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        db::fetch_live_schema(conn, &cfg.table_prefix).map_err(Error::Db)
+        db::fetch_live_schema(conn, &cfg.table_prefix).live(self)
     }
 
     #[cfg(not(feature = "db"))]
@@ -350,7 +350,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let (states, views) =
-            db::fetch_indexer_states(conn, &cfg.table_prefix).map_err(Error::Db)?;
+            db::fetch_indexer_states(conn, &cfg.table_prefix).live(self)?;
         for ix in list {
             let state = states.iter().find(|s| s.indexer_id == ix.id);
             let view = ix
@@ -544,7 +544,7 @@ impl Magento {
     fn fetch_translations(&self, locale: &str, needle: &str) -> Result<Vec<(String, String, u32)>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        db::fetch_translations(conn, &cfg.table_prefix, locale, needle).map_err(Error::Db)
+        db::fetch_translations(conn, &cfg.table_prefix, locale, needle).live(self)
     }
 
     #[cfg(not(feature = "db"))]
@@ -908,7 +908,7 @@ impl Magento {
     pub fn queue_backlog(&self) -> Result<Vec<QueueBacklog>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let counts = db::fetch_queue_backlog(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let counts = db::fetch_queue_backlog(conn, &cfg.table_prefix).live(self)?;
 
         let mut out: Vec<QueueBacklog> = Vec::new();
         for (queue, consumers) in self.mq_index().queues() {

@@ -16,9 +16,8 @@ pub(crate) fn run_select(
     sql: &str,
     timeout_secs: u64,
 ) -> Result<SelectRows, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
-    let version: Option<String> = c.query_first("SELECT VERSION()").map_err(clean_err)?;
+    let version: Option<String> = c.query_first("SELECT VERSION()")?;
     let timeout = if version.unwrap_or_default().contains("MariaDB") {
         format!("SET SESSION max_statement_time = {timeout_secs}")
     } else {
@@ -28,17 +27,18 @@ pub(crate) fn run_select(
         )
     };
     if timeout_secs > 0 {
-        c.query_drop(timeout).map_err(clean_err)?;
+        c.query_drop(timeout)?;
     }
     // GROUP_CONCAT truncates silently at 1 KB by default; multiselect labels and
     // `website_ids` are built with it.
-    c.query_drop("SET SESSION group_concat_max_len = 1048576")
-        .map_err(clean_err)?;
-    c.query_drop("START TRANSACTION READ ONLY")
-        .map_err(clean_err)?;
+    c.query_drop("SET SESSION group_concat_max_len = 1048576")?;
+    c.query_drop("START TRANSACTION READ ONLY")?;
 
+    // Values are read raw (no `FromRow`), so this is the one place outside `query.rs`
+    // that touches the connection directly.
     let out = (|| {
-        let mut result = c.query_iter(sql).map_err(clean_err)?;
+        use mysql::prelude::Queryable;
+        let mut result = c.raw().query_iter(sql).map_err(clean_err)?;
         let cols: Vec<mysql::Column> = result.columns().as_ref().to_vec();
         let mut rows = Vec::new();
         for row in result.by_ref() {

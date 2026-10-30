@@ -256,7 +256,7 @@ impl Magento {
         let x = vsql::expand(stmt, &cfg.table_prefix, limit, &ctx)?;
         let start = std::time::Instant::now();
         let (columns, numeric, mut rows) =
-            crate::db::run_select(conn, &x.sql, timeout_secs).map_err(Error::Db)?;
+            crate::db::run_select(conn, &x.sql, timeout_secs).live(self)?;
         let elapsed_ms = start.elapsed().as_millis();
         let truncated = x.cap.is_some_and(|n| rows.len() as u64 > n);
         if let (true, Some(n)) = (truncated, x.cap) {

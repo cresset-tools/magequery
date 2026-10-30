@@ -11,7 +11,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_product(conn, &cfg.table_prefix, db::ProductIdent::Sku(sku))
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(|r| to_product(r, false)))
     }
 
@@ -21,7 +21,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_product(conn, &cfg.table_prefix, db::ProductIdent::Id(id))
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(|r| to_product(r, true)))
     }
 
@@ -33,7 +33,7 @@ impl Magento {
         let conn = default_connection(&cfg)?;
         let raw =
             db::fetch_product_links(conn, &cfg.table_prefix, db::ProductIdent::Sku(sku), reverse)
-                .map_err(Error::Db)?;
+                .live(self)?;
         Ok(raw.map(|r| to_product_links(r, false)))
     }
 
@@ -44,7 +44,7 @@ impl Magento {
         let conn = default_connection(&cfg)?;
         let raw =
             db::fetch_product_links(conn, &cfg.table_prefix, db::ProductIdent::Id(id), reverse)
-                .map_err(Error::Db)?;
+                .live(self)?;
         Ok(raw.map(|r| to_product_links(r, true)))
     }
 
@@ -55,7 +55,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let (nodes, roots) =
-            db::fetch_category_nodes(conn, &cfg.table_prefix).map_err(Error::Db)?;
+            db::fetch_category_nodes(conn, &cfg.table_prefix).live(self)?;
 
         let mut by_parent: std::collections::BTreeMap<u32, Vec<&db::DbCategoryNode>> =
             std::collections::BTreeMap::new();
@@ -104,7 +104,7 @@ impl Magento {
     pub fn categories_like(&self, needle: &str) -> Result<Vec<CategoryHit>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let (nodes, _) = db::fetch_category_nodes(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let (nodes, _) = db::fetch_category_nodes(conn, &cfg.table_prefix).live(self)?;
         let n = needle.to_lowercase();
         let mut hits: Vec<CategoryHit> = nodes
             .into_iter()
@@ -140,7 +140,7 @@ impl Magento {
         let conn = default_connection(&cfg)?;
         let raw =
             db::fetch_category_card(conn, &cfg.table_prefix, id, include_products, indexed_store)
-                .map_err(Error::Db)?;
+                .live(self)?;
         Ok(raw.map(to_category))
     }
 
@@ -183,7 +183,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raws =
-            db::fetch_cms_entries(conn, &cfg.table_prefix, kind, sel).map_err(Error::Db)?;
+            db::fetch_cms_entries(conn, &cfg.table_prefix, kind, sel).live(self)?;
         Ok(raws
             .into_iter()
             .map(|r| {
@@ -226,7 +226,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let (rows, truncated) =
-            db::fetch_cms_like(conn, &cfg.table_prefix, kind, needle, limit).map_err(Error::Db)?;
+            db::fetch_cms_like(conn, &cfg.table_prefix, kind, needle, limit).live(self)?;
         Ok((
             rows.into_iter()
                 .map(|(id, identifier, title, active)| CmsHit {
@@ -254,7 +254,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_integration_secrets(conn, &cfg.table_prefix, integration_id)
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(
             |(consumer_key, consumer_secret, access_token, access_secret, revoked)| {
                 IntegrationCredentials {
@@ -276,7 +276,7 @@ impl Magento {
     pub fn integrations(&self, filter: Option<&str>) -> Result<Vec<Integration>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let raws = db::fetch_integrations(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let raws = db::fetch_integrations(conn, &cfg.table_prefix).live(self)?;
         let needle = filter.map(str::to_lowercase);
         Ok(raws
             .into_iter()
@@ -328,7 +328,7 @@ impl Magento {
     pub fn tax_info(&self) -> Result<TaxInfo> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let raw = db::fetch_tax_info(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let raw = db::fetch_tax_info(conn, &cfg.table_prefix).live(self)?;
 
         let class_name = |id: u32| -> String {
             raw.classes
@@ -420,7 +420,7 @@ impl Magento {
     pub fn catalog_rule(&self, id: u32) -> Result<Option<CatalogRule>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let raw = db::fetch_catalog_rule(conn, &cfg.table_prefix, id).map_err(Error::Db)?;
+        let raw = db::fetch_catalog_rule(conn, &cfg.table_prefix, id).live(self)?;
         Ok(raw.map(|r| {
             let amount = r.discount_amount.as_deref().unwrap_or("?");
             let action = match r.simple_action.as_deref() {
@@ -461,7 +461,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let (rows, truncated) =
-            db::fetch_catalog_rules(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
+            db::fetch_catalog_rules(conn, &cfg.table_prefix, needle, limit).live(self)?;
         Ok((
             rows.into_iter()
                 .map(|(rule_id, name, active, from_date, to_date, matched_products)| {
@@ -478,7 +478,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_sales_rule(conn, &cfg.table_prefix, db::RuleIdent::Id(id))
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(to_sales_rule))
     }
 
@@ -488,7 +488,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_sales_rule(conn, &cfg.table_prefix, db::RuleIdent::Coupon(code))
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(to_sales_rule))
     }
 
@@ -499,7 +499,7 @@ impl Magento {
         let conn = default_connection(&cfg)?;
         let (rows, truncated) =
             db::fetch_sales_rules_like(conn, &cfg.table_prefix, needle, limit)
-                .map_err(Error::Db)?;
+                .live(self)?;
         Ok((
             rows.into_iter()
                 .map(|(rule_id, name, active, from_date, to_date)| SalesRuleHit {
@@ -520,7 +520,7 @@ impl Magento {
     pub fn store_tree(&self) -> Result<StoreTree> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let raw = db::fetch_store_tree(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let raw = db::fetch_store_tree(conn, &cfg.table_prefix).live(self)?;
         let websites = raw
             .websites
             .into_iter()
@@ -565,7 +565,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let (statuses, states) =
-            db::fetch_order_statuses(conn, &cfg.table_prefix).map_err(Error::Db)?;
+            db::fetch_order_statuses(conn, &cfg.table_prefix).live(self)?;
         let needle = filter.map(str::to_lowercase);
         let mut out: Vec<OrderStatus> = statuses
             .into_iter()
@@ -606,7 +606,7 @@ impl Magento {
     pub fn customer_groups(&self, filter: Option<&str>) -> Result<Vec<CustomerGroup>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let rows = db::fetch_customer_groups(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let rows = db::fetch_customer_groups(conn, &cfg.table_prefix).live(self)?;
         let needle = filter.map(str::to_lowercase);
         Ok(rows
             .into_iter()
@@ -634,7 +634,7 @@ impl Magento {
     pub fn sales_sequences(&self, filter: Option<&str>) -> Result<Vec<SalesSequence>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let rows = db::fetch_sales_sequences(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let rows = db::fetch_sales_sequences(conn, &cfg.table_prefix).live(self)?;
         let needle = filter.map(str::to_lowercase);
         Ok(rows
             .into_iter()
@@ -675,7 +675,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_sales_document(conn, &cfg.table_prefix, kind, increment)
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(|r| to_sales_document(kind, r)))
     }
 
@@ -691,7 +691,7 @@ impl Magento {
         let conn = default_connection(&cfg)?;
         let (rows, truncated) =
             db::fetch_sales_documents_like(conn, &cfg.table_prefix, kind, needle, limit)
-                .map_err(Error::Db)?;
+                .live(self)?;
         Ok((
             rows.into_iter()
                 .map(|(increment_id, order_increment, created_at, amount)| SalesDocumentHit {
@@ -710,7 +710,7 @@ impl Magento {
     pub fn quote(&self, id: u64) -> Result<Option<Quote>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let raw = db::fetch_quote(conn, &cfg.table_prefix, id).map_err(Error::Db)?;
+        let raw = db::fetch_quote(conn, &cfg.table_prefix, id).live(self)?;
         Ok(raw.map(to_quote))
     }
 
@@ -720,7 +720,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let (rows, truncated) =
-            db::fetch_quotes_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
+            db::fetch_quotes_like(conn, &cfg.table_prefix, needle, limit).live(self)?;
         Ok((
             rows.into_iter()
                 .map(|(entity_id, active, email, qty, total, currency, updated)| QuoteHit {
@@ -743,7 +743,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_customer(conn, &cfg.table_prefix, db::CustomerIdent::Email(email))
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(|r| to_customer(r, false)))
     }
 
@@ -753,7 +753,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_customer(conn, &cfg.table_prefix, db::CustomerIdent::Id(id))
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(|r| to_customer(r, true)))
     }
 
@@ -763,7 +763,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let (rows, truncated) =
-            db::fetch_customers_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
+            db::fetch_customers_like(conn, &cfg.table_prefix, needle, limit).live(self)?;
         Ok((
             rows.into_iter()
                 .map(|(entity_id, email, name, group, created_at, _)| CustomerHit {
@@ -784,7 +784,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_order(conn, &cfg.table_prefix, db::OrderIdent::Increment(increment))
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(|r| to_order(r, false)))
     }
 
@@ -794,7 +794,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_order(conn, &cfg.table_prefix, db::OrderIdent::Id(id))
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(|r| to_order(r, true)))
     }
 
@@ -804,7 +804,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let (rows, truncated) =
-            db::fetch_orders_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
+            db::fetch_orders_like(conn, &cfg.table_prefix, needle, limit).live(self)?;
         Ok((
             rows.into_iter()
                 .map(
@@ -831,7 +831,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         Ok(db::fetch_product_identity(conn, &cfg.table_prefix, &db::ProductIdent::Id(id))
-            .map_err(Error::Db)?
+            .live(self)?
             .map(|(_, sku, _)| sku))
     }
 
@@ -841,7 +841,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_product_prices(conn, &cfg.table_prefix, db::ProductIdent::Sku(sku))
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(|r| to_product_prices(r, false)))
     }
 
@@ -851,7 +851,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let raw = db::fetch_product_prices(conn, &cfg.table_prefix, db::ProductIdent::Id(id))
-            .map_err(Error::Db)?;
+            .live(self)?;
         Ok(raw.map(|r| to_product_prices(r, true)))
     }
 
@@ -861,7 +861,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let (rows, truncated) =
-            db::fetch_products_like(conn, &cfg.table_prefix, needle, limit).map_err(Error::Db)?;
+            db::fetch_products_like(conn, &cfg.table_prefix, needle, limit).live(self)?;
         Ok((
             rows.into_iter()
                 .map(|(entity_id, sku, type_id, name, status)| ProductHit {
@@ -882,7 +882,7 @@ impl Magento {
     pub fn admin_users(&self) -> Result<Vec<AdminUser>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        let rows = db::fetch_admin_users(conn, &cfg.table_prefix).map_err(Error::Db)?;
+        let rows = db::fetch_admin_users(conn, &cfg.table_prefix).live(self)?;
         Ok(rows
             .into_iter()
             .map(|u| AdminUser {
@@ -914,7 +914,7 @@ impl Magento {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
         let (roles, members, rules) =
-            db::fetch_admin_roles(conn, &cfg.table_prefix).map_err(Error::Db)?;
+            db::fetch_admin_roles(conn, &cfg.table_prefix).live(self)?;
         Ok(roles
             .into_iter()
             .map(|(id, name)| {
@@ -1007,9 +1007,9 @@ impl Magento {
         for row in rows {
             let (sets, total_sets) =
                 db::fetch_eav_sets(conn, &cfg.table_prefix, row.attribute_id, &row.entity_code)
-                    .map_err(Error::Db)?;
+                    .live(self)?;
             let options = db::fetch_eav_options(conn, &cfg.table_prefix, row.attribute_id)
-                .map_err(Error::Db)?;
+                .live(self)?;
             // Setup calls naming this entity, plus ones whose entity we couldn't resolve.
             let setup_refs: Vec<EavSetupRef> = refs
                 .iter()
@@ -1037,21 +1037,21 @@ impl Magento {
     fn eav_fetch_entities(&self) -> Result<Vec<db::DbEavEntity>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        db::fetch_eav_entities(conn, &cfg.table_prefix).map_err(Error::Db)
+        db::fetch_eav_entities(conn, &cfg.table_prefix).live(self)
     }
 
     #[cfg(feature = "db")]
     fn eav_fetch_attributes(&self) -> Result<Vec<db::DbEavAttribute>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        db::fetch_eav_attributes(conn, &cfg.table_prefix).map_err(Error::Db)
+        db::fetch_eav_attributes(conn, &cfg.table_prefix).live(self)
     }
 
     #[cfg(feature = "db")]
     pub(crate) fn fetch_patch_list(&self) -> Result<Vec<String>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        db::fetch_patch_list(conn, &cfg.table_prefix).map_err(Error::Db)
+        db::fetch_patch_list(conn, &cfg.table_prefix).live(self)
     }
 
     #[cfg(not(feature = "db"))]

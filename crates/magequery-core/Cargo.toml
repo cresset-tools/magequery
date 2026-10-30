@@ -25,3 +25,5 @@ mysql = { version = "25", optional = true, default-features = false, features = 
 
 [dev-dependencies]
 tempfile = "3"
+# Builds `Row`s for the db query-layer tests (already in the tree via `mysql`).
+mysql_common = { version = "0.32", default-features = false }

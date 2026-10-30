@@ -2100,6 +2100,15 @@ interface-declared plugin) to catch merge-semantics surprises before building br
   feature**, which pulls the `mysql` client — `default-features=false, features=["minimal"]`
   to avoid the openssl/TLS build dependency). `db.rs` does a fast `TcpStream::connect_timeout`
   pre-check (5s) so an unreachable host fails fast, then connects + `SELECT VERSION()`.
+- **Every db query goes through `db::Db` (`db/query.rs`), never `Queryable` directly**
+  (#108). The `mysql` crate's `from_row` panics on a NULL in a non-`Option` field, so one
+  odd row used to kill the command with exit 101. `Db` converts with `from_row_opt`: list
+  queries skip a bad row and record a warning (table + NULL columns), single-row lookups
+  return a clean `Err`, and wide rows read by index use `RowExt::col` (mismatch = `None` +
+  warning). Warnings go to a per-thread sink that `Magento` drains into `diagnostics()`
+  after each live query (`LiveResult::live`). Row types still make every column that
+  Magento's `db_schema.xml` declares nullable an `Option` (or `COALESCE` it in SQL), plus
+  aggregates over possibly-empty sets and LEFT JOINed columns.
 - CLI (cli enables the `db` feature): `magequery db info` (connections incl. the real
   password — no masking; `(empty)` shown only when the value is genuinely empty) and
   `magequery db ping [<connection>]` (OK/FAIL + server version + ms, non-zero exit on fail).

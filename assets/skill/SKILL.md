@@ -142,6 +142,8 @@ cache, `setup:upgrade`.
   `sales-rule <coupon|id>`, `catalog-rule [<id|name>]`, `tax`, `stores`,
   `url-rewrites <path>`, `cms-page|cms-block [<identifier>]`.
   These read the database directly and report a clean error if it is unreachable.
+  A row that doesn't fit its expected shape (an unexpected NULL) is skipped and named
+  in a warning on stderr, so check stderr before treating a list as complete.
 - What customer groups exist, their tax class and member counts? →
   `customer-groups [<filter>]`. (`product <sku>` also lists the media gallery, with
   each image's base/thumbnail/swatch role.)

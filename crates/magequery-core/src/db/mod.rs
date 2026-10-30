@@ -32,14 +32,14 @@ pub(crate) fn ping(conn: &DbConnection) -> DbPing {
 }
 
 fn try_ping(conn: &DbConnection) -> Result<String, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
-    let version: Option<String> = c.query_first("SELECT VERSION()").map_err(clean_err)?;
+    let version: Option<String> = c.query_first("SELECT VERSION()")?;
     Ok(version.unwrap_or_default())
 }
 
-/// Connect to a MySQL connection, with a fast reachability pre-check.
-fn connect(conn: &DbConnection) -> Result<mysql::Conn, String> {
+/// Connect to a MySQL connection, with a fast reachability pre-check. Queries go through
+/// the returned [`Db`], which never panics on a row that doesn't convert.
+fn connect(conn: &DbConnection) -> Result<Db, String> {
     let mut builder = mysql::OptsBuilder::new()
         .user(Some(conn.username.as_str()))
         .pass(Some(conn.password.as_str()))
@@ -62,7 +62,7 @@ fn connect(conn: &DbConnection) -> Result<mysql::Conn, String> {
             .map_err(|e| format!("cannot reach {addr}: {e}"))?;
         builder = builder.ip_or_hostname(Some(conn.host.as_str())).tcp_port(port);
     }
-    mysql::Conn::new(builder).map_err(clean_err)
+    mysql::Conn::new(builder).map(Db::new).map_err(clean_err)
 }
 
 /// The `mysql` crate prints errors as `DriverError { … }` / `MySqlError { … }`; unwrap the
@@ -75,6 +75,8 @@ pub(crate) fn clean_err(e: mysql::Error) -> String {
     }
 }
 
+mod query;
+pub(crate) use query::{take_warnings, Db, RowExt};
 mod config;
 pub(crate) use config::*;
 mod content;

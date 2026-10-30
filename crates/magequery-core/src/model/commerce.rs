@@ -305,7 +305,9 @@ pub struct Integration {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct TaxRate {
     pub id: u32,
-    pub code: String,
+    /// The rate's code; `None` for a row stored without one (the schema forbids it, but
+    /// such rows exist).
+    pub code: Option<String>,
     pub country: String,
     /// Region code, `*` for all.
     pub region: String,

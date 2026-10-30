@@ -8,26 +8,16 @@ pub(crate) fn fetch_config(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<Vec<(String, String, String)>, String> {
-    use mysql::prelude::Queryable;
     use std::collections::HashMap;
 
     let mut c = connect(conn)?;
     let p = table_prefix;
 
-    let websites: HashMap<u32, String> = c
-        .query(format!("SELECT website_id, code FROM {p}store_website"))
-        .map_err(clean_err)?
-        .into_iter()
-        .collect();
-    let stores: HashMap<u32, String> = c
-        .query(format!("SELECT store_id, code FROM {p}store"))
-        .map_err(clean_err)?
-        .into_iter()
-        .collect();
+    let websites: HashMap<u32, String> = website_codes(&mut c, p)?;
+    let stores: HashMap<u32, String> = store_codes(&mut c, p)?;
 
     let rows: Vec<(String, u32, String, Option<String>)> = c
-        .query(format!("SELECT scope, scope_id, path, value FROM {p}core_config_data"))
-        .map_err(clean_err)?;
+        .query(format!("SELECT scope, scope_id, path, value FROM {p}core_config_data"))?;
 
     let mut out = Vec::with_capacity(rows.len());
     for (scope, scope_id, path, value) in rows {
@@ -55,12 +45,10 @@ pub(crate) fn fetch_themes(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<Vec<(u32, Option<u32>, Option<String>, String)>, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     c.query(format!(
         "SELECT theme_id, parent_id, theme_path, area FROM {table_prefix}theme"
     ))
-    .map_err(clean_err)
 }
 
 /// The live database's tables and columns from `information_schema`, keyed by table name
@@ -70,14 +58,12 @@ pub(crate) fn fetch_live_schema(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let rows: Vec<(String, String)> = c
         .query(
             "SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS \
              WHERE TABLE_SCHEMA = DATABASE() ORDER BY TABLE_NAME, ORDINAL_POSITION",
-        )
-        .map_err(clean_err)?;
+        )?;
     let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for (table, column) in rows {
         let name = if table_prefix.is_empty() {
@@ -102,16 +88,16 @@ pub(crate) fn fetch_translations(
     needle: &str,
 ) -> Result<Vec<(String, String, u32)>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
-    c.exec(
+    // `translate` is nullable; a row without one translates nothing.
+    let rows: Vec<(String, Option<String>, u32)> = c.exec(
         format!(
             "SELECT string, translate, store_id FROM {table_prefix}translation \
              WHERE locale = :loc AND LOWER(string) LIKE :pat"
         ),
         params! { "loc" => locale, "pat" => format!("%{}%", needle.to_lowercase()) },
-    )
-    .map_err(clean_err)
+    )?;
+    Ok(rows.into_iter().filter_map(|(s, t, store)| Some((s, t?, store))).collect())
 }
 
 /// Applied patch class names from `patch_list` (leading backslashes normalized away).
@@ -119,9 +105,8 @@ pub(crate) fn fetch_patch_list(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<Vec<String>, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let rows: Vec<String> =
-        c.query(format!("SELECT patch_name FROM {table_prefix}patch_list")).map_err(clean_err)?;
+        c.query(format!("SELECT patch_name FROM {table_prefix}patch_list"))?;
     Ok(rows.into_iter().map(|r| r.trim_start_matches('\\').to_string()).collect())
 }
