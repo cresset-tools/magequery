@@ -51,6 +51,21 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.21.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.20.3...magequery-v0.21.0) (2026-10-30)
+
+
+### Features
+
+* **doctor:** judge missing classes by reachability, and give every lint a code ([#163](https://github.com/cresset-tools/magequery/issues/163)) ([5301d50](https://github.com/cresset-tools/magequery/commit/5301d5073756437b779c34f4801291aa2178cbb6))
+* **magecommand:** color help, reports and diagnostics with magequery's palette ([3c0c6a9](https://github.com/cresset-tools/magequery/commit/3c0c6a935998a062bee840988e226131d8976ec7))
+
+
+### Bug Fixes
+
+* **magecommand:** export argument-less `new X()` constructor defaults as objects ([#162](https://github.com/cresset-tools/magequery/issues/162)) ([e4ea980](https://github.com/cresset-tools/magequery/commit/e4ea980792a7bdd0a2a3ddcff3dd34027ff183eb))
+* **magecommand:** load the traits of classes outside the compile scan ([#160](https://github.com/cresset-tools/magequery/issues/160)) ([ddaadf5](https://github.com/cresset-tools/magequery/commit/ddaadf5b66d840a31615176dd75ffc381eda24be))
+* **magequery:** decode XML entities in attribute values ([#161](https://github.com/cresset-tools/magequery/issues/161)) ([ef4bf33](https://github.com/cresset-tools/magequery/commit/ef4bf33442be6d3bbef03645c64c31a7bd30fd51))
+
 ## [0.20.3](https://github.com/cresset-tools/magequery/compare/magequery-v0.20.2...magequery-v0.20.3) (2026-10-30)
 
 
