@@ -777,8 +777,9 @@ pub fn min_resolver_excludes_from_magento(
     let (from_plugins, unknown) = plugin_min_excludes(magento);
     for class in unknown {
         eprintln!(
-            "warning: plugin {class} on Minification::getExcludes is not statically \
-             evaluable — its excludes are missing from requirejs-min-resolver.js"
+            "{} plugin {class} on Minification::getExcludes is not statically \
+             evaluable — its excludes are missing from requirejs-min-resolver.js",
+            crate::style::stderr::warning("warning:")
         );
     }
     excludes.extend(from_plugins);

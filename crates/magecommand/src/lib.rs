@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 pub mod static_deploy;
 mod style;
@@ -500,7 +500,13 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    let cli = Cli::parse();
+    // Help is printed during parsing, so clap's colors follow `--color` read ahead.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let matches = Cli::command()
+        .styles(style::HELP)
+        .color(style::clap_color(style::choice_from_args(&args)))
+        .get_matches_from(args);
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     style::init(cli.color);
 
     // Dispatched before anything touches a Magento root: the skill describes the
@@ -678,7 +684,7 @@ fn static_verify(
     let report = match sv::verify(reference, output, strict, all) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{} {e}", style::stderr::error("error:"));
             return Ok(ExitCode::FAILURE);
         }
     };
@@ -732,8 +738,8 @@ fn static_verify(
             {
                 continue;
             }
-            println!("{}", bucket.label());
-            let show = |label: &str, paths: &[String]| {
+            println!("{}", style::heading(&bucket.label()));
+            let show = |label: String, paths: &[String]| {
                 if paths.is_empty() {
                     return;
                 }
@@ -745,13 +751,17 @@ fn static_verify(
                     println!("      … {} more", paths.len() - sample);
                 }
             };
-            show("changed", &r.changed);
-            show("missing (reference only)", &r.missing);
-            show("extra (ours only)", &r.extra);
+            show(style::changed("changed"), &r.changed);
+            show(style::removed("missing (reference only)"), &r.missing);
+            show(style::added("extra (ours only)"), &r.extra);
             // Never hidden, but marked as not-a-defect outside --strict.
-            show("bundle re-split (.min-sibling cache scope)", &r.resplit);
+            show(style::dim("bundle re-split (.min-sibling cache scope)"), &r.resplit);
             show(
-                if strict { "equivalent (counted: --strict)" } else { "equivalent (formatting only)" },
+                if strict {
+                    style::changed("equivalent (counted: --strict)")
+                } else {
+                    style::dim("equivalent (formatting only)")
+                },
                 &r.equivalent,
             );
         }
@@ -783,7 +793,11 @@ fn static_verify(
         println!("{line}");
         println!(
             "{}",
-            if clean { "MATCHES the reference deploy" } else { "DIFFERS from the reference deploy" }
+            if clean {
+                style::pass("MATCHES the reference deploy")
+            } else {
+                style::fail("DIFFERS from the reference deploy")
+            }
         );
     }
 
@@ -848,12 +862,12 @@ fn static_minify(
         match sdmin::minify_css(&source) {
             Ok(m) => {
                 for w in &m.warnings {
-                    eprintln!("warning: {}: {w}", input.display());
+                    eprintln!("{} {}: {w}", style::stderr::warning("warning:"), input.display());
                 }
                 m.css
             }
             Err(e) => {
-                eprintln!("error: {}: {e}", input.display());
+                eprintln!("{} {}: {e}", style::stderr::error("error:"), input.display());
                 return Ok(ExitCode::FAILURE);
             }
         }
@@ -861,7 +875,7 @@ fn static_minify(
         match sdmin::minify_js(&source, &input.display().to_string()) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("error: {e}");
+                eprintln!("{} {e}", style::stderr::error("error:"));
                 return Ok(ExitCode::FAILURE);
             }
         }
@@ -894,10 +908,10 @@ fn static_minify(
         .with_context(|| format!("write {}", target.display()))?;
     println!(
         "{}: {} bytes -> {} bytes -> {}",
-        input.display(),
+        style::name(&input.display().to_string()),
         source.len(),
         minified.len(),
-        target.display()
+        style::dim(&target.display().to_string())
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -926,7 +940,8 @@ fn static_less(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     eprintln!(
-        "theme fallback chain: {}",
+        "{} {}",
+        style::stderr::dim("theme fallback chain:"),
         orch.chain()
             .iter()
             .map(|t| t.id.as_str())
@@ -966,10 +981,13 @@ fn static_less(
         match orch.compile_entry(name, &opts) {
             Ok(compiled) => {
                 for (module, err) in &compiled.skipped_modules {
-                    eprintln!("warning: skipped broken module {module}: {err}");
+                    eprintln!(
+                        "{} skipped broken module {module}: {err}",
+                        style::stderr::warning("warning:"),
+                    );
                 }
                 for w in &compiled.warnings {
-                    eprintln!("warning: {}: {w}", compiled.entry);
+                    eprintln!("{} {}: {w}", style::stderr::warning("warning:"), compiled.entry);
                 }
                 if to_stdout {
                     print!("{}", compiled.css);
@@ -993,10 +1011,11 @@ fn static_less(
                 std::fs::write(&target, &compiled.css)
                     .with_context(|| format!("write {}", target.display()))?;
                 println!(
-                    "{name}: {} ({} bytes) -> {}",
-                    compiled.entry_file.display(),
+                    "{}: {} ({} bytes) -> {}",
+                    style::name(name),
+                    style::dim(&compiled.entry_file.display().to_string()),
                     compiled.css.len(),
-                    target.display()
+                    style::dim(&target.display().to_string())
                 );
             }
             Err(e) => {
@@ -1004,10 +1023,14 @@ fn static_less(
                 // file) is a hard error only when explicitly requested.
                 let missing = e.message.starts_with("entry point not found");
                 if missing && entries.is_empty() {
-                    eprintln!("{name}: skipped (not provided by the theme chain)");
+                    eprintln!(
+                        "{}: {}",
+                        style::stderr::name(name),
+                        style::stderr::dim("skipped (not provided by the theme chain)")
+                    );
                     continue;
                 }
-                eprintln!("error: {e}");
+                eprintln!("{} {e}", style::stderr::error("error:"));
                 failed = true;
             }
         }
@@ -1045,13 +1068,14 @@ fn static_requirejs(
     let cfg = match sdrjs::build_from_magento(&magento, area, theme) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{} {e}", style::stderr::error("error:"));
             return Ok(ExitCode::FAILURE);
         }
     };
 
     eprintln!(
-        "theme fallback chain: {}",
+        "{} {}",
+        style::stderr::dim("theme fallback chain:"),
         cfg.chain
             .iter()
             .map(|t| t.id.as_str())
@@ -1069,7 +1093,7 @@ fn static_requirejs(
     let excludes = match sdrjs::min_resolver_excludes_from_magento(&magento) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{} {e}", style::stderr::error("error:"));
             return Ok(ExitCode::FAILURE);
         }
     };
@@ -1148,21 +1172,24 @@ fn static_requirejs(
     let (config_t, resolver_t, mixins_t) =
         targets.expect("non-stdout mode always writes");
     println!(
-        "requirejs-config.js: {} source file(s) ({} bytes) -> {}",
+        "{}: {} source file(s) ({} bytes) -> {}",
+        style::name("requirejs-config.js"),
         cfg.sources.len(),
         cfg.js.len(),
-        config_t.display()
+        style::dim(&config_t.display().to_string())
     );
     println!(
-        "requirejs-min-resolver.js: {} exclude(s) ({} bytes) -> {}",
+        "{}: {} exclude(s) ({} bytes) -> {}",
+        style::name("requirejs-min-resolver.js"),
         excludes.len(),
         resolver.len(),
-        resolver_t.display()
+        style::dim(&resolver_t.display().to_string())
     );
     println!(
-        "mage/requirejs/mixins.js: verbatim copy ({} bytes) -> {}",
+        "{}: verbatim copy ({} bytes) -> {}",
+        style::name("mage/requirejs/mixins.js"),
         mixins.map(|m| m.len()).expect("write mode read the mixins source"),
-        mixins_t.display()
+        style::dim(&mixins_t.display().to_string())
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -1222,7 +1249,7 @@ fn static_bundle(
     let bundles = match sdb::build_from_magento(&magento, area, themes, locale, &order_mode) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{} {e}", style::stderr::error("error:"));
             return Ok(ExitCode::FAILURE);
         }
     };
@@ -1266,7 +1293,8 @@ fn static_bundle(
 
     for (tb, target) in bundles.iter().zip(&targets) {
         eprintln!(
-            "theme fallback chain: {}",
+            "{} {}",
+            style::stderr::dim("theme fallback chain:"),
             tb.chain
                 .iter()
                 .map(|t| t.id.as_str())
@@ -1275,18 +1303,18 @@ fn static_bundle(
         );
         println!(
             "{}: {} js/html file(s) -> {} jsbuild + {} text -> {} bundle(s) (max {} KB) -> {}",
-            tb.theme,
+            style::name(&tb.theme),
             tb.tree_files,
             tb.pooled.0,
             tb.pooled.1,
             tb.files.len(),
             tb.max_size_kb,
-            target.display()
+            style::dim(&target.display().to_string())
         );
         for f in &tb.files {
             println!(
                 "  {}  {}  {} entr{}  {} bytes",
-                f.name,
+                style::name(&f.name),
                 f.pool,
                 f.keys.len(),
                 if f.keys.len() == 1 { "y" } else { "ies" },
@@ -1355,7 +1383,7 @@ fn static_files(
     let packages = match sdf::build_from_magento(&magento, area, themes, locale, &opts) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("error: {e}");
+            eprintln!("{} {e}", style::stderr::error("error:"));
             return Ok(ExitCode::FAILURE);
         }
     };
@@ -1399,7 +1427,7 @@ fn static_files(
                 .with_context(|| format!("write {}", target.join(sdf::SRI_HASHES_FILE_NAME).display()))?;
         }
         for (logical, warning) in &pkg.warnings {
-            eprintln!("warning: {logical}: {warning}");
+            eprintln!("{} {logical}: {warning}", style::stderr::warning("warning:"));
         }
     }
 
@@ -1432,7 +1460,8 @@ fn static_files(
         use static_deploy::files::PlacedKind as K;
         let target = sdf::package_dir(&static_root, area, &pkg.theme, locale);
         eprintln!(
-            "theme fallback chain: {}",
+            "{} {}",
+            style::stderr::dim("theme fallback chain:"),
             pkg.chain
                 .iter()
                 .map(|t| t.id.as_str())
@@ -1443,7 +1472,7 @@ fn static_files(
             "{}: {} file(s) ({} copied, {} css-processed, {} less-compiled, \
              {} requirejs, {} bundle(s), js-translation{}) \
              {:.1} MB -> {}",
-            pkg.theme,
+            style::name(&pkg.theme),
             pkg.files.len(),
             pkg.count(K::Copy),
             pkg.count(K::CssProcessed),
@@ -1452,13 +1481,14 @@ fn static_files(
             pkg.count(K::Bundle),
             if sri == sdf::SriLayout::PerPackage { " + sri-hashes" } else { "" },
             pkg.bytes() as f64 / (1024.0 * 1024.0),
-            target.display()
+            style::dim(&target.display().to_string())
         );
     }
     if let Some(version) = deployed_version {
         println!(
-            "deployed_version.txt: {version} -> {}",
-            static_root.join(sdf::DEPLOYED_VERSION_FILE_NAME).display()
+            "{}: {version} -> {}",
+            style::name(sdf::DEPLOYED_VERSION_FILE_NAME),
+            style::dim(&static_root.join(sdf::DEPLOYED_VERSION_FILE_NAME).display().to_string())
         );
     }
     Ok(ExitCode::SUCCESS)
@@ -1526,7 +1556,7 @@ fn static_deploy(
     let summary = match sdd::deploy_to_disk(&root, &req) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            eprintln!("{} {e:#}", style::stderr::error("error:"));
             return Ok(ExitCode::FAILURE);
         }
     };
@@ -1535,14 +1565,21 @@ fn static_deploy(
     // all-themes run (not fatal) — surface each so the exclusion is never
     // silent; name the theme with `--theme` to force it (and fail loud).
     for s in &summary.skipped {
-        eprintln!("warning: skipping theme {} — {} (use --theme {} to force)", s.id, s.reason, s.id);
+        eprintln!(
+            "{} skipping theme {} — {} (use --theme {} to force)",
+            style::stderr::warning("warning:"),
+            s.id,
+            s.reason,
+            s.id,
+        );
     }
     // A plugin on an extension point we model, whose effect we don't recognize,
     // certainly changes the output — never silent.
     for class in &summary.plugin_warnings {
         eprintln!(
-            "warning: unmodelled deploy plugin {class} — it may change which files \
-             deploy, or where, in ways we cannot reproduce"
+            "{} unmodelled deploy plugin {class} — it may change which files \
+             deploy, or where, in ways we cannot reproduce",
+            style::stderr::warning("warning:")
         );
     }
     // Plugins on deploy-path types we model nothing of. Common and usually
@@ -1550,7 +1587,10 @@ fn static_deploy(
     // learns to skip — which is how a real divergence gets missed.
     if verbose {
         for class in &summary.plugin_notices {
-            eprintln!("note: plugin on an unmodelled deploy extension point: {class}");
+            eprintln!(
+                "{} plugin on an unmodelled deploy extension point: {class}",
+                style::stderr::note("note:"),
+            );
         }
     }
 
@@ -1606,14 +1646,20 @@ fn static_deploy(
         // for parity unless `--verbose` asks for them.
         if verbose {
             for (logical, warning) in &s.warnings {
-                eprintln!("warning: {}/{} [{}]: {logical}: {warning}", s.area, s.theme, s.locale);
+                eprintln!(
+                    "{} {}/{} [{}]: {logical}: {warning}",
+                    style::stderr::warning("warning:"),
+                    s.area,
+                    s.theme,
+                    s.locale,
+                );
             }
         }
         println!(
             "{}/{} [{}]: {} file(s) ({} copied, {} css-processed, {} less-compiled, \
              {} requirejs, {} bundle(s), js-translation + sri-hashes) {:.1} MB -> {}",
-            s.area,
-            s.theme,
+            style::area(&s.area),
+            style::name(&s.theme),
             s.locale,
             s.files,
             s.copied,
@@ -1622,19 +1668,21 @@ fn static_deploy(
             s.requirejs,
             s.bundles,
             s.bytes as f64 / (1024.0 * 1024.0),
-            s.output.display()
+            style::dim(&s.output.display().to_string())
         );
         total_files += s.files;
         total_bytes += s.bytes;
     }
     if let Some(version) = deployed_version {
         println!(
-            "deployed_version.txt: {version} -> {}",
-            static_root.join(sdf::DEPLOYED_VERSION_FILE_NAME).display()
+            "{}: {version} -> {}",
+            style::name(sdf::DEPLOYED_VERSION_FILE_NAME),
+            style::dim(&static_root.join(sdf::DEPLOYED_VERSION_FILE_NAME).display().to_string())
         );
     }
     println!(
-        "total: {} package(s), {} file(s), {:.1} MB in {:.2}s ({})",
+        "{} {} package(s), {} file(s), {:.1} MB in {:.2}s ({})",
+        style::heading("total:"),
         stats.len(),
         total_files,
         total_bytes as f64 / (1024.0 * 1024.0),
@@ -1675,6 +1723,7 @@ fn static_cssdiff(
         });
         println!("{}", serde_json::to_string_pretty(&doc)?);
     } else {
+        // Left plain: scripts grep this report for "0 finding".
         let shown = if limit == 0 { d.findings.len() } else { limit.min(d.findings.len()) };
         for f in &d.findings[..shown] {
             println!("{f}");
@@ -1723,7 +1772,8 @@ fn compile(
         ($label:expr) => {
             if prof {
                 eprintln!(
-                    "  [profile] {:<26} {:>8.1} ms",
+                    "  {} {:<26} {:>8.1} ms",
+                    style::stderr::dim("[profile]"),
                     $label,
                     t.elapsed().as_secs_f64() * 1000.0
                 );
@@ -1770,7 +1820,11 @@ fn compile(
                 if json {
                     println!("{{\"status\":\"up-to-date\",\"reason\":\"no input changed\"}}");
                 } else {
-                    println!("up to date — no compile input changed (use --force to rebuild)");
+                    println!(
+                        "{} {}",
+                        style::pass("up to date"),
+                        style::dim("— no compile input changed (use --force to rebuild)")
+                    );
                 }
                 return Ok(ExitCode::SUCCESS);
             }
@@ -1824,15 +1878,20 @@ fn compile(
     } else {
         println!(
             "magento root: {} · {} modules ({} enabled)",
-            root.display(),
+            style::dim(&root.display().to_string()),
             modules.len(),
             enabled
         );
-        println!("work plan — config-derived declarations (the PHP scan adds more):");
+        println!(
+            "{} {}",
+            style::heading("work plan"),
+            style::dim("— config-derived declarations (the PHP scan adds more):")
+        );
         for (area, s) in &summaries {
             println!(
-                "  {:<12} {:>4} preferences · {:>3} virtual types · {:>4} plugin decls on {:>3} targets · {:>4} argument decls",
-                format!("{:?}", area).to_lowercase(),
+                "  {} {:>4} preferences · {:>3} virtual types · {:>4} plugin decls on {:>3} targets · {:>4} argument decls",
+                // Pad before coloring: escapes would count toward the width.
+                style::area(&format!("{:<12}", format!("{:?}", area).to_lowercase())),
                 s.preferences,
                 s.virtual_types,
                 s.plugin_declarations,
@@ -1890,7 +1949,8 @@ fn compile(
         let out = magecommand_engine::build::compute_outputs_opts(&magento, &mut defs, &root, fused);
         if !out.unresolved.is_empty() {
             eprintln!(
-                "note: {} class name(s) unresolvable via autoload maps (first: {})",
+                "{} {} class name(s) unresolvable via autoload maps (first: {})",
+                style::stderr::note("note:"),
                 out.unresolved.len(),
                 out.unresolved.first().map(String::as_str).unwrap_or("")
             );
@@ -1917,11 +1977,12 @@ fn compile(
         magecommand_engine::manifest::Manifest::new(&bp, digest).save(&root)?;
         lap!("write manifest + input digest");
         consume_regenerate_flag(&root)?;
-        println!("wrote {written} generated/ file(s)");
+        println!("{} {written} generated/ file(s)", style::pass("wrote"));
         warn_case_collapse(&root, &out.files);
         if !out.findings.is_empty() {
             eprintln!(
-                "note: {} compile finding(s), first: {}",
+                "{} {} compile finding(s), first: {}",
+                style::stderr::note("note:"),
                 out.findings.len(),
                 out.findings.first().map(String::as_str).unwrap_or("")
             );
@@ -1936,8 +1997,9 @@ fn compile(
 fn consume_regenerate_flag(root: &std::path::Path) -> anyhow::Result<()> {
     if magecommand_engine::metadata::consume_regenerate_flag(root)? {
         eprintln!(
-            "note: removed var/.regenerate, as setup:di:compile does, so the next \
-             bin/magento command keeps generated/"
+            "{} removed var/.regenerate, as setup:di:compile does, so the next \
+             bin/magento command keeps generated/",
+            style::stderr::note("note:")
         );
     }
     Ok(())
@@ -1964,14 +2026,15 @@ fn warn_case_collapse(root: &std::path::Path, files: &[(String, String)]) {
     if !collisions.files.is_empty() {
         eprintln!();
         eprintln!(
-            "WARNING: {} generated file group(s) differ only in letter case — PHP treats\n\
+            "{} {} generated file group(s) differ only in letter case — PHP treats\n\
              their classes as THE SAME class (class names are case-insensitive), so the\n\
              source likely declares case-variant duplicates of one class. Which file\n\
              autoloads depends on the first reference's spelling, on every platform.",
+            style::stderr::warning("WARNING:"),
             collisions.files.len()
         );
         for group in &collisions.files {
-            eprintln!("  same class: {}", group.join("  <->  "));
+            eprintln!("  {} {}", style::stderr::dim("same class:"), group.join("  <->  "));
         }
     }
     let collapsed_dirs = !collisions.dirs.is_empty()
@@ -1981,15 +2044,16 @@ fn warn_case_collapse(root: &std::path::Path, files: &[(String, String)]) {
     if collapsed_dirs {
         eprintln!();
         eprintln!(
-            "WARNING: this filesystem is case-insensitive, and {} output path group(s) that\n\
+            "{} this filesystem is case-insensitive, and {} output path group(s) that\n\
              differ only in letter case collapsed into single directories (first writer wins).\n\
              Some files now sit at a path whose case does not match their class namespace, so\n\
              PSR-4 CANNOT AUTOLOAD them on a case-sensitive host. Do NOT deploy this generated/\n\
              tree to Linux — compile on the target host (or a case-sensitive volume) instead.",
+            style::stderr::warning("WARNING:"),
             collisions.dirs.len()
         );
         for group in &collisions.dirs {
-            eprintln!("  collided: {}", group.join("  <->  "));
+            eprintln!("  {} {}", style::stderr::dim("collided:"), group.join("  <->  "));
         }
     }
     if !collisions.files.is_empty() || collapsed_dirs {
@@ -2108,16 +2172,19 @@ fn compare(
             println!("{}", serde_json::to_string_pretty(&report)?);
         } else {
             println!("{summary}");
-            print_bucket("changed", &report.changed, sample);
-            print_bucket("missing", &report.missing, sample);
-            print_bucket("extra", &report.extra, sample);
-            print_bucket("reordered", &report.reordered, sample);
+            print_bucket(&Bucket::Changed.paint("changed"), &report.changed, sample);
+            print_bucket(&Bucket::Missing.paint("missing"), &report.missing, sample);
+            print_bucket(&Bucket::Extra.paint("extra"), &report.extra, sample);
+            print_bucket(&style::dim("reordered"), &report.reordered, sample);
             if report.is_clean() && report.reordered.is_empty() {
-                println!("output reproduces the archive exactly");
+                println!("{}", style::pass("output reproduces the archive exactly"));
             } else if report.is_clean() {
                 println!(
-                    "output matches the archive; {} file(s) differ only in method order",
-                    report.reordered.len()
+                    "{}",
+                    style::pass(&format!(
+                        "output matches the archive; {} file(s) differ only in method order",
+                        report.reordered.len()
+                    ))
                 );
             }
         }

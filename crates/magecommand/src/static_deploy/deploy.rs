@@ -242,7 +242,10 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
     // silently defaulted.
     let (less_profile, less_note) = files::detect_less_profile(&root);
     if let Some(note) = less_note {
-        eprintln!("warning: assuming less.php 5.x (parens-division) — {note}");
+        eprintln!(
+            "{} assuming less.php 5.x (parens-division) — {note}",
+            crate::style::stderr::warning("warning:")
+        );
     }
     let opts = PlacementOptions {
         compress: !req.no_compress,

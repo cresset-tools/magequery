@@ -140,6 +140,15 @@ Rules:
 - Width/alignment: pad the *plain* string, then color (escape codes don't count toward
   display width), or color first and pad with computed spaces.
 
+**magecommand** uses the same palette through its own `crates/magecommand/src/style.rs`
+(it adds report roles: pass/fail verdicts, diff-convention added/removed/changed). Its clap
+help is styled with `style::HELP` to match magequery's root help screen (bold headings,
+green commands and flags, dim placeholders), and follows `--color` read ahead of parsing.
+Its `auto` also colors CI job logs (GitLab, GitHub), so stderr diagnostics go through
+`style::stderr`, decided on stderr's own TTY. Output a script or the PHP LESS adapter reads
+stays **plain on purpose**: `static less --file` (the adapter shows its stderr verbatim),
+`cssdiff`'s report (grepped for `0 finding`), `di digest`, and `--stdout` content.
+
 ## Command surface (organization — LOCKED)
 
 **The one grammar rule: `magequery <command> [target] [flags]`.** The command names what

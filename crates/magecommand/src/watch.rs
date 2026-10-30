@@ -26,6 +26,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+
+use crate::style::stderr as style;
 use notify::event::{EventKind, ModifyKind};
 use notify::{RecursiveMode, Watcher};
 
@@ -83,7 +85,8 @@ pub fn watch(root: Option<PathBuf>, _json: bool, once: bool) -> anyhow::Result<E
     metadata::consume_regenerate_flag(&root)?;
     let mut prev: HashMap<String, String> = out.files.iter().cloned().collect();
     eprintln!(
-        "watch: initial build — {} files in {:.1}s",
+        "{} initial build — {} files in {:.1}s",
+        style::name("watch:"),
         written,
         t0.elapsed().as_secs_f64()
     );
@@ -98,7 +101,12 @@ pub fn watch(root: Option<PathBuf>, _json: bool, once: bool) -> anyhow::Result<E
     })
     .context("failed to create a file watcher")?;
     watch_roots(&mut watcher, &magento, &root)?;
-    eprintln!("watch: ready — edit a di.xml or a PHP file (Ctrl-C to stop)");
+    eprintln!(
+        "{} {} {}",
+        style::name("watch:"),
+        style::bold("ready"),
+        style::dim("— edit a di.xml or a PHP file (Ctrl-C to stop)")
+    );
 
     let debug = std::env::var_os("MQ_WATCH_DEBUG").is_some();
     loop {
@@ -125,7 +133,7 @@ pub fn watch(root: Option<PathBuf>, _json: bool, once: bool) -> anyhow::Result<E
                     Change::Php => "php",
                     Change::ModuleSet => "moduleset",
                 };
-                eprintln!("  [watch-debug] {tag:<10} {}", path.display());
+                eprintln!("  {} {tag:<10} {}", style::dim("[watch-debug]"), path.display());
             }
             match change {
                 Change::Irrelevant => {}
@@ -161,7 +169,8 @@ pub fn watch(root: Option<PathBuf>, _json: bool, once: bool) -> anyhow::Result<E
         metadata::consume_regenerate_flag(&root)?;
         prev = out.files.iter().cloned().collect();
         eprintln!(
-            "watch: recompiled in {:.0}ms — wrote {} · deleted {} · unchanged {}{}",
+            "{} recompiled in {:.0}ms — wrote {} · deleted {} · unchanged {}{}",
+            style::name("watch:"),
             t.elapsed().as_secs_f64() * 1000.0,
             stats.written,
             stats.deleted,
@@ -187,14 +196,16 @@ fn compute(magento: &Magento, pristine: &Definitions, root: &Path) -> CompileOut
 fn report_findings(out: &CompileOutputs) {
     if !out.unresolved.is_empty() {
         eprintln!(
-            "  note: {} unresolvable class name(s) (first: {})",
+            "  {} {} unresolvable class name(s) (first: {})",
+            style::note("note:"),
             out.unresolved.len(),
             out.unresolved.first().map(String::as_str).unwrap_or("")
         );
     }
     if !out.findings.is_empty() {
         eprintln!(
-            "  note: {} compile finding(s), first: {}",
+            "  {} {} compile finding(s), first: {}",
+            style::note("note:"),
             out.findings.len(),
             out.findings.first().map(String::as_str).unwrap_or("")
         );
@@ -306,8 +317,12 @@ fn watch_roots(
         anyhow::bail!("no input roots to watch under {}", root.display());
     }
     if let Some(e) = first_err {
-        eprintln!("watch: note — some roots could not be watched ({e})");
+        eprintln!(
+            "{} {} some roots could not be watched ({e})",
+            style::name("watch:"),
+            style::note("note:")
+        );
     }
-    eprintln!("watch: watching {watched} input roots");
+    eprintln!("{} watching {watched} input roots", style::name("watch:"));
     Ok(())
 }
