@@ -28,11 +28,10 @@ pub(crate) fn fetch_sales_document(
 ) -> Result<Option<DbSalesDocument>, String> {
     use crate::model::SalesDocKind as K;
     use mysql::params;
-    use mysql::prelude::Queryable;
 
     let mut c = connect(conn)?;
     let p = table_prefix;
-    let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
+    let s = |r: &mut mysql::Row, i: usize| r.col::<String>(i);
 
     let head = match kind {
         K::Invoice => format!(
@@ -61,12 +60,12 @@ pub(crate) fn fetch_sales_document(
         ),
     };
     let row: Option<mysql::Row> =
-        c.exec_first(head, params! { "v" => increment }).map_err(clean_err)?;
+        c.exec_first(head, params! { "v" => increment })?;
     let Some(mut row) = row else { return Ok(None) };
 
-    let entity_id: u32 = row.take::<Option<u32>, _>(0).flatten().unwrap_or(0);
-    let order_id: u32 = row.take::<Option<u32>, _>(1).flatten().unwrap_or(0);
-    let state: Option<i64> = row.take::<Option<i64>, _>(2).flatten();
+    let entity_id: u32 = row.col::<u32>(0).unwrap_or(0);
+    let order_id: u32 = row.col::<u32>(1).unwrap_or(0);
+    let state: Option<i64> = row.col::<i64>(2);
     let created_at = s(&mut row, 3);
     let currency = s(&mut row, 4);
     let transaction_id = s(&mut row, 5);
@@ -83,12 +82,10 @@ pub(crate) fn fetch_sales_document(
     }
 
     let (order_increment, order_status): (Option<String>, Option<String>) = c
-        .exec_first::<(String, Option<String>), _, _>(
+        .exec_first::<(Option<String>, Option<String>)>(
             format!("SELECT increment_id, status FROM {p}sales_order WHERE entity_id = :v"),
             params! { "v" => order_id },
-        )
-        .map_err(clean_err)?
-        .map(|(i, st)| (Some(i), st))
+        )?
         .unwrap_or((None, None));
 
     let item_table = match kind {
@@ -101,19 +98,21 @@ pub(crate) fn fetch_sales_document(
     } else {
         "CAST(price AS CHAR), CAST(row_total AS CHAR)"
     };
-    let items: Vec<(String, Option<String>, Option<String>, Option<String>, Option<String>)> = c
+    // Every item column read here is nullable in the schema.
+    type ItemRow = (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+    let items: Vec<ItemRow> = c
         .exec(
             format!(
                 "SELECT sku, name, CAST(qty AS CHAR), {price_cols} \
                  FROM {p}{item_table} WHERE parent_id = :v ORDER BY entity_id"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let items = items
         .into_iter()
         .map(|(sku, name, qty, price, row_total)| {
-            (sku, name, qty.unwrap_or_else(|| "0".to_string()), price, row_total)
+            let qty = qty.unwrap_or_else(|| "0".to_string());
+            (sku.unwrap_or_default(), name, qty, price, row_total)
         })
         .collect();
 
@@ -125,8 +124,7 @@ pub(crate) fn fetch_sales_document(
                      WHERE parent_id = :v ORDER BY entity_id"
                 ),
                 params! { "v" => entity_id },
-            )
-            .map_err(clean_err)?
+            )?
         } else {
             Vec::new()
         };
@@ -158,7 +156,6 @@ pub(crate) fn fetch_sales_documents_like(
 ) -> Result<(Vec<(String, Option<String>, Option<String>, Option<String>)>, bool), String> {
     use crate::model::SalesDocKind as K;
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     let (table, amount) = match kind {
@@ -175,8 +172,7 @@ pub(crate) fn fetch_sales_documents_like(
                 limit + 1
             ),
             params! { "pat" => format!("%{needle}%") },
-        )
-        .map_err(clean_err)?;
+        )?;
     let truncated = rows.len() > limit;
     Ok((rows.into_iter().take(limit).collect(), truncated))
 }
@@ -248,7 +244,6 @@ pub(crate) fn fetch_quote(
     id: u64,
 ) -> Result<Option<DbQuote>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
 
     let mut c = connect(conn)?;
     let p = table_prefix;
@@ -267,19 +262,18 @@ pub(crate) fn fetch_quote(
                  FROM {p}quote WHERE entity_id = :v"
             ),
             params! { "v" => id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let Some(mut row) = row else { return Ok(None) };
-    let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
-    let n = |r: &mut mysql::Row, i: usize| r.take::<Option<i64>, _>(i).flatten().unwrap_or(0);
+    let s = |r: &mut mysql::Row, i: usize| r.col::<String>(i);
+    let n = |r: &mut mysql::Row, i: usize| r.col::<i64>(i).unwrap_or(0);
     let entity_id = n(&mut row, 0) as u64;
     let active = n(&mut row, 1) != 0;
-    let store_id: Option<u32> = row.take::<Option<u32>, _>(2).flatten();
+    let store_id: Option<u32> = row.col::<u32>(2);
     let created_at = s(&mut row, 3);
     let updated_at = s(&mut row, 4);
-    let updated_secs = row.take::<Option<i64>, _>(5).flatten();
+    let updated_secs = row.col::<i64>(5);
     let converted_at = s(&mut row, 6);
-    let customer_id: Option<u32> = row.take::<Option<u32>, _>(7).flatten();
+    let customer_id: Option<u32> = row.col::<u32>(7);
     let customer_email = s(&mut row, 8);
     let customer_firstname = s(&mut row, 9);
     let customer_lastname = s(&mut row, 10);
@@ -294,25 +288,36 @@ pub(crate) fn fetch_quote(
     let reserved_order_id = s(&mut row, 19);
     let quote_totals = (s(&mut row, 20), s(&mut row, 21), s(&mut row, 22), s(&mut row, 23));
 
+    // `store.code`, `sales_order.increment_id` and `quote_item.sku`/`product_type` are
+    // nullable in the schema.
     let store: Option<String> = match store_id {
         Some(sid) => c
-            .exec_first(
+            .exec_first::<Option<String>>(
                 format!("SELECT code FROM {p}store WHERE store_id = :v"),
                 params! { "v" => sid },
-            )
-            .map_err(clean_err)?,
+            )?
+            .flatten(),
         None => None,
     };
     let order_increment: Option<String> = c
-        .exec_first(
+        .exec_first::<Option<String>>(
             format!("SELECT increment_id FROM {p}sales_order WHERE quote_id = :v"),
             params! { "v" => entity_id },
         )
         .ok()
+        .flatten()
         .flatten();
 
-    type QItemRow =
-        (String, Option<String>, String, Option<u64>, Option<String>, Option<String>, Option<String>, Option<String>);
+    type QItemRow = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<u64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
     let items: Vec<QItemRow> = c
         .exec(
             format!(
@@ -322,15 +327,14 @@ pub(crate) fn fetch_quote(
                  FROM {p}quote_item WHERE quote_id = :v ORDER BY item_id"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let items = items
         .into_iter()
         .map(|(sku, name, ty, parent, qty, price, row_total, discount)| {
             (
-                sku,
+                sku.unwrap_or_default(),
                 name,
-                ty,
+                ty.unwrap_or_default(),
                 parent.is_some(),
                 qty.unwrap_or_else(|| "0".to_string()),
                 price,
@@ -352,8 +356,7 @@ pub(crate) fn fetch_quote(
                  FROM {p}quote_address WHERE quote_id = :v ORDER BY address_type"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let mut addresses = Vec::new();
     let mut address_totals = (None, None, None, None, None, None);
     for mut r in addr_rows {
@@ -389,8 +392,7 @@ pub(crate) fn fetch_quote(
                  WHERE quote_id = :v"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
 
     Ok(Some(DbQuote {
         entity_id,
@@ -434,7 +436,6 @@ pub(crate) fn fetch_quotes_like(
     String,
 > {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     let rows: Vec<(u64, i64, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> =
@@ -447,8 +448,7 @@ pub(crate) fn fetch_quotes_like(
                 limit + 1
             ),
             params! { "pat" => format!("%{needle}%") },
-        )
-        .map_err(clean_err)?;
+        )?;
     let truncated = rows.len() > limit;
     Ok((
         rows.into_iter()
@@ -517,7 +517,6 @@ pub(crate) fn fetch_customer(
     ident: CustomerIdent<'_>,
 ) -> Result<Option<DbCustomer>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
 
     let mut c = connect(conn)?;
     let p = table_prefix;
@@ -534,15 +533,13 @@ pub(crate) fn fetch_customer(
     );
     let row: Option<mysql::Row> = match ident {
         CustomerIdent::Email(email) => c
-            .exec_first(format!("{base} WHERE e.email = :v"), params! { "v" => email })
-            .map_err(clean_err)?,
+            .exec_first(format!("{base} WHERE e.email = :v"), params! { "v" => email })?,
         CustomerIdent::Id(id) => c
-            .exec_first(format!("{base} WHERE e.entity_id = :v"), params! { "v" => id })
-            .map_err(clean_err)?,
+            .exec_first(format!("{base} WHERE e.entity_id = :v"), params! { "v" => id })?,
     };
     let Some(mut row) = row else { return Ok(None) };
-    let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
-    let n = |r: &mut mysql::Row, i: usize| r.take::<Option<i64>, _>(i).flatten().unwrap_or(0);
+    let s = |r: &mut mysql::Row, i: usize| r.col::<String>(i);
+    let n = |r: &mut mysql::Row, i: usize| r.col::<i64>(i).unwrap_or(0);
     let entity_id = n(&mut row, 0) as u32;
     let email = s(&mut row, 1).unwrap_or_default();
     let firstname = s(&mut row, 2);
@@ -558,8 +555,8 @@ pub(crate) fn fetch_customer(
     let failures = n(&mut row, 12) as u32;
     let dob = s(&mut row, 13);
     let taxvat = s(&mut row, 14);
-    let default_billing: Option<u32> = row.take::<Option<u32>, _>(15).flatten();
-    let default_shipping: Option<u32> = row.take::<Option<u32>, _>(16).flatten();
+    let default_billing: Option<u32> = row.col::<u32>(15);
+    let default_shipping: Option<u32> = row.col::<u32>(16);
 
     type AddrRow =
         (u32, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
@@ -571,8 +568,7 @@ pub(crate) fn fetch_customer(
                  WHERE parent_id = :v ORDER BY entity_id"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let addresses = addr_rows
         .into_iter()
         .map(|(id, f, l, co, st, pc, ci, re, cn, ph)| {
@@ -594,7 +590,7 @@ pub(crate) fn fetch_customer(
         .collect();
 
     let (last_login, last_logout) = c
-        .exec_first::<(Option<String>, Option<String>), _, _>(
+        .exec_first::<(Option<String>, Option<String>)>(
             format!(
                 "SELECT CAST(last_login_at AS CHAR), CAST(last_logout_at AS CHAR) \
                  FROM {p}customer_log WHERE customer_id = :v"
@@ -605,10 +601,7 @@ pub(crate) fn fetch_customer(
         .flatten()
         .unwrap_or((None, None));
 
-    let stores: std::collections::HashMap<u32, String> =
-        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?
-            .into_iter()
-            .collect();
+    let stores: std::collections::HashMap<u32, String> = store_codes(&mut c, p)?;
     let newsletter: Vec<(String, i64)> = c
         .exec(
             format!(
@@ -618,12 +611,15 @@ pub(crate) fn fetch_customer(
             ),
             params! { "v" => entity_id, "email" => email.as_str() },
         )
-        .map(|rows: Vec<(u32, i64)>| rows)
+        // `store_id` is nullable in the schema.
+        .map(|rows: Vec<(Option<u32>, i64)>| rows)
         .unwrap_or_default()
         .into_iter()
         .map(|(store_id, status)| {
-            let code =
-                stores.get(&store_id).cloned().unwrap_or_else(|| format!("store/{store_id}"));
+            let code = match store_id {
+                Some(id) => stores.get(&id).cloned().unwrap_or_else(|| format!("store/{id}")),
+                None => "(no store)".to_string(),
+            };
             (code, status)
         })
         .collect();
@@ -657,7 +653,7 @@ pub(crate) fn fetch_customer(
     }
 
     let order_stats: (u32, Option<String>, Option<String>, Option<String>) = c
-        .exec_first::<(u64, Option<String>, Option<String>, Option<String>), _, _>(
+        .exec_first::<(u64, Option<String>, Option<String>, Option<String>)>(
             format!(
                 "SELECT COUNT(*), CAST(SUM(base_grand_total) AS CHAR), \
                  CAST(MIN(created_at) AS CHAR), CAST(MAX(created_at) AS CHAR) \
@@ -670,7 +666,7 @@ pub(crate) fn fetch_customer(
         .map(|(n, sum, first, last)| (n as u32, sum, first, last))
         .unwrap_or((0, None, None, None));
     let last_order: Option<(String, Option<String>)> = c
-        .exec_first(
+        .exec_first::<(Option<String>, Option<String>)>(
             format!(
                 "SELECT increment_id, status FROM {p}sales_order \
                  WHERE customer_id = :v ORDER BY entity_id DESC LIMIT 1"
@@ -678,7 +674,8 @@ pub(crate) fn fetch_customer(
             params! { "v" => entity_id },
         )
         .ok()
-        .flatten();
+        .flatten()
+        .and_then(|(increment, status)| Some((increment?, status)));
     let guest_orders: u64 = c
         .exec_first(
             format!(
@@ -727,10 +724,10 @@ pub(crate) fn fetch_customers_like(
     limit: usize,
 ) -> Result<(Vec<(u32, String, Option<String>, Option<String>, Option<String>, Option<String>)>, bool), String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
-    let rows: Vec<(u32, String, Option<String>, Option<String>, Option<String>, Option<String>)> = c
+    // `customer_entity.email` is nullable in the schema (a name match can find one).
+    let rows: Vec<(u32, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> = c
         .exec(
             format!(
                 "SELECT e.entity_id, e.email, CONCAT_WS(' ', e.firstname, e.lastname), \
@@ -742,10 +739,17 @@ pub(crate) fn fetch_customers_like(
                 limit + 1
             ),
             params! { "pat" => format!("%{needle}%") },
-        )
-        .map_err(clean_err)?;
+        )?;
     let truncated = rows.len() > limit;
-    Ok((rows.into_iter().take(limit).collect(), truncated))
+    Ok((
+        rows.into_iter()
+            .take(limit)
+            .map(|(id, email, name, group, created, x)| {
+                (id, email.unwrap_or_default(), name, group, created, x)
+            })
+            .collect(),
+        truncated,
+    ))
 }
 
 /// How to look an order up.
@@ -830,7 +834,6 @@ pub(crate) fn fetch_order(
     ident: OrderIdent<'_>,
 ) -> Result<Option<DbOrder>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
 
     let mut c = connect(conn)?;
     let p = table_prefix;
@@ -845,26 +848,24 @@ pub(crate) fn fetch_order(
     );
     let row: Option<mysql::Row> = match ident {
         OrderIdent::Increment(inc) => c
-            .exec_first(format!("{base} WHERE increment_id = :v"), params! { "v" => inc })
-            .map_err(clean_err)?,
+            .exec_first(format!("{base} WHERE increment_id = :v"), params! { "v" => inc })?,
         OrderIdent::Id(id) => c
-            .exec_first(format!("{base} WHERE entity_id = :v"), params! { "v" => id })
-            .map_err(clean_err)?,
+            .exec_first(format!("{base} WHERE entity_id = :v"), params! { "v" => id })?,
     };
     let Some(mut row) = row else { return Ok(None) };
-    let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
-    let entity_id: u32 = row.take::<Option<u32>, _>(0).flatten().unwrap_or(0);
+    let s = |r: &mut mysql::Row, i: usize| r.col::<String>(i);
+    let entity_id: u32 = row.col::<u32>(0).unwrap_or(0);
     let increment_id = s(&mut row, 1).unwrap_or_default();
     let state = s(&mut row, 2);
     let status = s(&mut row, 3);
-    let store_id: Option<u32> = row.take::<Option<u32>, _>(4).flatten();
+    let store_id: Option<u32> = row.col::<u32>(4);
     let created_at = s(&mut row, 5);
     let updated_at = s(&mut row, 6);
-    let customer_id: Option<u32> = row.take::<Option<u32>, _>(7).flatten();
+    let customer_id: Option<u32> = row.col::<u32>(7);
     let customer_email = s(&mut row, 8);
     let customer_firstname = s(&mut row, 9);
     let customer_lastname = s(&mut row, 10);
-    let guest = row.take::<Option<i64>, _>(11).flatten().unwrap_or(0) != 0;
+    let guest = row.col::<i64>(11).unwrap_or(0) != 0;
     let base_currency = s(&mut row, 12);
     let order_currency = s(&mut row, 13);
     let coupon = s(&mut row, 14);
@@ -872,7 +873,7 @@ pub(crate) fn fetch_order(
     let shipping_method = s(&mut row, 16);
     let shipping_description = s(&mut row, 17);
     let total_qty = s(&mut row, 18);
-    let quote_id: Option<u64> = row.take::<Option<u64>, _>(19).flatten();
+    let quote_id: Option<u64> = row.col::<u64>(19);
 
     let status_label: Option<String> = match &status {
         Some(st) => c
@@ -886,11 +887,11 @@ pub(crate) fn fetch_order(
     };
     let store: Option<String> = match store_id {
         Some(id) => c
-            .exec_first(
+            .exec_first::<Option<String>>(
                 format!("SELECT code FROM {p}store WHERE store_id = :v"),
                 params! { "v" => id },
-            )
-            .map_err(clean_err)?,
+            )?
+            .flatten(),
         None => None,
     };
 
@@ -911,8 +912,7 @@ pub(crate) fn fetch_order(
                  FROM {p}sales_order WHERE entity_id = :v"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let mut totals = Vec::with_capacity(8);
     if let Some(mut t) = trow {
         for (i, key) in TOTAL_KEYS.iter().enumerate() {
@@ -931,19 +931,18 @@ pub(crate) fn fetch_order(
                  FROM {p}sales_order_item WHERE order_id = :v ORDER BY item_id"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let items = item_rows
         .into_iter()
         .map(|mut r| {
             let q = |r: &mut mysql::Row, i: usize| {
-                r.take::<Option<String>, _>(i).flatten().unwrap_or_else(|| "0".to_string())
+                r.col::<String>(i).unwrap_or_else(|| "0".to_string())
             };
             (
                 s(&mut r, 0).unwrap_or_default(),
                 s(&mut r, 1),
                 s(&mut r, 2).unwrap_or_default(),
-                r.take::<Option<u64>, _>(3).flatten().is_some(),
+                r.col::<u64>(3).is_some(),
                 q(&mut r, 4),
                 q(&mut r, 5),
                 q(&mut r, 6),
@@ -955,7 +954,19 @@ pub(crate) fn fetch_order(
         })
         .collect();
 
-    let addresses = c
+    // Every address column read here is nullable in the schema.
+    type AddrRow = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let addresses: Vec<AddrRow> = c
         .exec(
             format!(
                 "SELECT address_type, firstname, lastname, company, street, postcode, \
@@ -963,8 +974,13 @@ pub(crate) fn fetch_order(
                  WHERE parent_id = :v ORDER BY address_type"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
+    let addresses = addresses
+        .into_iter()
+        .map(|(kind, f, l, co, st, pc, ci, cn, ph)| {
+            (kind.unwrap_or_default(), f, l, co, st, pc, ci, cn, ph)
+        })
+        .collect();
 
     let payment: Option<(Option<String>, Option<String>, Option<String>)> = c
         .exec_first(
@@ -973,9 +989,9 @@ pub(crate) fn fetch_order(
                  FROM {p}sales_order_payment WHERE parent_id = :v"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
 
+    type TxnRow = (Option<String>, Option<String>, i64, Option<String>);
     let transactions: Vec<(String, String, bool, Option<String>)> = c
         .exec(
             format!(
@@ -984,12 +1000,17 @@ pub(crate) fn fetch_order(
             ),
             params! { "v" => entity_id },
         )
-        .map(|rows: Vec<(String, String, i64, Option<String>)>| {
-            rows.into_iter().map(|(t, k, cl, d)| (t, k, cl != 0, d)).collect()
+        // `txn_id`/`txn_type` are nullable in the schema.
+        .map(|rows: Vec<TxnRow>| {
+            rows.into_iter()
+                .map(|(t, k, cl, d)| (t.unwrap_or_default(), k.unwrap_or_default(), cl != 0, d))
+                .collect()
         })
         .unwrap_or_default();
 
-    let invoices: Vec<(String, Option<i64>, Option<String>, Option<String>)> = c
+    // Document `increment_id`s are nullable in the schema.
+    type DocRow = (Option<String>, Option<i64>, Option<String>, Option<String>);
+    let invoices: Vec<DocRow> = c
         .exec(
             format!(
                 "SELECT increment_id, state, CAST(grand_total AS CHAR), \
@@ -997,9 +1018,9 @@ pub(crate) fn fetch_order(
                  WHERE order_id = :v ORDER BY entity_id"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
-    let shipments: Vec<(u32, String, Option<String>, Option<String>)> = c
+        )?;
+    type ShipmentRow = (u32, Option<String>, Option<String>, Option<String>);
+    let shipments: Vec<ShipmentRow> = c
         .exec(
             format!(
                 "SELECT entity_id, increment_id, CAST(total_qty AS CHAR), \
@@ -1007,8 +1028,7 @@ pub(crate) fn fetch_order(
                  WHERE order_id = :v ORDER BY entity_id"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let tracks: Vec<(u32, Option<String>, Option<String>, Option<String>)> = c
         .exec(
             format!(
@@ -1016,9 +1036,8 @@ pub(crate) fn fetch_order(
                  FROM {p}sales_shipment_track WHERE order_id = :v ORDER BY entity_id"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
-    let creditmemos: Vec<(String, Option<i64>, Option<String>, Option<String>)> = c
+        )?;
+    let creditmemos: Vec<DocRow> = c
         .exec(
             format!(
                 "SELECT increment_id, state, CAST(grand_total AS CHAR), \
@@ -1026,8 +1045,7 @@ pub(crate) fn fetch_order(
                  WHERE order_id = :v ORDER BY entity_id"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
 
     let history: Vec<(Option<String>, Option<String>, Option<String>, bool)> = c
         .exec(
@@ -1047,7 +1065,7 @@ pub(crate) fn fetch_order(
         .unwrap_or_default();
 
     let in_grid: bool = c
-        .exec_first::<u32, _, _>(
+        .exec_first::<u32>(
             format!("SELECT entity_id FROM {p}sales_order_grid WHERE entity_id = :v"),
             params! { "v" => entity_id },
         )
@@ -1081,10 +1099,19 @@ pub(crate) fn fetch_order(
         addresses,
         payment,
         transactions,
-        invoices,
-        shipments,
+        invoices: invoices
+            .into_iter()
+            .map(|(i, st, t, d)| (i.unwrap_or_default(), st, t, d))
+            .collect(),
+        shipments: shipments
+            .into_iter()
+            .map(|(id, i, q, d)| (id, i.unwrap_or_default(), q, d))
+            .collect(),
         tracks,
-        creditmemos,
+        creditmemos: creditmemos
+            .into_iter()
+            .map(|(i, st, t, d)| (i.unwrap_or_default(), st, t, d))
+            .collect(),
         history,
         in_grid,
     }))
@@ -1105,10 +1132,10 @@ pub(crate) fn fetch_orders_like(
     String,
 > {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
-    let rows: Vec<(u32, String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> =
+    // `increment_id` is nullable in the schema (an email or PSP-ref match can find one).
+    let rows: Vec<(u32, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> =
         c.exec(
             format!(
                 "SELECT DISTINCT o.entity_id, o.increment_id, o.status, \
@@ -1123,8 +1150,15 @@ pub(crate) fn fetch_orders_like(
                 limit + 1
             ),
             params! { "pat" => format!("%{needle}%") },
-        )
-        .map_err(clean_err)?;
+        )?;
     let truncated = rows.len() > limit;
-    Ok((rows.into_iter().take(limit).collect(), truncated))
+    Ok((
+        rows.into_iter()
+            .take(limit)
+            .map(|(id, inc, st, gt, cur, email, d)| {
+                (id, inc.unwrap_or_default(), st, gt, cur, email, d)
+            })
+            .collect(),
+        truncated,
+    ))
 }

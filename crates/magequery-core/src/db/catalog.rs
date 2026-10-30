@@ -32,7 +32,6 @@ pub(crate) fn fetch_category_nodes(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<(Vec<DbCategoryNode>, Vec<(u32, String)>), String> {
-    use mysql::prelude::Queryable;
     use std::collections::HashMap;
 
     let mut c = connect(conn)?;
@@ -42,8 +41,7 @@ pub(crate) fn fetch_category_nodes(
         .query(format!(
             "SELECT entity_id, parent_id, level, position FROM {p}catalog_category_entity \
              WHERE entity_id <> 1"
-        ))
-        .map_err(clean_err)?;
+        ))?;
 
     let mut strings: HashMap<(u32, &str), String> = HashMap::new();
     for code in ["name", "url_key"] {
@@ -52,8 +50,7 @@ pub(crate) fn fetch_category_nodes(
                 "SELECT entity_id, value FROM {p}catalog_category_entity_varchar \
                  WHERE store_id = 0 AND attribute_id = {}",
                 cat_attr(p, code)
-            ))
-            .map_err(clean_err)?;
+            ))?;
         for (id, v) in vals {
             if let Some(v) = v {
                 strings.insert((id, code), v);
@@ -67,8 +64,7 @@ pub(crate) fn fetch_category_nodes(
                 "SELECT entity_id, value FROM {p}catalog_category_entity_int \
                  WHERE store_id = 0 AND attribute_id = {}",
                 cat_attr(p, code)
-            ))
-            .map_err(clean_err)?;
+            ))?;
         for (id, v) in vals {
             if let Some(v) = v {
                 flags.insert((id, code), v != 0);
@@ -148,7 +144,6 @@ pub(crate) fn fetch_category_card(
     indexed_store: Option<Option<&str>>,
 ) -> Result<Option<DbCategoryCard>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     use std::collections::HashMap;
 
     let mut c = connect(conn)?;
@@ -161,16 +156,12 @@ pub(crate) fn fetch_category_card(
                  FROM {p}catalog_category_entity WHERE entity_id = :v"
             ),
             params! { "v" => id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let Some((id, path, level, position, parent_id, children)) = row else {
         return Ok(None);
     };
 
-    let stores: HashMap<u32, String> =
-        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?
-            .into_iter()
-            .collect();
+    let stores: HashMap<u32, String> = store_codes(&mut c, p)?;
 
     const CAT_ATTRS: &str = "'name','is_active','include_in_menu','is_anchor','url_key',\
 'url_path','display_mode','available_sort_by','default_sort_by','landing_page'";
@@ -226,15 +217,13 @@ pub(crate) fn fetch_category_card(
             "SELECT entity_id, store_id, value FROM {p}catalog_category_entity_int \
              WHERE entity_id IN ({ids_csv}) AND attribute_id = {}",
             cat_attr(p, "is_active")
-        ))
-        .map_err(clean_err)?;
+        ))?;
 
     let direct_products: u64 = c
         .exec_first(
             format!("SELECT COUNT(*) FROM {p}catalog_category_product WHERE category_id = :v"),
             params! { "v" => id },
-        )
-        .map_err(clean_err)?
+        )?
         .unwrap_or(0);
 
     // Per-store index counts — the per-store-view dimension tables are created by the
@@ -268,13 +257,13 @@ pub(crate) fn fetch_category_card(
                  ORDER BY store_id, request_path"
             ),
             params! { "v" => id },
-        )
-        .map_err(clean_err)?
+        )?
         .into_iter()
-        .map(|(path, store_id, redirect): (String, u32, u16)| {
+        // `request_path` is nullable in the schema; a rewrite without one matches nothing.
+        .filter_map(|(path, store_id, redirect): (Option<String>, u32, u16)| {
             let store =
                 stores.get(&store_id).cloned().unwrap_or_else(|| format!("store/{store_id}"));
-            (path, store, redirect)
+            Some((path?, store, redirect))
         })
         .collect();
 
@@ -301,8 +290,7 @@ pub(crate) fn fetch_category_card(
                  WHERE cp.category_id = :v ORDER BY cp.position, e.sku"
             ),
             params! { "v" => id },
-        )
-        .map_err(clean_err)?
+        )?
     } else {
         Vec::new()
     };
@@ -329,7 +317,8 @@ pub(crate) fn fetch_category_card(
         indexed_products = c
             .exec(
                 format!(
-                    "SELECT i.product_id, e.sku, n.value, i.position, i.is_parent, i.visibility \
+                    "SELECT i.product_id, e.sku, n.value, COALESCE(i.position, 0), i.is_parent, \
+                     i.visibility \
                      FROM {p}catalog_category_product_index_store{store_id} i \
                      JOIN {p}catalog_product_entity e ON e.entity_id = i.product_id \
                      LEFT JOIN {p}catalog_product_entity_varchar n ON n.entity_id = e.entity_id \
@@ -387,7 +376,6 @@ pub(crate) fn fetch_product_identity(
     ident: &ProductIdent<'_>,
 ) -> Result<Option<(u32, String, String)>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     let base = format!("SELECT entity_id, sku, type_id FROM {p}catalog_product_entity");
@@ -399,7 +387,6 @@ pub(crate) fn fetch_product_identity(
             c.exec_first(format!("{base} WHERE entity_id = :v"), params! { "v" => *id })
         }
     }
-    .map_err(clean_err)
 }
 
 /// One link target, raw: position + sku + the enrichment attributes (decoded later).
@@ -433,7 +420,6 @@ pub(crate) fn fetch_product_links(
     reverse: bool,
 ) -> Result<Option<DbProductLinks>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     use std::collections::HashMap;
     let mut c = connect(conn)?;
     let p = table_prefix;
@@ -446,8 +432,7 @@ pub(crate) fn fetch_product_links(
         ProductIdent::Id(id) => {
             c.exec_first(format!("{base} WHERE entity_id = :v"), params! { "v" => id })
         }
-    }
-    .map_err(clean_err)?;
+    }?;
     let Some((entity_id, sku, type_id)) = row else { return Ok(None) };
 
     // The product attribute ids we enrich targets with (name/status/visibility).
@@ -457,8 +442,7 @@ pub(crate) fn fetch_product_links(
              JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
              WHERE t.entity_type_code = 'catalog_product' \
              AND a.attribute_code IN ('name','status','visibility')"
-        ))
-        .map_err(clean_err)?
+        ))?
         .into_iter()
         .collect();
 
@@ -485,8 +469,7 @@ pub(crate) fn fetch_product_links(
                      ORDER BY i.value, e.sku"
                 ),
                 params! { "v" => entity_id },
-            )
-            .map_err(clean_err)?;
+            )?;
         per_type.push(rows.into_iter().map(|(id, sku, pos)| (id, sku, pos.unwrap_or(0))).collect());
     }
 
@@ -509,7 +492,7 @@ pub(crate) fn fetch_product_links(
             .unwrap_or_default(),
         None => HashMap::new(),
     };
-    let int_attr = |c: &mut mysql::Conn, code: &str| -> HashMap<u32, i64> {
+    let int_attr = |c: &mut Db, code: &str| -> HashMap<u32, i64> {
         match attr_ids.get(code) {
             Some(aid) => c
                 .query(format!(
@@ -607,7 +590,6 @@ pub(crate) fn fetch_product_prices(
     ident: ProductIdent<'_>,
 ) -> Result<Option<DbProductPrices>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     use std::collections::HashMap;
 
     let Some((entity_id, sku, type_id)) = fetch_product_identity(conn, table_prefix, &ident)?
@@ -619,7 +601,7 @@ pub(crate) fn fetch_product_prices(
 
     // `catalog/price/scope` default-scope row; absent = 0 = global.
     let price_scope_website: bool = c
-        .query_first::<Option<String>, _>(format!(
+        .query_first::<Option<String>>(format!(
             "SELECT value FROM {p}core_config_data \
              WHERE path = 'catalog/price/scope' AND scope = 'default'"
         ))
@@ -629,15 +611,8 @@ pub(crate) fn fetch_product_prices(
         .map(|v| v.trim() == "1")
         .unwrap_or(false);
 
-    let stores: HashMap<u32, String> =
-        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?
-            .into_iter()
-            .collect();
-    let websites: HashMap<u32, String> = c
-        .query(format!("SELECT website_id, code FROM {p}store_website"))
-        .map_err(clean_err)?
-        .into_iter()
-        .collect();
+    let stores: HashMap<u32, String> = store_codes(&mut c, p)?;
+    let websites: HashMap<u32, String> = website_codes(&mut c, p)?;
     let customer_groups: HashMap<u32, String> = c
         .query(format!("SELECT customer_group_id, customer_group_code FROM {p}customer_group"))
         .map(|rows: Vec<(u32, String)>| rows.into_iter().collect())
@@ -657,8 +632,7 @@ pub(crate) fn fetch_product_prices(
                      WHERE v.entity_id = :v AND a.attribute_code IN ({PRICE_ATTRS})"
                 ),
                 params! { "v" => entity_id },
-            )
-            .map_err(clean_err)?;
+            )?;
         for (attribute, backend_type, input, source_model, attribute_id, store_id, value) in rows {
             values.push(DbProductValue {
                 attribute,
@@ -687,6 +661,7 @@ pub(crate) fn fetch_product_prices(
         })
         .unwrap_or_default();
 
+    // `customer_group_id` is nullable in the schema; a row without one names no group.
     let rules: Vec<(String, u32, u32, String)> = c
         .exec(
             format!(
@@ -696,6 +671,9 @@ pub(crate) fn fetch_product_prices(
             ),
             params! { "v" => entity_id },
         )
+        .map(|rows: Vec<(String, Option<u32>, u32, String)>| {
+            rows.into_iter().filter_map(|(d, g, w, price)| Some((d, g?, w, price))).collect()
+        })
         .unwrap_or_default();
 
     #[allow(clippy::type_complexity)]
@@ -724,8 +702,7 @@ pub(crate) fn fetch_product_prices(
                      WHERE l.parent_id = :v ORDER BY e.sku"
                 ),
                 params! { "v" => entity_id },
-            )
-            .map_err(clean_err)?
+            )?
             .into_iter()
             .map(|(id, sku): (u32, String)| (id, sku, None, false))
             .collect(),
@@ -737,8 +714,7 @@ pub(crate) fn fetch_product_prices(
                      WHERE l.product_id = :v AND l.link_type_id = 3 ORDER BY e.sku"
                 ),
                 params! { "v" => entity_id },
-            )
-            .map_err(clean_err)?
+            )?
             .into_iter()
             .map(|(id, sku): (u32, String)| (id, sku, None, false))
             .collect(),
@@ -768,8 +744,7 @@ pub(crate) fn fetch_product_prices(
                      WHERE s.parent_product_id = :v ORDER BY s.position, e.sku"
                 ),
                 params! { "v" => entity_id },
-            )
-            .map_err(clean_err)?
+            )?
             .into_iter()
             .map(|(id, sku, pt, pv): (u32, String, i64, Option<String>)| {
                 (id, sku, pv, pt == 1)
@@ -790,8 +765,7 @@ pub(crate) fn fetch_product_prices(
                  JOIN {p}eav_attribute a ON a.attribute_id = v.attribute_id \
                  WHERE v.entity_id IN ({ids}) AND v.store_id = 0 \
                  AND a.attribute_code IN ('price','special_price')"
-            ))
-            .map_err(clean_err)?;
+            ))?;
         let statuses = fetch_child_statuses(&mut c, p, &ids)?;
         let finals: Vec<(u32, Option<String>, Option<String>)> = c
             .query(format!(
@@ -905,11 +879,10 @@ pub(crate) struct DbBundleOption {
 
 /// Default-scope `status` per entity (batched over an id list).
 fn fetch_child_statuses(
-    c: &mut mysql::Conn,
+    c: &mut Db,
     p: &str,
     ids: &str,
 ) -> Result<Vec<(u32, Option<i64>)>, String> {
-    use mysql::prelude::Queryable;
     c.query(format!(
         "SELECT entity_id, value FROM {p}catalog_product_entity_int \
          WHERE entity_id IN ({ids}) AND store_id = 0 AND attribute_id = \
@@ -917,21 +890,18 @@ fn fetch_child_statuses(
           JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
           WHERE a.attribute_code = 'status' AND t.entity_type_code = 'catalog_product')"
     ))
-    .map_err(clean_err)
 }
 
 /// Legacy stock `(product_id, qty, is_in_stock)` per entity (batched).
 fn fetch_child_stock(
-    c: &mut mysql::Conn,
+    c: &mut Db,
     p: &str,
     ids: &str,
 ) -> Result<Vec<(u32, Option<String>, i64)>, String> {
-    use mysql::prelude::Queryable;
     c.query(format!(
         "SELECT product_id, CAST(qty AS CHAR), is_in_stock \
          FROM {p}cataloginventory_stock_item WHERE product_id IN ({ids})"
     ))
-    .map_err(clean_err)
 }
 
 /// Fetch one product wholesale (identity + per-scope EAV values + option labels + stock
@@ -943,7 +913,6 @@ pub(crate) fn fetch_product(
     ident: ProductIdent<'_>,
 ) -> Result<Option<DbProduct>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     use std::collections::HashMap;
 
     let mut c = connect(conn)?;
@@ -956,38 +925,36 @@ pub(crate) fn fetch_product(
     );
     let row: Option<EntityRow> = match ident {
         ProductIdent::Sku(sku) => c
-            .exec_first(format!("{base} WHERE sku = :v"), params! { "v" => sku })
-            .map_err(clean_err)?,
+            .exec_first(format!("{base} WHERE sku = :v"), params! { "v" => sku })?,
         ProductIdent::Id(id) => c
-            .exec_first(format!("{base} WHERE entity_id = :v"), params! { "v" => id })
-            .map_err(clean_err)?,
+            .exec_first(format!("{base} WHERE entity_id = :v"), params! { "v" => id })?,
     };
     let Some((entity_id, sku, type_id, set_id, created_at, updated_at)) = row else {
         return Ok(None);
     };
 
+    // `attribute_set_name` is nullable in the schema.
     let attribute_set: Option<String> = c
-        .exec_first(
+        .exec_first::<Option<String>>(
             format!("SELECT attribute_set_name FROM {p}eav_attribute_set WHERE attribute_set_id = :v"),
             params! { "v" => set_id },
-        )
-        .map_err(clean_err)?;
+        )?
+        .flatten();
 
-    let stores: HashMap<u32, String> =
-        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?
-            .into_iter()
-            .collect();
+    let stores: HashMap<u32, String> = store_codes(&mut c, p)?;
 
     let websites: Vec<String> = c
-        .exec(
+        .exec::<Option<String>>(
             format!(
                 "SELECT w.code FROM {p}catalog_product_website pw \
                  JOIN {p}store_website w ON w.website_id = pw.website_id \
                  WHERE pw.product_id = :v ORDER BY w.code"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?
+        .into_iter()
+        .flatten()
+        .collect();
 
     let mut values: Vec<DbProductValue> = Vec::new();
     for table in ["varchar", "int", "decimal", "text", "datetime"] {
@@ -1001,8 +968,7 @@ pub(crate) fn fetch_product(
                      WHERE v.entity_id = :v"
                 ),
                 params! { "v" => entity_id },
-            )
-            .map_err(clean_err)?;
+            )?;
         for (attribute, backend_type, input, source_model, attribute_id, store_id, value) in rows {
             values.push(DbProductValue {
                 attribute,
@@ -1026,16 +992,15 @@ pub(crate) fn fetch_product(
         .collect();
     let mut option_labels: HashMap<(u32, u32), String> = HashMap::new();
     if !option_attr_ids.is_empty() {
-        let rows: Vec<(u32, u32, String)> = c
+        let rows: Vec<(u32, u32, Option<String>)> = c
             .query(format!(
                 "SELECT o.attribute_id, o.option_id, v.value FROM {p}eav_attribute_option o \
                  JOIN {p}eav_attribute_option_value v \
                  ON v.option_id = o.option_id AND v.store_id = 0 \
                  WHERE o.attribute_id IN ({})",
                 option_attr_ids.join(",")
-            ))
-            .map_err(clean_err)?;
-        option_labels = rows.into_iter().map(|(a, o, l)| ((a, o), l)).collect();
+            ))?;
+        option_labels = rows.into_iter().filter_map(|(a, o, l)| Some(((a, o), l?))).collect();
     }
 
     let tax_classes: HashMap<u32, String> = c
@@ -1064,8 +1029,7 @@ pub(crate) fn fetch_product(
                  FROM {p}cataloginventory_stock_item WHERE product_id = :v"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?
+        )?
         .map(|(qty, in_stock, manage): (Option<String>, i64, i64)| {
             (qty.unwrap_or_else(|| "0".to_string()), in_stock != 0, manage != 0)
         });
@@ -1080,8 +1044,7 @@ pub(crate) fn fetch_product(
                  WHERE cp.product_id = :v ORDER BY cp.category_id"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let mut categories: Vec<(u32, String)> = Vec::new();
     if !cat_rows.is_empty() {
         let path_ids: std::collections::BTreeSet<u32> = cat_rows
@@ -1098,9 +1061,9 @@ pub(crate) fn fetch_product(
                  AND t.entity_type_code = 'catalog_category' \
                  WHERE v.store_id = 0 AND v.entity_id IN ({})",
                 ids.join(",")
-            ))
-            .map_err(clean_err)?
+            ))?
             .into_iter()
+            .filter_map(|(id, name): (u32, Option<String>)| Some((id, name?)))
             .collect();
         for (id, path) in cat_rows {
             let components: Vec<u32> =
@@ -1127,13 +1090,13 @@ pub(crate) fn fetch_product(
                  ORDER BY store_id, request_path"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?
+        )?
         .into_iter()
-        .map(|(path, store_id, redirect): (String, u32, u16)| {
+        // `request_path` is nullable in the schema; a rewrite without one matches nothing.
+        .filter_map(|(path, store_id, redirect): (Option<String>, u32, u16)| {
             let store =
                 stores.get(&store_id).cloned().unwrap_or_else(|| format!("store/{store_id}"));
-            (path, store, redirect)
+            Some((path?, store, redirect))
         })
         .collect();
 
@@ -1145,8 +1108,7 @@ pub(crate) fn fetch_product(
                  WHERE l.product_id = :v ORDER BY e.sku"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let super_attrs: Vec<(u32, String)> = c
         .exec(
             format!(
@@ -1172,8 +1134,7 @@ pub(crate) fn fetch_product(
                      WHERE l.product_id = :v AND l.link_type_id = 3 ORDER BY e.sku"
                 ),
                 params! { "v" => entity_id },
-            )
-            .map_err(clean_err)?;
+            )?;
         if !links.is_empty() {
             let link_ids =
                 links.iter().map(|(l, _, _)| l.to_string()).collect::<Vec<_>>().join(",");
@@ -1205,8 +1166,7 @@ pub(crate) fn fetch_product(
                  WHERE l.parent_id = :v ORDER BY e.sku"
             ),
             params! { "v" => entity_id },
-        )
-        .map_err(clean_err)?
+        )?
     };
     let mut children = Vec::with_capacity(child_rows.len());
     if !child_rows.is_empty() {
@@ -1222,8 +1182,7 @@ pub(crate) fn fetch_product(
                     "SELECT entity_id, attribute_id, value FROM {p}catalog_product_entity_int \
                      WHERE entity_id IN ({ids}) AND store_id = 0 \
                      AND attribute_id IN ({attr_ids})"
-                ))
-                .map_err(clean_err)?;
+                ))?;
             let labels: HashMap<u32, String> = c
                 .query(format!(
                     "SELECT o.option_id, v.value FROM {p}eav_attribute_option o \
@@ -1231,7 +1190,9 @@ pub(crate) fn fetch_product(
                      ON v.option_id = o.option_id AND v.store_id = 0 \
                      WHERE o.attribute_id IN ({attr_ids})"
                 ))
-                .map(|rows: Vec<(u32, String)>| rows.into_iter().collect())
+                .map(|rows: Vec<(u32, Option<String>)>| {
+                    rows.into_iter().filter_map(|(o, l)| Some((o, l?))).collect()
+                })
                 .unwrap_or_default();
             for (child, attr, value) in rows {
                 if let Some(option) = value {
@@ -1267,7 +1228,8 @@ pub(crate) fn fetch_product(
     // Bundle options with their selections.
     let mut bundle_options: Vec<DbBundleOption> = Vec::new();
     if type_id == "bundle" {
-        let options: Vec<(u32, i64, String, Option<String>)> = c
+        // `o.type` and `s.selection_qty` are nullable in the schema.
+        let options: Vec<(u32, i64, Option<String>, Option<String>)> = c
             .exec(
                 format!(
                     "SELECT o.option_id, o.required, o.type, v.title \
@@ -1277,9 +1239,8 @@ pub(crate) fn fetch_product(
                      WHERE o.parent_id = :v ORDER BY o.position, o.option_id"
                 ),
                 params! { "v" => entity_id },
-            )
-            .map_err(clean_err)?;
-        type SelRow = (u32, u32, String, String, i64, i64, Option<String>);
+            )?;
+        type SelRow = (u32, u32, String, Option<String>, i64, i64, Option<String>);
         let selections: Vec<SelRow> = c
             .exec(
                 format!(
@@ -1290,8 +1251,7 @@ pub(crate) fn fetch_product(
                      WHERE s.parent_product_id = :v ORDER BY s.position, e.sku"
                 ),
                 params! { "v" => entity_id },
-            )
-            .map_err(clean_err)?;
+            )?;
         let (statuses, stock_rows) = if selections.is_empty() {
             (Vec::new(), Vec::new())
         } else {
@@ -1316,7 +1276,7 @@ pub(crate) fn fetch_product(
                         *id,
                         sku.clone(),
                         enabled,
-                        qty.clone(),
+                        qty.clone().unwrap_or_else(|| "-".to_string()),
                         *is_default != 0,
                         price.clone(),
                         *price_type == 1,
@@ -1327,7 +1287,7 @@ pub(crate) fn fetch_product(
             bundle_options.push(DbBundleOption {
                 title: title.unwrap_or_else(|| format!("(option {option_id})")),
                 required: required != 0,
-                input_type,
+                input_type: input_type.unwrap_or_default(),
                 selections: sels,
             });
         }
@@ -1351,11 +1311,12 @@ pub(crate) fn fetch_product(
             ),
             params! { "v" => entity_id },
         )
-        .map(|rows: Vec<(String, String, Option<String>, Option<i32>, i64, Option<i64>)>| {
+        // `mg.value` (the file) is nullable in the schema; a row without one shows nothing.
+        .map(|rows: Vec<(Option<String>, String, Option<String>, Option<i32>, i64, Option<i64>)>| {
             rows.into_iter()
-                .map(|(file, media_type, label, pos, mg_dis, mgv_dis)| {
+                .filter_map(|(file, media_type, label, pos, mg_dis, mgv_dis)| {
                     let disabled = mg_dis != 0 || mgv_dis.unwrap_or(0) != 0;
-                    (file, media_type, label, pos.unwrap_or(0), disabled)
+                    Some((file?, media_type, label, pos.unwrap_or(0), disabled))
                 })
                 .collect()
         })
@@ -1395,7 +1356,6 @@ pub(crate) fn fetch_products_like(
     limit: usize,
 ) -> Result<(Vec<(u32, String, String, Option<String>, Option<i64>)>, bool), String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     let attr = |code: &str| {
@@ -1420,8 +1380,7 @@ pub(crate) fn fetch_products_like(
                 limit + 1
             ),
             params! { "pat" => format!("%{needle}%") },
-        )
-        .map_err(clean_err)?;
+        )?;
     let truncated = rows.len() > limit;
     Ok((rows.into_iter().take(limit).collect(), truncated))
 }

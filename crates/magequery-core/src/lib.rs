@@ -132,6 +132,9 @@ pub struct Magento {
     email_templates: OnceLock<breadth::EmailTemplateIndex>,
     catalog_attrs: OnceLock<breadth::CatalogAttrIndex>,
     fieldsets: OnceLock<breadth::FieldsetIndex>,
+    // Rows the live-DB layer skipped (a NULL or mistyped value where the row type wants
+    // one), collected per query; reported through `diagnostics()`.
+    db_diagnostics: std::sync::Mutex<Vec<Diagnostic>>,
 }
 
 struct DiBuilt {
@@ -201,6 +204,7 @@ impl Magento {
             email_templates: OnceLock::new(),
             catalog_attrs: OnceLock::new(),
             fieldsets: OnceLock::new(),
+            db_diagnostics: Default::default(),
         })
     }
 
@@ -340,12 +344,30 @@ impl Magento {
     /// Non-fatal problems found while indexing. Includes di.xml parse problems once the DI
     /// index has been built (i.e. after a DI query); call after running a DI command to see
     /// them all.
+    ///
+    /// Live-DB queries add a warning for every result row they had to skip (a NULL or a
+    /// value of unexpected type where the row needs one) instead of failing the query.
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
         let mut all = self.index.diagnostics.clone();
         if let Some(di) = self.di.get() {
             all.extend(di.diagnostics.iter().cloned());
         }
+        #[cfg(feature = "db")]
+        self.absorb_db_warnings();
+        all.extend(self.db_diagnostics.lock().unwrap_or_else(|e| e.into_inner()).iter().cloned());
         all
+    }
+
+    /// Move the db layer's per-thread warnings onto this handle.
+    #[cfg(feature = "db")]
+    fn absorb_db_warnings(&self) {
+        let warnings = db::take_warnings();
+        if !warnings.is_empty() {
+            self.db_diagnostics
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(warnings.into_iter().map(|w| Diagnostic::warning(w, None)));
+        }
     }
 
     /// The installation root this handle was opened on.
@@ -1007,6 +1029,21 @@ fn default_connection(cfg: &DbConfig) -> Result<&DbConnection> {
         .find(|c| c.name == "default")
         .or_else(|| cfg.connections.first())
         .ok_or_else(|| Error::Db("no db connection configured in env.php".to_string()))
+}
+
+/// A db fetcher's result as a public one: its skipped-row warnings move onto the handle
+/// (right away, on the thread that ran the query) and its error becomes [`Error::Db`].
+#[cfg(feature = "db")]
+trait LiveResult<T> {
+    fn live(self, mage: &Magento) -> Result<T>;
+}
+
+#[cfg(feature = "db")]
+impl<T> LiveResult<T> for std::result::Result<T, String> {
+    fn live(self, mage: &Magento) -> Result<T> {
+        mage.absorb_db_warnings();
+        self.map_err(Error::Db)
+    }
 }
 
 /// A module's composer identity for the `deps` graph.

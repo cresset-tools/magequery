@@ -35,7 +35,6 @@ pub(crate) fn fetch_cms_entries(
 ) -> Result<Vec<DbCmsEntry>, String> {
     use crate::model::CmsKind as K;
     use mysql::params;
-    use mysql::prelude::Queryable;
     use std::collections::HashMap;
 
     let mut c = connect(conn)?;
@@ -64,27 +63,22 @@ pub(crate) fn fetch_cms_entries(
     };
     let rows: Vec<mysql::Row> = match sel {
         CmsSelector::Identifier(i) => c
-            .exec(format!("{select} WHERE identifier = :v ORDER BY 1"), params! { "v" => i })
-            .map_err(clean_err)?,
+            .exec(format!("{select} WHERE identifier = :v ORDER BY 1"), params! { "v" => i })?,
         CmsSelector::Id(id) => c
-            .exec(format!("{select} WHERE {id_col} = :v"), params! { "v" => id })
-            .map_err(clean_err)?,
+            .exec(format!("{select} WHERE {id_col} = :v"), params! { "v" => id })?,
         CmsSelector::All => {
-            c.query(format!("{select} ORDER BY identifier, 1")).map_err(clean_err)?
+            c.query(format!("{select} ORDER BY identifier, 1"))?
         }
     };
     if rows.is_empty() {
         return Ok(Vec::new());
     }
 
-    let stores: HashMap<u32, String> =
-        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?
-            .into_iter()
-            .collect();
+    let stores: HashMap<u32, String> = store_codes(&mut c, p)?;
     let mut entries: Vec<DbCmsEntry> = Vec::with_capacity(rows.len());
     for mut r in rows {
-        let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
-        let n = |r: &mut mysql::Row, i: usize| r.take::<Option<i64>, _>(i).flatten().unwrap_or(0);
+        let s = |r: &mut mysql::Row, i: usize| r.col::<String>(i);
+        let n = |r: &mut mysql::Row, i: usize| r.col::<i64>(i).unwrap_or(0);
         entries.push(DbCmsEntry {
             id: n(&mut r, 0) as u32,
             identifier: s(&mut r, 1).unwrap_or_default(),
@@ -101,8 +95,7 @@ pub(crate) fn fetch_cms_entries(
     }
     let ids = entries.iter().map(|e| e.id.to_string()).collect::<Vec<_>>().join(",");
     let links: Vec<(u32, u32)> = c
-        .query(format!("SELECT {id_col}, store_id FROM {p}{table} WHERE {id_col} IN ({ids})"))
-        .map_err(clean_err)?;
+        .query(format!("SELECT {id_col}, store_id FROM {p}{table} WHERE {id_col} IN ({ids})"))?;
     for e in &mut entries {
         e.stores = links
             .iter()
@@ -129,14 +122,14 @@ pub(crate) fn fetch_cms_like(
 ) -> Result<(Vec<(u32, String, String, bool)>, bool), String> {
     use crate::model::CmsKind as K;
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     let (table, id_col) = match kind {
         K::Page => ("cms_page", "page_id"),
         K::Block => ("cms_block", "block_id"),
     };
-    let rows: Vec<(u32, String, String, i64)> = c
+    // `cms_page.identifier`/`title` are nullable in the schema.
+    let rows: Vec<(u32, Option<String>, Option<String>, i64)> = c
         .exec(
             format!(
                 "SELECT {id_col}, identifier, title, is_active FROM {p}{table} \
@@ -145,11 +138,13 @@ pub(crate) fn fetch_cms_like(
                 limit + 1
             ),
             params! { "pat" => format!("%{needle}%") },
-        )
-        .map_err(clean_err)?;
+        )?;
     let truncated = rows.len() > limit;
     Ok((
-        rows.into_iter().take(limit).map(|(id, i, t, a)| (id, i, t, a != 0)).collect(),
+        rows.into_iter()
+            .take(limit)
+            .map(|(id, i, t, a)| (id, i.unwrap_or_default(), t.unwrap_or_default(), a != 0))
+            .collect(),
         truncated,
     ))
 }
@@ -175,7 +170,6 @@ pub(crate) fn fetch_integrations(
     )>,
     String,
 > {
-    use mysql::prelude::Queryable;
     use std::collections::HashMap;
 
     let mut c = connect(conn)?;
@@ -187,8 +181,7 @@ pub(crate) fn fetch_integrations(
             "SELECT integration_id, name, email, endpoint, status, setup_type, \
              CAST(created_at AS CHAR), CAST(updated_at AS CHAR), consumer_id \
              FROM {p}integration ORDER BY name"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     if integrations.is_empty() {
         return Ok(Vec::new());
     }
@@ -215,7 +208,9 @@ pub(crate) fn fetch_integrations(
             "SELECT role_id, resource_id, permission FROM {p}authorization_rule \
              ORDER BY resource_id"
         ))
-        .map(|rows: Vec<(u32, String, Option<String>)>| rows)
+        .map(|rows: Vec<(u32, Option<String>, Option<String>)>| {
+            rows.into_iter().filter_map(|(id, res, perm)| Some((id, res?, perm))).collect()
+        })
         .unwrap_or_default();
 
     Ok(integrations
@@ -252,7 +247,6 @@ pub(crate) fn fetch_integration_secrets(
     integration_id: u32,
 ) -> Result<Option<(String, String, Option<String>, Option<String>, bool)>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     // `key` is reserved — backtick it. oauth_token is LEFT-joined: consumer key/secret
@@ -268,7 +262,6 @@ pub(crate) fn fetch_integration_secrets(
                  WHERE i.integration_id = :v"
             ),
             params! { "v" => integration_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     Ok(row.map(|(ck, cs, tok, tsec, rev)| (ck, cs, tok, tsec, rev.unwrap_or(0) != 0)))
 }

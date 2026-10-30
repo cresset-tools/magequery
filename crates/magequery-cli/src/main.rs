@@ -1294,10 +1294,11 @@ fn main() -> Result<()> {
     };
 
     // Diagnostics are non-fatal; surface them on stderr (so stdout stays pipeable) *after*
-    // the command, so any lazily-built index (di.xml) has contributed its diagnostics too.
+    // the command, so any lazily-built index (di.xml) has contributed its diagnostics too,
+    // and so have live-DB queries (rows they skipped).
     let diags = mage.diagnostics();
     if !diags.is_empty() {
-        eprintln!("note: {} diagnostic(s) while indexing", diags.len());
+        eprintln!("note: {} diagnostic(s)", diags.len());
         for d in &diags {
             eprintln!("  {:?}: {}", d.severity, d.message);
         }
@@ -2948,10 +2949,11 @@ fn sequences(mage: &Magento, args: &SequencesArgs) -> Result<()> {
     let we = seqs.iter().map(|s| s.entity_type.len()).max().unwrap_or(0);
     let wst = seqs.iter().map(|s| s.store.len()).max().unwrap_or(0);
     for s in &seqs {
-        let current = s
-            .current
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "-".to_string());
+        // An empty sequence table (nothing issued yet) has no current value.
+        let current = match s.current {
+            Some(c) => style::number(&format!("{c:>10}")),
+            None => style::dim(&format!("{:>10}", "-")),
+        };
         let mut tags = String::new();
         if !s.active {
             tags.push_str(&format!("  {}", style::err("[inactive profile]")));
@@ -2968,12 +2970,11 @@ fn sequences(mage: &Magento, args: &SequencesArgs) -> Result<()> {
             tags.push_str(&format!("  {}", style::dim(&format!("step {}", s.step))));
         }
         println!(
-            "{}{}  {}{}  current {:>10}  next {}{tags}",
+            "{}{}  {}{}  current {current}  next {}{tags}",
             style::name(&s.entity_type),
             " ".repeat(we - s.entity_type.len()),
             style::area(&s.store),
             " ".repeat(wst - s.store.len()),
-            style::number(&current),
             style::number(&s.next_increment),
         );
     }
@@ -3214,7 +3215,8 @@ fn tax(mage: &Magento, args: &TaxArgs) -> Result<()> {
     if let Some(f) = &args.filter {
         let n = f.to_lowercase();
         let rate_hits = |r: &magequery_core::TaxRate| {
-            r.code.to_lowercase().contains(&n) || r.country.to_lowercase() == n
+            r.code.as_deref().is_some_and(|c| c.to_lowercase().contains(&n))
+                || r.country.to_lowercase() == n
         };
         info.classes.retain(|c| c.name.to_lowercase().contains(&n));
         info.rules.retain(|r| {
@@ -3231,9 +3233,12 @@ fn tax(mage: &Magento, args: &TaxArgs) -> Result<()> {
     }
 
     let rate_line = |r: &magequery_core::TaxRate| {
+        let code = match &r.code {
+            Some(code) => style::name(code),
+            None => style::dim(&format!("(no code, rate {})", r.id)),
+        };
         format!(
-            "{} {} {} {} {}",
-            style::name(&r.code),
+            "{code} {} {} {} {}",
             style::area(&r.country),
             r.region,
             style::dim(&r.postcode),

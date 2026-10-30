@@ -28,7 +28,6 @@ pub(crate) fn fetch_admin_users(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<Vec<DbAdminUser>, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     let rows: Vec<mysql::Row> = c
@@ -43,14 +42,13 @@ pub(crate) fn fetch_admin_users(
              AND ur.user_type = '2' AND ur.user_id = u.user_id \
              LEFT JOIN {p}authorization_role r ON r.role_id = ur.parent_id \
              ORDER BY u.username"
-        ))
-        .map_err(clean_err)?;
+        ))?;
 
     let mut out = Vec::with_capacity(rows.len());
     for mut row in rows {
-        let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
+        let s = |r: &mut mysql::Row, i: usize| r.col::<String>(i);
         let n = |r: &mut mysql::Row, i: usize| {
-            r.take::<Option<i64>, _>(i).flatten().unwrap_or(0)
+            r.col::<i64>(i).unwrap_or(0)
         };
         out.push(DbAdminUser {
             id: n(&mut row, 0) as u32,
@@ -61,7 +59,7 @@ pub(crate) fn fetch_admin_users(
             active: n(&mut row, 5) != 0,
             created: s(&mut row, 6),
             last_login: s(&mut row, 7),
-            last_login_secs: row.take::<Option<i64>, _>(8).flatten(),
+            last_login_secs: row.col::<i64>(8),
             logins: n(&mut row, 9) as u32,
             failures: n(&mut row, 10) as u32,
             locked: n(&mut row, 11) != 0,
@@ -80,33 +78,34 @@ pub(crate) fn fetch_admin_roles(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<(Vec<(u32, String)>, Vec<(u32, String)>, Vec<(u32, String, bool)>), String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
-    let roles: Vec<(u32, String)> = c
+    // `role_name`, `username` and `resource_id` are nullable in the schema.
+    let roles: Vec<(u32, Option<String>)> = c
         .query(format!(
             "SELECT role_id, role_name FROM {p}authorization_role \
              WHERE role_type = 'G' ORDER BY role_name"
-        ))
-        .map_err(clean_err)?;
-    let members: Vec<(u32, String)> = c
+        ))?;
+    let members: Vec<(u32, Option<String>)> = c
         .query(format!(
             "SELECT ur.parent_id, u.username FROM {p}authorization_role ur \
              JOIN {p}admin_user u ON u.user_id = ur.user_id \
              WHERE ur.role_type = 'U' AND ur.user_type = '2' ORDER BY u.username"
-        ))
-        .map_err(clean_err)?;
-    let rules: Vec<(u32, String, Option<String>)> = c
+        ))?;
+    let rules: Vec<(u32, Option<String>, Option<String>)> = c
         .query(format!(
             "SELECT role_id, resource_id, permission FROM {p}authorization_rule \
              ORDER BY resource_id"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     let rules = rules
         .into_iter()
-        .map(|(id, res, perm)| (id, res, perm.as_deref() == Some("allow")))
+        .filter_map(|(id, res, perm)| Some((id, res?, perm.as_deref() == Some("allow"))))
         .collect();
-    Ok((roles, members, rules))
+    Ok((
+        roles.into_iter().map(|(id, name)| (id, name.unwrap_or_default())).collect(),
+        members.into_iter().filter_map(|(id, user)| Some((id, user?))).collect(),
+        rules,
+    ))
 }
 
 /// One `indexer_state` row.
@@ -135,31 +134,36 @@ pub(crate) fn fetch_indexer_states(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<(Vec<DbIndexerState>, Vec<DbMviewState>), String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
 
-    let states: Vec<(String, String, Option<String>)> = c
+    // Every column of both state tables is nullable in the schema; a row without its id
+    // can't be joined to anything and is dropped.
+    let states: Vec<(Option<String>, Option<String>, Option<String>)> = c
         .query(format!(
             "SELECT indexer_id, status, CAST(updated AS CHAR) FROM {p}indexer_state"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     let states = states
         .into_iter()
-        .map(|(indexer_id, status, updated)| DbIndexerState { indexer_id, status, updated })
+        .filter_map(|(indexer_id, status, updated)| {
+            let status = status.unwrap_or_default();
+            Some(DbIndexerState { indexer_id: indexer_id?, status, updated })
+        })
         .collect();
 
-    let views: Vec<(String, String, String, Option<u64>)> = c
-        .query(format!("SELECT view_id, mode, status, version_id FROM {p}mview_state"))
-        .map_err(clean_err)?;
+    type ViewRow = (Option<String>, Option<String>, Option<String>, Option<u64>);
+    let views: Vec<ViewRow> = c
+        .query(format!("SELECT view_id, mode, status, version_id FROM {p}mview_state"))?;
     let mut out = Vec::with_capacity(views.len());
     for (view_id, mode, status, version_id) in views {
+        let Some(view_id) = view_id else { continue };
+        let (mode, status) = (mode.unwrap_or_default(), status.unwrap_or_default());
         // The changelog table name embeds the view id — identifier-sanitized, and the
         // query tolerated failing: the table is created lazily on first subscribe.
         let backlog = if mode == "enabled"
             && view_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         {
-            c.query_first::<u64, _>(format!(
+            c.query_first::<u64>(format!(
                 "SELECT COUNT(DISTINCT entity_id) FROM {p}{view_id}_cl \
                  WHERE version_id > {}",
                 version_id.unwrap_or(0)
@@ -186,7 +190,6 @@ pub(crate) fn fetch_eav_entities(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<Vec<DbEavEntity>, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     let rows: Vec<(String, Option<String>, Option<String>, u64)> = c
@@ -197,8 +200,7 @@ pub(crate) fn fetch_eav_entities(
              LEFT JOIN {p}eav_attribute a ON a.entity_type_id = t.entity_type_id \
              GROUP BY t.entity_type_id, t.entity_type_code, t.entity_table, \
              t.value_table_prefix ORDER BY t.entity_type_code"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     Ok(rows
         .into_iter()
         .map(|(code, entity_table, value_table_prefix, n)| DbEavEntity {
@@ -247,7 +249,6 @@ pub(crate) fn fetch_eav_attributes(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<Vec<DbEavAttribute>, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     let rows: Vec<mysql::Row> = c
@@ -262,18 +263,16 @@ pub(crate) fn fetch_eav_attributes(
              JOIN {p}eav_entity_type t ON t.entity_type_id = a.entity_type_id \
              LEFT JOIN {p}catalog_eav_attribute c ON c.attribute_id = a.attribute_id \
              ORDER BY t.entity_type_code, a.attribute_code"
-        ))
-        .map_err(clean_err)?;
+        ))?;
 
     let mut out = Vec::with_capacity(rows.len());
     for mut row in rows {
-        let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
+        let s = |r: &mut mysql::Row, i: usize| r.col::<String>(i);
         let n = |r: &mut mysql::Row, i: usize| {
-            r.take::<Option<i64>, _>(i).flatten().unwrap_or(0)
+            r.col::<i64>(i).unwrap_or(0)
         };
         let catalog = row
-            .take::<Option<u32>, _>(13)
-            .flatten()
+            .col::<u32>(13)
             .is_some()
             .then(|| DbCatalogFlags {
                 is_global: n(&mut row, 14),
@@ -315,10 +314,9 @@ pub(crate) fn fetch_eav_sets(
     entity_code: &str,
 ) -> Result<(Vec<(String, String)>, usize), String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
-    let sets: Vec<(String, String)> = c
+    let sets: Vec<(Option<String>, Option<String>)> = c
         .exec(
             format!(
                 "SELECT s.attribute_set_name, g.attribute_group_name \
@@ -328,8 +326,7 @@ pub(crate) fn fetch_eav_sets(
                  WHERE ea.attribute_id = :id ORDER BY s.attribute_set_name"
             ),
             params! { "id" => attribute_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let total: Option<u64> = c
         .exec_first(
             format!(
@@ -338,8 +335,11 @@ pub(crate) fn fetch_eav_sets(
                  WHERE t.entity_type_code = :code"
             ),
             params! { "code" => entity_code },
-        )
-        .map_err(clean_err)?;
+        )?;
+    let sets = sets
+        .into_iter()
+        .map(|(set, group)| (set.unwrap_or_default(), group.unwrap_or_default()))
+        .collect();
     Ok((sets, total.unwrap_or(0) as usize))
 }
 
@@ -350,10 +350,9 @@ pub(crate) fn fetch_eav_options(
     attribute_id: u32,
 ) -> Result<Vec<String>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
-    c.exec(
+    let labels: Vec<Option<String>> = c.exec(
         format!(
             "SELECT v.value FROM {p}eav_attribute_option o \
              JOIN {p}eav_attribute_option_value v \
@@ -361,8 +360,8 @@ pub(crate) fn fetch_eav_options(
              WHERE o.attribute_id = :id ORDER BY o.sort_order, v.value"
         ),
         params! { "id" => attribute_id },
-    )
-    .map_err(clean_err)
+    )?;
+    Ok(labels.into_iter().flatten().collect())
 }
 
 /// Read the `url_rewrite` table, resolving each row's `store_id` to a store code. Filters
@@ -378,14 +377,12 @@ pub(crate) fn fetch_url_rewrites(
     limit: usize,
 ) -> Result<(Vec<UrlRewrite>, bool), String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     use std::collections::HashMap;
 
     let mut c = connect(conn)?;
     let p = table_prefix;
 
-    let stores: HashMap<u32, String> =
-        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?.into_iter().collect();
+    let stores: HashMap<u32, String> = store_codes(&mut c, p)?;
 
     let mut wheres: Vec<String> = Vec::new();
     if path_filter.is_some() {
@@ -412,10 +409,11 @@ pub(crate) fn fetch_url_rewrites(
         limit + 1
     );
 
-    type Row = (String, String, String, i64, i64, i64, Option<String>, i64);
+    // `request_path`/`target_path` are nullable in the schema.
+    type Row = (Option<String>, Option<String>, String, i64, i64, i64, Option<String>, i64);
     let rows: Vec<Row> = match path_filter {
-        Some(f) => c.exec(&sql, params! { "pat" => format!("%{f}%") }).map_err(clean_err)?,
-        None => c.query(&sql).map_err(clean_err)?,
+        Some(f) => c.exec(&sql, params! { "pat" => format!("%{f}%") })?,
+        None => c.query(&sql)?,
     };
 
     let truncated = rows.len() > limit;
@@ -426,8 +424,8 @@ pub(crate) fn fetch_url_rewrites(
             let store_id = store_id as u32;
             let store = stores.get(&store_id).cloned().unwrap_or_else(|| format!("store/{store_id}"));
             UrlRewrite {
-                request_path,
-                target_path,
+                request_path: request_path.unwrap_or_default(),
+                target_path: target_path.unwrap_or_default(),
                 entity_type,
                 entity_id: entity_id as u32,
                 redirect_type: redirect_type as u16,

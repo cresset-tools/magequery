@@ -8,7 +8,7 @@ pub(crate) struct DbTaxInfo {
     /// `(class_id, name, type)`.
     pub classes: Vec<(u32, String, String)>,
     /// `(rate_id, code, country, region code or *, postcode display, rate)`.
-    pub rates: Vec<(u32, String, String, String, String, String)>,
+    pub rates: Vec<(u32, Option<String>, String, String, String, String)>,
     /// `(rule_id, code, priority, calculate_subtotal)`.
     pub rules: Vec<(u32, String, u32, bool)>,
     /// `(rule_id, rate_id, customer_class_id, product_class_id)`.
@@ -19,7 +19,6 @@ pub(crate) fn fetch_tax_info(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<DbTaxInfo, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
 
@@ -27,9 +26,10 @@ pub(crate) fn fetch_tax_info(
         .query(format!(
             "SELECT class_id, class_name, class_type FROM {p}tax_class \
              ORDER BY class_type, class_id"
-        ))
-        .map_err(clean_err)?;
-    type RateRow = (u32, String, String, Option<String>, Option<String>, i64, Option<String>, Option<String>, String);
+        ))?;
+    // `code` is NOT NULL in Magento's schema, but rates with a NULL code exist in the wild
+    // (imported/hand-edited tables); `zip_is_range` is nullable.
+    type RateRow = (u32, Option<String>, String, Option<String>, Option<String>, Option<i64>, Option<String>, Option<String>, String);
     let rates: Vec<RateRow> = c
         .query(format!(
             "SELECT r.tax_calculation_rate_id, r.code, r.tax_country_id, reg.code, \
@@ -38,12 +38,11 @@ pub(crate) fn fetch_tax_info(
              FROM {p}tax_calculation_rate r \
              LEFT JOIN {p}directory_country_region reg ON reg.region_id = r.tax_region_id \
              ORDER BY r.tax_country_id, r.code"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     let rates = rates
         .into_iter()
         .map(|(id, code, country, region, postcode, zip_is_range, from, to, rate)| {
-            let postcode = if zip_is_range != 0 {
+            let postcode = if zip_is_range.unwrap_or(0) != 0 {
                 format!("{}–{}", from.as_deref().unwrap_or("?"), to.as_deref().unwrap_or("?"))
             } else {
                 postcode.unwrap_or_else(|| "*".to_string())
@@ -55,14 +54,12 @@ pub(crate) fn fetch_tax_info(
         .query(format!(
             "SELECT tax_calculation_rule_id, code, priority, calculate_subtotal \
              FROM {p}tax_calculation_rule ORDER BY priority, position, tax_calculation_rule_id"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     let links: Vec<(u32, u32, u32, u32)> = c
         .query(format!(
             "SELECT tax_calculation_rule_id, tax_calculation_rate_id, \
              customer_tax_class_id, product_tax_class_id FROM {p}tax_calculation"
-        ))
-        .map_err(clean_err)?;
+        ))?;
 
     Ok(DbTaxInfo {
         classes,
@@ -97,7 +94,6 @@ pub(crate) fn fetch_catalog_rule(
     id: u32,
 ) -> Result<Option<DbCatalogRule>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
 
     let mut c = connect(conn)?;
     let p = table_prefix;
@@ -113,14 +109,13 @@ pub(crate) fn fetch_catalog_rule(
                  FROM {p}catalogrule WHERE rule_id = :v"
             ),
             params! { "v" => id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let Some(mut row) = row else { return Ok(None) };
-    let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
-    let n = |r: &mut mysql::Row, i: usize| r.take::<Option<i64>, _>(i).flatten().unwrap_or(0);
+    let s = |r: &mut mysql::Row, i: usize| r.col::<String>(i);
+    let n = |r: &mut mysql::Row, i: usize| r.col::<i64>(i).unwrap_or(0);
     let rule_id = n(&mut row, 0) as u32;
 
-    let websites: Vec<String> = c
+    let websites: Vec<Option<String>> = c
         .exec(
             format!(
                 "SELECT w.code FROM {p}catalogrule_website rw \
@@ -128,8 +123,7 @@ pub(crate) fn fetch_catalog_rule(
                  WHERE rw.rule_id = :v ORDER BY w.code"
             ),
             params! { "v" => rule_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let customer_groups: Vec<String> = c
         .exec(
             format!(
@@ -138,8 +132,7 @@ pub(crate) fn fetch_catalog_rule(
                  WHERE rg.rule_id = :v ORDER BY g.customer_group_id"
             ),
             params! { "v" => rule_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let matched: u64 = c
         .exec_first(
             format!(
@@ -165,7 +158,7 @@ pub(crate) fn fetch_catalog_rule(
         sort_order: n(&mut row, 9) as u32,
         stop_rules_processing: n(&mut row, 10) != 0,
         conditions: s(&mut row, 11),
-        websites,
+        websites: websites.into_iter().flatten().collect(),
         customer_groups,
         matched_products: matched as u32,
     }))
@@ -181,10 +174,9 @@ pub(crate) fn fetch_catalog_rules(
     limit: usize,
 ) -> Result<(Vec<(u32, String, bool, Option<String>, Option<String>, u32)>, bool), String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
-    let rows: Vec<(u32, String, i64, Option<String>, Option<String>, u64)> = c
+    let rows: Vec<(u32, Option<String>, i64, Option<String>, Option<String>, u64)> = c
         .exec(
             format!(
                 "SELECT r.rule_id, r.name, r.is_active, CAST(r.from_date AS CHAR), \
@@ -197,13 +189,12 @@ pub(crate) fn fetch_catalog_rules(
                 limit + 1
             ),
             params! { "pat" => format!("%{needle}%") },
-        )
-        .map_err(clean_err)?;
+        )?;
     let truncated = rows.len() > limit;
     Ok((
         rows.into_iter()
             .take(limit)
-            .map(|(id, name, a, f, t, m)| (id, name, a != 0, f, t, m as u32))
+            .map(|(id, name, a, f, t, m)| (id, name.unwrap_or_default(), a != 0, f, t, m as u32))
             .collect(),
         truncated,
     ))
@@ -253,7 +244,6 @@ pub(crate) fn fetch_sales_rule(
     ident: RuleIdent<'_>,
 ) -> Result<Option<DbSalesRule>, String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
 
     let mut c = connect(conn)?;
     let p = table_prefix;
@@ -264,7 +254,7 @@ pub(crate) fn fetch_sales_rule(
          (expiration_date IS NOT NULL AND expiration_date < NOW()) \
          FROM {p}salesrule_coupon"
     );
-    type CouponRow = (String, u64, Option<u64>, Option<u64>, Option<String>, i64);
+    type CouponRow = (Option<String>, u64, Option<u64>, Option<u64>, Option<String>, i64);
     let (rule_id, matched_coupon): (u32, Option<CouponRow>) = match ident {
         RuleIdent::Id(id) => (id, None),
         RuleIdent::Coupon(code) => {
@@ -277,11 +267,10 @@ pub(crate) fn fetch_sales_rule(
                          FROM {p}salesrule_coupon WHERE code = :v"
                     ),
                     params! { "v" => code },
-                )
-                .map_err(clean_err)?;
+                )?;
             match hit {
                 Some((rid, code, used, limit, per_cust, exp, expired)) => {
-                    (rid, Some((code, used, limit, per_cust, exp, expired)))
+                    (rid, Some((Some(code), used, limit, per_cust, exp, expired)))
                 }
                 None => return Ok(None),
             }
@@ -302,11 +291,10 @@ pub(crate) fn fetch_sales_rule(
                  FROM {p}salesrule WHERE rule_id = :v"
             ),
             params! { "v" => rule_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let Some(mut row) = row else { return Ok(None) };
-    let s = |r: &mut mysql::Row, i: usize| r.take::<Option<String>, _>(i).flatten();
-    let n = |r: &mut mysql::Row, i: usize| r.take::<Option<i64>, _>(i).flatten().unwrap_or(0);
+    let s = |r: &mut mysql::Row, i: usize| r.col::<String>(i);
+    let n = |r: &mut mysql::Row, i: usize| r.col::<i64>(i).unwrap_or(0);
     let rule_id = n(&mut row, 0) as u32;
     let name = s(&mut row, 1).unwrap_or_default();
     let description = s(&mut row, 2).filter(|d| !d.is_empty());
@@ -318,7 +306,7 @@ pub(crate) fn fetch_sales_rule(
     let simple_action = s(&mut row, 8);
     let discount_amount = s(&mut row, 9);
     let discount_qty = s(&mut row, 10);
-    let discount_step: Option<u64> = row.take::<Option<u64>, _>(11).flatten();
+    let discount_step: Option<u64> = row.col::<u64>(11);
     let apply_to_shipping = n(&mut row, 12) != 0;
     let free_shipping = n(&mut row, 13) != 0;
     let stop_rules_processing = n(&mut row, 14) != 0;
@@ -328,7 +316,7 @@ pub(crate) fn fetch_sales_rule(
     let times_used = n(&mut row, 18) as u64;
     let conditions = s(&mut row, 19);
 
-    let websites: Vec<String> = c
+    let websites: Vec<Option<String>> = c
         .exec(
             format!(
                 "SELECT w.code FROM {p}salesrule_website rw \
@@ -336,8 +324,7 @@ pub(crate) fn fetch_sales_rule(
                  WHERE rw.rule_id = :v ORDER BY w.code"
             ),
             params! { "v" => rule_id },
-        )
-        .map_err(clean_err)?;
+        )?;
     let customer_groups: Vec<String> = c
         .exec(
             format!(
@@ -346,22 +333,19 @@ pub(crate) fn fetch_sales_rule(
                  WHERE rg.rule_id = :v ORDER BY g.customer_group_id"
             ),
             params! { "v" => rule_id },
-        )
-        .map_err(clean_err)?;
+        )?;
 
     let coupon_count: u64 = c
         .exec_first(
             format!("SELECT COUNT(*) FROM {p}salesrule_coupon WHERE rule_id = :v"),
             params! { "v" => rule_id },
-        )
-        .map_err(clean_err)?
+        )?
         .unwrap_or(0);
     let coupons: Vec<CouponRow> = c
         .exec(
             format!("{coupon_select} WHERE rule_id = :v ORDER BY coupon_id LIMIT 10"),
             params! { "v" => rule_id },
-        )
-        .map_err(clean_err)?;
+        )?;
 
     Ok(Some(DbSalesRule {
         rule_id,
@@ -384,15 +368,18 @@ pub(crate) fn fetch_sales_rule(
         uses_per_coupon,
         times_used,
         conditions,
-        websites,
+        websites: websites.into_iter().flatten().collect(),
         customer_groups,
         coupon_count: coupon_count as u32,
         coupons: coupons
             .into_iter()
-            .map(|(code, used, limit, pc, exp, e)| (code, used, limit, pc, exp, e != 0))
+            .map(|(code, used, limit, pc, exp, e)| {
+                (code.unwrap_or_default(), used, limit, pc, exp, e != 0)
+            })
             .collect(),
-        matched_coupon: matched_coupon
-            .map(|(code, used, limit, pc, exp, e)| (code, used, limit, pc, exp, e != 0)),
+        matched_coupon: matched_coupon.map(|(code, used, limit, pc, exp, e)| {
+            (code.unwrap_or_default(), used, limit, pc, exp, e != 0)
+        }),
     }))
 }
 
@@ -405,10 +392,9 @@ pub(crate) fn fetch_sales_rules_like(
     limit: usize,
 ) -> Result<(Vec<(u32, String, bool, Option<String>, Option<String>)>, bool), String> {
     use mysql::params;
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
-    let rows: Vec<(u32, String, i64, Option<String>, Option<String>)> = c
+    let rows: Vec<(u32, Option<String>, i64, Option<String>, Option<String>)> = c
         .exec(
             format!(
                 "SELECT rule_id, name, is_active, CAST(from_date AS CHAR), \
@@ -418,13 +404,12 @@ pub(crate) fn fetch_sales_rules_like(
                 limit + 1
             ),
             params! { "pat" => format!("%{needle}%") },
-        )
-        .map_err(clean_err)?;
+        )?;
     let truncated = rows.len() > limit;
     Ok((
         rows.into_iter()
             .take(limit)
-            .map(|(id, name, a, f, t)| (id, name, a != 0, f, t))
+            .map(|(id, name, a, f, t)| (id, name.unwrap_or_default(), a != 0, f, t))
             .collect(),
         truncated,
     ))

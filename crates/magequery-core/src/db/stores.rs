@@ -20,28 +20,26 @@ pub(crate) fn fetch_store_tree(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<DbStoreTree, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
 
-    let websites: Vec<(u32, String, String, i64, u32)> = c
+    // `code`, `name` and `is_default` are nullable in the schema (never NULL in practice).
+    type WebsiteRow = (u32, Option<String>, Option<String>, Option<i64>, u32);
+    let websites: Vec<WebsiteRow> = c
         .query(format!(
             "SELECT website_id, code, name, is_default, default_group_id \
              FROM {p}store_website WHERE website_id > 0 ORDER BY sort_order, website_id"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     let groups: Vec<(u32, u32, String, u32, u32)> = c
         .query(format!(
             "SELECT group_id, website_id, name, root_category_id, default_store_id \
              FROM {p}store_group WHERE group_id > 0 ORDER BY group_id"
-        ))
-        .map_err(clean_err)?;
-    let views: Vec<(u32, String, String, u32, u32, i64)> = c
+        ))?;
+    let views: Vec<(u32, Option<String>, String, u32, u32, i64)> = c
         .query(format!(
             "SELECT store_id, code, name, website_id, group_id, is_active \
              FROM {p}store WHERE store_id > 0 ORDER BY sort_order, store_id"
-        ))
-        .map_err(clean_err)?;
+        ))?;
 
     let root_ids: std::collections::BTreeSet<u32> =
         groups.iter().map(|(_, _, _, root, _)| *root).collect();
@@ -70,12 +68,14 @@ pub(crate) fn fetch_store_tree(
     Ok(DbStoreTree {
         websites: websites
             .into_iter()
-            .map(|(id, code, name, d, g)| (id, code, name, d != 0, g))
+            .map(|(id, code, name, d, g)| {
+                (id, code.unwrap_or_default(), name.unwrap_or_default(), d.unwrap_or(0) != 0, g)
+            })
             .collect(),
         groups,
         views: views
             .into_iter()
-            .map(|(id, code, name, w, g, a)| (id, code, name, w, g, a != 0))
+            .map(|(id, code, name, w, g, a)| (id, code.unwrap_or_default(), name, w, g, a != 0))
             .collect(),
         category_names,
         currency_rates,
@@ -89,18 +89,15 @@ pub(crate) fn fetch_order_statuses(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<(Vec<(String, String)>, Vec<(String, String, bool, bool)>), String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     let statuses: Vec<(String, String)> = c
-        .query(format!("SELECT status, label FROM {p}sales_order_status ORDER BY status"))
-        .map_err(clean_err)?;
+        .query(format!("SELECT status, label FROM {p}sales_order_status ORDER BY status"))?;
     let states: Vec<(String, String, i64, i64)> = c
         .query(format!(
             "SELECT status, state, is_default, visible_on_front \
              FROM {p}sales_order_status_state ORDER BY state, status"
-        ))
-        .map_err(clean_err)?;
+        ))?;
     Ok((
         statuses,
         states.into_iter().map(|(st, s, d, v)| (st, s, d != 0, v != 0)).collect(),
@@ -114,7 +111,6 @@ pub(crate) fn fetch_customer_groups(
     conn: &DbConnection,
     table_prefix: &str,
 ) -> Result<Vec<(i64, String, u32, Option<String>, u64)>, String> {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     c.query(format!(
@@ -125,7 +121,6 @@ pub(crate) fn fetch_customer_groups(
          LEFT JOIN {p}tax_class t ON t.class_id = g.tax_class_id \
          ORDER BY g.customer_group_id"
     ))
-    .map_err(clean_err)
 }
 
 /// One row per (entity type × store) sequence: profile + the sequence table's high-water
@@ -139,7 +134,6 @@ pub(crate) fn fetch_sales_sequences(
     Vec<(String, String, Option<String>, Option<String>, u64, bool, Option<u64>, Option<u64>, Option<u64>)>,
     String,
 > {
-    use mysql::prelude::Queryable;
     let mut c = connect(conn)?;
     let p = table_prefix;
     type MetaRow = (String, u32, String, Option<String>, Option<String>, Option<u64>, Option<i64>, Option<u64>, Option<u64>);
@@ -150,19 +144,18 @@ pub(crate) fn fetch_sales_sequences(
              FROM {p}sales_sequence_meta m \
              LEFT JOIN {p}sales_sequence_profile pr ON pr.meta_id = m.meta_id \
              ORDER BY m.entity_type, m.store_id"
-        ))
-        .map_err(clean_err)?;
-    let stores: std::collections::HashMap<u32, String> =
-        c.query(format!("SELECT store_id, code FROM {p}store")).map_err(clean_err)?
-            .into_iter()
-            .collect();
+        ))?;
+    let stores = store_codes(&mut c, p)?;
     let mut out = Vec::with_capacity(rows.len());
     for (entity_type, store_id, table, prefix, suffix, step, active, max, warn) in rows {
-        // The sequence table name comes from the meta row — identifier-sanitized.
+        // The sequence table name comes from the meta row — identifier-sanitized. An
+        // empty table (nothing issued yet: Magento creates one per entity per store) has
+        // a NULL `MAX`; a missing one is tolerated too.
         let current: Option<u64> =
             if table.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-                c.query_first(format!("SELECT MAX(sequence_value) FROM {p}{table}"))
+                c.query_first::<Option<u64>>(format!("SELECT MAX(sequence_value) FROM {p}{table}"))
                     .ok()
+                    .flatten()
                     .flatten()
             } else {
                 None
@@ -182,4 +175,24 @@ pub(crate) fn fetch_sales_sequences(
         ));
     }
     Ok(out)
+}
+
+/// `store_id → code` for every store (admin included). `store.code` is nullable in the
+/// schema; a store without one is left out, so callers fall back to `store/<id>`.
+pub(crate) fn store_codes(
+    c: &mut Db,
+    p: &str,
+) -> Result<std::collections::HashMap<u32, String>, String> {
+    let rows: Vec<(u32, Option<String>)> = c.query(format!("SELECT store_id, code FROM {p}store"))?;
+    Ok(rows.into_iter().filter_map(|(id, code)| code.map(|code| (id, code))).collect())
+}
+
+/// `website_id → code`, like [`store_codes`].
+pub(crate) fn website_codes(
+    c: &mut Db,
+    p: &str,
+) -> Result<std::collections::HashMap<u32, String>, String> {
+    let rows: Vec<(u32, Option<String>)> =
+        c.query(format!("SELECT website_id, code FROM {p}store_website"))?;
+    Ok(rows.into_iter().filter_map(|(id, code)| code.map(|code| (id, code))).collect())
 }

@@ -89,7 +89,7 @@ impl Magento {
     fn fetch_core_config_data(&self) -> Result<Vec<(String, String, String)>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        db::fetch_config(conn, &cfg.table_prefix).map_err(Error::Db)
+        db::fetch_config(conn, &cfg.table_prefix).live(self)
     }
 
     /// Seconds since the last successful cron job finished (DB clock).
@@ -97,7 +97,7 @@ impl Magento {
     pub(crate) fn fetch_cron_last_success(&self) -> Result<Option<i64>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        db::fetch_cron_last_success(conn, &cfg.table_prefix).map_err(Error::Db)
+        db::fetch_cron_last_success(conn, &cfg.table_prefix).live(self)
     }
 
     #[cfg(not(feature = "db"))]
@@ -110,7 +110,7 @@ impl Magento {
     pub(crate) fn fetch_scope_counts(&self) -> Result<(usize, usize, usize)> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        db::fetch_scope_counts(conn, &cfg.table_prefix).map_err(Error::Db)
+        db::fetch_scope_counts(conn, &cfg.table_prefix).live(self)
     }
 
     #[cfg(not(feature = "db"))]
@@ -123,7 +123,7 @@ impl Magento {
     pub(crate) fn fetch_theme_rows(&self) -> Result<Vec<(u32, Option<u32>, Option<String>, String)>> {
         let cfg = self.db_config()?;
         let conn = default_connection(&cfg)?;
-        db::fetch_themes(conn, &cfg.table_prefix).map_err(Error::Db)
+        db::fetch_themes(conn, &cfg.table_prefix).live(self)
     }
 
     #[cfg(not(feature = "db"))]
@@ -152,7 +152,7 @@ impl Magento {
         let conn = default_connection(&cfg)?;
         let (rewrites, truncated) =
             db::fetch_url_rewrites(conn, &cfg.table_prefix, path_filter, store, redirects_only, limit)
-                .map_err(Error::Db)?;
+                .live(self)?;
         Ok(UrlRewrites { rewrites, truncated })
     }
 
