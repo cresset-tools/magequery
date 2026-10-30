@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+    <!-- Spelled like the FILE, not the declaration: interception.php keys this
+         type as written AND the scanned class as declared, both true. -->
+    <type name="Acme\Casing\Model\KingDebtor">
+        <arguments>
+            <argument name="data" xsi:type="array">
+                <item name="form_name" xsi:type="string">sales_rule_form</item>
+            </argument>
+        </arguments>
+    </type>
+    <type name="Acme\Casing\Model\Condition">
+        <plugin name="acme_validate" type="Acme\Casing\Plugin\Validate"/>
+    </type>
+</config>

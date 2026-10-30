@@ -14,7 +14,7 @@
 //! case-only path pair, an interceptor whose module is provably disabled), so a
 //! real regression is never silently absorbed into the "known" bucket.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -1415,35 +1415,21 @@ fn drop_inert_interception_misses(rel: &str, archive: &str, output: &str) -> (St
         return (archive.to_owned(), false);
     }
     let mut present: HashSet<&str> = HashSet::new();
-    // lowercased key -> value, for the case-alias rule.
-    let mut by_lower: HashMap<String, &str> = HashMap::new();
     for line in output.lines() {
         let Some(key) = top_level_entry_key(line) else { continue };
         present.insert(key);
-        by_lower.insert(key.to_ascii_lowercase(), entry_value(line));
     }
 
     let mut out = String::with_capacity(archive.len());
     let mut dropped = false;
     for line in archive.lines() {
         if let Some(key) = top_level_entry_key(line) {
-            if !present.contains(key) {
-                // (a) an inert `false` row the output simply lacks, and
-                // (b) a case-variant ALIAS of a row the output does have, with
-                //     the same verdict — PHP class names are case-insensitive, so
-                //     the two keys denote one type. The oracle records both when
-                //     a di.xml `<type name=>` spells a class differently from its
-                //     declaration (`…\KingDebtor` in config, `class Kingdebtor` in
-                //     source); magecommand canonicalizes to the declared case and
-                //     writes the single key. Both sides generate the interceptor
-                //     at the same path, so the code is identical either way.
-                let value = entry_value(line);
-                let inert = value == "false";
-                let alias = by_lower.get(&key.to_ascii_lowercase()) == Some(&value);
-                if inert || alias {
-                    dropped = true;
-                    continue;
-                }
+            // An inert `false` row the output simply lacks. (A config spelling
+            // that differs in case from the declaration is not excused here:
+            // magecommand writes both keys, as the oracle does.)
+            if !present.contains(key) && entry_value(line) == "false" {
+                dropped = true;
+                continue;
             }
         }
         out.push_str(line);

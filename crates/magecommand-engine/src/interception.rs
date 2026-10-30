@@ -68,16 +68,20 @@ struct Resolver<'a> {
 
 impl Resolver<'_> {
     /// `Config::_inheritInterception`, memoized into the map (every type
-    /// touched — ancestors and interfaces included — gets an entry). Keys
-    /// use the DECLARED case (reflection's view), and only CLASSES inherit:
-    /// `Relations\Runtime::getParents` bails when `class_exists` is false,
-    /// so interfaces, traits, and unknowns never walk their ancestry.
+    /// touched — ancestors and interfaces included — gets an entry). Only
+    /// CLASSES inherit: `Relations\Runtime::getParents` bails when
+    /// `class_exists` is false, so interfaces, traits, and unknowns never walk
+    /// their ancestry.
+    ///
+    /// The key is the name AS GIVEN, like `$this->_intercepted[$type]`: a
+    /// di.xml `<type name=>` keeps its config spelling, a scanned class its
+    /// declared one. PHP resolves the class case-insensitively, so a config
+    /// that spells it differently from its declaration (`…\KingDebtor` in
+    /// di.xml, `class Kingdebtor` in source) yields TWO keys with one verdict
+    /// — the compiled map has both. The declared case is only for finding the
+    /// class, and for its parents, which reflection reports declared.
     fn has_plugins(&mut self, type_name: &str) -> bool {
-        let key = self
-            .defs
-            .canonical_case(type_name)
-            .unwrap_or(type_name)
-            .to_owned();
+        let key = type_name.trim_start_matches('\\').to_owned();
         if let Some(&v) = self.map.get(&key) {
             return v;
         }
@@ -88,16 +92,22 @@ impl Resolver<'_> {
         let result = if real != key {
             self.has_plugins(&real)
         } else {
+            let declared = self.defs.canonical_case(&key).unwrap_or(&key).to_owned();
             // Classes whose last segment is exactly `Interceptor` never
             // inherit interception (`_serviceClassTypes`).
             let last = key.rsplit('\\').next().unwrap_or(&key);
             if last == "Interceptor" {
                 false
-            } else if let Some(record) = self.defs.get(&key) {
+            } else if let Some(record) = self.defs.get(&declared) {
                 if record.meta.kind == magecommand_php::ClassKind::Class {
-                    let relations = self.defs.relations_of(&key);
+                    let relations = self.defs.relations_of(&declared);
                     let mut any = false;
                     for relation in relations {
+                        let relation = self
+                            .defs
+                            .canonical_case(&relation)
+                            .map(str::to_owned)
+                            .unwrap_or(relation);
                         if self.has_plugins(&relation) {
                             any = true;
                             break;
@@ -107,7 +117,7 @@ impl Resolver<'_> {
                 } else {
                     false
                 }
-            } else if let Some(relations) = internal_relations(&key) {
+            } else if let Some(relations) = internal_relations(&declared) {
                 // Internal PHP classes: reflection still reports their
                 // parents + interfaces, which all get (false) entries.
                 let mut any = false;
