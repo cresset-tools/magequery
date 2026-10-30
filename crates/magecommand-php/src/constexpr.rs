@@ -40,7 +40,13 @@ pub enum ConstExpr {
     },
     /// Unary minus.
     Neg(Box<ConstExpr>),
-    /// Anything this parser does not model (`new Foo()`, ternaries, calls).
+    /// `new Foo` / `new Foo()` with no arguments (a PHP 8.1 initializer), the
+    /// class already resolved to its FQCN. An object is not a [`ConstValue`],
+    /// so [`eval`] still fails on it exactly as on [`ConstExpr::Opaque`];
+    /// a caller that can model the object matches on this shape itself.
+    /// Arguments, `new self`/`static`, and anonymous classes stay opaque.
+    New(String),
+    /// Anything this parser does not model (`new Foo(1)`, ternaries, calls).
     /// Evaluation fails loudly.
     Opaque(String),
 }
@@ -489,6 +495,7 @@ impl<'a> ExprParser<'a> {
                 }
                 return self.opaque();
             }
+            "new" => return self.parse_new(),
             _ => {}
         }
         self.cur.skip_insignificant();
@@ -527,6 +534,49 @@ impl<'a> ExprParser<'a> {
         // PHP resolves unqualified constants namespace-relative then global;
         // in practice metadata-relevant ones are the global core constants.
         ConstExpr::GlobalConst(name)
+    }
+
+    /// After the `new` keyword: a class name and an optional EMPTY argument
+    /// list. Everything else is opaque.
+    fn parse_new(&mut self) -> ConstExpr {
+        self.cur.skip_insignificant();
+        if !(self.cur.peek() == Some(b'\\') || self.cur.at_ident_start()) {
+            return self.opaque(); // `new (expr)`, `new $var`
+        }
+        let mut name = String::new();
+        if self.cur.peek() == Some(b'\\') {
+            self.cur.bump();
+            name.push('\\');
+        }
+        loop {
+            match self.cur.read_ident() {
+                Some(seg) => name.push_str(seg),
+                None => return self.opaque(),
+            }
+            if self.cur.peek() == Some(b'\\') {
+                self.cur.bump();
+                name.push('\\');
+            } else {
+                break;
+            }
+        }
+        // `new class {…}` is anonymous; self/parent/static need context.
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "class" | "self" | "parent" | "static"
+        ) {
+            return self.opaque();
+        }
+        self.cur.skip_insignificant();
+        if self.cur.peek() == Some(b'(') {
+            self.cur.bump();
+            self.cur.skip_insignificant();
+            if self.cur.peek() != Some(b')') {
+                return self.opaque(); // constructor arguments
+            }
+            self.cur.bump();
+        }
+        ConstExpr::New(self.resolve(&name))
     }
 }
 
@@ -803,6 +853,9 @@ fn eval_expr(
             let r = eval_expr(right, classes, ctx)?;
             eval_binop(*op, l, r)
         }
+        ConstExpr::New(fqcn) => Err(EvalError::new(format!(
+            "expression not statically evaluable: new \\{fqcn}()"
+        ))),
         ConstExpr::Opaque(text) => Err(EvalError::new(format!(
             "expression not statically evaluable: {text}"
         ))),
@@ -1103,9 +1156,27 @@ mod tests {
         );
     }
 
+    /// PHP 8.1 `new` in initializers: only the argument-less shape is modeled,
+    /// with the class resolved like any other name. It still never folds.
+    #[test]
+    fn argumentless_new_is_its_own_shape() {
+        let uses = [("thing".to_owned(), "Other\\Thing".to_owned())];
+        let f = |src: &str| parse_const_expr(src, "X", &uses).expr;
+        assert_eq!(f("new Foo()"), ConstExpr::New("X\\Foo".into()));
+        assert_eq!(f("new Foo"), ConstExpr::New("X\\Foo".into()));
+        assert_eq!(f("new \\A\\B ( )"), ConstExpr::New("A\\B".into()));
+        assert_eq!(f("NEW Thing()"), ConstExpr::New("Other\\Thing".into()));
+        for src in ["new Foo(1)", "new Foo(...[])", "new class {}", "new static()", "new self",
+                    "new ($cls)", "new Foo()->bar"] {
+            assert!(matches!(f(src), ConstExpr::Opaque(_)), "{src} must stay opaque");
+        }
+        let parsed = parse_const_expr("new Foo()", "X", &[]);
+        assert!(eval(&parsed, &EvalCtx::new(&NoLookup, None)).is_err());
+    }
+
     #[test]
     fn unevaluable_is_a_hard_error() {
-        let parsed = parse_const_expr("new Foo()", "X", &[]);
+        let parsed = parse_const_expr("new Foo(1)", "X", &[]);
         assert!(matches!(parsed.expr, ConstExpr::Opaque(_)));
         assert!(eval(&parsed, &EvalCtx::new(&NoLookup, None)).is_err());
         let parsed = parse_const_expr("UNKNOWN_CONST", "X", &[]);

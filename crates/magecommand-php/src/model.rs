@@ -55,6 +55,9 @@ pub struct ClassMeta {
     /// The enum backing type (`enum X: string`), when declared.
     pub enum_backing: Option<String>,
     pub methods: Vec<MethodMeta>,
+    /// Declared properties, in source order. Constructor-promoted properties
+    /// are NOT repeated here — they live on the `__construct` params.
+    pub properties: Vec<PropertyMeta>,
     /// Class-level `#[Attribute]` names, resolved to FQCNs.
     pub attributes: Vec<String>,
     /// Byte offset of the declaration keyword (for diagnostics).
@@ -123,6 +126,27 @@ pub struct ConstMeta {
     /// Declared type for typed constants (8.3+), resolved.
     pub ty: Option<String>,
     pub value: String,
+}
+
+/// A declared property (`[modifiers] [type] $name [= expr]`). One entry per
+/// name, so `public $a, $b = 1;` yields two.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct PropertyMeta {
+    /// Without the `$`.
+    pub name: String,
+    pub visibility: Visibility,
+    pub is_static: bool,
+    pub is_readonly: bool,
+    /// Resolved type expression; `None` for untyped properties — the
+    /// difference matters: an untyped property without a default starts as
+    /// `null`, a typed one starts uninitialized.
+    pub ty: Option<String>,
+    /// Raw default-value expression text, whitespace collapsed.
+    pub default: Option<String>,
+    /// Declared with 8.4 hooks (`{ get => …; }`). The hook bodies are skipped;
+    /// whether such a property has a backing value at all depends on them.
+    pub hooked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

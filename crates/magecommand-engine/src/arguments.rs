@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use magecommand_php::constexpr::{
     eval, parse_const_expr, ClassRef, ConstExpr, ConstLookup, ConstValue, EvalCtx, ParsedExpr,
 };
-use magecommand_php::{ClassKind, ParamMeta};
+use magecommand_php::{ClassKind, ParamMeta, Visibility};
 use magequery_core::{ArgValue, DiExport, Magento};
 
 use crate::definitions::Definitions;
@@ -27,6 +27,12 @@ pub(crate) enum Cfg {
     /// reference) emitted unquoted — see [`crate::phpexport::PhpValue::Raw`].
     Raw(String),
     Map(Vec<(CfgKey, Cfg)>),
+    /// An object built by a `new X()` parameter default — see
+    /// [`crate::phpexport::PhpValue::Object`].
+    Object {
+        class: String,
+        props: Vec<(String, Cfg)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -520,6 +526,22 @@ impl<'a> ArgsCtx<'a> {
                 &parsed.expr,
             )),
             Err(e) => {
+                // A PHP 8.1 `new X()` default: reflection hands Magento the
+                // constructed object and var_export writes it out. Built here
+                // only when the object is fully knowable; otherwise the row
+                // drops to NULL like any other unreadable default.
+                if let ConstExpr::New(class) = &parsed.expr {
+                    return match self.new_object_default(class) {
+                        Ok(object) => FoldedDefault::Value(object),
+                        Err(why) => {
+                            self.finding(format!(
+                                "{definer_fqcn}::${}: default '{default}': {why}",
+                                param.name
+                            ));
+                            FoldedDefault::Unresolvable
+                        }
+                    };
+                }
                 // An enum-case default can't fold (an enum case is an object, not
                 // a scalar) — Magento keeps it as the constant reference. Emit the
                 // verbatim `\Enum::CASE` instead of dropping it to null.
@@ -533,6 +555,95 @@ impl<'a> ArgsCtx<'a> {
                 FoldedDefault::Unresolvable
             }
         }
+    }
+
+    /// The object `new X()` constructs, as `var_export` prints it: its
+    /// initialized instance properties in PHP's property-table order. Only
+    /// built when that needs no PHP: X is a concrete class, and neither X nor
+    /// any ancestor declares a constructor (which could assign anything) or
+    /// uses a trait (whose properties we would have to splice in). Every
+    /// property default must fold, and hooked properties are refused.
+    /// `Err` says why the object is out of reach.
+    fn new_object_default(&self, class: &str) -> Result<Cfg, String> {
+        // Leaf first; PHP builds the table root first.
+        let mut chain = Vec::new();
+        let mut current = class.to_owned();
+        loop {
+            if chain.len() > 64 {
+                return Err(format!("inheritance cycle at {current}"));
+            }
+            let Some(record) = self.defs.get(&current) else {
+                return Err(format!("{current} is not a parsed class"));
+            };
+            let meta = &record.meta;
+            if meta.methods.iter().any(|m| m.name.eq_ignore_ascii_case("__construct")) {
+                return Err(format!("{} declares a constructor", meta.fqcn));
+            }
+            if !meta.traits.is_empty() {
+                return Err(format!("{} uses traits", meta.fqcn));
+            }
+            chain.push(record);
+            match meta.extends.first() {
+                Some(parent) => current = parent.clone(),
+                None => break,
+            }
+        }
+        let leaf = &chain[0].meta;
+        if leaf.kind != ClassKind::Class || leaf.is_abstract {
+            return Err(format!("{} is not an instantiable class", leaf.fqcn));
+        }
+        let lookup = DefsLookup { defs: self.defs };
+        // (name, visibility, value) — `None` = uninitialized, which var_export
+        // skips but which still holds the slot's position.
+        let mut slots: Vec<(String, Visibility, Option<Cfg>)> = Vec::new();
+        for record in chain.iter().rev() {
+            let meta = &record.meta;
+            let ns = meta.fqcn.rsplit_once('\\').map(|(n, _)| n).unwrap_or("");
+            for prop in meta.properties.iter().filter(|p| !p.is_static) {
+                if prop.hooked {
+                    return Err(format!("{}::${} has property hooks", meta.fqcn, prop.name));
+                }
+                let value = match &prop.default {
+                    Some(text) => {
+                        let parsed = parse_const_expr(text, ns, &meta.uses);
+                        match eval(&parsed, &EvalCtx::new(&lookup, Some(&meta.fqcn))) {
+                            Ok(v) => Some(coerce_property_float(const_to_cfg(&v), prop.ty.as_deref())),
+                            Err(e) => {
+                                return Err(format!(
+                                    "{}::${} = {text}: {}",
+                                    meta.fqcn, prop.name, e.message
+                                ))
+                            }
+                        }
+                    }
+                    // A typed property without a default is uninitialized; an
+                    // untyped one is implicitly null.
+                    None if prop.ty.is_some() => None,
+                    None => Some(Cfg::Null),
+                };
+                // A redeclared inherited property keeps its parent's slot. A
+                // parent's PRIVATE property is invisible to the child, so the
+                // child's same-named one is a second slot — and var_export
+                // prints both.
+                match slots
+                    .iter_mut()
+                    .find(|(name, vis, _)| *name == prop.name && *vis != Visibility::Private)
+                {
+                    Some(slot) => {
+                        slot.1 = prop.visibility;
+                        slot.2 = value;
+                    }
+                    None => slots.push((prop.name.clone(), prop.visibility, value)),
+                }
+            }
+        }
+        Ok(Cfg::Object {
+            class: leaf.fqcn.clone(),
+            props: slots
+                .into_iter()
+                .filter_map(|(name, _, value)| Some((name, value?)))
+                .collect(),
+        })
     }
 
     /// If `parsed` is a bare enum-case reference (`SomeEnum::CASE` where the
@@ -674,6 +785,10 @@ fn cfg_to_php(value: &Cfg) -> PhpValue {
         Cfg::Bool(b) => PhpValue::Bool(*b),
         Cfg::Null => PhpValue::Null,
         Cfg::Raw(expr) => PhpValue::Raw(expr.clone()),
+        Cfg::Object { class, props } => PhpValue::Object {
+            class: class.clone(),
+            props: props.iter().map(|(n, v)| (n.clone(), cfg_to_php(v))).collect(),
+        },
         Cfg::Map(entries) => PhpValue::Array(
             entries
                 .iter()
@@ -776,6 +891,26 @@ fn coerce_to_declared_float(value: Cfg, ty: Option<&str>, expr: &ConstExpr) -> C
     }
 }
 
+/// A typed property's int default under a float type is stored as a float —
+/// unlike a parameter default ([`coerce_to_declared_float`]), even when it
+/// comes from a constant: PHP verifies the evaluated default against the
+/// property type, and int → float is the one widening that check performs.
+/// `public float $a = self::I` (I = 2) var_exports as `2.0`; `int|float`
+/// keeps the int, since int is itself accepted.
+fn coerce_property_float(value: Cfg, ty: Option<&str>) -> Cfg {
+    let Some(ty) = ty else { return value };
+    let members: Vec<String> = ty
+        .split(['|', '&'])
+        .map(|m| m.trim_matches(|c| c == '?' || c == '(' || c == ')' || c == ' ').to_ascii_lowercase())
+        .collect();
+    match value {
+        Cfg::Int(n) if members.iter().any(|m| m == "float") && !members.iter().any(|m| m == "int") => {
+            Cfg::Float(n as f64)
+        }
+        other => other,
+    }
+}
+
 fn optional_tail_start(params: &[ParamMeta]) -> usize {
     params
         .iter()
@@ -827,6 +962,8 @@ fn sort_order_int(value: &Cfg) -> i64 {
         }
         Cfg::Map(m) => !m.is_empty() as i64,
         Cfg::Null | Cfg::Raw(_) => 0,
+        // `(int)` of an object is 1 (with a warning).
+        Cfg::Object { .. } => 1,
     }
 }
 

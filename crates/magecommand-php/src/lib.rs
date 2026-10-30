@@ -3,7 +3,8 @@
 //! A DI compiler needs declarations, never method bodies. This crate parses
 //! exactly that subset: namespace + use imports, class/interface/trait/enum
 //! headers, constructor parameters (incl. promoted properties), method
-//! signatures, trait uses + adaptations, and class constants. Bodies are
+//! signatures, trait uses + adaptations, class constants, and declared
+//! properties (for the objects `new X()` parameter defaults build). Bodies are
 //! *skipped*, not parsed — `memchr`-accelerated scanning past string/comment/
 //! heredoc interiors, with a scalar recursive-descent over the structural
 //! remainder.
@@ -357,12 +358,23 @@ class C {
     }
 
     #[test]
-    fn properties_are_skipped_including_hooks() {
+    fn properties_are_consumed_including_hooks() {
         let c = one(
             "<?php class C {\n  public int $a = 5;\n  protected array $b = ['x' => '}'], $c = [];\n  public string $hooked { get => strtoupper($this->raw); set { $this->raw = $value; } }\n  public function real() {}\n}",
         );
         assert_eq!(c.methods.len(), 1);
         assert_eq!(c.methods[0].name, "real");
+        let props: Vec<_> =
+            c.properties.iter().map(|p| (p.name.as_str(), p.default.as_deref(), p.hooked)).collect();
+        assert_eq!(
+            props,
+            [
+                ("a", Some("5"), false),
+                ("b", Some("['x' => '}']"), false),
+                ("c", Some("[]"), false),
+                ("hooked", None, true),
+            ]
+        );
     }
 
     #[test]
@@ -422,6 +434,84 @@ class C {
         let c = one("<?php class C { public function list() {} public function use() {} }");
         let names: Vec<_> = c.methods.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, ["list", "use"]);
+    }
+
+    /// What `var_export` of a `new X()` default needs: every declared property
+    /// in source order with its modifiers, type and raw default. Typed vs
+    /// untyped is the load-bearing distinction — without a default, an untyped
+    /// property is `null` and a typed one is uninitialized.
+    #[test]
+    fn properties_in_source_order() {
+        let c = one(
+            r#"<?php
+namespace N;
+use Other\Thing;
+class C {
+    public $plain;
+    protected ?Thing $typed = null, $second = 2;
+    private static array $shared = ['a' => 1, 'b' => [2, 3]];
+    var $legacy = 'x';
+    public readonly int $ro;
+    const K = 1;
+    public function __construct() {}
+    public int $after = self::K;
+}"#,
+        );
+        let p = &c.properties;
+        let names: Vec<_> = p.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["plain", "typed", "second", "shared", "legacy", "ro", "after"]);
+        assert_eq!((p[0].visibility, p[0].ty.as_deref(), p[0].default.as_deref()), (Visibility::Public, None, None));
+        assert_eq!(p[1].ty.as_deref(), Some("?Other\\Thing"));
+        assert_eq!(p[1].default.as_deref(), Some("null"));
+        // A grouped declaration shares its modifiers and type.
+        assert_eq!((p[2].visibility, p[2].ty.as_deref(), p[2].default.as_deref()),
+                   (Visibility::Protected, Some("?Other\\Thing"), Some("2")));
+        assert!(p[3].is_static);
+        assert_eq!(p[3].default.as_deref(), Some("['a' => 1, 'b' => [2, 3]]"));
+        assert_eq!((p[4].visibility, p[4].default.as_deref()), (Visibility::Public, Some("'x'")));
+        assert!(p[5].is_readonly && p[5].default.is_none());
+        assert_eq!(p[6].default.as_deref(), Some("self::K"));
+        assert!(!p.iter().any(|p| p.hooked));
+        // Members around the properties are unaffected.
+        assert_eq!(c.constants.len(), 1);
+        assert_eq!(c.methods.len(), 1);
+    }
+
+    /// Promoted constructor params stay on the constructor; they are not
+    /// duplicated as declared properties.
+    #[test]
+    fn promoted_params_are_not_properties() {
+        let c = one("<?php class C { public $a; public function __construct(private int $b) {} }");
+        assert_eq!(c.properties.len(), 1);
+        assert_eq!(c.properties[0].name, "a");
+    }
+
+    #[test]
+    fn readonly_class_makes_properties_readonly() {
+        let c = one("<?php readonly class C { public int $a; }");
+        assert!(c.properties[0].is_readonly);
+    }
+
+    /// 8.4 hooks are skipped like a body; the property is flagged, its default
+    /// kept, and the members after it still parse.
+    #[test]
+    fn hooked_properties_are_flagged() {
+        let c = one(
+            r#"<?php class C {
+    public string $v { get => strtoupper($this->b); }
+    public string $backed = 'x' { set => trim($value); }
+    public private(set) int $asym = 1;
+    public function f() {}
+}"#,
+        );
+        let p = &c.properties;
+        assert_eq!(p.len(), 3);
+        assert!(p[0].hooked && p[0].default.is_none());
+        assert!(p[1].hooked);
+        assert_eq!(p[1].default.as_deref(), Some("'x'"));
+        assert!(!p[2].hooked);
+        assert_eq!(p[2].default.as_deref(), Some("1"));
+        assert_eq!(c.methods[0].name, "f");
     }
 
     #[test]
