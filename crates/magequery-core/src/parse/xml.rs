@@ -2,11 +2,20 @@
 
 use super::*;
 
+/// An attribute's value with XML entities decoded (`name="&lt;=&gt;"` is
+/// `<=>`), as every DOM-based reader of these files sees it. A value that
+/// doesn't decode (a stray `&`) is returned as written.
 pub(crate) fn attr(e: &BytesStart, key: &[u8]) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| a.key.as_ref() == key)
-        .map(|a| String::from_utf8_lossy(&a.value).into_owned())
+        .map(|a| attr_value(&a))
+}
+
+fn attr_value(a: &quick_xml::events::attributes::Attribute) -> String {
+    a.unescape_value()
+        .map(|v| v.into_owned())
+        .unwrap_or_else(|_| String::from_utf8_lossy(&a.value).into_owned())
 }
 
 /// Maps a byte offset in a source file to a 1-based line number, for provenance.
@@ -51,6 +60,6 @@ pub(crate) fn attr_true(e: &BytesStart, key: &[u8]) -> bool {
 pub(crate) fn xsi_type(e: &BytesStart) -> Option<String> {
     e.attributes().flatten().find_map(|a| {
         let key = a.key.as_ref();
-        (key == b"xsi:type" || key.ends_with(b":type")).then(|| String::from_utf8_lossy(&a.value).into_owned())
+        (key == b"xsi:type" || key.ends_with(b":type")).then(|| attr_value(&a))
     })
 }
