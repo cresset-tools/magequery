@@ -1,0 +1,495 @@
+# magecommand-engine compile fixture — the expected output of compute_outputs()
+# over `in/`, byte for byte. Everything below is generated; edit `in/` instead.
+# Re-bless: MAGECOMMAND_COMPILE_BLESS=1 cargo test -p magecommand-engine --test compile
+# files: 17  findings: 0  unresolved: 0
+
+===== file: code/Acme/Pay/Model/Api/Interceptor.php =====
+<?php
+namespace Acme\Pay\Model\Api;
+
+/**
+ * Interceptor class for @see \Acme\Pay\Model\Api
+ */
+class Interceptor extends \Acme\Pay\Model\Api implements \Magento\Framework\Interception\InterceptorInterface
+{
+    use \Magento\Framework\Interception\Interceptor;
+
+    public function __construct()
+    {
+        $this->___init();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function ping(): bool
+    {
+        $pluginInfo = $this->pluginList->getNext($this->subjectType, 'ping');
+        return $pluginInfo ? $this->___callPlugins('ping', func_get_args(), $pluginInfo) : parent::ping();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function send(string $request)
+    {
+        $pluginInfo = $this->pluginList->getNext($this->subjectType, 'send');
+        return $pluginInfo ? $this->___callPlugins('send', func_get_args(), $pluginInfo) : parent::send($request);
+    }
+}
+
+===== file: metadata/adminhtml.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => NULL,
+    'Acme\\Pay\\Plugin\\Log' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 'Acme\\Pay\\Model\\Api\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/adminhtml|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Lib\\Client' => NULL,
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Pay\\Model\\Api_ping___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+    'Acme\\Pay\\Model\\Api_send___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/app_action_list.php =====
+<?php return array (
+);
+
+===== file: metadata/crontab.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => NULL,
+    'Acme\\Pay\\Plugin\\Log' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 'Acme\\Pay\\Model\\Api\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/crontab|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Lib\\Client' => NULL,
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Pay\\Model\\Api_ping___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+    'Acme\\Pay\\Model\\Api_send___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/frontend.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => NULL,
+    'Acme\\Pay\\Plugin\\Log' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 'Acme\\Pay\\Model\\Api\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/frontend|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Lib\\Client' => NULL,
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Pay\\Model\\Api_ping___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+    'Acme\\Pay\\Model\\Api_send___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => NULL,
+    'Acme\\Pay\\Plugin\\Log' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 'Acme\\Pay\\Model\\Api\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/global|graphql|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Lib\\Client' => NULL,
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Pay\\Model\\Api_ping___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+    'Acme\\Pay\\Model\\Api_send___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Lib\\Client' => NULL,
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Pay\\Model\\Api_ping___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+    'Acme\\Pay\\Model\\Api_send___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|webapi_rest|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Lib\\Client' => NULL,
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Pay\\Model\\Api_ping___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+    'Acme\\Pay\\Model\\Api_send___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|webapi_soap|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Lib\\Client' => NULL,
+    'Acme\\Pay\\Model\\Api' => 
+    array (
+      'acme_log' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Pay\\Plugin\\Log',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Pay\\Model\\Api_ping___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+    'Acme\\Pay\\Model\\Api_send___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_log',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/graphql.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => NULL,
+    'Acme\\Pay\\Plugin\\Log' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 'Acme\\Pay\\Model\\Api\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/interception.php =====
+<?php return array (
+  'Acme\\Pay\\Model\\Api' => true,
+  'Acme\\Pay\\Model\\Api\\Interceptor' => false,
+  'Acme\\Pay\\Plugin\\Log' => false,
+);
+
+===== file: metadata/webapi_rest.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => NULL,
+    'Acme\\Pay\\Plugin\\Log' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 'Acme\\Pay\\Model\\Api\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/webapi_soap.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => NULL,
+    'Acme\\Pay\\Plugin\\Log' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Pay\\Model\\Api' => 'Acme\\Pay\\Model\\Api\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== findings =====
+
+===== unresolved =====

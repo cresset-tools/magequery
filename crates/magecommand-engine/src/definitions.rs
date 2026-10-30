@@ -448,7 +448,15 @@ impl Definitions {
             .classes
             .values()
             .flat_map(|r| {
-                let supers = r.meta.extends.iter().chain(r.meta.implements.iter()).cloned();
+                // Used traits too: reflection flattens their methods into the
+                // class, so a library class's interceptor needs the trait files.
+                let supers = r
+                    .meta
+                    .extends
+                    .iter()
+                    .chain(r.meta.implements.iter())
+                    .chain(r.meta.traits.iter())
+                    .cloned();
                 // Constructor param class-hints too: reflection reports their
                 // DECLARED case, so the hinted files must be parsed even when
                 // no scanned class inherits from them.
@@ -497,6 +505,7 @@ impl Definitions {
             for decl in meta.declarations {
                 queue.extend(decl.extends.iter().cloned());
                 queue.extend(decl.implements.iter().cloned());
+                queue.extend(decl.traits.iter().cloned());
                 self.canonical
                     .insert(decl.fqcn.to_ascii_lowercase(), decl.fqcn.clone());
                 self.classes

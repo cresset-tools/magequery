@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+    <!-- A module class extending a library class: its interceptor must wrap
+         the library parent's TRAIT methods too (reflection flattens send()). -->
+    <type name="Acme\Pay\Model\Api">
+        <plugin name="acme_log" type="Acme\Pay\Plugin\Log"/>
+    </type>
+</config>

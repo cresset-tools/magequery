@@ -1,0 +1,14 @@
+{
+    "packages": [
+        {
+            "name": "acme/lib",
+            "version": "1.0.0",
+            "type": "library",
+            "install-path": "../acme/lib",
+            "autoload": {
+                "psr-4": {"Acme\\Lib\\": "src/"}
+            }
+        }
+    ],
+    "dev": false
+}
