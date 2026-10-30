@@ -51,6 +51,13 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.21.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.21.0...magequery-v0.21.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **magequery:** never panic on a database row that doesn't fit its type ([#164](https://github.com/cresset-tools/magequery/issues/164)) ([c0394ba](https://github.com/cresset-tools/magequery/commit/c0394baefa76c33a990e3aa04e8c727c3d1fa25e)), closes [#108](https://github.com/cresset-tools/magequery/issues/108)
+
 ## [0.21.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.20.3...magequery-v0.21.0) (2026-10-30)
 
 
