@@ -1,0 +1,530 @@
+# magecommand-engine compile fixture — the expected output of compute_outputs()
+# over `in/`, byte for byte. Everything below is generated; edit `in/` instead.
+# Re-bless: MAGECOMMAND_COMPILE_BLESS=1 cargo test -p magecommand-engine --test compile
+# files: 18  findings: 0  unresolved: 0
+
+===== file: code/Acme/Casing/Model/Condition/Interceptor.php =====
+<?php
+namespace Acme\Casing\Model\Condition;
+
+/**
+ * Interceptor class for @see \Acme\Casing\Model\Condition
+ */
+class Interceptor extends \Acme\Casing\Model\Condition implements \Magento\Framework\Interception\InterceptorInterface
+{
+    use \Magento\Framework\Interception\Interceptor;
+
+    public function __construct()
+    {
+        $this->___init();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function validate(array $data = []): bool
+    {
+        $pluginInfo = $this->pluginList->getNext($this->subjectType, 'validate');
+        return $pluginInfo ? $this->___callPlugins('validate', func_get_args(), $pluginInfo) : parent::validate($data);
+    }
+}
+
+===== file: code/Acme/Casing/Model/Kingdebtor/Interceptor.php =====
+<?php
+namespace Acme\Casing\Model\Kingdebtor;
+
+/**
+ * Interceptor class for @see \Acme\Casing\Model\Kingdebtor
+ */
+class Interceptor extends \Acme\Casing\Model\Kingdebtor implements \Magento\Framework\Interception\InterceptorInterface
+{
+    use \Magento\Framework\Interception\Interceptor;
+
+    public function __construct(array $data = [])
+    {
+        $this->___init();
+        parent::__construct($data);
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function validate(array $data = []): bool
+    {
+        $pluginInfo = $this->pluginList->getNext($this->subjectType, 'validate');
+        return $pluginInfo ? $this->___callPlugins('validate', func_get_args(), $pluginInfo) : parent::validate($data);
+    }
+}
+
+===== file: metadata/adminhtml.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => NULL,
+    'Acme\\Casing\\Model\\Kingdebtor\\Interceptor' => 
+    array (
+      'data' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+    ),
+    'Acme\\Casing\\Plugin\\Validate' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 'Acme\\Casing\\Model\\Condition\\Interceptor',
+    'Acme\\Casing\\Model\\Kingdebtor' => 'Acme\\Casing\\Model\\Kingdebtor\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/adminhtml|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Casing\\Model\\Condition_validate___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_validate',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/app_action_list.php =====
+<?php return array (
+);
+
+===== file: metadata/crontab.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => NULL,
+    'Acme\\Casing\\Model\\Kingdebtor\\Interceptor' => 
+    array (
+      'data' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+    ),
+    'Acme\\Casing\\Plugin\\Validate' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 'Acme\\Casing\\Model\\Condition\\Interceptor',
+    'Acme\\Casing\\Model\\Kingdebtor' => 'Acme\\Casing\\Model\\Kingdebtor\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/crontab|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Casing\\Model\\Condition_validate___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_validate',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/frontend.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => NULL,
+    'Acme\\Casing\\Model\\Kingdebtor\\Interceptor' => 
+    array (
+      'data' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+    ),
+    'Acme\\Casing\\Plugin\\Validate' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 'Acme\\Casing\\Model\\Condition\\Interceptor',
+    'Acme\\Casing\\Model\\Kingdebtor' => 'Acme\\Casing\\Model\\Kingdebtor\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/frontend|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Casing\\Model\\Condition_validate___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_validate',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => NULL,
+    'Acme\\Casing\\Model\\Kingdebtor\\Interceptor' => 
+    array (
+      'data' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+    ),
+    'Acme\\Casing\\Plugin\\Validate' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 'Acme\\Casing\\Model\\Condition\\Interceptor',
+    'Acme\\Casing\\Model\\Kingdebtor' => 'Acme\\Casing\\Model\\Kingdebtor\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/global|graphql|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Casing\\Model\\Condition_validate___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_validate',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Casing\\Model\\Condition_validate___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_validate',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|webapi_rest|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Casing\\Model\\Condition_validate___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_validate',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|webapi_soap|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 
+    array (
+      'acme_validate' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Casing\\Plugin\\Validate',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Casing\\Model\\Condition_validate___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_validate',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/graphql.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => NULL,
+    'Acme\\Casing\\Model\\Kingdebtor\\Interceptor' => 
+    array (
+      'data' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+    ),
+    'Acme\\Casing\\Plugin\\Validate' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 'Acme\\Casing\\Model\\Condition\\Interceptor',
+    'Acme\\Casing\\Model\\Kingdebtor' => 'Acme\\Casing\\Model\\Kingdebtor\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/interception.php =====
+<?php return array (
+  'Acme\\Casing\\Model\\Condition' => true,
+  'Acme\\Casing\\Model\\Condition\\Interceptor' => false,
+  'Acme\\Casing\\Model\\KingDebtor' => true,
+  'Acme\\Casing\\Model\\Kingdebtor' => true,
+  'Acme\\Casing\\Model\\Kingdebtor\\Interceptor' => false,
+  'Acme\\Casing\\Plugin\\Validate' => false,
+);
+
+===== file: metadata/webapi_rest.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => NULL,
+    'Acme\\Casing\\Model\\Kingdebtor\\Interceptor' => 
+    array (
+      'data' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+    ),
+    'Acme\\Casing\\Plugin\\Validate' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 'Acme\\Casing\\Model\\Condition\\Interceptor',
+    'Acme\\Casing\\Model\\Kingdebtor' => 'Acme\\Casing\\Model\\Kingdebtor\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/webapi_soap.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => NULL,
+    'Acme\\Casing\\Model\\Kingdebtor\\Interceptor' => 
+    array (
+      'data' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+    ),
+    'Acme\\Casing\\Plugin\\Validate' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Casing\\Model\\Condition' => 'Acme\\Casing\\Model\\Condition\\Interceptor',
+    'Acme\\Casing\\Model\\Kingdebtor' => 'Acme\\Casing\\Model\\Kingdebtor\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== findings =====
+
+===== unresolved =====
