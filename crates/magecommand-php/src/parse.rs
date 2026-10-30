@@ -577,6 +577,7 @@ impl<'a> Parser<'a> {
             cases: Vec::new(),
             enum_backing: None,
             methods: Vec::new(),
+            properties: Vec::new(),
             attributes,
             offset,
             uses: self.uses.iter().map(|(a, f)| (a.clone(), f.clone())).collect(),
@@ -730,7 +731,6 @@ impl<'a> Parser<'a> {
                             break;
                         }
                     }
-                    let _ = is_readonly;
                     let visibility = visibility.unwrap_or(Visibility::Public);
 
                     self.cur.skip_insignificant();
@@ -744,7 +744,8 @@ impl<'a> Parser<'a> {
                     } else if class.kind == ClassKind::Enum && self.cur.eat_keyword("case") {
                         self.parse_enum_case(class);
                     } else if self.at_property_start() {
-                        self.skip_property();
+                        let readonly = is_readonly || class.is_readonly;
+                        self.parse_property(class, visibility, is_static, readonly);
                     } else {
                         self.issue(self.cur.pos, "unexpected token in class body");
                         // Bounded recovery: skip to the next plausible member
@@ -779,23 +780,70 @@ impl<'a> Parser<'a> {
         matches!(self.cur.peek(), Some(b'$' | b'?' | b'(' | b'\\')) || self.cur.at_ident_start()
     }
 
-    /// `[type] $name [= expr] [, $more…] (; | { hooks })` — consumed, not
-    /// modeled: plain properties never affect DI. Property hooks (8.4) look
-    /// like a body and are skipped like one.
-    fn skip_property(&mut self) {
+    /// `[type] $name [= expr] [, $more…] (; | { hooks })`. Properties matter
+    /// to DI only through `new X()` parameter defaults, whose `var_export`
+    /// lists the object's initialized properties. Property hooks (8.4) look
+    /// like a body and are skipped like one; the property is only flagged
+    /// [`PropertyMeta::hooked`].
+    fn parse_property(
+        &mut self,
+        class: &mut ClassMeta,
+        visibility: Visibility,
+        is_static: bool,
+        is_readonly: bool,
+    ) {
         // Optional type expression.
-        if self.cur.peek() != Some(b'$') {
-            let _ = self.parse_type_expr();
+        let ty = if self.cur.peek() != Some(b'$') {
+            let ty = self.parse_type_expr();
             self.cur.skip_insignificant();
+            ty
+        } else {
+            None
+        };
+        loop {
+            if self.cur.peek() != Some(b'$') {
+                self.issue(self.cur.pos, "expected '$' in property declaration");
+                let _ = self.cur.capture_expr_until(b";{");
+                break;
+            }
+            self.cur.bump();
+            let name = self.cur.read_ident().unwrap_or("").to_owned();
+            self.cur.skip_insignificant();
+            let default = if self.cur.peek() == Some(b'=') {
+                self.cur.bump();
+                self.cur.skip_insignificant();
+                // A hook body may follow the default directly; capture stops
+                // on a depth-0 `{` before it could open a nesting level.
+                Some(self.cur.capture_expr_until(b",;{"))
+            } else {
+                None
+            };
+            class.properties.push(PropertyMeta {
+                name,
+                visibility,
+                is_static,
+                is_readonly,
+                ty: ty.clone(),
+                default,
+                hooked: false,
+            });
+            self.cur.skip_insignificant();
+            if self.cur.peek() == Some(b',') {
+                self.cur.bump();
+                self.cur.skip_insignificant();
+                continue;
+            }
+            break;
         }
-        // `$name … ;` — capture machinery reused purely for its
-        // string/nesting awareness.
-        let _ = self.cur.capture_expr_until(&[b';', b'{']);
         match self.cur.peek() {
             Some(b';') => self.cur.bump(),
             Some(b'{') => {
                 self.cur.bump();
                 self.cur.skip_code_until_close_brace(); // 8.4 hooks
+                // Hooks are only legal on a single-property declaration.
+                if let Some(p) = class.properties.last_mut() {
+                    p.hooked = true;
+                }
             }
             _ => {}
         }

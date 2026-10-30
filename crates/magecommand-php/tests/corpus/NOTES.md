@@ -11,9 +11,8 @@ hooks and asymmetric visibility:
 
 - **Plain property hooks** (`public string $x { get => …; set { … } }`) and
   **asymmetric visibility** (`public private(set) string $x`) parse clean:
-  they are consumed by the property path (`skip_property`, which skips hook
-  bodies like any body). Properties are never modeled — they cannot affect
-  DI — so there is nothing to classify. Zero issues.
+  they are consumed by the property path (`parse_property`, which skips hook
+  bodies like any body and flags the property `hooked`). Zero issues.
 - **Hooks on promoted constructor parameters**
   (`public function __construct(public string $x { get => …; })`) CANNOT be
   consumed under the current parameter grammar (a parameter may carry a
@@ -27,13 +26,14 @@ default), not a fallback tier. Until then the manifest pins the issue
 exactly: removing it from the parser's output fails the gate as a
 fingerprint drift.
 
-## Fingerprint (v2)
+## Fingerprint (v3)
 
 `fingerprint(meta)` renders one line per fact: declaration headers (kind,
 fqcn, flags, extends/implements/traits/attributes, enum backing/cases),
 trait adaptations (`insteadof` winners and excluded traits; `as` aliases
 with their visibility), then per-declaration constants (name, visibility,
-type, raw value) and method signatures (visibility,
+type, raw value), properties (name, visibility, static/readonly/hooked
+flags, type, raw default) and method signatures (visibility,
 static/abstract/final/returns-ref flags, return type, params with
 promotion/readonly/by-ref/variadic, types and raw default expressions).
 Hashed with sha256 into `manifest.tsv`'s `fp_sha256` column; `file_sha256`
@@ -64,6 +64,15 @@ to, to show the diff — and says so before the rows.
   fully implied by the `r` flag in column 3 and the promotion visibility in
   column 2. It could never disagree with them, and was baked into every
   digest.
+
+### v2 → v3
+
+- **Added** declared properties (`F` lines). The parser started modeling
+  them so `di compile` can export the object a `new X()` parameter default
+  builds: `var_export` lists that object's initialized properties, so
+  typed-vs-untyped and default-or-not decide what appears. Only the coverage
+  files that declare properties changed digest; every other row re-blessed
+  byte-identical.
 
 ## Contents
 

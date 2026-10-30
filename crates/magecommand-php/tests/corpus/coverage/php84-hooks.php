@@ -4,8 +4,8 @@
 // classify-or-issue.
 //
 //   - Plain property hooks (`get`/`set` bodies) and asymmetric visibility
-//     (`private(set)`) are consumed as properties (properties are never
-//     modeled — they cannot affect DI). Pinned clean: zero issues.
+//     (`private(set)`) are consumed as properties; a hooked one is flagged
+//     `hooked`. Pinned clean: zero issues.
 //   - Hooks on PROMOTED constructor parameters cannot be consumed under the
 //     current parameter grammar → one hard ParseIssue, pinned as the
 //     founding xfail.txt entry (decision in NOTES.md).

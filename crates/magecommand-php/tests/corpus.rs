@@ -45,7 +45,11 @@ use sha2::{Digest, Sha256};
 /// v2: trait adaptations (`insteadof` / `as`) joined the rendering, and the
 /// param line dropped a seventh column that restated `readonly` + promotion
 /// already present in columns 2 and 3.
-const FINGERPRINT_VERSION: u32 = 2;
+///
+/// v3: declared properties joined the rendering (`F` lines: name, visibility,
+/// static/readonly/hooked flags, type, default), now that the parser models
+/// them for `new X()` parameter defaults.
+const FINGERPRINT_VERSION: u32 = 3;
 
 /// How many declarations of a fingerprint to show on a mismatch.
 const FINGERPRINT_PRINT_LINES: usize = 12;
@@ -115,7 +119,8 @@ const MANIFEST_HEADER: &str = concat!(
     "# fp_sha256 hashes the stable fingerprint(meta) rendered by the test:\n",
     "#   per declaration: kind, fqcn, flags (abstract/final/readonly/conditional), extends,\n",
     "#   implements, traits, trait adaptations (insteadof + as), class attributes, enum\n",
-    "#   backing/cases, every constant (name, visibility, type, raw value) and every method\n",
+    "#   backing/cases, every constant (name, visibility, type, raw value), every property\n",
+    "#   (name, visibility, static/readonly/hooked, type, raw default) and every method\n",
     "#   signature (visibility, static/abstract/final/returns-ref, return type, every param\n",
     "#   incl. types, defaults, promotion, readonly, by-ref, variadic). NOT ClassMeta's Debug.\n",
     "#   Re-bless intentional changes:\n",
@@ -295,6 +300,30 @@ fn fingerprint(meta: &FileMeta) -> String {
                 vis(c.visibility),
                 c.ty.as_deref().map(esc).unwrap_or_default(),
                 esc(&c.value),
+            ));
+        }
+        // Properties: `F` (field), since `P` is a parameter line. The default
+        // column carries a leading `=` so "no default" and an empty capture
+        // stay distinct — for a typed property that is the difference between
+        // uninitialized and a value.
+        for p in &d.properties {
+            let mut flags = String::new();
+            if p.is_static {
+                flags.push('s');
+            }
+            if p.is_readonly {
+                flags.push('r');
+            }
+            if p.hooked {
+                flags.push('h');
+            }
+            out.push_str(&format!(
+                "F\t{}\t{}\t{}\t{}\t{}\n",
+                esc(&p.name),
+                vis(p.visibility),
+                flags,
+                p.ty.as_deref().map(esc).unwrap_or_default(),
+                p.default.as_deref().map(|d| format!("={}", esc(d))).unwrap_or_default(),
             ));
         }
         for m in &d.methods {

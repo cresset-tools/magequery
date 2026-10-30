@@ -1,0 +1,724 @@
+# magecommand-engine compile fixture — the expected output of compute_outputs()
+# over `in/`, byte for byte. Everything below is generated; edit `in/` instead.
+# Re-bless: MAGECOMMAND_COMPILE_BLESS=1 cargo test -p magecommand-engine --test compile
+# files: 16  findings: 42  unresolved: 0
+
+===== file: metadata/adminhtml.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\NewDefault\\Model\\Form' => 
+    array (
+      'tree' => 
+      array (
+        '_vn_' => true,
+      ),
+      'extra' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+      'marker' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Marker::__set_state(array(
+        )),
+      ),
+      'child' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Child::__set_state(array(
+           'pa' => 1,
+           'pb' => 'x',
+           'pc' => NULL,
+           'redecl' => 'child',
+           'untyped' => NULL,
+           'own' => 
+          array (
+            0 => 1,
+            'a' => 
+            array (
+              0 => true,
+              1 => NULL,
+            ),
+            'b' => 
+            array (
+            ),
+          ),
+           'pc' => 2.5,
+           'nullable' => NULL,
+           'widened' => 3.0,
+           'widenedConst' => 2.0,
+           'union' => 5,
+           'folded' => 'b!',
+           'negative' => -1,
+        )),
+      ),
+    ),
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithArguments' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInheritedConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInternalClassDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithTraitDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithUnfoldableDefault' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Base' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Child' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\InheritsConstructor' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Marker' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Unfoldable' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\UsesTrait' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\WithConstructor' => NULL,
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
+);
+
+===== file: metadata/adminhtml|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/app_action_list.php =====
+<?php return array (
+);
+
+===== file: metadata/crontab.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\NewDefault\\Model\\Form' => 
+    array (
+      'tree' => 
+      array (
+        '_vn_' => true,
+      ),
+      'extra' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+      'marker' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Marker::__set_state(array(
+        )),
+      ),
+      'child' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Child::__set_state(array(
+           'pa' => 1,
+           'pb' => 'x',
+           'pc' => NULL,
+           'redecl' => 'child',
+           'untyped' => NULL,
+           'own' => 
+          array (
+            0 => 1,
+            'a' => 
+            array (
+              0 => true,
+              1 => NULL,
+            ),
+            'b' => 
+            array (
+            ),
+          ),
+           'pc' => 2.5,
+           'nullable' => NULL,
+           'widened' => 3.0,
+           'widenedConst' => 2.0,
+           'union' => 5,
+           'folded' => 'b!',
+           'negative' => -1,
+        )),
+      ),
+    ),
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithArguments' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInheritedConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInternalClassDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithTraitDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithUnfoldableDefault' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Base' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Child' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\InheritsConstructor' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Marker' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Unfoldable' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\UsesTrait' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\WithConstructor' => NULL,
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
+);
+
+===== file: metadata/crontab|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/frontend.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\NewDefault\\Model\\Form' => 
+    array (
+      'tree' => 
+      array (
+        '_vn_' => true,
+      ),
+      'extra' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+      'marker' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Marker::__set_state(array(
+        )),
+      ),
+      'child' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Child::__set_state(array(
+           'pa' => 1,
+           'pb' => 'x',
+           'pc' => NULL,
+           'redecl' => 'child',
+           'untyped' => NULL,
+           'own' => 
+          array (
+            0 => 1,
+            'a' => 
+            array (
+              0 => true,
+              1 => NULL,
+            ),
+            'b' => 
+            array (
+            ),
+          ),
+           'pc' => 2.5,
+           'nullable' => NULL,
+           'widened' => 3.0,
+           'widenedConst' => 2.0,
+           'union' => 5,
+           'folded' => 'b!',
+           'negative' => -1,
+        )),
+      ),
+    ),
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithArguments' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInheritedConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInternalClassDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithTraitDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithUnfoldableDefault' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Base' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Child' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\InheritsConstructor' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Marker' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Unfoldable' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\UsesTrait' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\WithConstructor' => NULL,
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
+);
+
+===== file: metadata/frontend|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\NewDefault\\Model\\Form' => 
+    array (
+      'tree' => 
+      array (
+        '_vn_' => true,
+      ),
+      'extra' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+      'marker' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Marker::__set_state(array(
+        )),
+      ),
+      'child' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Child::__set_state(array(
+           'pa' => 1,
+           'pb' => 'x',
+           'pc' => NULL,
+           'redecl' => 'child',
+           'untyped' => NULL,
+           'own' => 
+          array (
+            0 => 1,
+            'a' => 
+            array (
+              0 => true,
+              1 => NULL,
+            ),
+            'b' => 
+            array (
+            ),
+          ),
+           'pc' => 2.5,
+           'nullable' => NULL,
+           'widened' => 3.0,
+           'widenedConst' => 2.0,
+           'union' => 5,
+           'folded' => 'b!',
+           'negative' => -1,
+        )),
+      ),
+    ),
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithArguments' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInheritedConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInternalClassDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithTraitDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithUnfoldableDefault' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Base' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Child' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\InheritsConstructor' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Marker' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Unfoldable' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\UsesTrait' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\WithConstructor' => NULL,
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
+);
+
+===== file: metadata/global|graphql|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|webapi_rest|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/global|primary|webapi_soap|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+  ),
+  1 => 
+  array (
+  ),
+  2 => 
+  array (
+  ),
+);
+
+===== file: metadata/graphql.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\NewDefault\\Model\\Form' => 
+    array (
+      'tree' => 
+      array (
+        '_vn_' => true,
+      ),
+      'extra' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+      'marker' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Marker::__set_state(array(
+        )),
+      ),
+      'child' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Child::__set_state(array(
+           'pa' => 1,
+           'pb' => 'x',
+           'pc' => NULL,
+           'redecl' => 'child',
+           'untyped' => NULL,
+           'own' => 
+          array (
+            0 => 1,
+            'a' => 
+            array (
+              0 => true,
+              1 => NULL,
+            ),
+            'b' => 
+            array (
+            ),
+          ),
+           'pc' => 2.5,
+           'nullable' => NULL,
+           'widened' => 3.0,
+           'widenedConst' => 2.0,
+           'union' => 5,
+           'folded' => 'b!',
+           'negative' => -1,
+        )),
+      ),
+    ),
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithArguments' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInheritedConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInternalClassDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithTraitDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithUnfoldableDefault' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Base' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Child' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\InheritsConstructor' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Marker' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Unfoldable' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\UsesTrait' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\WithConstructor' => NULL,
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
+);
+
+===== file: metadata/interception.php =====
+<?php return array (
+  'Acme\\NewDefault\\Model\\Form' => false,
+  'Acme\\NewDefault\\Model\\OutOfReach\\WithArguments' => false,
+  'Acme\\NewDefault\\Model\\OutOfReach\\WithConstructorDefault' => false,
+  'Acme\\NewDefault\\Model\\OutOfReach\\WithInheritedConstructorDefault' => false,
+  'Acme\\NewDefault\\Model\\OutOfReach\\WithInternalClassDefault' => false,
+  'Acme\\NewDefault\\Model\\OutOfReach\\WithTraitDefault' => false,
+  'Acme\\NewDefault\\Model\\OutOfReach\\WithUnfoldableDefault' => false,
+  'Acme\\NewDefault\\Model\\Value\\Base' => false,
+  'Acme\\NewDefault\\Model\\Value\\Child' => false,
+  'Acme\\NewDefault\\Model\\Value\\HasProperty' => false,
+  'Acme\\NewDefault\\Model\\Value\\InheritsConstructor' => false,
+  'Acme\\NewDefault\\Model\\Value\\Marker' => false,
+  'Acme\\NewDefault\\Model\\Value\\Unfoldable' => false,
+  'Acme\\NewDefault\\Model\\Value\\UsesTrait' => false,
+  'Acme\\NewDefault\\Model\\Value\\WithConstructor' => false,
+);
+
+===== file: metadata/webapi_rest.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\NewDefault\\Model\\Form' => 
+    array (
+      'tree' => 
+      array (
+        '_vn_' => true,
+      ),
+      'extra' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+      'marker' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Marker::__set_state(array(
+        )),
+      ),
+      'child' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Child::__set_state(array(
+           'pa' => 1,
+           'pb' => 'x',
+           'pc' => NULL,
+           'redecl' => 'child',
+           'untyped' => NULL,
+           'own' => 
+          array (
+            0 => 1,
+            'a' => 
+            array (
+              0 => true,
+              1 => NULL,
+            ),
+            'b' => 
+            array (
+            ),
+          ),
+           'pc' => 2.5,
+           'nullable' => NULL,
+           'widened' => 3.0,
+           'widenedConst' => 2.0,
+           'union' => 5,
+           'folded' => 'b!',
+           'negative' => -1,
+        )),
+      ),
+    ),
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithArguments' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInheritedConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInternalClassDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithTraitDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithUnfoldableDefault' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Base' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Child' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\InheritsConstructor' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Marker' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Unfoldable' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\UsesTrait' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\WithConstructor' => NULL,
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
+);
+
+===== file: metadata/webapi_soap.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\NewDefault\\Model\\Form' => 
+    array (
+      'tree' => 
+      array (
+        '_vn_' => true,
+      ),
+      'extra' => 
+      array (
+        '_v_' => 
+        array (
+        ),
+      ),
+      'marker' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Marker::__set_state(array(
+        )),
+      ),
+      'child' => 
+      array (
+        '_v_' => 
+        \Acme\NewDefault\Model\Value\Child::__set_state(array(
+           'pa' => 1,
+           'pb' => 'x',
+           'pc' => NULL,
+           'redecl' => 'child',
+           'untyped' => NULL,
+           'own' => 
+          array (
+            0 => 1,
+            'a' => 
+            array (
+              0 => true,
+              1 => NULL,
+            ),
+            'b' => 
+            array (
+            ),
+          ),
+           'pc' => 2.5,
+           'nullable' => NULL,
+           'widened' => 3.0,
+           'widenedConst' => 2.0,
+           'union' => 5,
+           'folded' => 'b!',
+           'negative' => -1,
+        )),
+      ),
+    ),
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithArguments' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInheritedConstructorDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithInternalClassDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithTraitDefault' => NULL,
+    'Acme\\NewDefault\\Model\\OutOfReach\\WithUnfoldableDefault' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Base' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Child' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\InheritsConstructor' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Marker' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\Unfoldable' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\UsesTrait' => NULL,
+    'Acme\\NewDefault\\Model\\Value\\WithConstructor' => NULL,
+  ),
+  'preferences' => 
+  array (
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
+);
+
+===== findings =====
+Acme\NewDefault\Model\OutOfReach\WithArguments::$m: default 'new Value\Marker(1)': expression not statically evaluable: new Value\Marker(1)
+Acme\NewDefault\Model\OutOfReach\WithArguments::$m: default 'new Value\Marker(1)': expression not statically evaluable: new Value\Marker(1)
+Acme\NewDefault\Model\OutOfReach\WithArguments::$m: default 'new Value\Marker(1)': expression not statically evaluable: new Value\Marker(1)
+Acme\NewDefault\Model\OutOfReach\WithArguments::$m: default 'new Value\Marker(1)': expression not statically evaluable: new Value\Marker(1)
+Acme\NewDefault\Model\OutOfReach\WithArguments::$m: default 'new Value\Marker(1)': expression not statically evaluable: new Value\Marker(1)
+Acme\NewDefault\Model\OutOfReach\WithArguments::$m: default 'new Value\Marker(1)': expression not statically evaluable: new Value\Marker(1)
+Acme\NewDefault\Model\OutOfReach\WithArguments::$m: default 'new Value\Marker(1)': expression not statically evaluable: new Value\Marker(1)
+Acme\NewDefault\Model\OutOfReach\WithConstructorDefault::$v: default 'new Value\WithConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithConstructorDefault::$v: default 'new Value\WithConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithConstructorDefault::$v: default 'new Value\WithConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithConstructorDefault::$v: default 'new Value\WithConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithConstructorDefault::$v: default 'new Value\WithConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithConstructorDefault::$v: default 'new Value\WithConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithConstructorDefault::$v: default 'new Value\WithConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithInheritedConstructorDefault::$v: default 'new Value\InheritsConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithInheritedConstructorDefault::$v: default 'new Value\InheritsConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithInheritedConstructorDefault::$v: default 'new Value\InheritsConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithInheritedConstructorDefault::$v: default 'new Value\InheritsConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithInheritedConstructorDefault::$v: default 'new Value\InheritsConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithInheritedConstructorDefault::$v: default 'new Value\InheritsConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithInheritedConstructorDefault::$v: default 'new Value\InheritsConstructor()': Acme\NewDefault\Model\Value\WithConstructor declares a constructor
+Acme\NewDefault\Model\OutOfReach\WithInternalClassDefault::$v: default 'new \ArrayObject()': ArrayObject is not a parsed class
+Acme\NewDefault\Model\OutOfReach\WithInternalClassDefault::$v: default 'new \ArrayObject()': ArrayObject is not a parsed class
+Acme\NewDefault\Model\OutOfReach\WithInternalClassDefault::$v: default 'new \ArrayObject()': ArrayObject is not a parsed class
+Acme\NewDefault\Model\OutOfReach\WithInternalClassDefault::$v: default 'new \ArrayObject()': ArrayObject is not a parsed class
+Acme\NewDefault\Model\OutOfReach\WithInternalClassDefault::$v: default 'new \ArrayObject()': ArrayObject is not a parsed class
+Acme\NewDefault\Model\OutOfReach\WithInternalClassDefault::$v: default 'new \ArrayObject()': ArrayObject is not a parsed class
+Acme\NewDefault\Model\OutOfReach\WithInternalClassDefault::$v: default 'new \ArrayObject()': ArrayObject is not a parsed class
+Acme\NewDefault\Model\OutOfReach\WithTraitDefault::$v: default 'new Value\UsesTrait()': Acme\NewDefault\Model\Value\UsesTrait uses traits
+Acme\NewDefault\Model\OutOfReach\WithTraitDefault::$v: default 'new Value\UsesTrait()': Acme\NewDefault\Model\Value\UsesTrait uses traits
+Acme\NewDefault\Model\OutOfReach\WithTraitDefault::$v: default 'new Value\UsesTrait()': Acme\NewDefault\Model\Value\UsesTrait uses traits
+Acme\NewDefault\Model\OutOfReach\WithTraitDefault::$v: default 'new Value\UsesTrait()': Acme\NewDefault\Model\Value\UsesTrait uses traits
+Acme\NewDefault\Model\OutOfReach\WithTraitDefault::$v: default 'new Value\UsesTrait()': Acme\NewDefault\Model\Value\UsesTrait uses traits
+Acme\NewDefault\Model\OutOfReach\WithTraitDefault::$v: default 'new Value\UsesTrait()': Acme\NewDefault\Model\Value\UsesTrait uses traits
+Acme\NewDefault\Model\OutOfReach\WithTraitDefault::$v: default 'new Value\UsesTrait()': Acme\NewDefault\Model\Value\UsesTrait uses traits
+Acme\NewDefault\Model\OutOfReach\WithUnfoldableDefault::$v: default 'new Value\Unfoldable()': Acme\NewDefault\Model\Value\Unfoldable::$os = PHP_OS: unknown constant PHP_OS
+Acme\NewDefault\Model\OutOfReach\WithUnfoldableDefault::$v: default 'new Value\Unfoldable()': Acme\NewDefault\Model\Value\Unfoldable::$os = PHP_OS: unknown constant PHP_OS
+Acme\NewDefault\Model\OutOfReach\WithUnfoldableDefault::$v: default 'new Value\Unfoldable()': Acme\NewDefault\Model\Value\Unfoldable::$os = PHP_OS: unknown constant PHP_OS
+Acme\NewDefault\Model\OutOfReach\WithUnfoldableDefault::$v: default 'new Value\Unfoldable()': Acme\NewDefault\Model\Value\Unfoldable::$os = PHP_OS: unknown constant PHP_OS
+Acme\NewDefault\Model\OutOfReach\WithUnfoldableDefault::$v: default 'new Value\Unfoldable()': Acme\NewDefault\Model\Value\Unfoldable::$os = PHP_OS: unknown constant PHP_OS
+Acme\NewDefault\Model\OutOfReach\WithUnfoldableDefault::$v: default 'new Value\Unfoldable()': Acme\NewDefault\Model\Value\Unfoldable::$os = PHP_OS: unknown constant PHP_OS
+Acme\NewDefault\Model\OutOfReach\WithUnfoldableDefault::$v: default 'new Value\Unfoldable()': Acme\NewDefault\Model\Value\Unfoldable::$os = PHP_OS: unknown constant PHP_OS
+
+===== unresolved =====
