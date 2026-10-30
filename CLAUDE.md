@@ -215,7 +215,7 @@ RUNTIME       (env.php config & live connections)
 PROJECT       (the codebase itself)
   info      mode   maintenance   base-url [--secure]   admin-url   (single-fact views of info)
   modules [--check] [--enabled|--disabled] [--source app|vendor]
-  deps <module>             doctor [--source]          whatis <class>   patches [--db|--pending]
+  deps <module>   doctor [--source] [--in] [--strict] [--deny] [--explain]   whatis <class>   patches [--db|--pending]
 ```
 
 **Tooling meta-commands** (`completions <shell>`, `man`, `skill`, `lsp`) sit *outside* the
@@ -990,14 +990,60 @@ for the preference join).
 
 ### `doctor` (cross-index lints, done)
 
-`magequery doctor [--source app|vendor] [--deny <lint>…]` — everything the merged config
+`magequery doctor [--source app|vendor] [--deny <lint>…] [--strict] [--in <scope>…]` — everything the merged config
 references that doesn't exist, structural breakage, and probably-forgotten wiring. Pure
 projection over the existing indexes (~90–140ms); exits 1 on **errors** only, so warnings
 can't fail CI — unless a lint is passed to `--deny` (repeatable), which upgrades its findings
 to errors (`DoctorReport::deny`, so `--json` agrees with the exit code). That's how a shop
 makes a warning it has cleaned up blocking in its own MR pipeline.
 `doctor.rs` in core, `Magento::doctor(source?) -> DoctorReport` (typed `DoctorLint` +
-`Severity` per finding, provenance where there is one).
+`Severity` per finding, provenance where there is one). Every lint has a stable code
+(`DoctorLint::code`, also `DoctorFinding::code` in `--json`): `E1xxx` module set, `E2xxx` DI,
+`E3xxx` entry points, `E4xxx` frontend, `E5xxx` unregistered code. A code belongs to the lint,
+not the severity, and is never reused: a new lint takes the next number in its group, and
+must be added to `DoctorLint::ALL` plus `summary`/`explanation` in `model/doctor_lints.rs`
+(the exhaustive matches enforce the latter; a unit test checks uniqueness and round-trips).
+Text output prints `<severity>[<code>]` (rustc's `error[E0308]`); `--deny` and `FromStr`
+take the code (any case) or the kebab-case name. `doctor --explain <code>` prints the
+explanation, bare `--explain` lists all codes; it is dispatched before `Magento::open`, so it
+works anywhere. `--strict` exits
+1 on warnings too (infos never fail). `--source app|vendor` keeps the findings *declared* in
+the project's own code (any file outside `vendor/`: app/code, app/design, app/etc) or in
+packages; sourceless findings go by their subject module's source (`finding_source`). It is
+applied inside `doctor::run`, which also skips the other side's unregistered-code scans (same
+result, less work). `--in` (repeatable) keeps only the
+findings located in a root-relative path prefix, a module, a module vendor (`Acme` =
+`Acme_*`) or a theme/theme vendor; sourceless findings match on their subject (module-set
+drift carries the module). `DoctorReport::retain_in`, applied after `deny`, so the exit
+code follows the filtered set.
+
+**Speed** (~0.5s on a 600-module store, from ~0.9s): `MQ_PROFILE=1` times every doctor
+phase. `class_known` is memoized (each area repeats the same references, each answer is
+file probes); the unregistered-code scans and the registered-class ancestor walks run on
+rayon (per-module results collected in module order, so output stays deterministic); the
+layout index walks template dirs in parallel and takes each entry's type from `read_dir`
+instead of an extra stat.
+
+**Reachability decides missing-class severity** (preference targets, virtualType bases,
+plugin classes, di argument objects). A missing class only breaks something when an object
+that *can* be built asks for it, so doctor indexes every reference to a name once
+(`Doctor::refs`: di arguments incl. array items, preferences, virtualType bases, enabled
+plugins, plus observers/cron/commands/webapi/GraphQL as always-live entry points) and walks
+back: an existing class is buildable (anything may ask the object manager for it); a
+virtual type only when something live asks for it by name (`demand`); an argument only
+reaches the constructor if the concrete class declares that parameter
+(`ClassResolver::constructor_params`, nearest declaring ancestor; unknown, abstract or
+interface = assume it does, since subclasses inherit type arguments). Live → **error**;
+dead and the class's package is installed (`provider_prefix`: an autoload prefix of ≥2
+segments, so the root catch-all `""` never counts) → **warning**, stale config; dead and no
+package provides it → **info** (`Severity::Info`), an optional integration. Unsure (depth
+cap) counts as live. The walk is kept on the finding as `chain: Vec<ChainNode>` (the live
+path, or every dead end), rendered as a `├─▶`/`└─▶` tree. Observers, cron, webapi,
+commands, mq and GraphQL classes stay plain errors: they *are* the entry points (whether
+an event is ever dispatched isn't knowable statically — names are often built at runtime).
+On a real store this moved every vendor missing-class error (Indexer `DefaultHandler`,
+Hyvä Checkout's removed `Layout`, `GroupedItemsPostProcessor` on a constructor without
+`$postProcessors`, Amasty ImportCore/ExportCore and ScandiPWA integrations) to warn/info.
 
 **Errors** (break at runtime): preference targets / virtualType bases / plugin classes /
 di argument objects / observer instances / cron instances / webapi services / console
@@ -1007,9 +1053,19 @@ webapi `<resource>` ids no acl.xml declares; preference/virtualType/`<sequence>`
 (setup:upgrade drift), queues no consumer reads, and the **unregistered-code** lints —
 classes under `Console/`/`Observer/`/`Plugin/` that are concrete, match their base type
 (Symfony Command / ObserverInterface / has `before*`/`around*`/`after*` methods) and are
-wired **nowhere**. `--source` restricts only these scans; candidates are verified by
+wired **nowhere**. Candidates are verified by
 resolving the conventional class name back through PSR-4 to the same file (namespace-
 diverging modules are skipped, never misreported).
+
+**Duplicate keys** (error, `duplicate-argument-key`): an `<argument name>` or array `<item
+name>` repeated for one type within one di.xml. The merged config only keeps the winner, so
+`di::build` records them (`DiIndex::duplicate_keys`) from the raw parse, beside the
+duplicate-`<plugin>` diagnostic, following the DOM merge: two same-key arrays combine item by
+item (several `<type>` blocks each adding a `$collections` item are fine), any other repeat
+is replaced by the later one; identical values are skipped. Doctor groups repeats of one key
+into one finding whose chain lists the dropped declarations (first 5) and the kept one. On
+a real store: a console command silently lost to a copy-pasted item name, and MultiSafepay
+re-setting `RedirectClient`'s `$logger` 75 times in one file.
 
 **Disabled modules** (warnings): `module-disabled` — an installed module set to `0` in
 config.php (anchored on that line); advise `composer remove`, or `replace` for Magento's own

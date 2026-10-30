@@ -52,6 +52,11 @@ impl Fixture {
             "app/code/Acme/Widget/Model/Thing.php",
             "<?php\nnamespace Acme\\Widget\\Model;\n\nclass Thing\n{\n    public function save($input)\n    {\n        return $input;\n    }\n}\n",
         );
+        // The broken preference's interface exists, so something can ask for it: an error.
+        write(
+            "app/code/Acme/Widget/Api/ThingInterface.php",
+            "<?php\nnamespace Acme\\Widget\\Api;\n\ninterface ThingInterface\n{\n}\n",
+        );
         // One edit-distance from the broken preference target: the did-you-mean donor.
         write(
             "app/code/Acme/Widget/Model/Mising.php",

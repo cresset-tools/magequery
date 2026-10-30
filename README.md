@@ -109,16 +109,36 @@ plugins (3)  run order
 references, cycles, and wiring that looks forgotten, and exits non-zero only on errors, so
 you can run it in CI. It also warns about modules disabled in `config.php` and config that
 reaches into them: remove such modules with composer instead, since tools disagree about
-how a disabled module's code takes part. Pass `--deny <lint>` to make a warning fail the
-run once you have cleaned it up, e.g. `--deny disabled-module-referenced`.
+how a disabled module's code takes part. Each finding is printed with a stable code
+(`warn[E1004]`); `magequery doctor --explain E1004` says what it means and how to fix it,
+and a bare `--explain` lists every code. Pass a code to `--deny` to make that kind of
+warning fail the run once you have cleaned it up, or pass `--strict` to fail on every
+warning.
+`--source app` keeps only the findings declared in your own code (everything outside
+`vendor/`), and `--source vendor` keeps only those in installed packages.
+
+A reference to a missing class is only an error when something that can be built asks for
+it. Otherwise it is a warning (the package is installed, so the config is stale) or an
+info (no installed package provides it, so it is an optional integration). The lines
+under each finding show the chain that decided it. `--in <path|module|vendor>` keeps
+only the findings located there, e.g. `--in app/code/Acme` or `--in Acme`.
 
 ```console
 $ magequery doctor
-error  di argument $defaultHandler of Magento\Indexer\Model\HandlerPool injects missing
-       class Magento\Indexer\Model\Handler\DefaultHandler   # .../module-indexer/etc/di.xml:30
-error  preference for ...\ProductRenderSearchResultsInterface points at missing class
-       ...\ProductRenderSearchResults   # .../module-catalog/etc/di.xml:54
-warn   ...\CouponUsagesDecrement implements ObserverInterface but no events.xml registers it
+error[E2001]  preference for ...\ProductRenderSearchResultsInterface points
+    at missing class ...\ProductRenderSearchResults   # .../module-catalog/etc/di.xml:54
+    └─▶ ...\ProductRenderSearchResultsInterface exists   # .../Api/Data/ProductRenderSearchResultsInterface.php
+warn[E2006]  di argument $defaultHandler of Magento\Indexer\Model\HandlerPool
+    injects missing class Magento\Indexer\Model\Handler\DefaultHandler   # .../module-indexer/etc/di.xml:30
+    └─▶ Magento\Indexer\Model\HandlerPool does not exist (its package Magento\Indexer is
+        installed: stale config)
+warn[E5002]  ...\CouponUsagesDecrement implements ObserverInterface but no
+    events.xml registers it
+info[E2003]  virtual type AmastyAttachmentExportEntity is based on missing
+    class Amasty\ExportCore\...\DemoEntityConfig
+    └─▶ injected as $demoEntities into Amasty\ExportCore\...\DemoEntitiesPool   # .../etc/adminhtml/di.xml:274
+        └─▶ Amasty\ExportCore\...\DemoEntitiesPool does not exist (no installed package
+            provides Amasty\ExportCore: an optional integration)
 ```
 
 `info` prints a one-screen summary of the install. It reads the static config and fills in

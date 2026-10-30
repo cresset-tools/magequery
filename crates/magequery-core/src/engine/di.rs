@@ -279,6 +279,25 @@ pub(crate) struct DiIndex {
     /// config read contains, needed by consumers that model Magento's
     /// scope-by-scope loading (the compiled plugin lists).
     overlays: HashMap<Area, AreaConfig>,
+    /// Argument names and array item keys declared twice in one file: the merge keeps
+    /// only the later one, so these are invisible in the merged config.
+    duplicate_keys: Vec<DuplicateKey>,
+}
+
+/// An `<argument name>` or array `<item name>` repeated within one di.xml element. In
+/// one file that's an authoring bug: Magento converts the array with the later
+/// declaration silently replacing the earlier (across files it's override semantics).
+pub(crate) struct DuplicateKey {
+    /// The `<type>`/`<virtualType>` the arguments belong to.
+    pub target: ClassName,
+    /// The argument, then any enclosing item keys: `commands`, `columns.sku`.
+    pub path: String,
+    pub key: String,
+    /// What the earlier declaration said, and where.
+    pub replaced: (String, u32),
+    /// What the later, winning declaration says; its line is in `source`.
+    pub winner: String,
+    pub source: Source,
 }
 
 impl DiIndex {
@@ -293,6 +312,80 @@ impl DiIndex {
     /// The overlay-only config of `area` (empty for [`Area::Global`]).
     pub fn overlay(&self, area: Area) -> Option<&AreaConfig> {
         self.overlays.get(&area)
+    }
+
+    /// Keys declared twice in one file (see [`DuplicateKey`]).
+    pub fn duplicate_keys(&self) -> &[DuplicateKey] {
+        &self.duplicate_keys
+    }
+}
+
+/// One declared key: `(name, value, line)`.
+type KeyDecl<'a> = (&'a str, &'a parse::RawArg, u32);
+
+/// Record every key among `items` (one argument list or one array) whose later
+/// declaration replaces an earlier, different one. Magento merges a repeated key the
+/// way its DOM merge does: two arrays combine item by item (so several `<type>` blocks
+/// each adding an item are fine), anything else is replaced by the later declaration.
+fn find_duplicate_keys(
+    items: &[KeyDecl],
+    target: &ClassName,
+    path: &str,
+    source: &Source,
+    out: &mut Vec<DuplicateKey>,
+) {
+    // Per key, in first-seen order: the winning value so far, and for arrays every item
+    // merged into it.
+    let mut merged: Vec<(&str, &parse::RawArg, u32, Vec<KeyDecl>)> = Vec::new();
+    for &(key, value, line) in items {
+        let Some(entry) = merged.iter_mut().find(|(k, ..)| *k == key) else {
+            merged.push((key, value, line, nested(value)));
+            continue;
+        };
+        let both_arrays = matches!(entry.1, parse::RawArg::Array(_))
+            && matches!(value, parse::RawArg::Array(_));
+        if both_arrays {
+            entry.3.extend(nested(value));
+            continue;
+        }
+        let (replaced, winner) = (describe_raw(entry.1), describe_raw(value));
+        if replaced != winner {
+            out.push(DuplicateKey {
+                target: target.clone(),
+                path: path.to_string(),
+                key: key.to_string(),
+                replaced: (replaced, entry.2),
+                winner,
+                source: Source { line, ..source.clone() },
+            });
+        }
+        *entry = (key, value, line, nested(value));
+    }
+    for (key, _, _, items) in &merged {
+        if !items.is_empty() {
+            let path = if path.is_empty() { key.to_string() } else { format!("{path}.{key}") };
+            find_duplicate_keys(items, target, &path, source, out);
+        }
+    }
+}
+
+/// An array's items as `(key, value, line)`; empty for anything else.
+fn nested(value: &parse::RawArg) -> Vec<KeyDecl<'_>> {
+    match value {
+        parse::RawArg::Array(items) => {
+            items.iter().map(|i| (i.key.as_str(), &i.value, i.line)).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// A short rendering of a declared value, for saying what a duplicate replaced.
+fn describe_raw(value: &parse::RawArg) -> String {
+    match value {
+        parse::RawArg::Object { class, .. } => class.to_string(),
+        parse::RawArg::Scalar { text, .. } => format!("\"{text}\""),
+        parse::RawArg::Array(items) => format!("an array of {} item(s)", items.len()),
+        parse::RawArg::Null => "null".to_string(),
     }
 }
 
@@ -425,6 +518,7 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
         .collect();
 
     // Surface parse failures once (non-fatal — the rest still merges).
+    let mut duplicate_keys = Vec::new();
     for p in &parsed {
         match &p.file {
             Err(e) => {
@@ -451,6 +545,24 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
                         ));
                     }
                 }
+
+                // The same for argument names and array item keys, per target.
+                let source =
+                    Source { module: p.module.clone(), file: p.path.clone(), line: 0, area: p.area };
+                let mut by_target: Vec<(&ClassName, Vec<KeyDecl>)> = Vec::new();
+                for (target, name, value, line) in &file.arguments {
+                    let entry = match by_target.iter_mut().find(|(t, _)| *t == target) {
+                        Some(entry) => entry,
+                        None => {
+                            by_target.push((target, Vec::new()));
+                            by_target.last_mut().unwrap()
+                        }
+                    };
+                    entry.1.push((name.as_str(), value, *line));
+                }
+                for (target, args) in &by_target {
+                    find_duplicate_keys(args, target, "", &source, &mut duplicate_keys);
+                }
             }
         }
     }
@@ -463,7 +575,7 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
         overlays.insert(area, merge_area(&parsed, area, AreaConfig::default()));
     }
 
-    DiIndex { global, areas, overlays }
+    DiIndex { global, areas, overlays, duplicate_keys }
 }
 
 /// The primary DI config files, exactly as Magento's bootstrap resolves them

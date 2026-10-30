@@ -240,6 +240,42 @@ pub(crate) fn plugin_methods(src: &str) -> Vec<PluginMethodRaw> {
     out
 }
 
+/// The parameter names (without `$`) of the file's `__construct`, in order, or `None`
+/// when the file declares no constructor (it inherits its parent's). Defaults are
+/// constant expressions, so every `$name` inside the parameter list is a parameter.
+pub(crate) fn constructor_params(src: &str) -> Option<Vec<String>> {
+    let tokens = tokenize(src);
+    let start = tokens.windows(3).position(|w| {
+        matches!(
+            w,
+            [Token::Ident(f), Token::Ident(n), Token::Punct('(')]
+                if f == "function" && n.eq_ignore_ascii_case("__construct")
+        )
+    })?;
+    let mut params = Vec::new();
+    let mut depth = 0;
+    let mut i = start + 2;
+    while let Some(tok) = tokens.get(i) {
+        match tok {
+            Token::Punct('(') => depth += 1,
+            Token::Punct(')') => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Token::Punct('$') => {
+                if let Some(Token::Ident(name)) = tokens.get(i + 1) {
+                    params.push(name.clone());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Some(params)
+}
+
 /// A value written as a string literal, a class-constant reference (`self::COMMAND_NAME`),
 /// or a property reference (`$this->commandName`) — the ways commands state their
 /// name/description.
@@ -1019,5 +1055,34 @@ class AddIsJitEnabledProductAttribute implements DataPatchInterface
         let rem = &calls[2];
         assert!(matches!(rem.kind, EavCallKind::Remove));
         assert_eq!((rem.entity.as_str(), rem.code.as_str()), ("catalog_category", "old_attr"));
+    }
+}
+
+#[cfg(test)]
+mod constructor_tests {
+    use super::constructor_params;
+
+    #[test]
+    fn reads_promoted_typed_and_defaulted_params() {
+        let src = r#"<?php
+class Pool
+{
+    public function helper($notAParam) {}
+
+    public function __construct(
+        #[Attr('x')] private readonly Foo $foo,
+        array $items = ['a' => [1, 2]],
+        ?string $name = null, // trailing comment $ignored
+        ...$rest
+    ) {
+        $this->bar = $foo;
+    }
+}"#;
+        assert_eq!(constructor_params(src).unwrap(), ["foo", "items", "name", "rest"]);
+    }
+
+    #[test]
+    fn no_constructor_means_inherited() {
+        assert!(constructor_params("<?php class A extends B { function run($x) {} }").is_none());
     }
 }

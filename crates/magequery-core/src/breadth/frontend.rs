@@ -366,6 +366,9 @@ impl LayoutIndex {
         }
 
         // Catalog module templates, including files not currently referenced by layout.
+        // The directory walks are thousands of independent reads, so they run in
+        // parallel; files are added in job order, keeping the index deterministic.
+        let mut dirs: Vec<(LayoutLayer, ModuleName, Vec<Area>, PathBuf)> = Vec::new();
         for m in modules.iter().filter(|m| m.enabled) {
             let layer = LayoutLayer::Module(m.name.clone());
             for (sub, areas) in [
@@ -373,13 +376,8 @@ impl LayoutIndex {
                 ("frontend", vec![Area::Frontend]),
                 ("adminhtml", vec![Area::Adminhtml]),
             ] {
-                add_template_files(
-                    &mut templates,
-                    &layer,
-                    &m.name,
-                    &areas,
-                    &m.path.join("view").join(sub).join("templates"),
-                );
+                let root = m.path.join("view").join(sub).join("templates");
+                dirs.push((layer.clone(), m.name.clone(), areas, root));
             }
         }
         // A theme override's first directory is the module namespace it overrides.
@@ -389,14 +387,12 @@ impl LayoutIndex {
             let Ok(entries) = std::fs::read_dir(dir) else { continue };
             for entry in entries.flatten() {
                 let module = ModuleName::new(entry.file_name().to_string_lossy().as_ref());
-                add_template_files(
-                    &mut templates,
-                    &layer,
-                    &module,
-                    &[area],
-                    &entry.path().join("templates"),
-                );
+                dirs.push((layer.clone(), module, vec![area], entry.path().join("templates")));
             }
+        }
+        let found: Vec<Vec<PathBuf>> = dirs.par_iter().map(|(.., root)| phtml_files(root)).collect();
+        for ((layer, module, areas, root), files) in dirs.iter().zip(found) {
+            add_template_files(&mut templates, layer, module, areas, root, files);
         }
         for template in templates.values_mut() {
             template.files.sort_by(|a, b| {
@@ -475,18 +471,20 @@ fn normalize_template_ref(module: &ModuleName, raw: &str) -> String {
     }
 }
 
-fn add_template_files(
-    templates: &mut HashMap<(Area, String), Template>,
-    layer: &LayoutLayer,
-    module: &ModuleName,
-    areas: &[Area],
-    root: &Path,
-) {
+/// Every `.phtml` under `root`, sorted.
+fn phtml_files(root: &Path) -> Vec<PathBuf> {
     fn walk(out: &mut Vec<PathBuf>, dir: &Path) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // The entry's own type: no extra stat per file. A symlink falls back to
+            // following it, as `is_dir` did.
+            let is_dir = match entry.file_type() {
+                Ok(t) if t.is_symlink() => path.is_dir(),
+                Ok(t) => t.is_dir(),
+                Err(_) => false,
+            };
+            if is_dir {
                 walk(out, &path);
             } else if path.extension().and_then(|e| e.to_str()) == Some("phtml") {
                 out.push(path);
@@ -497,6 +495,17 @@ fn add_template_files(
     let mut files = Vec::new();
     walk(&mut files, root);
     files.sort();
+    files
+}
+
+fn add_template_files(
+    templates: &mut HashMap<(Area, String), Template>,
+    layer: &LayoutLayer,
+    module: &ModuleName,
+    areas: &[Area],
+    root: &Path,
+    files: Vec<PathBuf>,
+) {
     for file in files {
         let Ok(rel) = file.strip_prefix(root) else { continue };
         let rel = rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");

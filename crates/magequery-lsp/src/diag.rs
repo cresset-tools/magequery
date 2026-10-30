@@ -66,7 +66,8 @@ fn push(
         range: Range::new(Position::new(line, 0), Position::new(line, u32::MAX)),
         severity: Some(match severity {
             Severity::Error => DiagnosticSeverity::ERROR,
-            _ => DiagnosticSeverity::WARNING,
+            Severity::Warning => DiagnosticSeverity::WARNING,
+            Severity::Info => DiagnosticSeverity::INFORMATION,
         }),
         code: code.map(NumberOrString::String),
         source: Some("magequery".to_string()),
