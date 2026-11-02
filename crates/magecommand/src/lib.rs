@@ -2095,7 +2095,8 @@ fn compare(
 ) -> anyhow::Result<ExitCode> {
     let report = magecommand_engine::compare_dirs(archive, output, strict_ordering)?;
 
-    // The disabled-module and obfuscation explanations need the checkout.
+    // The disabled-module explanations need the checkout (and the nulled-row
+    // check uses it to name an eval-obfuscated cause).
     // Best-effort: if the root isn't a Magento checkout (comparing two loose
     // trees), skip them — those differences simply stay unexplained rather
     // than misclassified.
@@ -2127,12 +2128,6 @@ fn compare(
             &disabled_modules,
             &disabled_types,
         );
-        let blocked = magecommand_engine::obfuscation_blocked_classes(
-            &report,
-            archive,
-            output,
-            magento.as_ref(),
-        );
         let outside = magecommand_engine::outside_scan_types(
             &report,
             archive,
@@ -2142,8 +2137,7 @@ fn compare(
             &reachable,
         );
         // Every expected-key set, unioned — see `residual_report`.
-        let mut expected = blocked;
-        expected.extend(reachable);
+        let mut expected = reachable;
         expected.extend(outside);
         print!(
             "{}",
@@ -2191,12 +2185,8 @@ fn compare(
         return Ok(fail_exit(fail_on_diff, !report.is_clean()));
     }
 
-    let obfuscation_blocked = magecommand_engine::obfuscation_blocked_classes(
-        &report,
-        archive,
-        output,
-        magento.as_ref(),
-    );
+    let null_arguments =
+        magecommand_engine::null_argument_entries(&report, archive, output, magento.as_ref());
     // One parallel walk of the disabled modules' source, shared by the metadata
     // rule and the generated-artifact rule.
     let disabled_types =
@@ -2222,7 +2212,7 @@ fn compare(
         archive,
         output,
         disabled_modules: &disabled_modules,
-        obfuscation_blocked: &obfuscation_blocked,
+        null_arguments: &null_arguments,
         disabled_reachable: &disabled_reachable,
         disabled_types: &disabled_types,
         outside_scan: &outside_scan,
@@ -2245,9 +2235,8 @@ fn compare(
     // tree they live in, each changed file with its first real divergence.
     let unexplained = classified.unexplained_count();
     if unexplained > 0 {
-        let expected: std::collections::HashSet<String> = obfuscation_blocked
+        let expected: std::collections::HashSet<String> = disabled_reachable
             .iter()
-            .chain(&disabled_reachable)
             .chain(&outside_scan)
             .cloned()
             .collect();
@@ -2255,6 +2244,41 @@ fn compare(
             "\n{} matching no known pattern — investigate these",
             style::fail(&format!("✗ UNEXPLAINED: {unexplained} difference(s)"))
         );
+        // A nulled arguments row is a fatal the moment the class is built, so it
+        // leads, by class, before the per-file listing.
+        if !classified.null_arguments.is_empty() {
+            println!(
+                "\n  {}",
+                style::fail(&format!(
+                    "{} class(es) get NO constructor arguments: Magento builds them with `new X()` \
+                     (ArgumentCountError, or di.xml arguments silently dropped)",
+                    classified.null_arguments.len()
+                ))
+            );
+            for n in classified.null_arguments.iter().take(sample) {
+                println!(
+                    "    {}  {}",
+                    style::class(&n.class),
+                    style::dim(&format!("NULL in {} file(s); the archive has a row", n.files.len()))
+                );
+                if let Some(src) = &n.eval_source {
+                    let src = magento
+                        .as_ref()
+                        .and_then(|m| src.strip_prefix(m.root()).ok())
+                        .unwrap_or(src);
+                    println!(
+                        "               {}",
+                        style::dim(&format!(
+                            "constructor hidden in eval()'d source: {}",
+                            src.display()
+                        ))
+                    );
+                }
+            }
+            if classified.null_arguments.len() > sample {
+                println!("    … {} more", classified.null_arguments.len() - sample);
+            }
+        }
         // The first real divergence between two versions of one file.
         let no_entries = std::collections::HashSet::new();
         let print_divergence = |archive_rel: &str, output_rel: &str, tree: Tree| {

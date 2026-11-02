@@ -16,7 +16,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::compare::{canonical_method_order, CompareReport};
 
@@ -65,12 +65,6 @@ pub enum KnownKind {
     /// (return-type spacing, explicit nullable defaults, proxy `__clone`/
     /// `_resetState` null-guards, added `__debugInfo`). Behavior-preserving.
     GeneratorVersionFormatting,
-    /// An arguments entry that resolves to NULL in the output because the
-    /// class (or an ancestor its constructor comes from) lives in
-    /// eval-obfuscated vendor source — the real compiler EXECUTES the
-    /// decrypting stub and reflects the materialized class; magecommand never
-    /// executes PHP, so the constructor is statically invisible.
-    ObfuscatedVendorSource,
 }
 
 /// The document that explains every [`KnownKind`], one section per kind. The
@@ -85,7 +79,7 @@ pub const ORDERING_ONLY_SLUG: &str = "ordering-only";
 
 impl KnownKind {
     /// Every kind, for exhaustive checks (e.g. that each has a doc section).
-    pub const ALL: [KnownKind; 11] = [
+    pub const ALL: [KnownKind; 10] = [
         KnownKind::PluginListScopeOrder,
         KnownKind::DisabledModuleInterceptor,
         KnownKind::DisabledModuleMetadata,
@@ -96,7 +90,6 @@ impl KnownKind {
         KnownKind::ClassScannerExcludeRegex,
         KnownKind::FilenameCasing,
         KnownKind::GeneratorVersionFormatting,
-        KnownKind::ObfuscatedVendorSource,
     ];
 
     /// Stable anchor of this kind's section in [`DIFFERENCES_DOC_URL`]. Each is
@@ -114,7 +107,6 @@ impl KnownKind {
             KnownKind::ClassScannerExcludeRegex => "class-scanner-exclude-regex",
             KnownKind::FilenameCasing => "filename-casing",
             KnownKind::GeneratorVersionFormatting => "generator-version-formatting",
-            KnownKind::ObfuscatedVendorSource => "obfuscated-vendor-source",
         }
     }
 
@@ -151,9 +143,6 @@ impl KnownKind {
             KnownKind::GeneratorVersionFormatting => {
                 "Code-generator formatting (Magento version, behavior-preserving)"
             }
-            KnownKind::ObfuscatedVendorSource => {
-                "Arguments unresolvable from eval-obfuscated vendor source"
-            }
         }
     }
 }
@@ -188,6 +177,35 @@ pub struct Classified {
     /// sorts the scope names) but whose CONTENT differs. Unexplained, like
     /// `changed`: the name is accounted for, the content is a real bug.
     pub renamed_changed: Vec<RenamedChange>,
+    /// Classes the output writes as `NULL` in `arguments` while the archive has
+    /// a constructor row — a runtime fatal, never an expected difference. Their
+    /// files are always in `changed`, whatever rule would otherwise claim them.
+    pub null_arguments: Vec<NullArguments>,
+}
+
+/// A class whose `arguments` entry is `NULL` in the output but a non-empty row
+/// in the archive (the reference compile).
+///
+/// `NULL` does NOT mean "resolve at runtime". `ObjectManager\Config\Compiled::
+/// getArguments()` turns a present `NULL` into `[]`, and
+/// `ObjectManager\Factory\Compiled::create()` answers `[]` with `new $type()`
+/// — so a class with a required constructor parameter dies with
+/// `ArgumentCountError`, and one with only optional parameters silently loses
+/// every argument di.xml configures. Only a key ABSENT from `arguments` sends
+/// the factory to runtime reflection. This was once classified as expected for
+/// eval-obfuscated vendor source, on exactly that wrong reading, and shipped a
+/// store-breaking compile past a green verify.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct NullArguments {
+    /// The class, unescaped (`Vendor\Module\Class`).
+    pub class: String,
+    /// The metadata files (relative paths) carrying the bad entry.
+    pub files: Vec<String>,
+    /// The file in the class's `extends` chain whose class declaration only
+    /// exists inside an `eval()` (encrypted vendor source), when that is why
+    /// magecommand could not see the constructor.
+    pub eval_source: Option<PathBuf>,
 }
 
 /// One file the two trees store under different names for a known reason,
@@ -224,10 +242,9 @@ pub struct ClassifyCtx<'a> {
     /// than merely equal once a plugin-list's key order is canonicalized.
     pub strict_ordering: bool,
     pub disabled_modules: &'a HashSet<String>,
-    /// Class keys (escaped `Vendor\\\\Class` metadata form) whose arguments are
-    /// statically unresolvable because their constructor chain runs through
-    /// eval-obfuscated vendor source — see [`obfuscation_blocked_classes`].
-    pub obfuscation_blocked: &'a HashSet<String>,
+    /// `arguments` entries the output nulled where the archive has a row — see
+    /// [`null_argument_entries`]. Never explained: their files stay unexplained.
+    pub null_arguments: &'a [NullArguments],
     /// Type keys (escaped `Vendor\\\\Class` metadata form) the archive's compile
     /// reached only through a disabled module, though the name itself belongs to
     /// an enabled one — see [`disabled_reachable_types`].
@@ -250,21 +267,14 @@ pub struct ClassifyCtx<'a> {
 }
 
 impl ClassifyCtx<'_> {
-    /// [`strip_expected_entries`] with this context's three expected-key sets.
+    /// [`strip_expected_entries`] with this context's expected-key sets.
     fn strip(&self, text: &str) -> (String, bool) {
-        let (text, a) = strip_expected_entries(
+        strip_expected_entries(
             text,
             self.disabled_modules,
-            self.obfuscation_blocked,
             self.disabled_reachable,
-        );
-        let (text, b) = strip_expected_entries(
-            &text,
-            self.disabled_modules,
-            self.obfuscation_blocked,
             self.outside_scan,
-        );
-        (text, a || b)
+        )
     }
 }
 
@@ -278,6 +288,25 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
     let mut changed: Vec<String> = report.changed.clone();
     let mut known: Vec<KnownGroup> = Vec::new();
     let mut renamed_changed: Vec<RenamedChange> = Vec::new();
+
+    // 0. Files carrying a nulled `arguments` row are a runtime fatal. Hold them
+    //    out of every rule below so none can explain them away — an expected-key
+    //    strip or an "output only adds lines" pass could otherwise claim the file
+    //    around the bad entry — and put them back as unexplained at the end.
+    let null_files: HashSet<&str> = ctx
+        .null_arguments
+        .iter()
+        .flat_map(|n| n.files.iter().map(String::as_str))
+        .collect();
+    let mut held: Vec<String> = Vec::new();
+    changed.retain(|path| {
+        if null_files.contains(path.as_str()) {
+            held.push(path.clone());
+            false
+        } else {
+            true
+        }
+    });
 
     // 1. Plugin-list scope ordering: pair a missing `a|b|…|plugin-list.php`
     //    with an extra file whose scope tokens are the same multiset in a
@@ -315,35 +344,6 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
         known.push(group);
     }
 
-    // 5. Obfuscation-blocked entries: report the classes whose arguments are
-    //    statically unresolvable (their constructor chain runs through
-    //    eval-obfuscated vendor source, pre-verified into ctx). Their entries
-    //    are stripped inside rules 5b–7's comparisons, so the files claim
-    //    under their natural patterns; this group is where the WHY lives.
-    if !ctx.obfuscation_blocked.is_empty() {
-        let mut items: Vec<String> = ctx
-            .obfuscation_blocked
-            .iter()
-            .map(|k| k.replace("\\\\", "\\"))
-            .collect();
-        items.sort();
-        known.push(KnownGroup {
-            kind: KnownKind::ObfuscatedVendorSource,
-            title: KnownKind::ObfuscatedVendorSource.title().to_owned(),
-            explanation:
-                "These classes' constructor chains run through vendor source whose class \
-declaration only exists inside an eval() of encrypted code (Anowave-style obfuscation). The real \
-compiler EXECUTES that stub when the autoloader requires the file, then reflects the materialized \
-class; magecommand never executes PHP, so the constructor is statically invisible and the \
-arguments entry honestly degrades to NULL (a compile finding records each one). At runtime the \
-object manager falls back to reflection for a NULL entry, so the store still works — the row is \
-just uncached. This is the one place the no-PHP-execution guarantee costs fidelity."
-                    .to_owned(),
-            items,
-            verified: true,
-        });
-    }
-
     // 5c. Classes whose file sits outside every scan path — a component that
     //    registers as a module without being one. Stripped inside 5b–7 too, and
     //    the same component's generated artifacts are claimed out of `missing`
@@ -379,7 +379,7 @@ framework library paths, setup/src), so a missing framework or module entry stil
         });
     }
 
-    // 5a. Types the archive reached only through a disabled module. Like rule 5,
+    // 5a. Types the archive reached only through a disabled module. Like rule 5c,
     //    their entries are stripped inside rules 5b–7's comparisons so the files
     //    claim under their natural patterns; this group carries the WHY.
     if !ctx.disabled_reachable.is_empty() {
@@ -433,7 +433,16 @@ payment module. Verified against the disabled modules' own source, one PHP heade
         known.push(group);
     }
 
-    Classified { known, missing, extra, changed, renamed_changed }
+    changed.extend(held);
+    changed.sort();
+    Classified {
+        known,
+        missing,
+        extra,
+        changed,
+        renamed_changed,
+        null_arguments: ctx.null_arguments.to_vec(),
+    }
 }
 
 /// Scope tokens of a plugin-list cache filename, e.g.
@@ -747,8 +756,8 @@ fn top_level_entry_key(line: &str) -> Option<&str> {
 }
 
 /// Remove every top-level DI-config entry whose class key belongs to a disabled
-/// module — or is a known obfuscation-blocked class, or a type only a disabled
-/// module reached — so two metadata files can be compared modulo that expected
+/// module — or is in one of the expected-key sets (a type only a disabled module
+/// reached, one outside the scan paths) — so two metadata files can be compared modulo that expected
 /// noise.
 ///
 /// The block a key introduces is either a single inline line (`'K' => NULL,`) or
@@ -758,7 +767,7 @@ fn top_level_entry_key(line: &str) -> Option<&str> {
 fn strip_expected_entries(
     text: &str,
     disabled: &HashSet<String>,
-    blocked: &HashSet<String>,
+    expected: &HashSet<String>,
     reachable: &HashSet<String>,
 ) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
@@ -767,7 +776,7 @@ fn strip_expected_entries(
     while let Some(line) = lines.next() {
         if let Some(key) = top_level_entry_key(line) {
             if metadata_entry_module_disabled(key, disabled)
-                || blocked.contains(key)
+                || expected.contains(key)
                 || reachable.contains(key)
             {
                 stripped = true;
@@ -846,19 +855,6 @@ fn canonicalize_disabled_interceptor_refs(
     (out, rewrote)
 }
 
-/// Find changed-metadata argument entries that are statically unresolvable
-/// because the class's constructor chain runs through EVAL-OBFUSCATED vendor
-/// source (Anowave-style: the real class declaration only exists inside an
-/// `eval(<decrypt>(…))` payload). The real compiler `require`s the file —
-/// executing the stub — and reflects the materialized class; magecommand never
-/// executes PHP, so it sees no constructor and honestly emits NULL (plus a
-/// compile finding).
-///
-/// Candidates are exactly the keys that are a one-line `NULL` entry on one
-/// side and a block on the other; each is confirmed by walking the class's
-/// `extends` chain through real files until one matches the obfuscation
-/// signature (`eval(` + `base64_decode` in the same source). Returns the keys
-/// in their escaped metadata form, for [`ClassifyCtx::obfuscation_blocked`].
 /// Types the archive's compile reached **only by way of a disabled module**.
 ///
 /// The name-prefix rule ([`metadata_entry_module_disabled`]) explains an
@@ -1252,76 +1248,102 @@ fn disabled_module_type_closure(
     reached
 }
 
-pub fn obfuscation_blocked_classes(
+/// Every `arguments` entry the output writes as `NULL` (or an empty row) where the archive has a
+/// non-empty row — see [`NullArguments`] for why that is always a runtime bug.
+///
+/// Scans each changed metadata file's `arguments` section on both sides. An
+/// archive entry that is `NULL` or an empty `array ()` is equivalent to the
+/// output's `NULL` (both reach `new $type()`), so only a real row counts. With a
+/// checkout, each class's `extends` chain is walked through real files to name
+/// the eval-obfuscated source behind it, when that is the cause.
+pub fn null_argument_entries(
     report: &CompareReport,
     archive: &Path,
     output: &Path,
     magento: Option<&magequery_core::Magento>,
-) -> HashSet<String> {
-    let Some(magento) = magento else { return HashSet::new() };
-
-    // key -> is the entry a one-line NULL? (block entries map to false)
-    fn entry_shapes(text: &str) -> Vec<(String, bool)> {
-        text.lines()
-            .filter_map(|line| {
-                let key = top_level_entry_key(line)?;
-                Some((key.to_owned(), line.trim_end().ends_with("=> NULL,")))
-            })
-            .collect()
+) -> Vec<NullArguments> {
+    // key -> does the archive give it a non-empty row?
+    fn argument_rows(text: &str) -> std::collections::HashMap<&str, bool> {
+        let mut rows = std::collections::HashMap::new();
+        let mut in_arguments = false;
+        let mut lines = text.lines().peekable();
+        while let Some(line) = lines.next() {
+            // Section headers sit at indent two: `  'arguments' => `.
+            if let Some(rest) = line.strip_prefix("  '") {
+                in_arguments = rest.starts_with("arguments' =>");
+                continue;
+            }
+            if !in_arguments {
+                continue;
+            }
+            let Some(rest) = line.strip_prefix("    '") else { continue };
+            let Some(end) = rest.find("' =>") else { continue };
+            let key = &rest[..end];
+            let has_row = if line.trim_end().ends_with("=> NULL,") {
+                false
+            } else {
+                // `'K' => ` / `    array (` / either `    ),` (empty) or a row.
+                let _open = lines.next();
+                lines.peek().is_some_and(|next| *next != "    ),")
+            };
+            rows.insert(key, has_row);
+        }
+        rows
     }
 
-    let mut candidates: HashSet<String> = HashSet::new();
+    let mut by_key: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for rel in &report.changed {
+        if !rel.starts_with("metadata/") {
+            continue;
+        }
         let (Ok(a), Ok(b)) =
             (fs::read_to_string(archive.join(rel)), fs::read_to_string(output.join(rel)))
         else {
             continue;
         };
-        if !a.starts_with("<?php return array (") {
-            continue;
-        }
-        let shapes_a: std::collections::HashMap<String, bool> =
-            entry_shapes(&a).into_iter().collect();
-        for (key, b_null) in entry_shapes(&b) {
-            if let Some(&a_null) = shapes_a.get(&key) {
-                if a_null != b_null {
-                    candidates.insert(key);
-                }
+        let archive_rows = argument_rows(&a);
+        for (key, out_has_row) in argument_rows(&b) {
+            // An empty `array ()` reaches `new $type()` exactly like NULL.
+            if !out_has_row && archive_rows.get(key) == Some(&true) {
+                by_key.entry(key.to_owned()).or_default().push(rel.clone());
             }
         }
     }
 
-    let mut verdict: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-    let mut blocked = HashSet::new();
-    for key in candidates {
-        let fqcn = key.replace("\\\\", "\\");
-        if chain_hits_obfuscation(&fqcn, magento, &mut verdict, 0) {
-            blocked.insert(key);
-        }
-    }
-    blocked
+    let mut verdict = std::collections::HashMap::new();
+    by_key
+        .into_iter()
+        .map(|(key, mut files)| {
+            files.sort();
+            let class = key.replace("\\\\", "\\");
+            let eval_source =
+                magento.and_then(|m| chain_eval_source(&class, m, &mut verdict, 0));
+            NullArguments { class, files, eval_source }
+        })
+        .collect()
 }
 
-fn chain_hits_obfuscation(
+/// The first file up `fqcn`'s `extends` chain that matches the eval-obfuscation
+/// signature (`eval(` and `base64_decode` in one source): a class declared only
+/// inside an encrypted payload, whose constructor no static parse can see.
+fn chain_eval_source(
     fqcn: &str,
     magento: &magequery_core::Magento,
-    verdict: &mut std::collections::HashMap<String, bool>,
+    verdict: &mut std::collections::HashMap<String, Option<PathBuf>>,
     depth: usize,
-) -> bool {
+) -> Option<PathBuf> {
     if depth > 8 {
-        return false;
+        return None;
     }
-    if let Some(&v) = verdict.get(fqcn) {
-        return v;
+    if let Some(v) = verdict.get(fqcn) {
+        return v.clone();
     }
-    verdict.insert(fqcn.to_owned(), false); // cycle guard
-    let Some(file) = magento.class_file(&magequery_core::ClassName::new(fqcn.to_owned())) else {
-        return false;
-    };
-    let Ok(src) = fs::read(&file) else { return false };
+    verdict.insert(fqcn.to_owned(), None); // cycle guard
+    let file = magento.class_file(&magequery_core::ClassName::new(fqcn.to_owned()))?;
+    let src = fs::read(&file).ok()?;
     let text = String::from_utf8_lossy(&src);
     let hit = if text.contains("eval(") && text.contains("base64_decode") {
-        true
+        Some(file)
     } else {
         let meta = magecommand_php::parse_file(&src);
         meta.declarations
@@ -1329,9 +1351,9 @@ fn chain_hits_obfuscation(
             .find(|d| d.fqcn.eq_ignore_ascii_case(fqcn))
             .or(meta.declarations.first())
             .and_then(|d| d.extends.first().cloned())
-            .is_some_and(|parent| chain_hits_obfuscation(&parent, magento, verdict, depth + 1))
+            .and_then(|parent| chain_eval_source(&parent, magento, verdict, depth + 1))
     };
-    verdict.insert(fqcn.to_owned(), hit);
+    verdict.insert(fqcn.to_owned(), hit.clone());
     hit
 }
 
@@ -1911,7 +1933,7 @@ mod tests {
             archive: dir,
             output: dir,
             disabled_modules: disabled,
-            obfuscation_blocked: no_blocked(),
+            null_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2055,7 +2077,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
-            obfuscation_blocked: no_blocked(),
+            null_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2069,6 +2091,56 @@ mod tests {
         assert_eq!(c.known[0].items, vec!["global.php"]);
         // The enabled-module change is NOT absorbed.
         assert_eq!(c.changed, vec!["crontab.php"]);
+    }
+
+    #[test]
+    fn a_nulled_arguments_row_is_never_explained() {
+        // The shape that shipped a broken store past a green verify: the archive
+        // has a constructor row, the output writes NULL. Magento reads a present
+        // NULL as `[]` and calls `new X()` — a fatal, so no rule may absorb it.
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        let row = "    array (\n      'context' => \n      array (\n        '_i_' => 'Magento\\\\Framework\\\\App\\\\Helper\\\\Context',\n      ),\n    ),\n";
+        // `Bad\Mod` is disabled, so without the guard the disabled-module rule
+        // strips the entry from both sides and calls the file explained.
+        let args = |body: &str| {
+            format!("<?php return array (\n  'arguments' => \n  array (\n{body}  ),\n);\n")
+        };
+        write(archive.path(), "metadata/global.php", &args(&format!("    'Bad\\\\Mod\\\\B' => \n{row}")));
+        write(output.path(), "metadata/global.php", &args("    'Bad\\\\Mod\\\\B' => NULL,\n"));
+        // Not findings: an empty archive row is equivalent to NULL, and a NULL
+        // outside `arguments` is some other difference.
+        write(
+            archive.path(),
+            "metadata/frontend.php",
+            "<?php return array (\n  'arguments' => \n  array (\n    'Good\\\\Mod\\\\Empty' => \n    array (\n    ),\n  ),\n  'preferences' => \n  array (\n    'Good\\\\Mod\\\\P' => 'x',\n  ),\n);\n",
+        );
+        write(
+            output.path(),
+            "metadata/frontend.php",
+            "<?php return array (\n  'arguments' => \n  array (\n    'Good\\\\Mod\\\\Empty' => NULL,\n  ),\n  'preferences' => \n  array (\n    'Good\\\\Mod\\\\P' => NULL,\n  ),\n);\n",
+        );
+        let r = report(&[], &[], &["metadata/frontend.php", "metadata/global.php"]);
+        let nulls = null_argument_entries(&r, archive.path(), output.path(), None);
+        assert_eq!(nulls.len(), 1, "{nulls:?}");
+        assert_eq!(nulls[0].class, "Bad\\Mod\\B");
+        assert_eq!(nulls[0].files, vec!["metadata/global.php"]);
+        assert_eq!(nulls[0].eval_source, None);
+
+        let mut disabled = HashSet::new();
+        disabled.insert("Bad_Mod".to_string());
+        let mut ctx = ctx(&disabled, archive.path());
+        ctx.output = output.path();
+        ctx.null_arguments = &nulls;
+        let c = classify(&r, &ctx);
+        assert!(c.known.is_empty(), "explained away: {:?}", c.known);
+        assert_eq!(c.changed, vec!["metadata/frontend.php", "metadata/global.php"]);
+        assert_eq!(c.null_arguments, nulls);
     }
 
     #[test]
@@ -2117,7 +2189,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
-            obfuscation_blocked: no_blocked(),
+            null_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2214,7 +2286,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
-            obfuscation_blocked: no_blocked(),
+            null_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2261,7 +2333,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
-            obfuscation_blocked: no_blocked(),
+            null_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2305,7 +2377,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
-            obfuscation_blocked: no_blocked(),
+            null_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2337,7 +2409,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
-            obfuscation_blocked: no_blocked(),
+            null_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2491,7 +2563,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
-            obfuscation_blocked: no_blocked(),
+            null_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2606,7 +2678,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
-            obfuscation_blocked: no_blocked(),
+            null_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2623,7 +2695,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
-            obfuscation_blocked: no_blocked(),
+            null_arguments: &[],
             disabled_reachable: &reachable,
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2795,7 +2867,7 @@ mod tests {
             archive: archive.path(),
             output: output.path(),
             disabled_modules: &disabled,
-            obfuscation_blocked: no_blocked(),
+            null_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),

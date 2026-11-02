@@ -212,13 +212,22 @@ These differences disappear on a 2.4.9 store.
 
 ## Obfuscated vendor source
 
-*DI config.* The constructor chain of these classes runs through vendor source whose
-class declaration exists only inside an `eval()` of encrypted code. The real compiler
-executes that stub and reflects the class it produces. magecommand never executes PHP,
-so it can't see the constructor, and the arguments entry degrades to `NULL` (a compile
-finding records each one). At runtime the object manager falls back to reflection for a
-`NULL` entry, so the store still works; the entry just isn't cached. This is the one
-place where never executing PHP costs fidelity.
+**Not an expected difference.** Versions up to 0.21.0 listed it here, and that was a bug.
+
+The constructor chain of these classes runs through vendor source whose class declaration
+exists only inside an `eval()` of encrypted code. magecommand never executes PHP, so it
+can't see the constructor and writes `NULL` as the class's `arguments` entry. Earlier
+versions assumed Magento falls back to runtime reflection for a `NULL` entry. It doesn't:
+`ObjectManager\Config\Compiled::getArguments()` turns a present `NULL` into `[]`, and the
+compiled factory answers `[]` with `new $type()`. Only a key that is *absent* from
+`arguments` gets runtime reflection. The result is an `ArgumentCountError` the first time
+the class is built (or, if every parameter is optional, every argument di.xml configures
+is silently dropped).
+
+`di verify` now reports any `arguments` entry that is `NULL` (or an empty row) in the
+output while the archive has a row as **unexplained**, whatever else the file matches.
+The report leads with these classes and names the `eval()`'d file behind each one when it
+can find it.
 
 ## Ordering only
 
