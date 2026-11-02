@@ -133,6 +133,10 @@ pub enum DoctorLint {
     ModuleDisabled,
     /// Enabled DI config pointing at a class that lives in a disabled module.
     DisabledModuleReferenced,
+    /// Config names a class with different letter case than its declaration.
+    ClassNameCaseMismatch,
+    /// A class's declared namespace differs in letter case from its file path.
+    ClassFileCaseMismatch,
 }
 
 /// The kebab-case name a finding is reported under: what `doctor --deny` takes.
@@ -147,7 +151,7 @@ impl std::fmt::Display for DoctorLint {
 
 impl DoctorLint {
     /// Every lint, in code order.
-    pub const ALL: [DoctorLint; 24] = [
+    pub const ALL: [DoctorLint; 26] = [
         Self::ModuleMissingOnDisk,
         Self::ModuleNotRegistered,
         Self::SequenceCycle,
@@ -160,6 +164,8 @@ impl DoctorLint {
         Self::PluginClassMissing,
         Self::DiArgumentClassMissing,
         Self::DuplicateArgumentKey,
+        Self::ClassNameCaseMismatch,
+        Self::ClassFileCaseMismatch,
         Self::ObserverClassMissing,
         Self::CronInstanceMissing,
         Self::WebapiServiceMissing,
@@ -193,6 +199,8 @@ impl DoctorLint {
             Self::PluginClassMissing => "E2005",
             Self::DiArgumentClassMissing => "E2006",
             Self::DuplicateArgumentKey => "E2007",
+            Self::ClassNameCaseMismatch => "E2008",
+            Self::ClassFileCaseMismatch => "E2009",
             Self::ObserverClassMissing => "E3001",
             Self::CronInstanceMissing => "E3002",
             Self::WebapiServiceMissing => "E3003",

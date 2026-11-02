@@ -4,7 +4,7 @@
 //! yields the inheritance chain — needed for plugin-on-ancestor resolution — comes later.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::composer::ComposerPackage;
@@ -44,6 +44,11 @@ fn under_app_code(path: &std::path::Path) -> bool {
     false
 }
 
+/// `p` without `.` components, so `./a/b` and `a/b` compare equal.
+fn lexical(p: &Path) -> PathBuf {
+    p.components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect()
+}
+
 pub(crate) struct ClassResolver {
     /// PSR-4: `(namespace prefix ending in '\', source dirs)`, sorted longest-prefix-first
     /// so longest-match wins. The prefix is stripped from the path.
@@ -52,6 +57,10 @@ pub(crate) struct ClassResolver {
     /// `src/Cm/RedisSession/X.php`). (Underscore-as-separator in the class name is not
     /// modeled — no Magento-adjacent PSR-0 package needs it.)
     psr0: Vec<(String, Vec<PathBuf>)>,
+    /// The mappings composer itself knows (installed packages + the root composer.json),
+    /// `(prefix, dirs, is_psr0)` longest-prefix-first — without the synthesized app/code
+    /// prefixes. What composer's optimized classmap checks a class against.
+    composer_maps: Vec<(String, Vec<PathBuf>, bool)>,
     /// Lazily parsed PHP headers, keyed by class name (`None` = file missing/unparseable).
     headers: Mutex<HashMap<ClassName, Option<Arc<PhpClass>>>>,
     /// Content reads (headers, plugin methods, command names) honor the buffer overlay.
@@ -87,6 +96,12 @@ impl ClassResolver {
         let (root_psr4, root_psr0) = crate::composer::root_autoload(root);
         prefixes.extend(root_psr4);
         psr0.extend(root_psr0);
+        let mut composer_maps: Vec<(String, Vec<PathBuf>, bool)> = prefixes
+            .iter()
+            .map(|(p, d)| (p.clone(), d.clone(), false))
+            .chain(psr0.iter().map(|(p, d)| (p.clone(), d.clone(), true)))
+            .collect();
+        composer_maps.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.len()));
 
         // Modules that aren't composer-PSR-4-managed: synthesize the Magento
         // registrar convention `Vendor_Module` -> namespace `Vendor\Module\`
@@ -105,7 +120,59 @@ impl ClassResolver {
 
         prefixes.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
         psr0.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
-        Self { prefixes, psr0, headers: Mutex::new(HashMap::new()), vfs, root: root.to_path_buf() }
+        Self {
+            prefixes,
+            psr0,
+            composer_maps,
+            headers: Mutex::new(HashMap::new()),
+            vfs,
+            root: root.to_path_buf(),
+        }
+    }
+
+    /// The spelling (a directory, or a segment of a PSR-4 prefix) where `declared`
+    /// departs, in letter case only, from what composer's autoload mapping derives for it
+    /// in `file`, or `None` when the spellings agree. Uses the most specific real composer mapping whose directory
+    /// holds the file, and compares only the part of the name that mapping turns into a
+    /// path: a PSR-4 package directory named differently from its prefix
+    /// (`vendor/amasty/base` for `Amasty\Base\`) is fine. A class this flags is what
+    /// composer's optimized classmap skips as not complying with PSR-0/PSR-4.
+    pub(crate) fn path_case_conflict(&self, declared: &ClassName, file: &Path) -> Option<String> {
+        let name = declared.as_str();
+        for (prefix, dirs, is_psr0) in &self.composer_maps {
+            if name.len() < prefix.len() || !name[..prefix.len()].eq_ignore_ascii_case(prefix) {
+                continue;
+            }
+            // Lexically: a root opened as `.` yields `./app/code/…` files, while composer
+            // dirs are normalized (`app/code`).
+            let file = lexical(file);
+            let Some(rel) = dirs.iter().find_map(|d| file.strip_prefix(lexical(d)).ok()) else {
+                continue;
+            };
+            // Composer matches a PSR-4 prefix case-sensitively too.
+            if !*is_psr0 && &name[..prefix.len()] != prefix.as_str() {
+                return prefix
+                    .trim_end_matches('\\')
+                    .split('\\')
+                    .zip(name[..prefix.len()].trim_end_matches('\\').split('\\'))
+                    .find(|(p, n)| p != n)
+                    .map(|(p, _)| p.to_owned());
+            }
+            let mapped = if *is_psr0 { name } else { &name[prefix.len()..] };
+            let rel = rel.with_extension("");
+            let path_parts: Vec<String> =
+                rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+            let name_parts: Vec<&str> = mapped.split('\\').collect();
+            if path_parts.len() != name_parts.len() {
+                return None;
+            }
+            return path_parts
+                .into_iter()
+                .zip(name_parts)
+                .find(|(p, n)| p != n && p.eq_ignore_ascii_case(n))
+                .map(|(p, _)| p);
+        }
+        None
     }
 
     /// The on-disk file a class maps to, if any PSR-4/PSR-0 prefix resolves it to an
@@ -454,6 +521,7 @@ mod tests {
         ClassResolver {
             prefixes: vec![(prefix.to_owned(), vec![dir.to_path_buf()])],
             psr0: Vec::new(),
+            composer_maps: vec![(prefix.to_owned(), vec![dir.to_path_buf()], false)],
             headers: Mutex::new(HashMap::new()),
             vfs: std::sync::Arc::new(crate::engine::vfs::Vfs::new(HashMap::new())),
             root: dir.to_path_buf(),

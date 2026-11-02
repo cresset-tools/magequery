@@ -1278,6 +1278,109 @@ mod handle_tests {
         assert_eq!(luma, 1, "root-level theme not double-discovered: {themes:?}");
     }
 
+    /// A class whose declared namespace differs from its directory only in letter case
+    /// still loads (PHP class names are case-insensitive) but breaks two case-SENSITIVE
+    /// lookups: Composer leaves it out of the optimized classmap, and the compiled DI
+    /// config keys preferences and interceptors by exact spelling — so a preference
+    /// written the directory's way never reaches the interceptor generated under the
+    /// declared name, and the class's plugins silently stop running in production.
+    #[test]
+    fn class_name_case_mismatches_are_reported() {
+        let tree = TempTree::new("doctor-case");
+        let write = |rel: &str, content: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        // `Acme\Lib\` maps onto a directory named `lib`: PSR-4 strips the prefix, so
+        // that directory's spelling is not the namespace's and must not be flagged.
+        write(
+            "composer.json",
+            r#"{"autoload": {"psr-0": {"": ["app/code/"]}, "psr-4": {"Acme\\Lib\\": "lib/acme/lib/", "Acme\\Kit\\": "lib/kit/"}}}"#,
+        );
+        write("lib/acme/lib/Thing.php", "<?php\nnamespace Acme\\Lib;\n\nclass Thing\n{\n}\n");
+        // The PSR-4 prefix itself is compared case-sensitively by composer: `Acme\KIT`
+        // under the `Acme\Kit\` mapping is skipped from the classmap too.
+        write("lib/kit/Tool.php", "<?php\nnamespace Acme\\KIT;\n\nclass Tool\n{\n}\n");
+        write("app/etc/config.php", "<?php\nreturn ['modules' => ['Acme_WebShop' => 1]];\n");
+        write("app/code/Acme/WebShop/etc/module.xml", r#"<config><module name="Acme_WebShop"/></config>"#);
+        write(
+            "app/code/Acme/WebShop/Api/SwitcherInterface.php",
+            "<?php\nnamespace Acme\\WebShop\\Api;\n\ninterface SwitcherInterface\n{\n}\n",
+        );
+        write(
+            "app/code/Acme/WebShop/Block/Base.php",
+            "<?php\nnamespace Acme\\WebShop\\Block;\n\nclass Base\n{\n    public function toHtml() {}\n}\n",
+        );
+        // The mis-cased declarations: `Webshop` in a `WebShop` directory.
+        write(
+            "app/code/Acme/WebShop/Block/SwitcherOverride.php",
+            "<?php\nnamespace Acme\\Webshop\\Block;\n\nclass SwitcherOverride extends \\Acme\\WebShop\\Block\\Base implements \\Acme\\WebShop\\Api\\SwitcherInterface\n{\n}\n",
+        );
+        write(
+            "app/code/Acme/WebShop/Model/Plain.php",
+            "<?php\nnamespace Acme\\Webshop\\Model;\n\nclass Plain\n{\n}\n",
+        );
+        write(
+            "app/code/Acme/WebShop/Plugin/Html.php",
+            "<?php\nnamespace Acme\\WebShop\\Plugin;\n\nclass Html\n{\n    public function afterToHtml($subject, $result) { return $result; }\n}\n",
+        );
+        write(
+            "app/code/Acme/WebShop/etc/di.xml",
+            r#"<config>
+    <preference for="Acme\WebShop\Api\SwitcherInterface" type="Acme\WebShop\Block\SwitcherOverride"/>
+    <type name="Acme\WebShop\Block\Base">
+        <plugin name="html" type="Acme\WebShop\Plugin\Html"/>
+        <arguments>
+            <argument name="plain" xsi:type="object">Acme\WebShop\Model\Plain</argument>
+            <argument name="thing" xsi:type="object">Acme\Lib\Thing</argument>
+            <argument name="tool" xsi:type="object">Acme\Kit\Tool</argument>
+        </arguments>
+    </type>
+</config>"#,
+        );
+
+        let magento = super::Magento::open(&tree.0).unwrap();
+        let report = magento.doctor(None);
+        let find = |lint: crate::model::DoctorLint, subject: &str| {
+            report
+                .findings
+                .iter()
+                .find(|f| f.lint == lint && f.subject.as_deref() == Some(subject))
+                .unwrap_or_else(|| panic!("no {lint} about {subject}: {:#?}", report.findings))
+        };
+        use crate::model::DoctorLint::{ClassFileCaseMismatch, ClassNameCaseMismatch};
+
+        // Intercepted: the compiled preference stops at the di.xml spelling and never
+        // reaches the interceptor, so the plugin is lost. An error.
+        let pref = find(ClassNameCaseMismatch, "Acme\\Webshop\\Block\\SwitcherOverride");
+        assert_eq!(pref.severity, crate::Severity::Error);
+        assert!(pref.message.contains("Acme\\WebShop\\Block\\SwitcherOverride"), "{}", pref.message);
+        assert!(pref.source.as_ref().is_some_and(|s| s.file.ends_with("etc/di.xml") && s.line == 2));
+
+        // Not intercepted: nothing verifiably breaks, but the lookups are still split.
+        let plain = find(ClassNameCaseMismatch, "Acme\\Webshop\\Model\\Plain");
+        assert_eq!(plain.severity, crate::Severity::Warning);
+
+        // The file itself: Composer's classmap skips it. A warning, at the declaration.
+        let file = find(ClassFileCaseMismatch, "Acme\\Webshop\\Block\\SwitcherOverride");
+        assert_eq!(file.severity, crate::Severity::Warning);
+        assert!(file.source.as_ref().is_some_and(|s| s.file.ends_with("Block/SwitcherOverride.php") && s.line == 4));
+
+        let prefix = find(ClassFileCaseMismatch, "Acme\\KIT\\Tool");
+        assert!(prefix.message.contains("Kit"), "{}", prefix.message);
+
+        // Correctly cased classes say nothing.
+        assert!(
+            !report.findings.iter().any(|f| matches!(f.lint, ClassNameCaseMismatch | ClassFileCaseMismatch)
+                && f.subject.as_deref().is_some_and(|s| {
+                    s.contains("Base") || s.contains("Plugin") || s.contains("Lib")
+                })),
+            "{:#?}",
+            report.findings
+        );
+    }
+
     /// A missing class is an error only when something buildable asks for it. Otherwise
     /// it's stale config (its package is installed: warning) or an optional integration
     /// (no installed package provides it: info), and the chain says which dead end.

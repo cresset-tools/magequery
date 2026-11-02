@@ -19,6 +19,8 @@ impl DoctorLint {
             Self::PluginClassMissing => "a <plugin> uses a class that doesn't exist",
             Self::DiArgumentClassMissing => "a di.xml argument injects a class that doesn't exist",
             Self::DuplicateArgumentKey => "an argument or array item is declared twice in one di.xml",
+            Self::ClassNameCaseMismatch => "config names a class with different letter case than its declaration",
+            Self::ClassFileCaseMismatch => "a class's namespace differs in letter case from its autoload path or prefix",
             Self::ObserverClassMissing => "an observer uses a class that doesn't exist",
             Self::CronInstanceMissing => "a cron job uses a class that doesn't exist",
             Self::WebapiServiceMissing => "a webapi route uses a service class that doesn't exist",
@@ -157,6 +159,36 @@ Repeats with identical values are not reported. Across files, repeating a key is
 Magento override behaviour and is not reported either.
 
 Fix: give each item a unique name, or delete the declaration that shouldn't be there.",
+
+            Self::ClassNameCaseMismatch => "\
+Config names a class with different letter case than the class declares, for example
+di.xml says Acme\\WebShop\\Block\\Switcher while the PHP file declares
+namespace Acme\\Webshop\\Block. PHP class names are case-insensitive, so the class still
+loads, and in developer mode everything seems to work.
+
+The compiled DI config (production mode) is not case-insensitive: it is PHP arrays keyed
+by exact spelling. setup:di:compile generates the interceptor under the DECLARED name and
+records `Declared => Declared\\Interceptor` as a preference. A request for the other
+spelling never matches that key, so Magento builds the plain class and every plugin on it
+silently stops running. That's why this is an error when the class has plugins, and a
+warning otherwise (configuration keyed by the other spelling can still be missed).
+
+Fix: use one spelling everywhere, normally the one matching the directory: correct the
+namespace line (see E2009) or the reference.",
+
+            Self::ClassFileCaseMismatch => "\
+A class's declared namespace differs in letter case from the directory it lives in, for
+example namespace Acme\\Webshop\\Block in app/code/Acme/WebShop/Block/. On a
+case-sensitive filesystem (Linux) the PSR-0/PSR-4 autoloader looks for the path its name
+spells, and Composer's optimized classmap (composer install -o) skips the class with
+\"does not comply with psr-0 autoloading standard\". It only loads when it's requested
+under the directory's spelling, which then differs from what the class declares (E2008).
+
+The same goes for a PSR-4 prefix: composer.json maps Acme\\WebShop\\ but the file declares
+Acme\\Webshop. Only the part of the path the namespace maps to is compared, so a PSR-4
+package directory named differently from its namespace prefix is fine.
+
+Fix: make the namespace line match the directory (or rename the directory).",
 
             Self::ObserverClassMissing => "\
 An events.xml <observer instance=\"O\"/> uses a class that doesn't exist. When the event

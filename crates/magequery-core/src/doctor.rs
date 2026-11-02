@@ -65,6 +65,7 @@ pub(crate) fn run(mage: &Magento, source_filter: Option<ModuleSource>) -> Doctor
     phase("sequence cycles", &mut d, &|d| d.check_sequence_cycles());
     phase("di", &mut d, &|d| d.check_di());
     phase("duplicate keys", &mut d, &|d| d.check_duplicate_keys());
+    phase("class name case", &mut d, &|d| d.check_class_name_case());
     phase("observers", &mut d, &|d| d.check_observers());
     phase("cron", &mut d, &|d| d.check_cron());
     phase("webapi", &mut d, &|d| d.check_webapi());
@@ -573,6 +574,100 @@ impl Doctor<'_> {
                 for (arg_name, la) in args {
                     self.check_arg_value(&la.value, &la.source, target, arg_name);
                 }
+            }
+        }
+    }
+
+    /// Class names whose letter case differs between a reference and the declaration
+    /// (E2008), and declarations whose namespace differs in case from their file path
+    /// (E2009). Only classes the config actually names are read, through the resolver,
+    /// which finds a file by the referenced spelling.
+    fn check_class_name_case(&mut self) {
+        let mage = self.mage;
+        // (referenced name, where, how it's referenced)
+        let mut sites: Vec<(ClassName, Source, String)> = Vec::new();
+        for (class, refs) in &self.refs {
+            for r in refs {
+                let (source, what) = match r {
+                    Ref::Arg { target, arg, source } => (source, format!("argument ${arg} of {target}")),
+                    Ref::Preference { for_, source } => (source, format!("the preference for {for_}")),
+                    Ref::VirtualBase { virtual_type, source } => {
+                        (source, format!("virtual type {virtual_type}"))
+                    }
+                    Ref::Plugin { target, name, source } => {
+                        (source, format!("plugin `{name}` on {target}"))
+                    }
+                    Ref::EntryPoint { what, source } => (source, what.clone()),
+                };
+                sites.push((class.clone(), source.clone(), what));
+            }
+        }
+        // `<type name="…">` blocks name their class too, through plugins and arguments.
+        for &area in Area::ALL.iter() {
+            let cfg = mage.di_index().config(area);
+            for (target, by_name) in &cfg.plugins {
+                if let Some(lp) = by_name.values().next() {
+                    sites.push((target.clone(), lp.source.clone(), format!("<type name> for {target}")));
+                }
+            }
+            for (target, args) in &cfg.type_args {
+                if let Some(la) = args.values().next() {
+                    sites.push((target.clone(), la.source.clone(), format!("<type name> for {target}")));
+                }
+            }
+        }
+
+        let resolver = &mage.index.resolver;
+        let mut declared_of: HashMap<ClassName, Option<ClassName>> = HashMap::new();
+        let mut intercepted: HashMap<ClassName, bool> = HashMap::new();
+        let mut files_checked: HashSet<PathBuf> = HashSet::new();
+        sites.sort_by(|a, b| (a.1.file.as_path(), a.1.line, a.0.as_str()).cmp(&(b.1.file.as_path(), b.1.line, b.0.as_str())));
+        for (class, source, what) in sites {
+            let declared = declared_of
+                .entry(class.clone())
+                .or_insert_with(|| resolver.header_of(&class).map(|h| h.fqcn.clone()))
+                .clone();
+            let Some(declared) = declared else { continue };
+
+            // E2009 once per file: the declaration against its own path.
+            if let Some(file) = resolver.file_for(&class) {
+                if files_checked.insert(file.clone()) {
+                    if let Some(path_spelling) = resolver.path_case_conflict(&declared, &file) {
+                        self.warn_on(
+                            DoctorLint::ClassFileCaseMismatch,
+                            &declared,
+                            format!(
+                                "{declared} doesn't match its autoload mapping, which spells it \
+{path_spelling}: Composer's classmap skips it, and it loads only under the mapping's spelling"
+                            ),
+                            self.class_source(&class),
+                        );
+                    }
+                }
+            }
+
+            if declared.as_str() == class.as_str() || !declared.as_str().eq_ignore_ascii_case(class.as_str()) {
+                continue;
+            }
+            // Through both spellings: on a case-sensitive filesystem only the one matching
+            // the directory resolves to a file, and with it the ancestors plugins sit on.
+            let has_plugins = *intercepted.entry(declared.clone()).or_insert_with(|| {
+                [&class, &declared].into_iter().any(|name| {
+                    mage.plugins_all_areas(name).is_ok_and(|p| p.iter().any(|p| !p.disabled))
+                })
+            });
+            let message = format!(
+                "{what} names {class}, but the class is declared {declared}{}",
+                if has_plugins {
+                    ": in compiled mode its interceptor is keyed by the declared spelling, so its plugins never run"
+                } else {
+                    ": compiled DI config is keyed by exact spelling"
+                }
+            );
+            if has_plugins {
+                self.error_on(DoctorLint::ClassNameCaseMismatch, &declared, message, Some(source));
+            } else {
+                self.warn_on(DoctorLint::ClassNameCaseMismatch, &declared, message, Some(source));
             }
         }
     }
