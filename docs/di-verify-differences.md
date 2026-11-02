@@ -202,6 +202,26 @@ canonicalized on both sides, disabled-module entries are removed and the
 [extra-metadata](#extra-metadata) additions are set aside. Any other changed or added value
 keeps the file flagged.
 
+## Setup area config
+
+*DI config.* The output's `arguments` have rows for the setup application's own classes
+(`Magento\Setup\…`, files under `setup/src`) that the archive doesn't. Since Magento 2.4.8
+([magento/magento2#33161](https://github.com/magento/magento2/pull/33161)),
+`setup:di:compile` passes `setup/src` to the step that writes the per-area DI config. Before
+that it scanned `setup/src` only for code generation, so a 2.4.7-or-older reference has no
+rows for these classes. magecommand targets 2.4.9 and writes them.
+
+Explained only when both checks hold:
+
+- the class resolves to a file under `setup/src` (a generated factory, through the class it
+  is generated for), and
+- the checkout's own `setup/src/Magento/Setup/Console/Command/DiCompileCommand.php` leaves
+  `setup` out of its `AREA_CONFIG_GENERATOR` paths.
+
+On a 2.4.8+ checkout, and when verify has no checkout to read, nothing is explained, so a
+setup row missing from a current reference still fails. The rule assumes the archive was
+compiled from the checkout passed as `--root`.
+
 ## Filename casing
 
 *Generated code. A warning, on macOS only.* Paths that differ only in letter case
