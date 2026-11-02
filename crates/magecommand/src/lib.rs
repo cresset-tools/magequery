@@ -465,6 +465,12 @@ enum DiCommand {
         /// PHP 8.4 vs 8.5 reflection order) are reported as `reordered`.
         #[arg(long)]
         strict_ordering: bool,
+        /// Fail on every class the output leaves to runtime reflection (no
+        /// `arguments` entry where the archive has one), even one whose di.xml
+        /// configures nothing and so builds correctly. By default those are a
+        /// warning.
+        #[arg(long)]
+        strict_fallback: bool,
         /// Diagnostic: for one changed metadata file (relative path, e.g.
         /// `frontend.php`), apply the classifier normalizations (strip
         /// disabled-module entries, canonicalize the ClassesScanner regex) to both
@@ -533,6 +539,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 sample,
                 no_explain,
                 strict_ordering,
+                strict_fallback,
                 ref show_residual,
             } => compare(
                 cli.root,
@@ -543,6 +550,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 sample,
                 no_explain,
                 strict_ordering,
+                strict_fallback,
                 show_residual.as_deref(),
             ),
         },
@@ -2113,6 +2121,7 @@ fn compare(
     sample: usize,
     no_explain: bool,
     strict_ordering: bool,
+    strict_fallback: bool,
     show_residual: Option<&std::path::Path>,
 ) -> anyhow::Result<ExitCode> {
     let report = magecommand_engine::compare_dirs(archive, output, strict_ordering)?;
@@ -2169,7 +2178,7 @@ fn compare(
         // Every expected-key set, unioned — see `residual_report`.
         let mut expected = reachable;
         expected.extend(outside);
-        expected.extend(runtime.iter().filter(|r| r.harmless()).map(|r| r.key()));
+        expected.extend(runtime.iter().filter(|r| !strict_fallback && r.harmless()).map(|r| r.key()));
         expected.extend(magecommand_engine::setup_area_config_types(
             &report,
             archive,
@@ -2270,6 +2279,7 @@ fn compare(
         outside_scan: &outside_scan,
         outside_scan_files: &outside_scan_files,
         strict_ordering,
+        forbid_runtime_fallback: strict_fallback,
     };
     let classified = magecommand_engine::classify(&report, &ctx);
 
@@ -2291,7 +2301,7 @@ fn compare(
             .iter()
             .chain(&outside_scan)
             .cloned()
-            .chain(runtime_arguments.iter().filter(|r| r.harmless()).map(|r| r.key()))
+            .chain(ctx.excused_runtime().map(|r| r.key()))
             .chain(setup_area_config.iter().cloned())
             .collect();
         println!(
@@ -2333,19 +2343,21 @@ fn compare(
                 println!("    … {} more", classified.null_arguments.len() - sample);
             }
         }
-        // Builds, but without its di.xml configuration: leads for the same reason.
+        // Left to runtime reflection where that is not acceptable: it loses
+        // di.xml configuration, or `--strict-fallback` forbids the fallback outright.
         if !classified.lost_arguments.is_empty() {
             println!(
                 "\n  {}",
                 style::fail(&format!(
-                    "{} class(es) lose their di.xml arguments: the output has no `arguments` key, \
+                    "{} class(es) left to runtime reflection: the output has no `arguments` key, \
                      so Magento reflects the constructor at runtime and ignores di.xml",
                     classified.lost_arguments.len()
                 ))
             );
             for r in classified.lost_arguments.iter().take(sample) {
                 let why = match r.configured {
-                    Some(_) => "di.xml configures its arguments",
+                    Some(true) => "di.xml configures its arguments, which are lost",
+                    Some(false) => "builds correctly, but --strict-fallback forbids it",
                     None => "no checkout to check its di.xml against (pass --root)",
                 };
                 println!(

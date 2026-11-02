@@ -305,6 +305,9 @@ pub struct ClassifyCtx<'a> {
     /// `--strict-ordering`: require renamed pairs to be byte-identical rather
     /// than merely equal once a plugin-list's key order is canonicalized.
     pub strict_ordering: bool,
+    /// `--strict-fallback`: no class may be left to runtime reflection, so even a
+    /// [`RuntimeArguments`] entry proven harmless stays unexplained.
+    pub forbid_runtime_fallback: bool,
     pub disabled_modules: &'a HashSet<String>,
     /// `arguments` entries the output nulled where the archive has a row — see
     /// [`null_argument_entries`]. Never explained: their files stay unexplained.
@@ -344,6 +347,13 @@ pub struct ClassifyCtx<'a> {
 }
 
 impl ClassifyCtx<'_> {
+    /// The runtime-resolved entries set aside as a warning: the harmless ones,
+    /// or none under `--strict-fallback`.
+    pub fn excused_runtime(&self) -> impl Iterator<Item = &RuntimeArguments> {
+        let forbid = self.forbid_runtime_fallback;
+        self.runtime_arguments.iter().filter(move |r| !forbid && r.harmless())
+    }
+
     /// [`strip_expected_entries`] on both sides of one file pair, with this
     /// context's expected-key sets. A disabled module's key is only stripped
     /// where the OUTPUT lacks it — see [`strip_expected_entries`].
@@ -359,9 +369,7 @@ impl ClassifyCtx<'_> {
             )
         };
         let runtime: HashSet<String> = self
-            .runtime_arguments
-            .iter()
-            .filter(|r| r.harmless())
+            .excused_runtime()
             .map(RuntimeArguments::key)
             .chain(self.setup_area_config.iter().cloned())
             .collect();
@@ -396,9 +404,15 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
     //    strip or an "output only adds lines" pass could otherwise claim the file
     //    around the bad entry — and put them back as unexplained at the end.
     //    A key the output leaves out while di.xml configures it is held the same
-    //    way: it builds, but without that configuration.
-    let lost_arguments: Vec<RuntimeArguments> =
-        ctx.runtime_arguments.iter().filter(|r| !r.harmless()).cloned().collect();
+    //    way: it builds, but without that configuration. Under `--strict-fallback`, so is
+    //    every key left to runtime reflection.
+    let excused: HashSet<&str> = ctx.excused_runtime().map(|r| r.class.as_str()).collect();
+    let lost_arguments: Vec<RuntimeArguments> = ctx
+        .runtime_arguments
+        .iter()
+        .filter(|r| !excused.contains(r.class.as_str()))
+        .cloned()
+        .collect();
     let null_files: HashSet<&str> = ctx
         .null_arguments
         .iter()
@@ -621,8 +635,7 @@ and by that source, so a setup class a 2.4.8+ reference lacks still fails the di
 }
 
 fn runtime_resolved_arguments(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
-    let harmless: Vec<&RuntimeArguments> =
-        ctx.runtime_arguments.iter().filter(|r| r.harmless()).collect();
+    let harmless: Vec<&RuntimeArguments> = ctx.excused_runtime().collect();
     if harmless.is_empty() {
         return None;
     }
@@ -2382,6 +2395,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            forbid_runtime_fallback: false,
             case_insensitive_fs: false,
         }
     }
@@ -2529,6 +2543,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            forbid_runtime_fallback: false,
             case_insensitive_fs: false,
         };
         let r = report(&[], &[], &["global.php", "crontab.php"]);
@@ -2663,6 +2678,14 @@ mod tests {
         assert_eq!(c.warnings.len(), 1);
         assert_eq!(c.warnings[0].kind, KnownKind::RuntimeResolvedArguments);
         assert_eq!(c.warnings[0].items, vec!["Acme\\Ok"]);
+
+        // `--strict-fallback`: the harmless one is no longer excused either.
+        ctx.forbid_runtime_fallback = true;
+        let c = classify(&r, &ctx);
+        assert!(c.changed.contains(&"metadata/ok.php".to_string()), "{:?}", c.changed);
+        assert_eq!(c.lost_arguments, entries);
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        ctx.forbid_runtime_fallback = false;
 
         // Unproven (no checkout): unexplained like a configured one.
         let unproven = vec![RuntimeArguments { configured: None, ..entries[1].clone() }];
@@ -2802,6 +2825,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            forbid_runtime_fallback: false,
             case_insensitive_fs: false,
         };
         let flagged = [
@@ -2894,6 +2918,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            forbid_runtime_fallback: false,
             case_insensitive_fs: false,
         };
         let r = report(&[], &[], &["A/Interceptor.php", "B/Interceptor.php"]);
@@ -2944,6 +2969,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            forbid_runtime_fallback: false,
             case_insensitive_fs: false,
         };
         let r = report(&[], &[], &["P/Proxy.php"]);
@@ -2991,6 +3017,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            forbid_runtime_fallback: false,
             case_insensitive_fs: false,
         };
         let r = report(&[], &[], &["interception.php"]);
@@ -3026,6 +3053,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            forbid_runtime_fallback: false,
             case_insensitive_fs: false,
         };
         let missing = [
@@ -3183,6 +3211,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            forbid_runtime_fallback: false,
             case_insensitive_fs: false,
         };
         let c = classify(&report(&missing, &[], &[]), &bare);
@@ -3461,6 +3490,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            forbid_runtime_fallback: false,
             case_insensitive_fs: false,
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &bare);
@@ -3481,6 +3511,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            forbid_runtime_fallback: false,
             case_insensitive_fs: false,
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &ctx);
@@ -3659,6 +3690,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            forbid_runtime_fallback: false,
             case_insensitive_fs: false,
         };
         let r = report(&[], &[], &["added.php", "global.php", "other.php"]);

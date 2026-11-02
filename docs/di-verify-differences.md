@@ -275,7 +275,8 @@ reports that.
 
 ## Runtime-resolved arguments
 
-*DI config. A warning, or unexplained when di.xml configures the class.* The archive has
+*DI config. A warning, or unexplained when di.xml configures the class or under
+`--strict-fallback`.* The archive has
 a constructor row for a class, and the output has no `arguments` key for it at all. That's
 what `di compile` writes when it can't resolve a constructor statically (see
 [above](#obfuscated-vendor-source)). An absent key makes
@@ -289,10 +290,16 @@ inherits configuration from, and (for a virtual type) its base chain:
 
 - **Nothing configured:** the class is listed as a warning, and a file whose only
   difference is such keys doesn't fail the verify.
-- **Arguments configured:** **unexplained.** The class builds, but without its di.xml
-  arguments. The report leads with these classes, and `di compile` names them on stderr
-  as well.
+- **Arguments configured:** **unexplained.** The class builds without its di.xml
+  arguments: a required non-object one set only there throws `Missing required
+  argument`, an object one gets its type-hinted class, an optional one its PHP default.
+  The report leads with these classes, and `di compile` names them on stderr as well,
+  with why it couldn't resolve the constructor.
 - **No checkout** (verify can't open `--root`): unexplained, since nothing can be proven.
+
+`--strict-fallback` allows no fallback at all: every class left to runtime reflection is
+unexplained, including the ones whose di.xml configures nothing. Use it to require that
+the output caches every constructor row the reference does.
 
 ## Ordering only
 

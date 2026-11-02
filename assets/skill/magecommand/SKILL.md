@@ -71,7 +71,8 @@ Writes `generated/code` and `generated/metadata`.
   Magento reflects it at runtime) is a WARNING when di.xml configures nothing
   for it, and unexplained when di.xml does (runtime reflection ignores di.xml,
   and a required non-object argument set only there then throws `Missing
-  required argument`; `di compile` names those on stderr). On macOS, paths differing only in
+  required argument`; `di compile` names those on stderr). `--strict-fallback` makes every
+  such omission unexplained, configured or not. On macOS, paths differing only in
   letter case are a WARNING, not a failure; elsewhere they fail. Run verify with
   `--root` at the checkout the archive was built from: several rules (e.g. the
   pre-2.4.8 setup/src area config) read it as evidence. `--show-residual <FILE>` gives more context for
