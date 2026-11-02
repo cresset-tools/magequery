@@ -109,6 +109,10 @@ pub fn fail(s: &str) -> String {
 pub fn pass(s: &str) -> String {
     paint(fg(AnsiColor::Green).bold(), s)
 }
+/// A warning heading — worth a look, not a failure.
+pub fn warn(s: &str) -> String {
+    paint(fg(AnsiColor::Yellow).bold(), s)
+}
 /// A sub-heading (which tree a difference lives in).
 pub fn heading(s: &str) -> String {
     paint(Style::new().bold(), s)

@@ -2,7 +2,7 @@
 
 `magecommand di verify --archive <php-output> --output <magecommand-output>` compares a
 magecommand compile with a reference `generated/` tree, usually one produced by
-`bin/magento setup:di:compile`. It sorts every difference into one of two buckets:
+`bin/magento setup:di:compile`. It sorts every difference into one of three buckets:
 
 - **Unexplained.** The difference matches none of the patterns below. These are the ones
   to investigate, and the only ones `--fail-on-diff` fails on. The report lists them first,
@@ -18,6 +18,8 @@ magecommand compile with a reference `generated/` tree, usually one produced by
   difference, not an entry that one of the patterns below already explains.
 - **Explained.** The difference is known and expected. Each group links to its section
   below.
+- **Warning.** Shown, but neither explained nor a failure. Today that's only
+  [filename casing](#filename-casing) on macOS.
 
 magecommand targets **Mage-OS 3.1.0 / Magento 2.4.9**. Most explained differences come from
 comparing against an archive built by an older Magento (2.4.8 or earlier, see
@@ -137,8 +139,10 @@ the two have to mean the same thing; `magequery modules --check` lists the secon
 ## Disabled-module metadata
 
 *DI config.* Metadata files (`<area>.php`, `interception.php`) that are byte-identical once
-the top-level entries for classes in disabled modules are removed from both sides. This
-is the same 2.4.9 behavior as above, for the compiled config.
+the archive's entries for classes in disabled modules are removed. This is the same 2.4.9
+behavior as above, for the compiled config. An entry is only removed when the output does
+not have it: a 2.4.9 compile emits nothing for a disabled module, so if the output carries
+such a key, its value is compared like any other.
 
 ## Disabled-module reachable types
 
@@ -174,12 +178,18 @@ library paths, `setup/src`). A missing framework or module entry therefore still
 
 ## Extra metadata
 
-*DI config.* The output is a strict superset of the archive: every archive entry is
-present unchanged and the output only adds entries. The largest addition is the
-`nonLazyTypes` section (plus its `NonLazyTypes` step in `ModificationChain`). It comes from
-the lazy-proxy compiler pass in 2.4.9 / PHP 8.4, which older archives predate. Extra
-compiled entries are inert. A real regression would remove or change an archive entry,
-and that keeps the file flagged.
+*DI config.* The output equals the archive once these specific additions are set aside:
+
+- the `nonLazyTypes` section and its `NonLazyTypes` step in `ModificationChain`, from the
+  lazy-proxy compiler pass of 2.4.9 / PHP 8.4. This only applies when the archive has no
+  such section; an archive that ran the pass must match it exactly.
+- `interception.php` rows that say `false` (no plugins) for a type the archive has no row
+  for. Without a row, Magento works that out at runtime. If `false` were wrong, the type's
+  interceptor and plugin-list entries would be missing too, and those stay flagged.
+
+Any other addition keeps the file flagged: an extra plugin, preference or `arguments` row
+changes what runs, and an argument inserted into an existing row shifts every later one,
+because Magento passes them by position.
 
 ## Class-scanner exclude regex
 
@@ -187,38 +197,53 @@ and that keeps the file flagged.
 (`#^(?:…/vendor/<pkg>…|…/app/code/<Vendor>/<Module>…)/Test#` and its `/tests#` sibling) lists
 every enabled module directory. An archive compiled from a different module set lists
 different members, in a different order. The file matches once that regex is
-canonicalized on both sides and disabled-module entries are removed. A changed value
-anywhere else survives canonicalization and keeps the file flagged.
+canonicalized on both sides, disabled-module entries are removed and the
+[extra-metadata](#extra-metadata) additions are set aside. Any other changed or added value
+keeps the file flagged.
 
 ## Filename casing
 
-*Generated code.* Paths that differ only in letter case (`Tierprice` vs `TierPrice`). The
-archive was generated on a case-insensitive filesystem (macOS), where the first directory
-created sets the casing. magecommand emits the case the PHP class declares, which is the
-correct form on the case-sensitive filesystems used in production.
+*Generated code. A warning, on macOS only.* Paths that differ only in letter case
+(`Tierprice` vs `TierPrice`). A case-insensitive filesystem can't hold both spellings, so
+which one each tree kept can depend on creation order, and the two can't be compared there.
+On macOS these are listed as a warning and don't fail the verify. Everywhere else they stay
+unexplained: on Linux the two spellings are two different files, and the autoloader asks for
+one exact spelling.
 
 ## Generator version formatting
 
-*Generated code.* The file is byte-identical after normalizing formatting that Magento's
-code generator changed between versions. All of it preserves behavior:
+*Generated code.* Both files are parsed and compared as structure: the class declaration,
+every method signature with its resolved types and defaults, and every method body as
+tokens. Formatting, docblocks and method order therefore never count. On top of that,
+exactly these changes Magento's code generator made between versions are allowed:
 
-- return-type spacing (`foo() : T` → `foo(): T`)
-- explicit nullable defaults (`?T $x` → `?T $x = null`, the PHP 8.4-compatible form)
-- the proxy template's laziness hardening: null guards in `__clone` and `_resetState`,
-  so cloning or resetting an unused proxy no longer instantiates it, plus an added
-  `__debugInfo`
+- explicit nullable defaults: a nullable parameter with no default in the archive and
+  `= null` in the output (the PHP 8.4-compatible form)
+- in proxies only, the laziness hardening: `__clone` and `_resetState` may each be the old
+  or the new template body (the new one has null guards, so cloning or resetting an unused
+  proxy no longer instantiates it), and the output may add the template's `__debugInfo`
 
-These differences disappear on a 2.4.9 store.
+Anything else is a difference. That includes a default that the output *drops*, which PHP
+rejects as an incompatible override. These differences disappear on a 2.4.9 store.
 
 ## Obfuscated vendor source
 
-*DI config.* The constructor chain of these classes runs through vendor source whose
-class declaration exists only inside an `eval()` of encrypted code. The real compiler
-executes that stub and reflects the class it produces. magecommand never executes PHP,
-so it can't see the constructor, and the arguments entry degrades to `NULL` (a compile
-finding records each one). At runtime the object manager falls back to reflection for a
-`NULL` entry, so the store still works; the entry just isn't cached. This is the one
-place where never executing PHP costs fidelity.
+**Not an expected difference.** Versions up to 0.21.0 listed it here, and that was a bug.
+
+The constructor chain of these classes runs through vendor source whose class declaration
+exists only inside an `eval()` of encrypted code. magecommand never executes PHP, so it
+can't see the constructor and writes `NULL` as the class's `arguments` entry. Earlier
+versions assumed Magento falls back to runtime reflection for a `NULL` entry. It doesn't:
+`ObjectManager\Config\Compiled::getArguments()` turns a present `NULL` into `[]`, and the
+compiled factory answers `[]` with `new $type()`. Only a key that is *absent* from
+`arguments` gets runtime reflection. The result is an `ArgumentCountError` the first time
+the class is built (or, if every parameter is optional, every argument di.xml configures
+is silently dropped).
+
+`di verify` now reports any `arguments` entry that is `NULL` (or an empty row) in the
+output while the archive has a row as **unexplained**, whatever else the file matches.
+The report leads with these classes and names the `eval()`'d file behind each one when it
+can find it.
 
 ## Ordering only
 
