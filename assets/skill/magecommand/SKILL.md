@@ -48,7 +48,12 @@ Writes `generated/code` and `generated/metadata`.
   with inlined plugin chains instead of stock runtime-dispatch ones
   (global-only classes for now). Like `setup:di:compile`, it removes
   `var/.regenerate` (left by `composer install`), so the next `bin/magento`
-  command does not wipe `generated/`.
+  command does not wipe `generated/`. A class whose constructor it cannot
+  resolve (an unreadable parent, or a default it cannot evaluate such as an
+  unknown constant) gets no `arguments` entry, so Magento reflects it at
+  runtime. That ignores di.xml, so when di.xml configures the class, stderr
+  warns and names it with the reason: setting the unevaluable argument in
+  di.xml, or using a constant magecommand can read, restores the compiled row.
 - Stay compiled while editing → `di watch`. Builds once, keeps the parsed index in
   memory, recompiles on change and writes only the delta. Long-running.
 - Cache `generated/` in CI → `di digest`. The compile is a pure function of the
@@ -64,8 +69,9 @@ Writes `generated/code` and `generated/metadata`.
   `new X()`), and leads the report. A class the output leaves OUT of
   `arguments` (what `di compile` does when it can't read a constructor, so
   Magento reflects it at runtime) is a WARNING when di.xml configures nothing
-  for it, and unexplained when di.xml does (runtime reflection ignores di.xml;
-  `di compile` also names those on stderr). On macOS, paths differing only in
+  for it, and unexplained when di.xml does (runtime reflection ignores di.xml,
+  and a required non-object argument set only there then throws `Missing
+  required argument`; `di compile` names those on stderr). On macOS, paths differing only in
   letter case are a WARNING, not a failure; elsewhere they fail. Run verify with
   `--root` at the checkout the archive was built from: several rules (e.g. the
   pre-2.4.8 setup/src area config) read it as evidence. `--show-residual <FILE>` gives more context for

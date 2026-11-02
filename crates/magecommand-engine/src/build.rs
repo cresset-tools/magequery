@@ -34,7 +34,8 @@ pub struct CompileOutputs {
     /// arguments for them, sorted and deduped across areas. Magento builds
     /// them by runtime reflection, WITHOUT that configuration — see
     /// `AreaFile::lost_arguments`.
-    pub lost_arguments: Vec<String>,
+    /// Each entry is `(type, why its key went)`.
+    pub lost_arguments: Vec<(String, String)>,
 }
 
 /// Run the full compute over an already-scanned `defs` and return the complete
@@ -202,7 +203,7 @@ pub fn compute_outputs_opts(
         ilap!(_it, "areas + code (fold round)");
     }
 
-    let mut lost_arguments: std::collections::BTreeSet<String> = Default::default();
+    let mut lost_arguments: std::collections::BTreeSet<(String, String)> = Default::default();
     for ca in &area_files {
         findings.extend(ca.file.findings.iter().cloned());
         lost_arguments.extend(ca.file.lost_arguments.iter().cloned());

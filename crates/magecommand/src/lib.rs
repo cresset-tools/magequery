@@ -1994,19 +1994,22 @@ fn compile(
 
 /// Name every type the compile left to runtime reflection although di.xml
 /// configures its arguments. Magento's runtime branch never reads that config,
-/// so each of these is built without it: not a crash, but not what di.xml says.
-pub(crate) fn warn_lost_arguments(lost: &[String]) {
+/// so each of these is built without it. A required non-object argument set
+/// only in di.xml then throws `Missing required argument`; an object argument
+/// gets its type-hinted class and an optional one its PHP default.
+pub(crate) fn warn_lost_arguments(lost: &[(String, String)]) {
     if lost.is_empty() {
         return;
     }
     eprintln!(
         "{} {} type(s) lose their di.xml arguments: their constructor could not be \
-resolved statically, so Magento builds them by runtime reflection, which ignores di.xml",
+resolved statically, so Magento builds them by runtime reflection, which ignores di.xml. \
+A required non-object argument set only in di.xml makes that throw `Missing required argument`",
         style::stderr::warning("warning:"),
         lost.len()
     );
-    for name in lost {
-        eprintln!("  {}", style::stderr::name(name));
+    for (name, why) in lost {
+        eprintln!("  {}  ({why})", style::stderr::name(name));
     }
 }
 

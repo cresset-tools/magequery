@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use magequery_core::{Area, Magento};
 
-use crate::arguments::{build_arguments, ArgsCtx};
+use crate::arguments::{build_arguments, ArgsCtx, Omission};
 use crate::definitions::Definitions;
 use crate::phpexport::{PhpKey, PhpValue};
 
@@ -176,10 +176,10 @@ pub struct AreaFile {
     /// statically, so the file carries no `arguments` key for them and the
     /// runtime factory reflects the constructor instead (see `ArgsCtx::omit`).
     pub omitted: Vec<String>,
-    /// The subset of `omitted` that di.xml configures arguments for. The
-    /// runtime branch never reads that configuration, so these classes are
-    /// built without it.
-    pub lost_arguments: Vec<String>,
+    /// The subset of `omitted` that di.xml configures arguments for, each with
+    /// why its key went. The runtime branch never reads that configuration,
+    /// so these classes are built without it.
+    pub lost_arguments: Vec<(String, String)>,
 }
 
 /// Reader + modification chain for one area: arguments, preferences,
@@ -279,11 +279,20 @@ pub fn build_area_file_from_export(
     );
 
     // Only now, with the chain done, do the omitted keys leave the file.
-    let omitted: Vec<String> = ctx.take_omitted().into_iter().collect();
-    for name in &omitted {
+    let omissions = ctx.take_omitted();
+    let mut lost_arguments = Vec::new();
+    for (name, why) in &omissions {
         arguments.remove(name);
+        if !ctx.configures(name) {
+            continue;
+        }
+        let why = match why {
+            Omission::UnknownConstructor => "its constructor could not be read".to_owned(),
+            Omission::UnfoldableDefault(param) => format!("cannot evaluate the default `{param}`"),
+        };
+        lost_arguments.push((name.clone(), why));
     }
-    let lost_arguments = omitted.iter().filter(|n| ctx.configures(n)).cloned().collect();
+    let omitted: Vec<String> = omissions.into_keys().collect();
 
     AreaFile {
         arguments,

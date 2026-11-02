@@ -38,8 +38,13 @@
 //! (`DateInterval`), or an eval-obfuscated vendor class.
 //!
 //! The runtime branch does not read di.xml `<argument>` config, which lives only
-//! in the compiled row, so a class that has some is built without it. That is
-//! not a crash, but it is not what di.xml says, so the compile names each one.
+//! in the compiled row, so a class that has some is built without it
+//! (`AbstractFactory::getResolvedArgument` only sees call-time arguments). A
+//! required non-object argument set only in di.xml then throws `Missing
+//! required argument`; an object one gets its type-hinted class, an optional
+//! one its PHP default. That is still the best output available, so the
+//! compile keeps it and names each such class on stderr, with why its key went:
+//! the unfoldable default, or the unreadable constructor.
 
 #![cfg(not(windows))]
 
@@ -88,14 +93,31 @@ impl Fixture {
             "app/code/Acme/Unres/Model/BuiltinChild.php",
             "<?php\nnamespace Acme\\Unres\\Model;\n\nclass BuiltinChild extends \\DateInterval\n{\n}\n",
         );
-        // An unfoldable default next to a configured argument: the key must
-        // still go, and the lost configuration must be reported.
+        // The built-in parent case again, with di.xml config the runtime
+        // branch will ignore: the compile still succeeds, and names it.
+        write(
+            "app/code/Acme/Unres/Model/ConfiguredBuiltin.php",
+            "<?php\nnamespace Acme\\Unres\\Model;\n\nclass ConfiguredBuiltin extends \\DateInterval\n{\n}\n",
+        );
+        let mut types = String::from(
+            "<type name=\"Acme\\Unres\\Model\\ConfiguredBuiltin\">\n        <arguments>\n            \
+             <argument name=\"duration\" xsi:type=\"string\">P1D</argument>\n        \
+             </arguments>\n    </type>\n    ",
+        );
+        // An unfoldable default next to a configured argument. Without a row
+        // the runtime branch throws `Missing required argument $label`, so the
+        // compile must say so.
         write(
             "app/code/Acme/Unres/Model/Configured.php",
             "<?php\nnamespace Acme\\Unres\\Model;\n\nclass Configured\n{\n    \
              public function __construct(\n        \
              private readonly string $label,\n        \
              private readonly string $mystery = ACME_MYSTERY_CONSTANT\n    ) {\n    }\n}\n",
+        );
+        types.push_str(
+            "<type name=\"Acme\\Unres\\Model\\Configured\">\n        <arguments>\n            \
+             <argument name=\"label\" xsi:type=\"string\">configured</argument>\n        \
+             </arguments>\n    </type>\n    ",
         );
         // Control: the di config replaces the unfoldable default, so nothing
         // unreadable reaches the row and it must NOT be degraded.
@@ -106,14 +128,13 @@ impl Fixture {
         );
         write(
             "app/code/Acme/Unres/etc/di.xml",
-            "<?xml version=\"1.0\"?>\n\
-             <config xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n    \
-             <type name=\"Acme\\Unres\\Model\\Overridden\">\n        <arguments>\n            \
-             <argument name=\"mystery\" xsi:type=\"string\">configured</argument>\n        \
-             </arguments>\n    </type>\n    \
-             <type name=\"Acme\\Unres\\Model\\Configured\">\n        <arguments>\n            \
-             <argument name=\"label\" xsi:type=\"string\">configured</argument>\n        \
-             </arguments>\n    </type>\n</config>\n",
+            &format!(
+                "<?xml version=\"1.0\"?>\n\
+                 <config xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n    \
+                 <type name=\"Acme\\Unres\\Model\\Overridden\">\n        <arguments>\n            \
+                 <argument name=\"mystery\" xsi:type=\"string\">configured</argument>\n        \
+                 </arguments>\n    </type>\n    {types}</config>\n"
+            ),
         );
         Fixture(root)
     }
@@ -191,22 +212,40 @@ fn a_class_extending_an_unmodelled_builtin_has_no_key() {
     );
 }
 
-/// Dropping the key also drops the class's di.xml arguments at runtime, so the
-/// compile names it rather than losing the configuration silently.
+/// An unreadable parent constructor leaves no choice but runtime reflection,
+/// which drops the class's di.xml arguments, so the compile names it rather
+/// than losing the configuration silently.
 #[test]
-fn a_configured_class_left_to_runtime_is_reported() {
+fn a_configured_class_with_an_unreadable_constructor_is_reported() {
+    let fx = Fixture::new("configured-builtin");
+    let stderr = fx.compile();
+
+    assert!(!has_key(&fx.global_metadata(), "Acme\\Unres\\Model\\ConfiguredBuiltin"));
+    assert!(
+        stderr.contains("lose their di.xml arguments")
+            && stderr.contains("Acme\\Unres\\Model\\ConfiguredBuiltin  (its constructor could not be read)"),
+        "the lost di.xml configuration must be reported by name and reason; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Acme\\Unres\\Model\\Unfoldable  ("),
+        "a class with no di.xml arguments loses nothing and must not be listed; stderr:\n{stderr}"
+    );
+}
+
+/// An unfoldable default with di.xml arguments takes the same fallback: no
+/// key, so Magento reflects the class and ignores di.xml. The warning names
+/// the default, which is what to fix to get the compiled row back.
+#[test]
+fn a_configured_class_with_an_unfoldable_default_is_reported() {
     let fx = Fixture::new("configured");
     let stderr = fx.compile();
 
     assert!(!has_key(&fx.global_metadata(), "Acme\\Unres\\Model\\Configured"));
     assert!(
-        stderr.contains("lose their di.xml arguments")
-            && stderr.contains("Acme\\Unres\\Model\\Configured"),
-        "the lost di.xml configuration must be reported by name; stderr:\n{stderr}"
-    );
-    assert!(
-        !stderr.contains("Acme\\Unres\\Model\\Unfoldable\n"),
-        "a class with no di.xml arguments loses nothing and must not be listed; stderr:\n{stderr}"
+        stderr.contains(
+            "Acme\\Unres\\Model\\Configured  (cannot evaluate the default `$mystery = ACME_MYSTERY_CONSTANT`)"
+        ),
+        "the warning must name the class and the default; stderr:\n{stderr}"
     );
 }
 

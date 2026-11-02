@@ -4,7 +4,7 @@
 //! ArgumentsResolver` (the `_i_/_ins_/_v_/_vn_/_vac_/_a_/_d_` encodings) —
 //! over the parser's constructors and statically evaluated defaults.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use magecommand_php::constexpr::{
     eval, parse_const_expr, ClassRef, ConstExpr, ConstLookup, ConstValue, EvalCtx, ParsedExpr,
@@ -90,8 +90,8 @@ pub(crate) struct ArgsCtx<'a> {
     merged_cache: std::cell::RefCell<HashMap<String, Vec<(CfgKey, Cfg)>>>,
     findings: std::cell::RefCell<Vec<String>>,
     /// Instance names whose `arguments` key must be left OUT of the area file —
-    /// see [`ArgsCtx::omit`].
-    omitted: std::cell::RefCell<BTreeSet<String>>,
+    /// see [`ArgsCtx::omit`] — each with the reason: see [`Omission`].
+    omitted: std::cell::RefCell<BTreeMap<String, Omission>>,
 }
 
 impl<'a> ArgsCtx<'a> {
@@ -217,11 +217,11 @@ impl<'a> ArgsCtx<'a> {
     /// interceptor rename treats a NULL row and an absent one alike, and the
     /// key still counts as a nonLazyTypes candidate, as the reference's row
     /// does); `build_area_file` drops it at the end.
-    fn omit(&self, name: &str) {
-        self.omitted.borrow_mut().insert(name.to_owned());
+    fn omit(&self, name: &str, why: Omission) {
+        self.omitted.borrow_mut().insert(name.to_owned(), why);
     }
 
-    pub fn take_omitted(&self) -> BTreeSet<String> {
+    pub fn take_omitted(&self) -> BTreeMap<String, Omission> {
         std::mem::take(&mut self.omitted.borrow_mut())
     }
 
@@ -401,6 +401,8 @@ impl<'a> ArgsCtx<'a> {
         // A default the di config then overrides is harmless, so the flag is
         // cleared again below rather than raised once and kept.
         let mut unresolvable = false;
+        // The first default that could not be folded, for the report.
+        let mut first_bad: Option<String> = None;
         for (idx, param) in params.iter().enumerate() {
             let required = idx < optional_tail_start;
             let class_ty = self.param_class(param, definer_fqcn);
@@ -458,6 +460,13 @@ impl<'a> ArgsCtx<'a> {
                     self.non_object_argument(cfg)
                 };
             }
+            if from_bad_default && first_bad.is_none() {
+                first_bad = Some(format!(
+                    "${} = {}",
+                    param.name,
+                    param.default.as_deref().unwrap_or("?")
+                ));
+            }
             unresolvable |= from_bad_default;
             out.push((PhpKey::str(param.name.clone()), arg));
         }
@@ -470,7 +479,10 @@ impl<'a> ArgsCtx<'a> {
         // class loses its cached arguments; it never receives a value we
         // invented.
         if unresolvable {
-            self.omit(instance_name);
+            self.omit(
+                instance_name,
+                Omission::UnfoldableDefault(first_bad.unwrap_or_default()),
+            );
             return PhpValue::Null;
         }
         PhpValue::Array(out)
@@ -781,6 +793,19 @@ impl<'a> ArgsCtx<'a> {
                 .collect(),
         )
     }
+}
+
+/// Why a type's `arguments` key was left out of an area file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Omission {
+    /// A constructor parameter's default could not be evaluated statically;
+    /// the string is that parameter and its source text (`$limit = FOO`).
+    /// The constructor itself is known.
+    UnfoldableDefault(String),
+    /// The constructor chain runs through a class magecommand cannot read (a
+    /// PHP built-in with no modelled signature, eval-obfuscated source), so
+    /// the parameters themselves are unknown.
+    UnknownConstructor,
 }
 
 /// The outcome of folding a constructor parameter's default.
@@ -1128,7 +1153,7 @@ pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<Stri
             Ok(None) => PhpValue::Null,
             Err(missing) => {
                 ctx.finding(format!("{name}: constructor chain leaves known set at {missing}"));
-                ctx.omit(name);
+                ctx.omit(name, Omission::UnknownConstructor);
                 PhpValue::Null
             }
         };
@@ -1160,8 +1185,8 @@ pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<Stri
         // omission recorded for the class applies only while that row stands.
         let class_omitted = ctx.omitted.borrow_mut().remove(vtype);
         let keep_class_row = || {
-            if class_omitted {
-                ctx.omit(vtype);
+            if let Some(why) = &class_omitted {
+                ctx.omit(vtype, why.clone());
             }
         };
         // Reader: an in-collection base is used as-is (even abstract);
@@ -1181,7 +1206,7 @@ pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<Stri
                     ctx.finding(format!(
                         "{vtype}: base {base_real} constructor chain leaves known set at {missing}"
                     ));
-                    ctx.omit(vtype);
+                    ctx.omit(vtype, Omission::UnknownConstructor);
                     PhpValue::Null
                 }
             }
