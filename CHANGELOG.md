@@ -51,6 +51,23 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.22.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.21.0...magequery-v0.22.0) (2026-11-02)
+
+
+### Features
+
+* **magecommand:** di verify --strict-fallback forbids the runtime-reflection fallback ([bcc17f6](https://github.com/cresset-tools/magequery/commit/bcc17f65a6d090bf0fd6edf2760335a3e9e4dc03))
+* **magequery:** doctor flags class names whose letter case differs from the declaration ([#169](https://github.com/cresset-tools/magequery/issues/169)) ([bc030cb](https://github.com/cresset-tools/magequery/commit/bc030cb6aaefcb5c046589caebf3078ed10756d1))
+
+
+### Bug Fixes
+
+* **magecommand:** di verify fails on NULL arguments rows and stops excusing real changes ([#166](https://github.com/cresset-tools/magequery/issues/166)) ([382a561](https://github.com/cresset-tools/magequery/commit/382a561a8dbb56d06ed34a663c01d966e38e6580))
+* **magecommand:** explain setup/src classes a pre-2.4.8 reference leaves out of the DI config ([#168](https://github.com/cresset-tools/magequery/issues/168)) ([48710cf](https://github.com/cresset-tools/magequery/commit/48710cf76333ee538d036bc452a20ba55bc1a3e2))
+* **magecommand:** omit an unresolvable constructor's arguments key instead of writing NULL ([#167](https://github.com/cresset-tools/magequery/issues/167)) ([423186f](https://github.com/cresset-tools/magequery/commit/423186fe9eb7b9e740c58a998135f7b8166c2917))
+* **magecommand:** say why a type loses its di.xml arguments, and that it can crash ([8059826](https://github.com/cresset-tools/magequery/commit/8059826f5b5dc6ce3f22d9c6d014e157aa14bba3))
+* **magequery:** never panic on a database row that doesn't fit its type ([#164](https://github.com/cresset-tools/magequery/issues/164)) ([c0394ba](https://github.com/cresset-tools/magequery/commit/c0394baefa76c33a990e3aa04e8c727c3d1fa25e)), closes [#108](https://github.com/cresset-tools/magequery/issues/108)
+
 ## [0.21.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.20.3...magequery-v0.21.0) (2026-10-30)
 
 
