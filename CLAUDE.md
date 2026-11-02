@@ -1080,6 +1080,15 @@ with MSI + an Amasty module disabled surfaced three such magecommand divergences
 once). Not yet covered: an enabled class *inheriting* from a disabled module's
 class/interface (needs a hierarchy walk per class).
 
+**Class-name case** (E2008/E2009): a reference whose spelling differs from the class's
+declaration only in letter case, and a declaration whose namespace differs in case from what
+its real composer mapping derives (path *or* PSR-4 prefix, compared case-sensitively as
+composer does; the synthesized app/code prefixes are not composer's, so the resolver keeps
+the real maps apart). PHP loads such a class anyway, but the compiled DI config is keyed by
+exact spelling: the interceptor preference is recorded under the declared name, so a request
+by the other spelling builds the plain class and its plugins never run — E2008 is an error
+exactly when the class (or an ancestor) has plugins. Found live on three stores' own code.
+
 The false-positive war is the design (doctor must not cry wolf) — `class_known` accepts:
 global-namespace names (PHP built-ins like `DateTime`), virtual types, generated code
 (`\Proxy`/`\Interceptor`/`…Factory` verified against their base; `…Extension[Interface]`

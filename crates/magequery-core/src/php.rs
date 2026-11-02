@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use crate::ids::ClassName;
 
 pub(crate) struct PhpClass {
-    /// The file's own FQCN (kept for sanity/future use; resolution keys on the request).
-    #[allow(dead_code)]
+    /// The file's own FQCN, as declared. Resolution keys on the request; doctor compares
+    /// the two spellings (E2008).
     pub fqcn: ClassName,
     /// Parent class(es) — one for a class, possibly several for an interface.
     pub extends: Vec<ClassName>,
