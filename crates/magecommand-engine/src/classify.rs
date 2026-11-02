@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::compare::{canonical_method_order, CompareReport};
+use crate::compare::CompareReport;
 
 /// A category of known/expected difference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -47,13 +47,13 @@ pub enum KnownKind {
     /// that only a DISABLED module's constructor type-hints — the file-level
     /// twin of [`KnownKind::DisabledModuleReachableType`].
     DisabledModuleReachableArtifact,
-    /// A metadata DI-config file where the output is a strict superset of the
-    /// archive: it only *adds* entries (e.g. the `nonLazyTypes` section and the
-    /// `NonLazyTypes` compiler-chain step, a 2.4.9 / PHP 8.4 feature the older
-    /// archive predates), never removing or changing what the archive has.
+    /// A metadata DI-config file the output only extends with the allowlisted
+    /// 2.4.9 additions (the `nonLazyTypes` section and its compiler-chain step,
+    /// and `interception.php` rows asserting `false`) — see
+    /// `drop_allowed_additions`. Any other addition keeps the file flagged.
     ExtraMetadata,
     /// A metadata DI-config file whose only substantive difference (once
-    /// disabled-module entries and pure additions are accounted for) is the
+    /// disabled-module entries and the allowlisted additions are accounted for) is the
     /// generated ClassesScanner directory-exclusion regex — a literal alternation
     /// of every enabled module's directory, so a stale archive with a different
     /// module set lists different members.
@@ -181,6 +181,10 @@ pub struct Classified {
     /// a constructor row — a runtime fatal, never an expected difference. Their
     /// files are always in `changed`, whatever rule would otherwise claim them.
     pub null_arguments: Vec<NullArguments>,
+    /// Groups worth a look that neither fail the verify nor count as explained
+    /// — today only [`KnownKind::FilenameCasing`] on a case-insensitive
+    /// filesystem, where the two spellings cannot be told apart.
+    pub warnings: Vec<KnownGroup>,
 }
 
 /// A class whose `arguments` entry is `NULL` in the output but a non-empty row
@@ -264,17 +268,29 @@ pub struct ClassifyCtx<'a> {
     /// Missing generated-artifact PATHS whose subject class lies outside every
     /// scan path — see [`outside_scan_artifacts`].
     pub outside_scan_files: &'a HashSet<String>,
+    /// The trees live on a case-insensitive filesystem (macOS). Only there are
+    /// paths differing in letter case set aside as a warning; on Linux the two
+    /// spellings are two files, and a case mismatch is a real difference — the
+    /// autoloader asks for one exact spelling.
+    pub case_insensitive_fs: bool,
 }
 
 impl ClassifyCtx<'_> {
-    /// [`strip_expected_entries`] with this context's expected-key sets.
-    fn strip(&self, text: &str) -> (String, bool) {
-        strip_expected_entries(
-            text,
-            self.disabled_modules,
-            self.disabled_reachable,
-            self.outside_scan,
-        )
+    /// [`strip_expected_entries`] on both sides of one file pair, with this
+    /// context's expected-key sets. A disabled module's key is only stripped
+    /// where the OUTPUT lacks it — see [`strip_expected_entries`].
+    fn strip_pair(&self, archive: &str, output: &str) -> ((String, bool), (String, bool)) {
+        let present = entry_keys(output);
+        let strip = |text: &str| {
+            strip_expected_entries(
+                text,
+                self.disabled_modules,
+                self.disabled_reachable,
+                self.outside_scan,
+                &present,
+            )
+        };
+        (strip(archive), strip(output))
     }
 }
 
@@ -317,9 +333,13 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
     }
 
     // 2. Filename casing: pair a remaining missing path with a remaining extra
-    //    path that is identical apart from ASCII case.
-    if let Some(group) = filename_casing(&mut missing, &mut extra) {
-        known.push(group);
+    //    path that is identical apart from ASCII case — a warning, and only on a
+    //    case-insensitive filesystem. Elsewhere the pair stays missing + extra.
+    let mut warnings: Vec<KnownGroup> = Vec::new();
+    if ctx.case_insensitive_fs {
+        if let Some(group) = filename_casing(&mut missing, &mut extra) {
+            warnings.push(group);
+        }
     }
 
     // 3. Disabled-module interceptors: a remaining missing interceptor whose
@@ -415,11 +435,11 @@ payment module. Verified against the disabled modules' own source, one PHP heade
         known.push(group);
     }
 
-    // 6. Extra metadata: a changed metadata file where the output only *adds*
-    //    lines the archive lacks (chiefly the `nonLazyTypes` section) and never
-    //    removes or changes archive content — magecommand's 2.4.9 target being
-    //    ahead of the older archive. Disabled-module entries are stripped first so
-    //    a file mixing disabled removals with output additions still qualifies.
+    // 6. Extra metadata: a changed metadata file that equals the archive once
+    //    the allowlisted 2.4.9 additions are set aside (chiefly the `nonLazyTypes`
+    //    section) — magecommand's target being ahead of the older archive.
+    //    Disabled-module entries are stripped first so a file mixing disabled
+    //    removals with those additions still qualifies.
     if let Some(group) = extra_metadata(&mut changed, ctx) {
         known.push(group);
     }
@@ -442,6 +462,7 @@ payment module. Verified against the disabled modules' own source, one PHP heade
         changed,
         renamed_changed,
         null_arguments: ctx.null_arguments.to_vec(),
+        warnings,
     }
 }
 
@@ -609,10 +630,11 @@ fn filename_casing(missing: &mut Vec<String>, extra: &mut Vec<String>) -> Option
         kind: KnownKind::FilenameCasing,
         title: KnownKind::FilenameCasing.title().to_owned(),
         explanation:
-            "These paths differ only in letter case (e.g. `Tierprice` vs `TierPrice`). The archive \
-was generated on a case-insensitive filesystem (macOS), where the first directory created wins the \
-casing. magecommand emits the case the PHP class actually declares (its reflection name), which is \
-the correct, unambiguous form on the case-sensitive filesystems used in production (Linux)."
+            "These paths differ only in letter case (e.g. `Tierprice` vs `TierPrice`). On this \
+case-insensitive filesystem (macOS) a tree cannot hold both spellings, so which one each side kept \
+can depend on creation order, and the two cannot be compared here. Not counted as a failure; \
+verify on Linux, where a case mismatch IS a difference — the autoloader asks for one exact \
+spelling."
                 .to_owned(),
         items,
         verified: true,
@@ -749,6 +771,11 @@ fn metadata_entry_module_disabled(key: &str, disabled: &HashSet<String>) -> bool
 /// class — only real `Vendor\\Module\\…` keys are ever stripped. Deeper argument
 /// lines (six-plus spaces) have a space, not a quote, at the tested position and
 /// are rejected.
+/// Every top-level entry key of a metadata file — see [`top_level_entry_key`].
+fn entry_keys(text: &str) -> HashSet<&str> {
+    text.lines().filter_map(top_level_entry_key).collect()
+}
+
 fn top_level_entry_key(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("    '").or_else(|| line.strip_prefix("  '"))?;
     let end = rest.find("' =>")?;
@@ -757,8 +784,16 @@ fn top_level_entry_key(line: &str) -> Option<&str> {
 
 /// Remove every top-level DI-config entry whose class key belongs to a disabled
 /// module — or is in one of the expected-key sets (a type only a disabled module
-/// reached, one outside the scan paths) — so two metadata files can be compared modulo that expected
-/// noise.
+/// reached, one outside the scan paths) — so two metadata files can be compared
+/// modulo that expected noise.
+///
+/// A disabled module's key is stripped only when the output (`in_output`, the
+/// output file's keys) does not have it. The excuse is that a 2.4.9 compile
+/// emits nothing for a disabled module, while the archive's older compiler did;
+/// a key the OUTPUT carries is outside that excuse — magecommand compiled the
+/// module after all, or enabled code builds the class — and stripping it from
+/// both sides would hide whatever its value is. The expected-key sets need no
+/// such guard: they are built from archive-only keys to begin with.
 ///
 /// The block a key introduces is either a single inline line (`'K' => NULL,`) or
 /// a `var_export` array spanning to its own indent-four `    ),` close; both are
@@ -769,13 +804,14 @@ fn strip_expected_entries(
     disabled: &HashSet<String>,
     expected: &HashSet<String>,
     reachable: &HashSet<String>,
+    in_output: &HashSet<&str>,
 ) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
     let mut stripped = false;
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
         if let Some(key) = top_level_entry_key(line) {
-            if metadata_entry_module_disabled(key, disabled)
+            if (metadata_entry_module_disabled(key, disabled) && !in_output.contains(key))
                 || expected.contains(key)
                 || reachable.contains(key)
             {
@@ -1375,8 +1411,7 @@ fn disabled_module_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Opt
         if !a.starts_with("<?php return array (") {
             continue;
         }
-        let (sa, stripped_a) = ctx.strip(&a);
-        let (sb, stripped_b) = ctx.strip(&b);
+        let ((sa, stripped_a), (sb, stripped_b)) = ctx.strip_pair(&a, &b);
         let (sa, dropped) = drop_inert_interception_misses(c, &sa, &sb);
         let stripped_a = stripped_a || dropped;
         // Claim only when removing disabled-module entries (from at least one
@@ -1465,36 +1500,78 @@ fn entry_value(line: &str) -> &str {
     line.trim_end().strip_suffix(',').unwrap_or("").rsplit("=> ").next().unwrap_or("")
 }
 
-/// True when every line of `a` appears in `b` in order — i.e. `b` is `a` with
-/// some lines inserted, and nothing deleted or changed. Greedy single-pass, O(|b|):
-/// each `b` line is consumed at most once and the cursor never rewinds, which is
-/// the standard (and optimal) test for "is `a` a subsequence of `b`". A changed
-/// or removed line in `a` has no match remaining in `b`, so the check fails —
-/// only pure insertions into `b` pass.
-fn is_line_subsequence(a: &str, b: &str) -> bool {
-    let mut b_lines = b.lines();
-    for a_line in a.lines() {
-        loop {
-            match b_lines.next() {
-                Some(b_line) if b_line == a_line => break,
-                Some(_) => continue,
-                None => return false,
+
+/// The output additions a 2.4.9 compile makes over an older archive, removed
+/// from the normalized output so the two can be compared for EQUALITY.
+///
+/// An allowlist, deliberately. The earlier rule accepted any file where the
+/// output only added lines, which also accepted an extra plugin in a plugin
+/// list, an extra preference, an extra `arguments` row (where Magento would
+/// otherwise reflect at runtime), or an argument inserted into an existing row
+/// — shifting every later positional argument. Each allowed addition is
+/// specific:
+///
+/// - the top-level `nonLazyTypes` section and the `NonLazyTypes` step of the
+///   compiler's `ModificationChain` argument — the `Chain\NonLazyTypes` pass of
+///   2.4.9 on PHP 8.4. Only when the archive has neither: an archive that ran the
+///   pass must match it exactly.
+/// - an output-only `'X' => false,` row in `interception.php`. A missing key
+///   makes `Interception\Config\Config::hasPlugins()` recompute, so the row only
+///   asserts "no plugins"; were that wrong, the type's interceptor and its
+///   plugin-list entries would be missing too, and those stay flagged.
+fn drop_allowed_additions(archive: &str, output: &str) -> String {
+    let archive_has_pass = archive.contains("\n  'nonLazyTypes' => ")
+        || archive.contains("Compiler\\\\Config\\\\Chain\\\\NonLazyTypes'");
+    // `interception.php` is the one flat class => bool map; the area files open
+    // with a section header and the plugin lists with `  0 => `.
+    let is_interception = archive
+        .lines()
+        .nth(1)
+        .is_some_and(|l| matches!(entry_value(l), "true" | "false"));
+    let archive_keys = if is_interception { entry_keys(archive) } else { HashSet::new() };
+
+    let mut out = String::with_capacity(output.len());
+    let mut lines = output.lines().peekable();
+    while let Some(line) = lines.next() {
+        if !archive_has_pass {
+            // `  'nonLazyTypes' => ` … `  ),`
+            if line == "  'nonLazyTypes' => " {
+                for inner in lines.by_ref() {
+                    if inner == "  )," {
+                        break;
+                    }
+                }
+                continue;
+            }
+            // `<indent>'NonLazyTypes' => ` / `array (` / `'_i_' => '…\NonLazyTypes',` / `),`
+            if line.trim() == "'NonLazyTypes' =>" || line.trim_end().ends_with("'NonLazyTypes' =>") {
+                let indent = line.len() - line.trim_start().len();
+                let block: Vec<&str> = lines.clone().take(3).collect();
+                let pad = " ".repeat(indent);
+                if block.len() == 3
+                    && block[0] == format!("{pad}array (")
+                    && block[1].trim()
+                        == "'_i_' => 'Magento\\\\Setup\\\\Module\\\\Di\\\\Compiler\\\\Config\\\\Chain\\\\NonLazyTypes',"
+                    && block[2] == format!("{pad}),")
+                {
+                    lines.nth(2);
+                    continue;
+                }
             }
         }
+        if is_interception {
+            if let Some(key) = top_level_entry_key(line) {
+                if entry_value(line) == "false" && !archive_keys.contains(key) {
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
     }
-    true
+    out
 }
 
-/// A changed metadata file whose output is a strict superset of the archive: the
-/// output only *adds* config (most visibly the whole `nonLazyTypes` section and
-/// the `NonLazyTypes` step in `ModificationChain`, a 2.4.9 / PHP 8.4 feature the
-/// older archive predates), never removing or altering what the archive has.
-///
-/// Disabled-module entries are stripped from both sides first (rule 5's transform),
-/// so a file combining disabled-module *removals* with genuine output *additions*
-/// still qualifies — every remaining difference is then an insertion into the
-/// output. Any real regression (a changed value, a dropped entry) leaves an
-/// archive line unmatched and keeps the file flagged.
 fn extra_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
     let mut items: Vec<String> = Vec::new();
     let mut claimed: HashSet<String> = HashSet::new();
@@ -1508,13 +1585,12 @@ fn extra_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownG
         if !a.starts_with("<?php return array (") {
             continue;
         }
-        let (sa, _) = ctx.strip(&a);
-        let (sb, _) = ctx.strip(&b);
+        let ((sa, _), (sb, _)) = ctx.strip_pair(&a, &b);
         let (sa, _) = drop_inert_interception_misses(c, &sa, &sb);
-        // Claim only when the output strictly grew and contains every archive line
-        // in order — additions only. `sa.len() < sb.len()` also rules out the
-        // equal case (which rule 5 already handles).
-        if sa.len() < sb.len() && is_line_subsequence(&sa, &sb) {
+        // Claim only when the output's allowed additions are ALL that separate
+        // the two. `sa != sb` rules out the equal case (rule 5 owns it).
+        let trimmed = drop_allowed_additions(&sa, &sb);
+        if sa != sb && trimmed == sa {
             items.push(c.clone());
             claimed.insert(c.clone());
         }
@@ -1529,13 +1605,12 @@ fn extra_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownG
         kind: KnownKind::ExtraMetadata,
         title: KnownKind::ExtraMetadata.title().to_owned(),
         explanation:
-            "In these files the output is a strict superset of the archive: every archive entry \
-is present unchanged and the output only *adds* metadata. The largest addition is the \
-`nonLazyTypes` section (plus its `NonLazyTypes` step in `ModificationChain`) — the lazy-proxy \
-optimization from the `Chain\\NonLazyTypes` compiler pass that magecommand's 2.4.9 / Mage-OS \
-3.1.0 (PHP 8.4) target runs but the older archive predates. Extra compiled DI entries are inert \
-— nothing references them at runtime — so this is additive and safe. A genuine regression would \
-*remove* or *change* an archive entry, which keeps the file flagged; only pure additions land here."
+            "In these files the output equals the archive once two specific additions are set \
+aside: the `nonLazyTypes` section with its `NonLazyTypes` step in `ModificationChain` (the \
+`Chain\\NonLazyTypes` compiler pass that magecommand's 2.4.9 / Mage-OS 3.1.0 (PHP 8.4) target \
+runs and the older archive predates), and `interception.php` rows asserting `false` (no plugins) \
+for types the archive left to runtime. Any other addition — a plugin, a preference, an arguments \
+row or a single argument — keeps the file flagged."
                 .to_owned(),
         items,
         verified: true,
@@ -1579,10 +1654,10 @@ fn canonical_scanner_regex_line(line: &str) -> Option<String> {
 }
 
 /// A changed metadata file whose only substantive difference — after removing
-/// disabled-module entries and allowing pure additions — is the generated
+/// disabled-module entries and the allowlisted additions — is the generated
 /// ClassesScanner directory-exclusion regex. Canonicalizing that one line on both
-/// sides and re-checking equality/superset confirms it; any *other* changed value
-/// leaves the sides unequal and non-subsequence, so the file stays flagged.
+/// sides and re-checking equality confirms it; any *other* changed or added value
+/// leaves the sides unequal, so the file stays flagged.
 ///
 /// Runs after rules 5/6 so pure disabled-module and pure-additions files are
 /// already claimed — a file only reaches here because the regex line was the
@@ -1603,8 +1678,7 @@ fn class_scanner_exclude_regex(
         if !a.starts_with("<?php return array (") {
             continue;
         }
-        let (sa, _) = ctx.strip(&a);
-        let (sb, _) = ctx.strip(&b);
+        let ((sa, _), (sb, _)) = ctx.strip_pair(&a, &b);
         let (sa, _) = drop_inert_interception_misses(c, &sa, &sb);
         let ca = canonicalize_class_scanner_regex(&sa);
         let cb = canonicalize_class_scanner_regex(&sb);
@@ -1613,7 +1687,7 @@ fn class_scanner_exclude_regex(
         if ca == sa && cb == sb {
             continue;
         }
-        let matches = ca == cb || (ca.len() <= cb.len() && is_line_subsequence(&ca, &cb));
+        let matches = ca == cb || drop_allowed_additions(&ca, &cb) == ca;
         if matches {
             items.push(c.clone());
             claimed.insert(c.clone());
@@ -1636,48 +1710,12 @@ module's directory, so an archive compiled from a different module set lists dif
 order). magecommand builds it from the same module discovery it uses everywhere, and it is \
 byte-identical to a matched-version compile (the oracle), so a membership/order difference here is a \
 stale-archive artifact, never a bug. After canonicalizing it, the only remaining differences are \
-disabled-module removals and additive entries — a genuine changed value would survive canonicalization \
-and keep the file flagged."
+disabled-module removals and the allowed 2.4.9 additions (see Extra metadata) — any other changed or \
+added value keeps the file flagged."
                 .to_owned(),
         items,
         verified: true,
     })
-}
-
-/// Reduce the code generator's version-specific formatting to a canonical form.
-///
-/// Magento's code generator changed several byte-level (but behavior-preserving)
-/// details between releases; magecommand emits the 2.4.9 / Mage-OS 3.1.0 form, so
-/// an archive from an older Magento differs in exactly these ways. Applying the
-/// same reductions to BOTH sides collapses those differences while leaving any
-/// genuine change (a different type, an extra dependency, a real body edit)
-/// intact — so a file is only claimed when the sole differences were these.
-fn strip_generator_version_formatting(s: &str) -> String {
-    let mut t = s.to_string();
-    // Return-type spacing: `foo() : T` (older) -> `foo(): T` (2.4.9, PSR-12).
-    // Also normalizes the identical ternary spacing on both sides — harmless.
-    t = t.replace(") : ", "): ");
-    // Explicit nullable default: `?T $x = null` (2.4.9, PHP 8.4 compat) -> `?T $x`.
-    t = t.replace(" = null,", ",");
-    t = t.replace(" = null)", ")");
-    // Proxy `__clone` null-guard (2.4.9) -> unguarded (older): keep the proxy
-    // lazy when cloned instead of forcing instantiation.
-    t = t.replace(
-        "        if ($this->_subject) {\n            $this->_subject = clone $this->_getSubject();\n        }",
-        "        $this->_subject = clone $this->_getSubject();",
-    );
-    // Proxy `__debugInfo` method (2.4.9-only) -> removed.
-    t = t.replace(
-        "\n\n    /**\n     * Debug proxied instance\n     */\n    public function __debugInfo()\n    {\n        return ['i' => $this->_subject];\n    }",
-        "",
-    );
-    // Proxy `_resetState` null-guard (2.4.9) -> unguarded (older).
-    t = t.replace("     * Reset state of proxied instance", "     * {@inheritdoc}");
-    t = t.replace(
-        "        if ($this->_subject) {\n            $this->_subject->_resetState(); \n        }",
-        "        $this->_getSubject()->_resetState();",
-    );
-    t
 }
 
 fn generator_version_formatting(
@@ -1693,19 +1731,11 @@ fn generator_version_formatting(
         else {
             continue;
         };
-        // Claim only when normalization makes them equal: the sole differences
-        // were the known generator-formatting reductions. A generated interceptor
-        // or proxy may additionally differ in method order (a reflection-order
-        // artifact), so fall back to comparing the normalized text modulo block
-        // order — this absorbs files that combine formatting deltas with a reorder.
-        let na = strip_generator_version_formatting(&a);
-        let nb = strip_generator_version_formatting(&b);
-        let matches = na == nb
-            || matches!(
-                (canonical_method_order(na.as_bytes()), canonical_method_order(nb.as_bytes())),
-                (Some(ca), Some(cb)) if ca == cb
-            );
-        if matches {
+        // Claim only when the two parse to the same class modulo exactly the
+        // known generator changes — compared as structure, not rewritten text,
+        // so a dropped default or any other real change stays flagged. Method
+        // order is irrelevant there (methods are matched by name).
+        if crate::genequiv::generator_equivalent(&a, &b) {
             items.push(c.clone());
             claimed.insert(c.clone());
         }
@@ -1720,13 +1750,14 @@ fn generator_version_formatting(
         kind: KnownKind::GeneratorVersionFormatting,
         title: KnownKind::GeneratorVersionFormatting.title().to_owned(),
         explanation:
-            "These files are byte-identical after normalizing the code generator's \
-version-specific formatting, so they differ only in ways Magento changed between the archive's \
-version and magecommand's 2.4.9 / Mage-OS 3.1.0 target — all behavior-preserving: return-type \
-spacing (`foo() : T` -> `foo(): T`), explicit nullable defaults (`?T $x` -> `?T $x = null`, the \
-PHP 8.4 compat form), and the proxy template's laziness hardening (null-guards in `__clone` and \
-`_resetState` so cloning/resetting an unused proxy no longer forces instantiation, plus an added \
-`__debugInfo`). Run magecommand against a 2.4.9 store and these vanish."
+            "These files parse to the same class once exactly the code generator's \
+version-specific changes are allowed — compared as structure (signatures, resolved types, method \
+bodies as tokens), so formatting, docblocks and method order never count, and nothing else may \
+differ. The allowed changes, all made by Magento between the archive's version and magecommand's \
+2.4.9 / Mage-OS 3.1.0 target: explicit nullable defaults (`?T $x` -> `?T $x = null`, the PHP 8.4 \
+compat form), and in proxies the laziness hardening (null-guards in `__clone` and `_resetState` so \
+cloning/resetting an unused proxy no longer forces instantiation, plus an added `__debugInfo`). \
+Run magecommand against a 2.4.9 store and these vanish."
                 .to_owned(),
         items,
         verified: true,
@@ -1751,8 +1782,7 @@ pub fn residual_report(
     // but not `blocked`, then again when `outside_scan` was added — because each
     // new set had to be remembered at this call site. A single `expected`
     // parameter makes forgetting one impossible.
-    let na = normalize_metadata(archive_text, disabled, expected);
-    let nb = normalize_metadata(output_text, disabled, expected);
+    let (na, nb) = normalize_metadata(archive_text, output_text, disabled, expected);
     let a: Vec<&str> = na.lines().collect();
     let b: Vec<&str> = nb.lines().collect();
 
@@ -1793,14 +1823,22 @@ pub fn residual_report(
         .to_string()
 }
 
-/// The classifiers' metadata normalization: strip every expected entry (the
-/// disabled-module ones and the `expected` key union), then canonicalize the
-/// ClassesScanner regex. Shared by [`residual_report`] and [`first_divergence`]
+/// The classifiers' metadata normalization of one file pair: strip every
+/// expected entry (the disabled-module ones and the `expected` key union), drop
+/// the output's allowed additions, then canonicalize the ClassesScanner regex. Shared by [`residual_report`] and [`first_divergence`]
 /// so the two diagnostics can never disagree about what was already explained.
-fn normalize_metadata(text: &str, disabled: &HashSet<String>, expected: &HashSet<String>) -> String {
+fn normalize_metadata(
+    archive: &str,
+    output: &str,
+    disabled: &HashSet<String>,
+    expected: &HashSet<String>,
+) -> (String, String) {
     let empty = HashSet::new();
-    let (stripped, _) = strip_expected_entries(text, disabled, expected, &empty);
-    canonicalize_class_scanner_regex(&stripped)
+    let present = entry_keys(output);
+    let strip = |text: &str| strip_expected_entries(text, disabled, expected, &empty, &present).0;
+    let (sa, sb) = (strip(archive), strip(output));
+    let sb = drop_allowed_additions(&sa, &sb);
+    (canonicalize_class_scanner_regex(&sa), canonicalize_class_scanner_regex(&sb))
 }
 
 /// Where an unexplained changed file first diverges, as one line from each side.
@@ -1849,10 +1887,7 @@ pub fn first_divergence(
     expected: &HashSet<String>,
 ) -> Option<Divergence> {
     let (na, nb) = if is_metadata {
-        (
-            normalize_metadata(archive_text, disabled, expected),
-            normalize_metadata(output_text, disabled, expected),
-        )
+        normalize_metadata(archive_text, output_text, disabled, expected)
     } else {
         (archive_text.to_owned(), output_text.to_owned())
     };
@@ -1939,6 +1974,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            case_insensitive_fs: false,
         }
     }
 
@@ -2083,6 +2119,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            case_insensitive_fs: false,
         };
         let r = report(&[], &[], &["global.php", "crontab.php"]);
         let c = classify(&r, &ctx);
@@ -2144,6 +2181,34 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_module_key_the_output_has_is_not_stripped() {
+        // The excuse is "2.4.9 emits nothing for a disabled module". A key the
+        // OUTPUT carries is outside it, so a different value must stay flagged
+        // rather than vanish from both sides.
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| fs::write(root.join(rel), c).unwrap();
+        let args = |body: &str| format!("<?php return array (\n  'arguments' => \n  array (\n{body}  ),\n);\n");
+        let row = |v: u8| format!("    'Bad\\\\Mod\\\\B' => \n    array (\n      'y' => \n      array (\n        '_v_' => {v},\n      ),\n    ),\n");
+        // Both sides have it, with different values: flagged.
+        write(archive.path(), "both.php", &args(&row(1)));
+        write(output.path(), "both.php", &args(&row(2)));
+        // Only the archive has it: the excuse applies.
+        write(archive.path(), "archive_only.php", &args(&row(1)));
+        write(output.path(), "archive_only.php", &args(""));
+
+        let mut disabled = HashSet::new();
+        disabled.insert("Bad_Mod".to_string());
+        let mut ctx = ctx(&disabled, archive.path());
+        ctx.output = output.path();
+        let c = classify(&report(&[], &[], &["archive_only.php", "both.php"]), &ctx);
+        assert_eq!(c.changed, vec!["both.php"]);
+        assert_eq!(c.known.len(), 1);
+        assert_eq!(c.known[0].kind, KnownKind::DisabledModuleMetadata);
+        assert_eq!(c.known[0].items, vec!["archive_only.php"]);
+    }
+
+    #[test]
     fn classifies_extra_metadata_additions() {
         let archive = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
@@ -2182,6 +2247,33 @@ mod tests {
             &format!("{args_open}    'Good\\\\Mod\\\\Z' => NULL,\n{close}"),
         );
         write(output.path(), "removed.php", &format!("{args_open}{close}"));
+        // Additions outside the allowlist — each passed the old "output only adds
+        // lines" rule, and each changes behaviour — must stay flagged.
+        let row = |key: &str| format!("    '{key}' => \n    array (\n      'x' => \n      array (\n        '_v_' => 1,\n      ),\n    ),\n");
+        // An extra arguments row: Magento would otherwise reflect at runtime.
+        write(archive.path(), "extra_row.php", &format!("{args_open}{close}"));
+        write(output.path(), "extra_row.php", &format!("{args_open}{}{close}", row("Good\\\\Mod\\\\New")));
+        // An argument inserted into an existing row: shifts every later positional one.
+        write(archive.path(), "inserted_arg.php", &format!("{args_open}{close}"));
+        write(
+            output.path(),
+            "inserted_arg.php",
+            &format!("{args_open}{close}").replace(
+                "    array (\n      'x' => ",
+                "    array (\n      'w' => \n      array (\n        '_v_' => 0,\n      ),\n      'x' => ",
+            ),
+        );
+        // interception.php: an output-only `false` row is allowed, a `true` row is not.
+        let icpt = |rows: &str| format!("<?php return array (\n  'Good\\\\Mod\\\\A' => true,\n{rows});\n");
+        write(archive.path(), "interception.php", &icpt(""));
+        write(output.path(), "interception.php", &icpt("  'Good\\\\Mod\\\\B' => false,\n"));
+        write(archive.path(), "interception_true.php", &icpt(""));
+        write(output.path(), "interception_true.php", &icpt("  'Good\\\\Mod\\\\B' => true,\n"));
+        // An archive that ran the NonLazyTypes pass must match it: a section the
+        // output adds to there is a real difference.
+        let lazy = |rows: &str| format!("{args_open}  ),\n  'nonLazyTypes' => \n  array (\n    'Good\\\\Mod\\\\A' => true,\n{rows}  ),\n);\n");
+        write(archive.path(), "lazy_changed.php", &lazy(""));
+        write(output.path(), "lazy_changed.php", &lazy("    'Good\\\\Mod\\\\B' => true,\n"));
 
         let mut disabled = HashSet::new();
         disabled.insert("Bad_Mod".to_string());
@@ -2195,24 +2287,27 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            case_insensitive_fs: false,
         };
-        let r = report(&[], &[], &["additions.php", "changed.php", "removed.php"]);
+        let flagged = [
+            "changed.php",
+            "removed.php",
+            "extra_row.php",
+            "inserted_arg.php",
+            "interception_true.php",
+            "lazy_changed.php",
+        ];
+        let mut all = vec!["additions.php", "interception.php"];
+        all.extend(flagged);
+        let r = report(&[], &[], &all);
         let c = classify(&r, &ctx);
         let extra: Vec<_> =
             c.known.iter().filter(|g| g.kind == KnownKind::ExtraMetadata).collect();
         assert_eq!(extra.len(), 1);
-        assert_eq!(extra[0].items, vec!["additions.php"]);
-        // A changed value and a dropped entry are NOT absorbed.
-        assert!(c.changed.contains(&"changed.php".to_string()));
-        assert!(c.changed.contains(&"removed.php".to_string()));
-    }
-
-    #[test]
-    fn line_subsequence_detects_insertions_only() {
-        assert!(is_line_subsequence("a\nb\nc\n", "a\nX\nb\nc\nY\n")); // insertions
-        assert!(!is_line_subsequence("a\nb\nc\n", "a\nc\n")); // deletion
-        assert!(!is_line_subsequence("a\nb\nc\n", "a\nB\nc\n")); // change
-        assert!(is_line_subsequence("", "a\n")); // empty is a subsequence of anything
+        assert_eq!(extra[0].items, vec!["additions.php", "interception.php"]);
+        for f in flagged {
+            assert!(c.changed.contains(&f.to_string()), "{f} was absorbed");
+        }
     }
 
     #[test]
@@ -2224,10 +2319,22 @@ mod tests {
             &["Magento/Catalog/Model/Backend/TierPrice/Interceptor.php"],
             &[],
         );
+        // Case-sensitive filesystem (Linux): two spellings are two files, so the
+        // pair is a real missing + extra.
         let c = classify(&r, &ctx(&disabled, dir));
-        assert_eq!(c.known.len(), 1);
-        assert_eq!(c.known[0].kind, KnownKind::FilenameCasing);
+        assert!(c.known.is_empty() && c.warnings.is_empty());
+        assert_eq!((c.missing.len(), c.extra.len()), (1, 1));
+
+        // Case-insensitive (macOS): set aside as a warning — neither explained
+        // nor a failure.
+        let mut insensitive = ctx(&disabled, dir);
+        insensitive.case_insensitive_fs = true;
+        let c = classify(&r, &insensitive);
+        assert!(c.known.is_empty());
+        assert_eq!(c.warnings.len(), 1);
+        assert_eq!(c.warnings[0].kind, KnownKind::FilenameCasing);
         assert!(c.missing.is_empty() && c.extra.is_empty());
+        assert_eq!(c.unexplained_count(), 0);
     }
 
     #[test]
@@ -2241,31 +2348,6 @@ mod tests {
     }
 
     #[test]
-    fn strips_the_known_generator_formatting_deltas() {
-        // return-type spacing
-        let a = "    public function getCID() : string\n    {\n    }\n";
-        let b = "    public function getCID(): string\n    {\n    }\n";
-        assert_eq!(
-            strip_generator_version_formatting(a),
-            strip_generator_version_formatting(b)
-        );
-        // nullable default + proxy __clone guard + __debugInfo
-        let arch = "    public function __clone()\n    {\n        $this->_subject = clone $this->_getSubject();\n    }\n\n    public function f(?\\X $r)\n    {\n    }\n";
-        let mc = "    public function __clone()\n    {\n        if ($this->_subject) {\n            $this->_subject = clone $this->_getSubject();\n        }\n    }\n\n    /**\n     * Debug proxied instance\n     */\n    public function __debugInfo()\n    {\n        return ['i' => $this->_subject];\n    }\n\n    public function f(?\\X $r = null)\n    {\n    }\n";
-        assert_eq!(
-            strip_generator_version_formatting(arch),
-            strip_generator_version_formatting(mc)
-        );
-        // a genuine type difference is NOT collapsed
-        let x = "    public function f(\\Laminas\\Uri\\Uri $u)\n";
-        let y = "    public function f(\\Zend\\Uri\\Uri $u)\n";
-        assert_ne!(
-            strip_generator_version_formatting(x),
-            strip_generator_version_formatting(y)
-        );
-    }
-
-    #[test]
     fn classifies_formatting_absorbs_only_matching_files() {
         let archive = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
@@ -2274,12 +2356,15 @@ mod tests {
             fs::create_dir_all(p.parent().unwrap()).unwrap();
             fs::write(p, c).unwrap();
         };
+        let class = |method: &str| {
+            format!("<?php\nnamespace A;\n\nclass Interceptor extends \\A\\Base\n{{\n    {method}\n    {{\n    }}\n}}\n")
+        };
         // formatting-only difference -> should be absorbed
-        write(archive.path(), "A/Interceptor.php", "public function g() : void\n{\n}\n");
-        write(output.path(), "A/Interceptor.php", "public function g(): void\n{\n}\n");
+        write(archive.path(), "A/Interceptor.php", &class("public function g() : void"));
+        write(output.path(), "A/Interceptor.php", &class("public function g(): void"));
         // genuine difference -> stays changed
-        write(archive.path(), "B/Interceptor.php", "public function g(\\Laminas\\Uri\\Uri $u)\n");
-        write(output.path(), "B/Interceptor.php", "public function g(\\Zend\\Uri\\Uri $u)\n");
+        write(archive.path(), "B/Interceptor.php", &class("public function g(\\Laminas\\Uri\\Uri $u)"));
+        write(output.path(), "B/Interceptor.php", &class("public function g(\\Zend\\Uri\\Uri $u)"));
 
         let disabled = HashSet::new();
         let ctx = ClassifyCtx {
@@ -2292,6 +2377,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            case_insensitive_fs: false,
         };
         let r = report(&[], &[], &["A/Interceptor.php", "B/Interceptor.php"]);
         let c = classify(&r, &ctx);
@@ -2339,6 +2425,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            case_insensitive_fs: false,
         };
         let r = report(&[], &[], &["P/Proxy.php"]);
         let c = classify(&r, &ctx);
@@ -2383,6 +2470,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            case_insensitive_fs: false,
         };
         let r = report(&[], &[], &["interception.php"]);
         let c = classify(&r, &ctx);
@@ -2415,6 +2503,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            case_insensitive_fs: false,
         };
         let missing = [
             "code/Bad/Mod/Block/Thing/Interceptor.php",
@@ -2569,6 +2658,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            case_insensitive_fs: false,
         };
         let c = classify(&report(&missing, &[], &[]), &bare);
         assert_eq!(c.missing, vec!["code/Good/Mod/Model/Type/OnepageFactory.php"]);
@@ -2684,6 +2774,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            case_insensitive_fs: false,
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &bare);
         assert_eq!(c.changed, vec!["interception.php"]);
@@ -2701,6 +2792,7 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            case_insensitive_fs: false,
         };
         let c = classify(&report(&[], &[], &["interception.php"]), &ctx);
         assert!(c.changed.is_empty());
@@ -2826,11 +2918,12 @@ mod tests {
     #[test]
     fn classifies_class_scanner_exclude_regex_membership() {
         // The 2.4.8 store shape in miniature: a `global.php` where, relative to the
-        // stale archive, the output (a) drops a disabled module's entry, (b) adds a
-        // new enabled class, and (c) lists a different member set in the generated
-        // ClassesScanner exclusion regex. Only after normalizing that one regex line
-        // do the sides reconcile — so the file must land in the regex group, not stay
-        // flagged.
+        // stale archive, the output (a) drops a disabled module's entry and (b)
+        // lists a different member set in the generated ClassesScanner exclusion
+        // regex. Only after normalizing that one regex line do the sides reconcile
+        // — so the file must land in the regex group, not stay flagged. A third
+        // file also ADDS an arguments entry: that is not a regex difference and
+        // must stay flagged (an extra row replaces Magento's runtime reflection).
         let archive = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
         let write = |root: &Path, rel: &str, c: &str| {
@@ -2852,9 +2945,11 @@ mod tests {
             s
         };
         write(archive.path(), "global.php", &file("/v/foo/module-a", &["Bad\\\\Mod\\\\X"]));
+        write(output.path(), "global.php", &file("/v/foo/module-a|/v/foo/module-b", &[]));
+        write(archive.path(), "added.php", &file("/v/foo/module-a", &["Bad\\\\Mod\\\\X"]));
         write(
             output.path(),
-            "global.php",
+            "added.php",
             &file("/v/foo/module-a|/v/foo/module-b", &["New\\\\Enabled\\\\Class"]),
         );
         // Control: a genuine changed value (no scanner regex) must stay flagged.
@@ -2873,8 +2968,9 @@ mod tests {
             outside_scan: no_blocked(),
             outside_scan_files: no_blocked(),
             strict_ordering: false,
+            case_insensitive_fs: false,
         };
-        let r = report(&[], &[], &["global.php", "other.php"]);
+        let r = report(&[], &[], &["added.php", "global.php", "other.php"]);
         let c = classify(&r, &ctx);
         let regex_groups: Vec<_> = c
             .known
@@ -2883,7 +2979,7 @@ mod tests {
             .collect();
         assert_eq!(regex_groups.len(), 1);
         assert_eq!(regex_groups[0].items, vec!["global.php"]);
-        // The genuine value change is NOT absorbed.
-        assert_eq!(c.changed, vec!["other.php"]);
+        // The added entry and the genuine value change are NOT absorbed.
+        assert_eq!(c.changed, vec!["added.php", "other.php"]);
     }
 }

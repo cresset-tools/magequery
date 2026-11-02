@@ -2213,6 +2213,9 @@ fn compare(
         output,
         disabled_modules: &disabled_modules,
         null_arguments: &null_arguments,
+        // macOS filesystems are case-insensitive by default; only there do two
+        // spellings of one path collapse into one file.
+        case_insensitive_fs: cfg!(target_os = "macos"),
         disabled_reachable: &disabled_reachable,
         disabled_types: &disabled_types,
         outside_scan: &outside_scan,
@@ -2446,19 +2449,37 @@ fn compare(
         }
     }
 
+    // Warnings: neither explained nor failing (filename casing on macOS).
+    let warned: usize = classified.warnings.iter().map(|g| g.items.len()).sum();
+    if warned > 0 {
+        println!(
+            "\n{} {}",
+            style::warn(&format!("⚠ WARNING: {warned} difference(s) not comparable here")),
+            style::dim("(not counted as failures; --json lists the files)")
+        );
+        let width = classified.warnings.iter().map(|g| g.title.chars().count()).max().unwrap_or(0);
+        for group in &classified.warnings {
+            print_known_group(group.items.len(), &group.title, width, &group.kind.doc_url());
+        }
+    }
+    let warned_note =
+        if warned > 0 { format!(" · {warned} warning(s)") } else { String::new() };
+
     // Verdict.
     if report.is_clean() && reordered == 0 {
         println!("\n{}", style::pass("OK: output reproduces the archive exactly"));
     } else if unexplained == 0 {
         println!(
             "\n{}",
-            style::pass(&format!("OK: every difference is explained ({explained} expected)"))
+            style::pass(&format!(
+                "OK: every difference is explained ({explained} expected{warned_note})"
+            ))
         );
     } else {
         println!(
             "\n{} {}",
             style::fail(&format!("FAIL: {unexplained} unexplained difference(s)")),
-            style::dim(&format!("· {explained} expected"))
+            style::dim(&format!("· {explained} expected{warned_note}"))
         );
     }
 
