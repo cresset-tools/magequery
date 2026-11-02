@@ -1979,6 +1979,7 @@ fn compile(
         consume_regenerate_flag(&root)?;
         println!("{} {written} generated/ file(s)", style::pass("wrote"));
         warn_case_collapse(&root, &out.files);
+        warn_lost_arguments(&out.lost_arguments);
         if !out.findings.is_empty() {
             eprintln!(
                 "{} {} compile finding(s), first: {}",
@@ -1989,6 +1990,24 @@ fn compile(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Name every type the compile left to runtime reflection although di.xml
+/// configures its arguments. Magento's runtime branch never reads that config,
+/// so each of these is built without it: not a crash, but not what di.xml says.
+pub(crate) fn warn_lost_arguments(lost: &[String]) {
+    if lost.is_empty() {
+        return;
+    }
+    eprintln!(
+        "{} {} type(s) lose their di.xml arguments: their constructor could not be \
+resolved statically, so Magento builds them by runtime reflection, which ignores di.xml",
+        style::stderr::warning("warning:"),
+        lost.len()
+    );
+    for name in lost {
+        eprintln!("  {}", style::stderr::name(name));
+    }
 }
 
 /// Remove `var/.regenerate` so the next `bin/magento` boot keeps the tree we
@@ -2136,9 +2155,18 @@ fn compare(
             &disabled_modules,
             &reachable,
         );
+        let runtime = magecommand_engine::runtime_argument_entries(
+            &report,
+            archive,
+            output,
+            magento.as_ref(),
+            &disabled_modules,
+            &reachable.union(&outside).cloned().collect(),
+        );
         // Every expected-key set, unioned — see `residual_report`.
         let mut expected = reachable;
         expected.extend(outside);
+        expected.extend(runtime.iter().filter(|r| r.harmless()).map(|r| r.key()));
         print!(
             "{}",
             magecommand_engine::residual_report(&a, &b, &disabled_modules, &expected)
@@ -2208,11 +2236,20 @@ fn compare(
     );
     let outside_scan_files =
         magecommand_engine::outside_scan_artifacts(&report, magento.as_ref());
+    let runtime_arguments = magecommand_engine::runtime_argument_entries(
+        &report,
+        archive,
+        output,
+        magento.as_ref(),
+        &disabled_modules,
+        &disabled_reachable.union(&outside_scan).cloned().collect(),
+    );
     let ctx = magecommand_engine::ClassifyCtx {
         archive,
         output,
         disabled_modules: &disabled_modules,
         null_arguments: &null_arguments,
+        runtime_arguments: &runtime_arguments,
         // macOS filesystems are case-insensitive by default; only there do two
         // spellings of one path collapse into one file.
         case_insensitive_fs: cfg!(target_os = "macos"),
@@ -2242,6 +2279,7 @@ fn compare(
             .iter()
             .chain(&outside_scan)
             .cloned()
+            .chain(runtime_arguments.iter().filter(|r| r.harmless()).map(|r| r.key()))
             .collect();
         println!(
             "\n{} matching no known pattern — investigate these",
@@ -2280,6 +2318,31 @@ fn compare(
             }
             if classified.null_arguments.len() > sample {
                 println!("    … {} more", classified.null_arguments.len() - sample);
+            }
+        }
+        // Builds, but without its di.xml configuration: leads for the same reason.
+        if !classified.lost_arguments.is_empty() {
+            println!(
+                "\n  {}",
+                style::fail(&format!(
+                    "{} class(es) lose their di.xml arguments: the output has no `arguments` key, \
+                     so Magento reflects the constructor at runtime and ignores di.xml",
+                    classified.lost_arguments.len()
+                ))
+            );
+            for r in classified.lost_arguments.iter().take(sample) {
+                let why = match r.configured {
+                    Some(_) => "di.xml configures its arguments",
+                    None => "no checkout to check its di.xml against (pass --root)",
+                };
+                println!(
+                    "    {}  {}",
+                    style::class(&r.class),
+                    style::dim(&format!("absent from {} file(s); {why}", r.files.len()))
+                );
+            }
+            if classified.lost_arguments.len() > sample {
+                println!("    … {} more", classified.lost_arguments.len() - sample);
             }
         }
         // The first real divergence between two versions of one file.

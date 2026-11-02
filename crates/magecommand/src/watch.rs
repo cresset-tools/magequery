@@ -194,6 +194,7 @@ fn compute(magento: &Magento, pristine: &Definitions, root: &Path) -> CompileOut
 }
 
 fn report_findings(out: &CompileOutputs) {
+    crate::warn_lost_arguments(&out.lost_arguments);
     if !out.unresolved.is_empty() {
         eprintln!(
             "  {} {} unresolvable class name(s) (first: {})",

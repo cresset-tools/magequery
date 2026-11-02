@@ -1,4 +1,5 @@
-//! `di compile` and a constructor default that cannot be folded statically.
+//! `di compile` and a constructor it cannot resolve statically: a default it
+//! cannot fold, or a parent constructor it cannot see.
 //!
 //! Not built on Windows, for the same reason as the sibling `di compile`
 //! fixtures: the metadata filenames join their cache scope with `|`, a reserved
@@ -19,18 +20,26 @@
 //! entry shifts every later argument into the wrong parameter — a worse failure
 //! than the one being fixed. The row has to be all-or-nothing.
 //!
-//! So the whole class's `arguments` entry degrades to `NULL`, which sends the
-//! factory down its runtime branch:
+//! Nor can the entry be `NULL`. `Compiled::getArguments()` turns a present NULL
+//! into `[]`, and the factory answers `[]` with a bare `new $type()` — every
+//! argument dropped, an ArgumentCountError for any required one. Only an ABSENT
+//! key makes `getArguments()` return null and sends the factory down its runtime
+//! branch:
 //!
 //! ```php
 //! $parameters = $this->getDefinitions()->getParameters($type) ?: [];
 //! $args = $this->resolveArgumentsInRuntime($type, $parameters, $arguments);
 //! ```
 //!
-//! where PHP reflects the constructor and reads the real default itself. The
-//! class loses its cached arguments; it never receives an invented value. This
-//! is the same degradation magecommand already applies to eval-obfuscated
-//! vendor source.
+//! where PHP reflects the constructor and reads the real default itself. So the
+//! class gets no key at all: it loses its cached arguments, and never receives
+//! an invented value. The same holds for a class whose constructor comes from a
+//! parent magecommand cannot read — a PHP built-in it has no signature for
+//! (`DateInterval`), or an eval-obfuscated vendor class.
+//!
+//! The runtime branch does not read di.xml `<argument>` config, which lives only
+//! in the compiled row, so a class that has some is built without it. That is
+//! not a crash, but it is not what di.xml says, so the compile names each one.
 
 #![cfg(not(windows))]
 
@@ -72,6 +81,22 @@ impl Fixture {
             "<?php\nnamespace Acme\\Unres\\Model;\n\nclass Foldable\n{\n    \
              public function __construct(private readonly string $kept = 'kept')\n    {\n    }\n}\n",
         );
+        // A required argument inherited from a built-in magecommand has no
+        // constructor signature for. A present key — NULL or empty — makes the
+        // factory call `new BuiltinChild()`, an ArgumentCountError.
+        write(
+            "app/code/Acme/Unres/Model/BuiltinChild.php",
+            "<?php\nnamespace Acme\\Unres\\Model;\n\nclass BuiltinChild extends \\DateInterval\n{\n}\n",
+        );
+        // An unfoldable default next to a configured argument: the key must
+        // still go, and the lost configuration must be reported.
+        write(
+            "app/code/Acme/Unres/Model/Configured.php",
+            "<?php\nnamespace Acme\\Unres\\Model;\n\nclass Configured\n{\n    \
+             public function __construct(\n        \
+             private readonly string $label,\n        \
+             private readonly string $mystery = ACME_MYSTERY_CONSTANT\n    ) {\n    }\n}\n",
+        );
         // Control: the di config replaces the unfoldable default, so nothing
         // unreadable reaches the row and it must NOT be degraded.
         write(
@@ -85,22 +110,24 @@ impl Fixture {
              <config xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n    \
              <type name=\"Acme\\Unres\\Model\\Overridden\">\n        <arguments>\n            \
              <argument name=\"mystery\" xsi:type=\"string\">configured</argument>\n        \
+             </arguments>\n    </type>\n    \
+             <type name=\"Acme\\Unres\\Model\\Configured\">\n        <arguments>\n            \
+             <argument name=\"label\" xsi:type=\"string\">configured</argument>\n        \
              </arguments>\n    </type>\n</config>\n",
         );
         Fixture(root)
     }
 
-    fn compile(&self) {
+    /// Run the compile; returns its stderr.
+    fn compile(&self) -> String {
         let out = Command::new(env!("CARGO_BIN_EXE_magecommand"))
-            .args(["di", "compile", "--root"])
+            .args(["--color", "never", "di", "compile", "--root"])
             .arg(&self.0)
             .output()
             .expect("run magecommand");
-        assert!(
-            out.status.success(),
-            "di compile failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "di compile failed: {stderr}");
+        stderr
     }
 
     fn global_metadata(&self) -> String {
@@ -126,31 +153,65 @@ fn row(metadata: &str, class: &str) -> String {
     rest[..end].to_owned()
 }
 
+/// Whether the `arguments` section has any entry for `class` (nonLazyTypes
+/// lists class names at the same indent, so the section is cut out first).
+fn has_key(metadata: &str, class: &str) -> bool {
+    let start = metadata.find("  'arguments' => ").expect("an arguments section");
+    let section = &metadata[start..];
+    let section = &section[..section[1..].find("\n  '").map_or(section.len(), |i| i + 1)];
+    section.contains(&format!("    '{}' => ", class.replace('\\', "\\\\")))
+}
+
+/// No key at all: not `_vn_` (a literal null), not a partial row (shifts the
+/// positional arguments), not NULL (a bare `new X()`).
 #[test]
-fn an_unfoldable_default_degrades_the_whole_row_to_null() {
+fn an_unfoldable_default_leaves_the_class_without_a_key() {
     let fx = Fixture::new("unfoldable");
     fx.compile();
     let metadata = fx.global_metadata();
-    let r = row(&metadata, "Acme\\Unres\\Model\\Unfoldable");
 
     assert!(
-        r.contains("NULL"),
-        "the row must degrade to NULL so the factory reflects at runtime; got:\n{r}"
-    );
-    assert!(
-        !r.contains("_vn_"),
-        "it must NOT emit `_vn_` — the factory reads that as a literal null and \
-         a non-nullable `string` parameter then fatals; got:\n{r}"
-    );
-    assert!(
-        !r.contains("'kept'"),
-        "and it must not emit a PARTIAL row: arguments are passed positionally, \
-         so a surviving later argument would land in the wrong parameter; got:\n{r}"
+        !has_key(&metadata, "Acme\\Unres\\Model\\Unfoldable"),
+        "the class must have NO arguments key, so the factory reflects at runtime — \
+         a NULL or partial row builds it wrongly; got:\n{metadata}"
     );
 }
 
-/// The degradation is scoped to the class that needs it — one unreadable
-/// default must not null out every row in the file.
+/// The built-in parent case: a present key would build `new BuiltinChild()`
+/// and throw ArgumentCountError for DateInterval's required argument.
+#[test]
+fn a_class_extending_an_unmodelled_builtin_has_no_key() {
+    let fx = Fixture::new("builtin");
+    fx.compile();
+    let metadata = fx.global_metadata();
+
+    assert!(
+        !has_key(&metadata, "Acme\\Unres\\Model\\BuiltinChild"),
+        "a constructor inherited from an unmodelled built-in must leave no key; got:\n{metadata}"
+    );
+}
+
+/// Dropping the key also drops the class's di.xml arguments at runtime, so the
+/// compile names it rather than losing the configuration silently.
+#[test]
+fn a_configured_class_left_to_runtime_is_reported() {
+    let fx = Fixture::new("configured");
+    let stderr = fx.compile();
+
+    assert!(!has_key(&fx.global_metadata(), "Acme\\Unres\\Model\\Configured"));
+    assert!(
+        stderr.contains("lose their di.xml arguments")
+            && stderr.contains("Acme\\Unres\\Model\\Configured"),
+        "the lost di.xml configuration must be reported by name; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Acme\\Unres\\Model\\Unfoldable\n"),
+        "a class with no di.xml arguments loses nothing and must not be listed; stderr:\n{stderr}"
+    );
+}
+
+/// The omission is scoped to the class that needs it — one unreadable default
+/// must not drop every row in the file.
 #[test]
 fn a_class_whose_defaults_all_fold_keeps_its_row() {
     let fx = Fixture::new("foldable");
@@ -164,7 +225,7 @@ fn a_class_whose_defaults_all_fold_keeps_its_row() {
 }
 
 /// An unfoldable default that the di config replaces never reaches the output,
-/// so there is nothing to degrade — degrading anyway would needlessly uncache
+/// so there is nothing to omit — omitting anyway would needlessly uncache
 /// every class that configures such an argument.
 #[test]
 fn a_configured_override_of_an_unfoldable_default_keeps_its_row() {

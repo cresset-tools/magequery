@@ -18,8 +18,9 @@ magecommand compile with a reference `generated/` tree, usually one produced by
   difference, not an entry that one of the patterns below already explains.
 - **Explained.** The difference is known and expected. Each group links to its section
   below.
-- **Warning.** Shown, but neither explained nor a failure. Today that's only
-  [filename casing](#filename-casing) on macOS.
+- **Warning.** Shown, but neither explained nor a failure:
+  [filename casing](#filename-casing) on macOS, and
+  [constructor arguments left to runtime reflection](#runtime-resolved-arguments).
 
 magecommand targets **Mage-OS 3.1.0 / Magento 2.4.9**. Most explained differences come from
 comparing against an archive built by an older Magento (2.4.8 or earlier, see
@@ -232,8 +233,11 @@ rejects as an incompatible override. These differences disappear on a 2.4.9 stor
 
 The constructor chain of these classes runs through vendor source whose class declaration
 exists only inside an `eval()` of encrypted code. magecommand never executes PHP, so it
-can't see the constructor and writes `NULL` as the class's `arguments` entry. Earlier
-versions assumed Magento falls back to runtime reflection for a `NULL` entry. It doesn't:
+couldn't see the constructor, and versions up to 0.21.0 wrote `NULL` as the class's
+`arguments` entry. The same happened for a parent that is a PHP built-in with no modelled
+signature (`DateInterval`, `DateTimeZone`, `SoapClient`, `IteratorIterator`), and for a
+constructor default it can't evaluate. Those versions assumed Magento falls back to
+runtime reflection for a `NULL` entry. It doesn't:
 `ObjectManager\Config\Compiled::getArguments()` turns a present `NULL` into `[]`, and the
 compiled factory answers `[]` with `new $type()`. Only a key that is *absent* from
 `arguments` gets runtime reflection. The result is an `ArgumentCountError` the first time
@@ -244,6 +248,31 @@ is silently dropped).
 output while the archive has a row as **unexplained**, whatever else the file matches.
 The report leads with these classes and names the `eval()`'d file behind each one when it
 can find it.
+
+`di compile` now leaves such a class out of `arguments` altogether, which is what runtime
+reflection needs. See [the next section](#runtime-resolved-arguments) for how verify
+reports that.
+
+## Runtime-resolved arguments
+
+*DI config. A warning, or unexplained when di.xml configures the class.* The archive has
+a constructor row for a class, and the output has no `arguments` key for it at all. That's
+what `di compile` writes when it can't resolve a constructor statically (see
+[above](#obfuscated-vendor-source)). An absent key makes
+`ObjectManager\Config\Compiled::getArguments()` return null, so the compiled factory
+reflects the real constructor at runtime and autowires it. The class works, at the cost of
+one reflection on first use instead of a cached row.
+
+The runtime branch never reads di.xml `<argument>` configuration, which exists only in the
+compiled row. So verify checks the merged di.xml of every area, for the class, the types it
+inherits configuration from, and (for a virtual type) its base chain:
+
+- **Nothing configured:** the class is listed as a warning, and a file whose only
+  difference is such keys doesn't fail the verify.
+- **Arguments configured:** **unexplained.** The class builds, but without its di.xml
+  arguments. The report leads with these classes, and `di compile` names them on stderr
+  as well.
+- **No checkout** (verify can't open `--root`): unexplained, since nothing can be proven.
 
 ## Ordering only
 

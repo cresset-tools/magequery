@@ -172,6 +172,14 @@ pub struct AreaFile {
     /// section Area::doOperation never ksorts).
     pub non_lazy: Vec<String>,
     pub findings: Vec<String>,
+    /// Instance names whose constructor arguments could not be resolved
+    /// statically, so the file carries no `arguments` key for them and the
+    /// runtime factory reflects the constructor instead (see `ArgsCtx::omit`).
+    pub omitted: Vec<String>,
+    /// The subset of `omitted` that di.xml configures arguments for. The
+    /// runtime branch never reads that configuration, so these classes are
+    /// built without it.
+    pub lost_arguments: Vec<String>,
 }
 
 /// Reader + modification chain for one area: arguments, preferences,
@@ -270,12 +278,21 @@ pub fn build_area_file_from_export(
         &interceptors,
     );
 
+    // Only now, with the chain done, do the omitted keys leave the file.
+    let omitted: Vec<String> = ctx.take_omitted().into_iter().collect();
+    for name in &omitted {
+        arguments.remove(name);
+    }
+    let lost_arguments = omitted.iter().filter(|n| ctx.configures(n)).cloned().collect();
+
     AreaFile {
         arguments,
         preferences: preferences.into_iter().collect(),
         instance_types: instance_types.into_iter().collect(),
         non_lazy,
         findings: ctx.take_findings(),
+        omitted,
+        lost_arguments,
     }
 }
 
