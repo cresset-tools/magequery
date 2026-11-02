@@ -65,6 +65,11 @@ pub enum KnownKind {
     /// (return-type spacing, explicit nullable defaults, proxy `__clone`/
     /// `_resetState` null-guards, added `__debugInfo`). Behavior-preserving.
     GeneratorVersionFormatting,
+    /// A class the output leaves out of `arguments` while the archive has a
+    /// row, and that di.xml configures no argument for — Magento's runtime
+    /// factory reflects its constructor and builds it the same way. A warning,
+    /// not an explanation: the compile could not read that constructor.
+    RuntimeResolvedArguments,
 }
 
 /// The document that explains every [`KnownKind`], one section per kind. The
@@ -79,7 +84,7 @@ pub const ORDERING_ONLY_SLUG: &str = "ordering-only";
 
 impl KnownKind {
     /// Every kind, for exhaustive checks (e.g. that each has a doc section).
-    pub const ALL: [KnownKind; 10] = [
+    pub const ALL: [KnownKind; 11] = [
         KnownKind::PluginListScopeOrder,
         KnownKind::DisabledModuleInterceptor,
         KnownKind::DisabledModuleMetadata,
@@ -90,6 +95,7 @@ impl KnownKind {
         KnownKind::ClassScannerExcludeRegex,
         KnownKind::FilenameCasing,
         KnownKind::GeneratorVersionFormatting,
+        KnownKind::RuntimeResolvedArguments,
     ];
 
     /// Stable anchor of this kind's section in [`DIFFERENCES_DOC_URL`]. Each is
@@ -107,6 +113,7 @@ impl KnownKind {
             KnownKind::ClassScannerExcludeRegex => "class-scanner-exclude-regex",
             KnownKind::FilenameCasing => "filename-casing",
             KnownKind::GeneratorVersionFormatting => "generator-version-formatting",
+            KnownKind::RuntimeResolvedArguments => "runtime-resolved-arguments",
         }
     }
 
@@ -142,6 +149,9 @@ impl KnownKind {
             KnownKind::FilenameCasing => "Filename letter-casing (case-insensitive filesystem)",
             KnownKind::GeneratorVersionFormatting => {
                 "Code-generator formatting (Magento version, behavior-preserving)"
+            }
+            KnownKind::RuntimeResolvedArguments => {
+                "Constructor arguments left to runtime reflection (no di.xml arguments)"
             }
         }
     }
@@ -181,9 +191,15 @@ pub struct Classified {
     /// a constructor row — a runtime fatal, never an expected difference. Their
     /// files are always in `changed`, whatever rule would otherwise claim them.
     pub null_arguments: Vec<NullArguments>,
-    /// Groups worth a look that neither fail the verify nor count as explained
-    /// — today only [`KnownKind::FilenameCasing`] on a case-insensitive
-    /// filesystem, where the two spellings cannot be told apart.
+    /// Classes the output leaves out of `arguments` although di.xml configures
+    /// arguments for them (or no checkout was given to check). Magento builds
+    /// them by runtime reflection, which never reads di.xml, so that
+    /// configuration is lost. Their files are always in `changed`.
+    pub lost_arguments: Vec<RuntimeArguments>,
+    /// Groups worth a look that neither fail the verify nor count as explained:
+    /// [`KnownKind::FilenameCasing`] on a case-insensitive filesystem, where the
+    /// two spellings cannot be told apart, and
+    /// [`KnownKind::RuntimeResolvedArguments`].
     pub warnings: Vec<KnownGroup>,
 }
 
@@ -210,6 +226,40 @@ pub struct NullArguments {
     /// exists inside an `eval()` (encrypted vendor source), when that is why
     /// magecommand could not see the constructor.
     pub eval_source: Option<PathBuf>,
+}
+
+/// A class the output leaves out of `arguments` while the archive (the
+/// reference compile) gives it a constructor row.
+///
+/// Leaving the key out is what magecommand does when it cannot resolve a
+/// constructor statically. Unlike a `NULL` entry it is safe: an absent key is
+/// the one case where `Compiled::getArguments()` returns null, and the factory
+/// then reflects the real constructor at runtime. What the runtime branch never
+/// reads is di.xml `<argument>` configuration, so the omission is harmless
+/// exactly when di.xml configures nothing for the class.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
+pub struct RuntimeArguments {
+    /// The class (or virtual type), unescaped (`Vendor\Module\Class`).
+    pub class: String,
+    /// The metadata files (relative paths) whose `arguments` lack the key.
+    pub files: Vec<String>,
+    /// Whether di.xml configures an argument for the class, a type it inherits
+    /// configuration from, or (for a virtual type) its base chain. `None` when
+    /// verify ran without a checkout and could not tell.
+    pub configured: Option<bool>,
+}
+
+impl RuntimeArguments {
+    /// The key as it appears in a metadata file (`Vendor\\Class`).
+    pub fn key(&self) -> String {
+        self.class.replace('\\', "\\\\")
+    }
+
+    /// Safe to set aside as a warning: proven to lose no configuration.
+    pub fn harmless(&self) -> bool {
+        self.configured == Some(false)
+    }
 }
 
 /// One file the two trees store under different names for a known reason,
@@ -249,6 +299,10 @@ pub struct ClassifyCtx<'a> {
     /// `arguments` entries the output nulled where the archive has a row — see
     /// [`null_argument_entries`]. Never explained: their files stay unexplained.
     pub null_arguments: &'a [NullArguments],
+    /// `arguments` keys the output leaves out where the archive has a row —
+    /// see [`runtime_argument_entries`]. The harmless ones are stripped like an
+    /// expected key and reported as a warning; the rest stay unexplained.
+    pub runtime_arguments: &'a [RuntimeArguments],
     /// Type keys (escaped `Vendor\\\\Class` metadata form) the archive's compile
     /// reached only through a disabled module, though the name itself belongs to
     /// an enabled one — see [`disabled_reachable_types`].
@@ -280,7 +334,7 @@ impl ClassifyCtx<'_> {
     /// context's expected-key sets. A disabled module's key is only stripped
     /// where the OUTPUT lacks it — see [`strip_expected_entries`].
     fn strip_pair(&self, archive: &str, output: &str) -> ((String, bool), (String, bool)) {
-        let present = entry_keys(output);
+        let present = section_entry_keys(output);
         let strip = |text: &str| {
             strip_expected_entries(
                 text,
@@ -290,7 +344,23 @@ impl ClassifyCtx<'_> {
                 &present,
             )
         };
-        (strip(archive), strip(output))
+        let runtime: HashSet<String> = self
+            .runtime_arguments
+            .iter()
+            .filter(|r| r.harmless())
+            .map(RuntimeArguments::key)
+            .collect();
+        if runtime.is_empty() {
+            return (strip(archive), strip(output));
+        }
+        // The harmless runtime-resolved keys, as a second pass: they are no
+        // disabled module's, so the first pass's interceptor rewrite is moot.
+        let none = HashSet::new();
+        let again = |(text, stripped): (String, bool)| {
+            let (text, more) = strip_expected_entries(&text, &none, &runtime, &none, &present);
+            (text, stripped || more)
+        };
+        (again(strip(archive)), again(strip(output)))
     }
 }
 
@@ -309,10 +379,15 @@ pub fn classify(report: &CompareReport, ctx: &ClassifyCtx) -> Classified {
     //    out of every rule below so none can explain them away — an expected-key
     //    strip or an "output only adds lines" pass could otherwise claim the file
     //    around the bad entry — and put them back as unexplained at the end.
+    //    A key the output leaves out while di.xml configures it is held the same
+    //    way: it builds, but without that configuration.
+    let lost_arguments: Vec<RuntimeArguments> =
+        ctx.runtime_arguments.iter().filter(|r| !r.harmless()).cloned().collect();
     let null_files: HashSet<&str> = ctx
         .null_arguments
         .iter()
         .flat_map(|n| n.files.iter().map(String::as_str))
+        .chain(lost_arguments.iter().flat_map(|r| r.files.iter().map(String::as_str)))
         .collect();
     let mut held: Vec<String> = Vec::new();
     changed.retain(|path| {
@@ -453,6 +528,15 @@ payment module. Verified against the disabled modules' own source, one PHP heade
         known.push(group);
     }
 
+    // 8. Constructor arguments left to runtime reflection, for classes di.xml
+    //    configures nothing for. Their keys are stripped inside every metadata
+    //    rule above, so a file mixing them with another pattern claims there;
+    //    here the files whose ONLY difference they are, and the warning that
+    //    names the classes either way.
+    if let Some(group) = runtime_resolved_arguments(&mut changed, ctx) {
+        warnings.push(group);
+    }
+
     changed.extend(held);
     changed.sort();
     Classified {
@@ -462,8 +546,47 @@ payment module. Verified against the disabled modules' own source, one PHP heade
         changed,
         renamed_changed,
         null_arguments: ctx.null_arguments.to_vec(),
+        lost_arguments,
         warnings,
     }
+}
+
+fn runtime_resolved_arguments(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
+    let harmless: Vec<&RuntimeArguments> =
+        ctx.runtime_arguments.iter().filter(|r| r.harmless()).collect();
+    if harmless.is_empty() {
+        return None;
+    }
+    let files: HashSet<&str> =
+        harmless.iter().flat_map(|r| r.files.iter().map(String::as_str)).collect();
+    changed.retain(|c| {
+        if !files.contains(c.as_str()) {
+            return true;
+        }
+        let (Ok(a), Ok(b)) =
+            (fs::read_to_string(ctx.archive.join(c)), fs::read_to_string(ctx.output.join(c)))
+        else {
+            return true;
+        };
+        let ((sa, _), (sb, _)) = ctx.strip_pair(&a, &b);
+        // The output's 2.4.9 additions (nonLazyTypes) may sit beside them.
+        !(sa == sb || drop_allowed_additions(&sa, &sb) == sa)
+    });
+    let mut items: Vec<String> = harmless.iter().map(|r| r.class.clone()).collect();
+    items.sort();
+    Some(KnownGroup {
+        kind: KnownKind::RuntimeResolvedArguments,
+        title: KnownKind::RuntimeResolvedArguments.title().to_owned(),
+        explanation: "magecommand could not resolve these constructors statically (an \
+unreadable parent, such as a PHP built-in or eval-obfuscated vendor source, or a default it cannot \
+evaluate), so it left the classes out of `arguments`. An absent key makes Magento's compiled \
+factory reflect the constructor at runtime, which builds the class correctly; it never reads \
+di.xml `<argument>` config, and none of these classes has any, so nothing is lost. Each costs a \
+reflection on first use instead of a cached row."
+            .to_owned(),
+        items,
+        verified: true,
+    })
 }
 
 /// Scope tokens of a plugin-list cache filename, e.g.
@@ -776,6 +899,37 @@ fn entry_keys(text: &str) -> HashSet<&str> {
     text.lines().filter_map(top_level_entry_key).collect()
 }
 
+/// Every top-level entry key with the section it sits in: `(section, key)`. In
+/// an area file the indent-two keys open sections (`arguments`, `preferences`,
+/// `nonLazyTypes`, …) and the entries sit at indent four under them; a flat
+/// file's indent-two entries get the empty section. Keyed this way, a class the
+/// output lists only in `nonLazyTypes` does not count as present in `arguments`.
+fn section_entry_keys(text: &str) -> HashSet<(&str, &str)> {
+    let mut keys = HashSet::new();
+    let mut section = "";
+    for line in text.lines() {
+        if let Some((sec, key)) = sectioned_key(line, &mut section) {
+            keys.insert((sec, key));
+        }
+    }
+    keys
+}
+
+/// [`top_level_entry_key`], plus the section the key belongs to; `section`
+/// tracks the most recent indent-two block opener across calls.
+fn sectioned_key<'t>(line: &'t str, section: &mut &'t str) -> Option<(&'t str, &'t str)> {
+    let key = top_level_entry_key(line)?;
+    if line.starts_with("    ") {
+        return Some((*section, key));
+    }
+    if line.ends_with("=>") || line.ends_with("=> ") {
+        *section = key;
+    } else {
+        *section = "";
+    }
+    Some(("", key))
+}
+
 fn top_level_entry_key(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("    '").or_else(|| line.strip_prefix("  '"))?;
     let end = rest.find("' =>")?;
@@ -788,7 +942,7 @@ fn top_level_entry_key(line: &str) -> Option<&str> {
 /// modulo that expected noise.
 ///
 /// A disabled module's key is stripped only when the output (`in_output`, the
-/// output file's keys) does not have it. The excuse is that a 2.4.9 compile
+/// output file's keys by section) does not have it in the same section. The excuse is that a 2.4.9 compile
 /// emits nothing for a disabled module, while the archive's older compiler did;
 /// a key the OUTPUT carries is outside that excuse — magecommand compiled the
 /// module after all, or enabled code builds the class — and stripping it from
@@ -804,14 +958,15 @@ fn strip_expected_entries(
     disabled: &HashSet<String>,
     expected: &HashSet<String>,
     reachable: &HashSet<String>,
-    in_output: &HashSet<&str>,
+    in_output: &HashSet<(&str, &str)>,
 ) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
     let mut stripped = false;
+    let mut section = "";
     let mut lines = text.lines();
     while let Some(line) = lines.next() {
-        if let Some(key) = top_level_entry_key(line) {
-            if (metadata_entry_module_disabled(key, disabled) && !in_output.contains(key))
+        if let Some((sec, key)) = sectioned_key(line, &mut section) {
+            if (metadata_entry_module_disabled(key, disabled) && !in_output.contains(&(sec, key)))
                 || expected.contains(key)
                 || reachable.contains(key)
             {
@@ -1298,35 +1453,6 @@ pub fn null_argument_entries(
     output: &Path,
     magento: Option<&magequery_core::Magento>,
 ) -> Vec<NullArguments> {
-    // key -> does the archive give it a non-empty row?
-    fn argument_rows(text: &str) -> std::collections::HashMap<&str, bool> {
-        let mut rows = std::collections::HashMap::new();
-        let mut in_arguments = false;
-        let mut lines = text.lines().peekable();
-        while let Some(line) = lines.next() {
-            // Section headers sit at indent two: `  'arguments' => `.
-            if let Some(rest) = line.strip_prefix("  '") {
-                in_arguments = rest.starts_with("arguments' =>");
-                continue;
-            }
-            if !in_arguments {
-                continue;
-            }
-            let Some(rest) = line.strip_prefix("    '") else { continue };
-            let Some(end) = rest.find("' =>") else { continue };
-            let key = &rest[..end];
-            let has_row = if line.trim_end().ends_with("=> NULL,") {
-                false
-            } else {
-                // `'K' => ` / `    array (` / either `    ),` (empty) or a row.
-                let _open = lines.next();
-                lines.peek().is_some_and(|next| *next != "    ),")
-            };
-            rows.insert(key, has_row);
-        }
-        rows
-    }
-
     let mut by_key: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for rel in &report.changed {
         if !rel.starts_with("metadata/") {
@@ -1355,6 +1481,120 @@ pub fn null_argument_entries(
             let eval_source =
                 magento.and_then(|m| chain_eval_source(&class, m, &mut verdict, 0));
             NullArguments { class, files, eval_source }
+        })
+        .collect()
+}
+
+/// Each key of a metadata file's `arguments` section -> whether it carries a
+/// non-empty row (`NULL` and an empty `array ()` both count as no row).
+fn argument_rows(text: &str) -> std::collections::HashMap<&str, bool> {
+    let mut rows = std::collections::HashMap::new();
+    let mut in_arguments = false;
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        // Section headers sit at indent two: `  'arguments' => `.
+        if let Some(rest) = line.strip_prefix("  '") {
+            in_arguments = rest.starts_with("arguments' =>");
+            continue;
+        }
+        if !in_arguments {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("    '") else { continue };
+        let Some(end) = rest.find("' =>") else { continue };
+        let key = &rest[..end];
+        let has_row = if line.trim_end().ends_with("=> NULL,") {
+            false
+        } else {
+            // `'K' => ` / `    array (` / either `    ),` (empty) or a row.
+            let _open = lines.next();
+            lines.peek().is_some_and(|next| *next != "    ),")
+        };
+        rows.insert(key, has_row);
+    }
+    rows
+}
+
+/// Every `arguments` key the archive gives a constructor row that the output
+/// leaves out altogether — see [`RuntimeArguments`].
+///
+/// Keys another rule already accounts for are skipped: a disabled module's, and
+/// those in `already_explained` (types only a disabled module reached, classes
+/// outside the scan paths). With a checkout, each class is checked against the
+/// merged di.xml of every area for configured arguments; without one,
+/// `configured` is `None` and the class stays unexplained.
+pub fn runtime_argument_entries(
+    report: &CompareReport,
+    archive: &Path,
+    output: &Path,
+    magento: Option<&magequery_core::Magento>,
+    disabled_modules: &HashSet<String>,
+    already_explained: &HashSet<String>,
+) -> Vec<RuntimeArguments> {
+    let mut by_key: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for rel in &report.changed {
+        if !rel.starts_with("metadata/") {
+            continue;
+        }
+        let (Ok(a), Ok(b)) =
+            (fs::read_to_string(archive.join(rel)), fs::read_to_string(output.join(rel)))
+        else {
+            continue;
+        };
+        let output_rows = argument_rows(&b);
+        for (key, archive_has_row) in argument_rows(&a) {
+            if archive_has_row
+                && !output_rows.contains_key(key)
+                && !already_explained.contains(key)
+                && !metadata_entry_module_disabled(key, disabled_modules)
+            {
+                by_key.entry(key.to_owned()).or_default().push(rel.clone());
+            }
+        }
+    }
+    if by_key.is_empty() {
+        return Vec::new();
+    }
+
+    // Every type an `<arguments>` block sits on, and every virtual type's base,
+    // across the areas — the inputs of ObjectManager's configuration merge.
+    let mut configured_types: HashSet<String> = HashSet::new();
+    let mut vtype_base: std::collections::HashMap<String, String> = Default::default();
+    if let Some(m) = magento {
+        for area in magequery_core::Area::ALL {
+            let export = m.di_export_ref(area);
+            configured_types.extend(export.arguments.iter().map(|d| d.type_name.as_str().to_owned()));
+            for v in &export.virtual_types {
+                vtype_base.insert(v.name.as_str().to_owned(), v.base.as_str().to_owned());
+            }
+        }
+    }
+    let configures = |m: &magequery_core::Magento, class: &str| -> bool {
+        // A virtual type inherits its base chain's config, a class its
+        // ancestors' (parents and interfaces alike).
+        let mut current = class.to_owned();
+        let mut seen = HashSet::new();
+        loop {
+            if configured_types.contains(&current) {
+                return true;
+            }
+            match vtype_base.get(&current) {
+                Some(base) if seen.insert(current.clone()) => current = base.clone(),
+                _ => break,
+            }
+        }
+        m.ancestors(&magequery_core::ClassName::new(current))
+            .iter()
+            .any(|a| configured_types.contains(a.as_str()))
+    };
+
+    by_key
+        .into_iter()
+        .map(|(key, mut files)| {
+            files.sort();
+            let class = key.replace("\\\\", "\\");
+            let configured = magento.map(|m| configures(m, &class));
+            RuntimeArguments { class, files, configured }
         })
         .collect()
 }
@@ -1834,7 +2074,7 @@ fn normalize_metadata(
     expected: &HashSet<String>,
 ) -> (String, String) {
     let empty = HashSet::new();
-    let present = entry_keys(output);
+    let present = section_entry_keys(output);
     let strip = |text: &str| strip_expected_entries(text, disabled, expected, &empty, &present).0;
     let (sa, sb) = (strip(archive), strip(output));
     let sb = drop_allowed_additions(&sa, &sb);
@@ -1969,6 +2209,7 @@ mod tests {
             output: dir,
             disabled_modules: disabled,
             null_arguments: &[],
+            runtime_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2114,6 +2355,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             null_arguments: &[],
+            runtime_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2181,6 +2423,88 @@ mod tests {
     }
 
     #[test]
+    fn an_omitted_arguments_key_warns_only_when_di_xml_configures_nothing() {
+        // magecommand leaves a class out of `arguments` when it cannot read its
+        // constructor. An absent key gets runtime reflection, which builds the
+        // class correctly but never reads di.xml — so it is a warning when di.xml
+        // configures nothing, and a failure when it does.
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        let args = |body: &str| format!("<?php return array (\n  'arguments' => \n  array (\n{body}  ),\n);\n");
+        let row = |class: &str, v: u8| {
+            format!("    '{class}' => \n    array (\n      'y' => \n      array (\n        '_v_' => {v},\n      ),\n    ),\n")
+        };
+        // Only the harmless key is gone: the file is claimed, the class warned.
+        write(archive.path(), "metadata/ok.php", &args(&row("Acme\\\\Ok", 1)));
+        write(output.path(), "metadata/ok.php", &args(""));
+        // The configured key is gone: unexplained.
+        write(archive.path(), "metadata/lost.php", &args(&row("Acme\\\\Lost", 1)));
+        write(output.path(), "metadata/lost.php", &args(""));
+        // The harmless key is gone AND another row differs: still unexplained.
+        write(
+            archive.path(),
+            "metadata/mixed.php",
+            &args(&(row("Acme\\\\Ok", 1) + &row("Acme\\\\Other", 1))),
+        );
+        write(output.path(), "metadata/mixed.php", &args(&row("Acme\\\\Other", 2)));
+        // An empty archive row is not a constructor row: nothing to report.
+        write(
+            archive.path(),
+            "metadata/empty.php",
+            &args("    'Acme\\\\Empty' => \n    array (\n    ),\n"),
+        );
+        write(output.path(), "metadata/empty.php", &args(""));
+
+        let r = report(
+            &[],
+            &[],
+            &["metadata/empty.php", "metadata/lost.php", "metadata/mixed.php", "metadata/ok.php"],
+        );
+        let none = HashSet::new();
+        // Without a checkout nothing can be proven harmless.
+        let found = runtime_argument_entries(&r, archive.path(), output.path(), None, &none, &none);
+        let classes: Vec<&str> = found.iter().map(|f| f.class.as_str()).collect();
+        assert_eq!(classes, vec!["Acme\\Lost", "Acme\\Ok"]);
+        assert!(found.iter().all(|f| f.configured.is_none()));
+        assert_eq!(found[1].files, vec!["metadata/mixed.php", "metadata/ok.php"]);
+
+        let entries = vec![
+            RuntimeArguments {
+                class: "Acme\\Lost".into(),
+                files: vec!["metadata/lost.php".into()],
+                configured: Some(true),
+            },
+            RuntimeArguments {
+                class: "Acme\\Ok".into(),
+                files: vec!["metadata/mixed.php".into(), "metadata/ok.php".into()],
+                configured: Some(false),
+            },
+        ];
+        let mut ctx = ctx(&none, archive.path());
+        ctx.output = output.path();
+        ctx.runtime_arguments = &entries;
+        let c = classify(&r, &ctx);
+        assert_eq!(c.changed, vec!["metadata/empty.php", "metadata/lost.php", "metadata/mixed.php"]);
+        assert_eq!(c.lost_arguments, vec![entries[0].clone()]);
+        assert!(c.known.is_empty(), "{:?}", c.known);
+        assert_eq!(c.warnings.len(), 1);
+        assert_eq!(c.warnings[0].kind, KnownKind::RuntimeResolvedArguments);
+        assert_eq!(c.warnings[0].items, vec!["Acme\\Ok"]);
+
+        // Unproven (no checkout): unexplained like a configured one.
+        let unproven = vec![RuntimeArguments { configured: None, ..entries[1].clone() }];
+        ctx.runtime_arguments = &unproven;
+        let c = classify(&r, &ctx);
+        assert!(c.changed.contains(&"metadata/ok.php".to_string()), "{:?}", c.changed);
+        assert!(c.warnings.is_empty());
+    }
+
+    #[test]
     fn a_disabled_module_key_the_output_has_is_not_stripped() {
         // The excuse is "2.4.9 emits nothing for a disabled module". A key the
         // OUTPUT carries is outside it, so a different value must stay flagged
@@ -2196,16 +2520,37 @@ mod tests {
         // Only the archive has it: the excuse applies.
         write(archive.path(), "archive_only.php", &args(&row(1)));
         write(output.path(), "archive_only.php", &args(""));
+        // The output names it only in its 2.4.9 `nonLazyTypes` section: still
+        // absent from `arguments`, so the excuse still applies there.
+        write(archive.path(), "nonlazy_only.php", &args(&row(1)));
+        write(
+            output.path(),
+            "nonlazy_only.php",
+            &format!(
+                "{}  'nonLazyTypes' => \n  array (\n    'Bad\\\\Mod\\\\B' => true,\n  ),\n);\n",
+                args("").trim_end_matches(");\n")
+            ),
+        );
 
         let mut disabled = HashSet::new();
         disabled.insert("Bad_Mod".to_string());
         let mut ctx = ctx(&disabled, archive.path());
         ctx.output = output.path();
-        let c = classify(&report(&[], &[], &["archive_only.php", "both.php"]), &ctx);
+        let c = classify(
+            &report(&[], &[], &["archive_only.php", "both.php", "nonlazy_only.php"]),
+            &ctx,
+        );
         assert_eq!(c.changed, vec!["both.php"]);
-        assert_eq!(c.known.len(), 1);
-        assert_eq!(c.known[0].kind, KnownKind::DisabledModuleMetadata);
-        assert_eq!(c.known[0].items, vec!["archive_only.php"]);
+        let kinds: Vec<(KnownKind, &[String])> =
+            c.known.iter().map(|g| (g.kind, g.items.as_slice())).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (KnownKind::DisabledModuleMetadata, &["archive_only.php".to_string()][..]),
+                // The disabled row is stripped, the added section is allowlisted.
+                (KnownKind::ExtraMetadata, &["nonlazy_only.php".to_string()][..]),
+            ]
+        );
     }
 
     #[test]
@@ -2282,6 +2627,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             null_arguments: &[],
+            runtime_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2372,6 +2718,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             null_arguments: &[],
+            runtime_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2420,6 +2767,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             null_arguments: &[],
+            runtime_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2465,6 +2813,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             null_arguments: &[],
+            runtime_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2498,6 +2847,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             null_arguments: &[],
+            runtime_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2653,6 +3003,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             null_arguments: &[],
+            runtime_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2769,6 +3120,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             null_arguments: &[],
+            runtime_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2787,6 +3139,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             null_arguments: &[],
+            runtime_arguments: &[],
             disabled_reachable: &reachable,
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2963,6 +3316,7 @@ mod tests {
             output: output.path(),
             disabled_modules: &disabled,
             null_arguments: &[],
+            runtime_arguments: &[],
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),

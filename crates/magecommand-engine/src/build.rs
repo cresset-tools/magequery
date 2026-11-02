@@ -30,6 +30,11 @@ pub struct CompileOutputs {
     pub findings: Vec<String>,
     /// Class names referenced in DI but unresolvable via any autoload map.
     pub unresolved: Vec<String>,
+    /// Types left without an `arguments` row although di.xml configures
+    /// arguments for them, sorted and deduped across areas. Magento builds
+    /// them by runtime reflection, WITHOUT that configuration — see
+    /// `AreaFile::lost_arguments`.
+    pub lost_arguments: Vec<String>,
 }
 
 /// Run the full compute over an already-scanned `defs` and return the complete
@@ -122,8 +127,8 @@ pub fn compute_outputs_opts(
     // deeper: PHP evaluates `Foo::BAR` through the autoloader when it reflects
     // the default, and the autoloader does not care whether the owning module
     // is enabled. Unseeded, `DefsLookup::class_const` cannot find the owning
-    // class, the default fails to fold, and the whole class's arguments row
-    // degrades to NULL — losing the rows for every OTHER argument too.
+    // class, the default fails to fold, and the whole class's arguments row is
+    // left out — losing the cached rows for every OTHER argument too.
     //
     // Cheap: only a default that mentions `::` can name a class constant, and
     // the parse is the same one `eval_default` performs later anyway.
@@ -197,8 +202,10 @@ pub fn compute_outputs_opts(
         ilap!(_it, "areas + code (fold round)");
     }
 
+    let mut lost_arguments: std::collections::BTreeSet<String> = Default::default();
     for ca in &area_files {
         findings.extend(ca.file.findings.iter().cloned());
+        lost_arguments.extend(ca.file.lost_arguments.iter().cloned());
         files.push((format!("metadata/{}.php", ca.code), ca.rendered.clone()));
     }
     files.push(("metadata/interception.php".to_owned(), interception::render(&interception)));
@@ -226,5 +233,6 @@ pub fn compute_outputs_opts(
     let unresolved: Vec<String> =
         unresolved.into_iter().filter(|name| !defs.contains(name)).collect();
 
-    CompileOutputs { files, findings, unresolved }
+    let lost_arguments = lost_arguments.into_iter().collect();
+    CompileOutputs { files, findings, unresolved, lost_arguments }
 }

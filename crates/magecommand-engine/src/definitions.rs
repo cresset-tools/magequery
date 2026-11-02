@@ -352,9 +352,16 @@ impl Definitions {
     /// TRAIT therefore enters the compiled arguments universe and even the
     /// interceptor-substitution list; byte parity means reproducing that
     /// quirk, not fixing it.
+    ///
+    /// Except a trait that DECLARES an abstract method: reflection reports that
+    /// one `isAbstract() === true` (the implicit-abstract flag a method sets on
+    /// its declaring type), so it gets no row. Seen on two stores' references:
+    /// every trait has a row but the ones with an `abstract public function`.
     pub fn is_concrete(&self, fqcn: &str) -> bool {
         self.get(fqcn).is_some_and(|r| {
-            r.meta.kind != ClassKind::Interface && !r.meta.is_abstract
+            r.meta.kind != ClassKind::Interface
+                && !r.meta.is_abstract
+                && !(r.meta.kind == ClassKind::Trait && r.meta.methods.iter().any(|m| m.is_abstract))
         })
     }
 
@@ -804,8 +811,11 @@ pub fn is_internal_class(fqcn: &str) -> bool {
 /// empty row that nothing reports. The reflected signatures are in the commit
 /// that added this list; add one here to [`internal_ctor`] the moment a real
 /// compile demands it, with the oracle to check it against. Guessing ahead of
-/// that risks baking a signature from the wrong PHP version, which ships a
-/// confidently wrong value — strictly worse than an honest NULL.
+/// that risks baking a signature from the wrong PHP version — their parameter
+/// names differ between releases (`DateInterval`'s `$interval_spec` on 7.4 is
+/// `$duration` on 8.x) — which ships a confidently wrong row. Leaving the class
+/// out of the `arguments` map instead hands it to the runtime factory, which
+/// reflects the constructor of the PHP actually running.
 const UNMODELLED_INTERNAL_CTOR: &[&str] = &[
     "Collator",
     "DOMDocument",
@@ -1151,6 +1161,24 @@ mod tests {
         // A built-in has no record, so lookups still miss — seeding only ever
         // fixes the SPELLING, it does not invent a class.
         assert!(d.get("arrayaccess").is_none());
+    }
+
+    #[test]
+    fn a_trait_is_concrete_unless_it_declares_an_abstract_method() {
+        // Reflection counts a trait as concrete, so it gets an `arguments` row,
+        // unless one of its methods is abstract: that makes `isAbstract()` true.
+        let d = Definitions::from_records([
+            record("<?php namespace Acme; trait Plain { public function x() {} }"),
+            record("<?php namespace Acme; trait Needs { abstract public function y(): string; }"),
+            record("<?php namespace Acme; interface Face {}"),
+            record("<?php namespace Acme; abstract class Base {}"),
+            record("<?php namespace Acme; class Thing {}"),
+        ]);
+        assert!(d.is_concrete("Acme\\Plain"));
+        assert!(!d.is_concrete("Acme\\Needs"));
+        assert!(!d.is_concrete("Acme\\Face"));
+        assert!(!d.is_concrete("Acme\\Base"));
+        assert!(d.is_concrete("Acme\\Thing"));
     }
 
     #[test]

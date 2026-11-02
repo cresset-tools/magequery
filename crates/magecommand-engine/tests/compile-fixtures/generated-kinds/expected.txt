@@ -213,7 +213,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'arguments' => 
   array (
     'Acme\\Gen\\Api\\Data\\Item' => NULL,
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => NULL,
     'Acme\\Gen\\Api\\Data\\ItemExtensionInterfaceFactory' => 
     array (
       'objectManager' => 
@@ -294,7 +293,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'arguments' => 
   array (
     'Acme\\Gen\\Api\\Data\\Item' => NULL,
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => NULL,
     'Acme\\Gen\\Api\\Data\\ItemExtensionInterfaceFactory' => 
     array (
       'objectManager' => 
@@ -371,7 +369,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'arguments' => 
   array (
     'Acme\\Gen\\Api\\Data\\Item' => NULL,
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => NULL,
     'Acme\\Gen\\Api\\Data\\ItemExtensionInterfaceFactory' => 
     array (
       'objectManager' => 
@@ -448,7 +445,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'arguments' => 
   array (
     'Acme\\Gen\\Api\\Data\\Item' => NULL,
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => NULL,
     'Acme\\Gen\\Api\\Data\\ItemExtensionInterfaceFactory' => 
     array (
       'objectManager' => 
@@ -564,7 +560,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'arguments' => 
   array (
     'Acme\\Gen\\Api\\Data\\Item' => NULL,
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => NULL,
     'Acme\\Gen\\Api\\Data\\ItemExtensionInterfaceFactory' => 
     array (
       'objectManager' => 
@@ -643,7 +638,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'arguments' => 
   array (
     'Acme\\Gen\\Api\\Data\\Item' => NULL,
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => NULL,
     'Acme\\Gen\\Api\\Data\\ItemExtensionInterfaceFactory' => 
     array (
       'objectManager' => 
@@ -707,7 +701,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'arguments' => 
   array (
     'Acme\\Gen\\Api\\Data\\Item' => NULL,
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => NULL,
     'Acme\\Gen\\Api\\Data\\ItemExtensionInterfaceFactory' => 
     array (
       'objectManager' => 

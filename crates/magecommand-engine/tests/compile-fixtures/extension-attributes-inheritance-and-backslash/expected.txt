@@ -147,8 +147,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
 <?php return array (
   'arguments' => 
   array (
-    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
-    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
     'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
     array (
       'objectManager' => 
@@ -160,7 +158,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
         '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
       ),
     ),
-    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
     'Acme\\Child\\Model\\Builder' => 
     array (
       'factory' => 
@@ -204,8 +201,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
 <?php return array (
   'arguments' => 
   array (
-    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
-    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
     'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
     array (
       'objectManager' => 
@@ -217,7 +212,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
         '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
       ),
     ),
-    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
     'Acme\\Child\\Model\\Builder' => 
     array (
       'factory' => 
@@ -257,8 +251,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
 <?php return array (
   'arguments' => 
   array (
-    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
-    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
     'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
     array (
       'objectManager' => 
@@ -270,7 +262,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
         '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
       ),
     ),
-    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
     'Acme\\Child\\Model\\Builder' => 
     array (
       'factory' => 
@@ -310,8 +301,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
 <?php return array (
   'arguments' => 
   array (
-    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
-    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
     'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
     array (
       'objectManager' => 
@@ -323,7 +312,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
         '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
       ),
     ),
-    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
     'Acme\\Child\\Model\\Builder' => 
     array (
       'factory' => 
@@ -402,8 +390,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
 <?php return array (
   'arguments' => 
   array (
-    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
-    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
     'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
     array (
       'objectManager' => 
@@ -415,7 +401,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
         '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
       ),
     ),
-    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
     'Acme\\Child\\Model\\Builder' => 
     array (
       'factory' => 
@@ -456,8 +441,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
 <?php return array (
   'arguments' => 
   array (
-    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
-    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
     'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
     array (
       'objectManager' => 
@@ -469,7 +452,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
         '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
       ),
     ),
-    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
     'Acme\\Child\\Model\\Builder' => 
     array (
       'factory' => 
@@ -496,8 +478,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
 <?php return array (
   'arguments' => 
   array (
-    'Acme\\Base\\Api\\Data\\CreditmemoExtension' => NULL,
-    'Acme\\Base\\Api\\Data\\OrderExtension' => NULL,
     'Acme\\Base\\Api\\Data\\OrderExtensionFactory' => 
     array (
       'objectManager' => 
@@ -509,7 +489,6 @@ interface SpecialOrderExtensionInterface extends \Magento\Framework\Api\Extensio
         '_v_' => '\\Acme\\Base\\Api\\Data\\OrderExtension',
       ),
     ),
-    'Acme\\Child\\Api\\Data\\SpecialOrderExtension' => NULL,
     'Acme\\Child\\Model\\Builder' => 
     array (
       'factory' => 

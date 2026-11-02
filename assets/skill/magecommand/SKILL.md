@@ -61,8 +61,12 @@ Writes `generated/code` and `generated/metadata`.
   first diverging line); known/expected ones link to
   docs/di-verify-differences.md. A class whose `arguments` entry is NULL in the
   output but not the archive is always unexplained (Magento builds it with
-  `new X()`), and leads the report. On macOS, paths differing only in letter
-  case are a WARNING, not a failure; elsewhere they fail. `--show-residual <FILE>` gives more context for
+  `new X()`), and leads the report. A class the output leaves OUT of
+  `arguments` (what `di compile` does when it can't read a constructor, so
+  Magento reflects it at runtime) is a WARNING when di.xml configures nothing
+  for it, and unexplained when di.xml does (runtime reflection ignores di.xml;
+  `di compile` also names those on stderr). On macOS, paths differing only in
+  letter case are a WARNING, not a failure; elsewhere they fail. `--show-residual <FILE>` gives more context for
   one metadata file. Interceptors differing only in method order are reported as
   `reordered`, not `changed`, unless `--strict-ordering`.
 

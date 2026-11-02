@@ -4,7 +4,7 @@
 //! ArgumentsResolver` (the `_i_/_ins_/_v_/_vn_/_vac_/_a_/_d_` encodings) —
 //! over the parser's constructors and statically evaluated defaults.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use magecommand_php::constexpr::{
     eval, parse_const_expr, ClassRef, ConstExpr, ConstLookup, ConstValue, EvalCtx, ParsedExpr,
@@ -89,6 +89,9 @@ pub(crate) struct ArgsCtx<'a> {
     zend_bridge: bool,
     merged_cache: std::cell::RefCell<HashMap<String, Vec<(CfgKey, Cfg)>>>,
     findings: std::cell::RefCell<Vec<String>>,
+    /// Instance names whose `arguments` key must be left OUT of the area file —
+    /// see [`ArgsCtx::omit`].
+    omitted: std::cell::RefCell<BTreeSet<String>>,
 }
 
 impl<'a> ArgsCtx<'a> {
@@ -138,6 +141,7 @@ impl<'a> ArgsCtx<'a> {
             zend_bridge,
             merged_cache: Default::default(),
             findings: Default::default(),
+            omitted: Default::default(),
         }
     }
 
@@ -195,6 +199,36 @@ impl<'a> ArgsCtx<'a> {
 
     pub fn take_findings(&self) -> Vec<String> {
         std::mem::take(&mut self.findings.borrow_mut())
+    }
+
+    /// Mark `name`'s constructor arguments as unknowable here, so the area file
+    /// carries NO key for it. A present key is not the escape hatch it looks
+    /// like: `Compiled::getArguments()` turns a NULL row into `[]`, and
+    /// `Factory\Compiled::create()` answers `[]` with `new $type()` — every
+    /// constructor argument dropped, an ArgumentCountError for any required one.
+    /// Only an ABSENT key returns null and sends the factory down its runtime
+    /// branch, which reflects the real constructor and autowires it.
+    ///
+    /// The runtime branch never reads di.xml `<argument>` config, though — that
+    /// lives only in the compiled row. [`ArgsCtx::configures`] tells the caller
+    /// which omitted names lose configuration this way.
+    ///
+    /// The NULL placeholder stays in the map until the chain has run (the
+    /// interceptor rename treats a NULL row and an absent one alike, and the
+    /// key still counts as a nonLazyTypes candidate, as the reference's row
+    /// does); `build_area_file` drops it at the end.
+    fn omit(&self, name: &str) {
+        self.omitted.borrow_mut().insert(name.to_owned());
+    }
+
+    pub fn take_omitted(&self) -> BTreeSet<String> {
+        std::mem::take(&mut self.omitted.borrow_mut())
+    }
+
+    /// Whether di.xml configures any constructor argument for `name`, its
+    /// virtual-type base, or any type it inherits configuration from.
+    pub fn configures(&self, name: &str) -> bool {
+        !self.merged_config(name).is_empty()
     }
 
     fn is_shared_type(&self, name: &str) -> bool {
@@ -430,11 +464,13 @@ impl<'a> ArgsCtx<'a> {
         // One unreadable default poisons the whole row, because
         // `Compiled::create` passes the arguments POSITIONALLY
         // (`array_values($args)`) — dropping or nulling a single entry would
-        // silently shift every later argument into the wrong parameter. A NULL
-        // row instead sends the factory down its runtime-reflection branch,
-        // where PHP reads the real default itself. The class loses its cached
-        // arguments; it never receives a value we invented.
+        // silently shift every later argument into the wrong parameter. The
+        // key is omitted instead (see `omit`): the factory's runtime branch
+        // reflects the constructor, and PHP reads the real default itself. The
+        // class loses its cached arguments; it never receives a value we
+        // invented.
         if unresolvable {
+            self.omit(instance_name);
             return PhpValue::Null;
         }
         PhpValue::Array(out)
@@ -1092,6 +1128,7 @@ pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<Stri
             Ok(None) => PhpValue::Null,
             Err(missing) => {
                 ctx.finding(format!("{name}: constructor chain leaves known set at {missing}"));
+                ctx.omit(name);
                 PhpValue::Null
             }
         };
@@ -1119,11 +1156,20 @@ pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<Stri
             }
             current.to_owned()
         };
+        // A vtype named like a scanned class replaces that class's row, so an
+        // omission recorded for the class applies only while that row stands.
+        let class_omitted = ctx.omitted.borrow_mut().remove(vtype);
+        let keep_class_row = || {
+            if class_omitted {
+                ctx.omit(vtype);
+            }
+        };
         // Reader: an in-collection base is used as-is (even abstract);
         // the isConcrete guard applies only to the reflect-fallback path.
         let in_collection = ctx.scanned.contains(&base_real);
         let value = if in_collection || ctx.defs.contains(&base_real) {
             if !in_collection && !ctx.defs.is_concrete(&base_real) {
+                keep_class_row();
                 continue;
             }
             match ctx.defs.constructor_of(&base_real) {
@@ -1135,6 +1181,7 @@ pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<Stri
                     ctx.finding(format!(
                         "{vtype}: base {base_real} constructor chain leaves known set at {missing}"
                     ));
+                    ctx.omit(vtype);
                     PhpValue::Null
                 }
             }
@@ -1142,6 +1189,7 @@ pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<Stri
             ctx.resolve_instance(vtype, &base_real, &[], &params)
         } else {
             ctx.finding(format!("{vtype}: base {base_real} not found anywhere"));
+            keep_class_row();
             continue;
         };
         out.insert(vtype.clone(), value);
@@ -1709,6 +1757,7 @@ mod tests {
             zend_bridge: false,
             merged_cache: Default::default(),
             findings: Default::default(),
+            omitted: Default::default(),
         }
     }
 

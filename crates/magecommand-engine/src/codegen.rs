@@ -1038,6 +1038,8 @@ pub fn generate_code(
             .arguments
             .keys()
             .cloned()
+            // An omitted key was still a Reader key for Magento.
+            .chain(file.omitted.iter().cloned())
             .chain(file.instance_types.iter().map(|(_, v)| v.clone()))
             .filter(|n| !n.ends_with("\\Proxy") && !n.ends_with("\\Interceptor"))
             .collect();
