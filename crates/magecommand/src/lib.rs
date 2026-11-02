@@ -2167,6 +2167,12 @@ fn compare(
         let mut expected = reachable;
         expected.extend(outside);
         expected.extend(runtime.iter().filter(|r| r.harmless()).map(|r| r.key()));
+        expected.extend(magecommand_engine::setup_area_config_types(
+            &report,
+            archive,
+            output,
+            magento.as_ref(),
+        ));
         print!(
             "{}",
             magecommand_engine::residual_report(&a, &b, &disabled_modules, &expected)
@@ -2244,12 +2250,15 @@ fn compare(
         &disabled_modules,
         &disabled_reachable.union(&outside_scan).cloned().collect(),
     );
+    let setup_area_config =
+        magecommand_engine::setup_area_config_types(&report, archive, output, magento.as_ref());
     let ctx = magecommand_engine::ClassifyCtx {
         archive,
         output,
         disabled_modules: &disabled_modules,
         null_arguments: &null_arguments,
         runtime_arguments: &runtime_arguments,
+        setup_area_config: &setup_area_config,
         // macOS filesystems are case-insensitive by default; only there do two
         // spellings of one path collapse into one file.
         case_insensitive_fs: cfg!(target_os = "macos"),
@@ -2280,6 +2289,7 @@ fn compare(
             .chain(&outside_scan)
             .cloned()
             .chain(runtime_arguments.iter().filter(|r| r.harmless()).map(|r| r.key()))
+            .chain(setup_area_config.iter().cloned())
             .collect();
         println!(
             "\n{} matching no known pattern — investigate these",

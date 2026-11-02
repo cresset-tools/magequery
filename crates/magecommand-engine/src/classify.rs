@@ -70,6 +70,11 @@ pub enum KnownKind {
     /// factory reflects its constructor and builds it the same way. A warning,
     /// not an explanation: the compile could not read that constructor.
     RuntimeResolvedArguments,
+    /// A setup-application class (its file under `setup/src`) the output's
+    /// DI config has and the archive's lacks, from a checkout whose
+    /// `setup:di:compile` does not scan `setup/src` for the area config — the
+    /// pre-2.4.8 behavior (magento/magento2#33161 added it).
+    SetupAreaConfig,
 }
 
 /// The document that explains every [`KnownKind`], one section per kind. The
@@ -84,7 +89,7 @@ pub const ORDERING_ONLY_SLUG: &str = "ordering-only";
 
 impl KnownKind {
     /// Every kind, for exhaustive checks (e.g. that each has a doc section).
-    pub const ALL: [KnownKind; 11] = [
+    pub const ALL: [KnownKind; 12] = [
         KnownKind::PluginListScopeOrder,
         KnownKind::DisabledModuleInterceptor,
         KnownKind::DisabledModuleMetadata,
@@ -96,6 +101,7 @@ impl KnownKind {
         KnownKind::FilenameCasing,
         KnownKind::GeneratorVersionFormatting,
         KnownKind::RuntimeResolvedArguments,
+        KnownKind::SetupAreaConfig,
     ];
 
     /// Stable anchor of this kind's section in [`DIFFERENCES_DOC_URL`]. Each is
@@ -114,6 +120,7 @@ impl KnownKind {
             KnownKind::FilenameCasing => "filename-casing",
             KnownKind::GeneratorVersionFormatting => "generator-version-formatting",
             KnownKind::RuntimeResolvedArguments => "runtime-resolved-arguments",
+            KnownKind::SetupAreaConfig => "setup-area-config",
         }
     }
 
@@ -152,6 +159,9 @@ impl KnownKind {
             }
             KnownKind::RuntimeResolvedArguments => {
                 "Constructor arguments left to runtime reflection (no di.xml arguments)"
+            }
+            KnownKind::SetupAreaConfig => {
+                "Setup application classes in DI config (Magento 2.4.8 behavior)"
             }
         }
     }
@@ -303,6 +313,10 @@ pub struct ClassifyCtx<'a> {
     /// see [`runtime_argument_entries`]. The harmless ones are stripped like an
     /// expected key and reported as a warning; the rest stay unexplained.
     pub runtime_arguments: &'a [RuntimeArguments],
+    /// Output-only entries of setup-application classes, section-qualified
+    /// ([`section_key`]), from a checkout whose compile skips `setup/src` for
+    /// the area config — see [`setup_area_config_types`].
+    pub setup_area_config: &'a HashSet<String>,
     /// Type keys (escaped `Vendor\\\\Class` metadata form) the archive's compile
     /// reached only through a disabled module, though the name itself belongs to
     /// an enabled one — see [`disabled_reachable_types`].
@@ -349,12 +363,14 @@ impl ClassifyCtx<'_> {
             .iter()
             .filter(|r| r.harmless())
             .map(RuntimeArguments::key)
+            .chain(self.setup_area_config.iter().cloned())
             .collect();
         if runtime.is_empty() {
             return (strip(archive), strip(output));
         }
-        // The harmless runtime-resolved keys, as a second pass: they are no
-        // disabled module's, so the first pass's interceptor rewrite is moot.
+        // The harmless runtime-resolved keys and the setup-application keys, as
+        // a second pass: they are no disabled module's, so the first pass's
+        // interceptor rewrite is moot.
         let none = HashSet::new();
         let again = |(text, stripped): (String, bool)| {
             let (text, more) = strip_expected_entries(&text, &none, &runtime, &none, &present);
@@ -528,6 +544,14 @@ payment module. Verified against the disabled modules' own source, one PHP heade
         known.push(group);
     }
 
+    // 7b. Setup-application classes a pre-2.4.8 reference never put in its area
+    //    config. Stripped inside every metadata rule above like rule 5c's keys;
+    //    here the files whose only difference they are, and the group naming
+    //    the classes either way.
+    if let Some(group) = setup_area_config(&mut changed, ctx) {
+        known.push(group);
+    }
+
     // 8. Constructor arguments left to runtime reflection, for classes di.xml
     //    configures nothing for. Their keys are stripped inside every metadata
     //    rule above, so a file mixing them with another pattern claims there;
@@ -551,16 +575,12 @@ payment module. Verified against the disabled modules' own source, one PHP heade
     }
 }
 
-fn runtime_resolved_arguments(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
-    let harmless: Vec<&RuntimeArguments> =
-        ctx.runtime_arguments.iter().filter(|r| r.harmless()).collect();
-    if harmless.is_empty() {
-        return None;
-    }
-    let files: HashSet<&str> =
-        harmless.iter().flat_map(|r| r.files.iter().map(String::as_str)).collect();
+/// Claim each changed file that is equal once `keys` are stripped (with the
+/// output's allowlisted 2.4.9 additions set aside) — the files a key-set rule
+/// fully explains.
+fn claim_stripped(changed: &mut Vec<String>, ctx: &ClassifyCtx, files: Option<&HashSet<&str>>) {
     changed.retain(|c| {
-        if !files.contains(c.as_str()) {
+        if files.is_some_and(|f| !f.contains(c.as_str())) || !c.starts_with("metadata/") {
             return true;
         }
         let (Ok(a), Ok(b)) =
@@ -569,9 +589,46 @@ fn runtime_resolved_arguments(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> O
             return true;
         };
         let ((sa, _), (sb, _)) = ctx.strip_pair(&a, &b);
-        // The output's 2.4.9 additions (nonLazyTypes) may sit beside them.
         !(sa == sb || drop_allowed_additions(&sa, &sb) == sa)
     });
+}
+
+fn setup_area_config(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
+    if ctx.setup_area_config.is_empty() {
+        return None;
+    }
+    claim_stripped(changed, ctx, None);
+    let mut items: Vec<String> = ctx
+        .setup_area_config
+        .iter()
+        .map(|k| k.split(SECTION_SEP).nth(1).unwrap_or(k).replace("\\\\", "\\"))
+        .collect();
+    items.sort();
+    items.dedup();
+    Some(KnownGroup {
+        kind: KnownKind::SetupAreaConfig,
+        title: KnownKind::SetupAreaConfig.title().to_owned(),
+        explanation: "These classes are the setup application's own (their files are under \
+setup/src). Since Magento 2.4.8 (magento/magento2#33161), setup:di:compile scans setup/src for the \
+per-area DI config too, so magecommand, targeting 2.4.9, writes their `arguments` rows. The \
+archive was built by a Magento that scanned setup/src only for code generation: this checkout's \
+own DiCompileCommand leaves `setup` out of the AREA_CONFIG_GENERATOR paths. Verified by location \
+and by that source, so a setup class a 2.4.8+ reference lacks still fails the diff."
+            .to_owned(),
+        items,
+        verified: true,
+    })
+}
+
+fn runtime_resolved_arguments(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
+    let harmless: Vec<&RuntimeArguments> =
+        ctx.runtime_arguments.iter().filter(|r| r.harmless()).collect();
+    if harmless.is_empty() {
+        return None;
+    }
+    let files: HashSet<&str> =
+        harmless.iter().flat_map(|r| r.files.iter().map(String::as_str)).collect();
+    claim_stripped(changed, ctx, Some(&files));
     let mut items: Vec<String> = harmless.iter().map(|r| r.class.clone()).collect();
     items.sort();
     Some(KnownGroup {
@@ -915,6 +972,24 @@ fn section_entry_keys(text: &str) -> HashSet<(&str, &str)> {
     keys
 }
 
+/// Separates the section from the key in a section-qualified expected entry,
+/// which [`strip_expected_entries`] matches only inside that section.
+const SECTION_SEP: char = '\u{1f}';
+
+/// The expected-set entry for `key` inside `section` only (`preferences␟K`).
+/// A bare key in an expected set is stripped from every section; this one is
+/// not, so a rule can excuse one kind of entry without hiding a different one
+/// that happens to share the key.
+pub fn section_key(section: &str, key: &str) -> String {
+    format!("{section}{SECTION_SEP}{key}")
+}
+
+/// [`section_key`] narrowed to one inline value (`preferences␟K␟'V'`, the value
+/// as written), so only that exact entry is excused.
+pub fn section_value_key(section: &str, key: &str, value: &str) -> String {
+    format!("{section}{SECTION_SEP}{key}{SECTION_SEP}{value}")
+}
+
 /// [`top_level_entry_key`], plus the section the key belongs to; `section`
 /// tracks the most recent indent-two block opener across calls.
 fn sectioned_key<'t>(line: &'t str, section: &mut &'t str) -> Option<(&'t str, &'t str)> {
@@ -968,6 +1043,9 @@ fn strip_expected_entries(
         if let Some((sec, key)) = sectioned_key(line, &mut section) {
             if (metadata_entry_module_disabled(key, disabled) && !in_output.contains(&(sec, key)))
                 || expected.contains(key)
+                || (!sec.is_empty()
+                    && (expected.contains(&section_key(sec, key))
+                        || expected.contains(&section_value_key(sec, key, entry_value(line)))))
                 || reachable.contains(key)
             {
                 stripped = true;
@@ -1599,6 +1677,94 @@ pub fn runtime_argument_entries(
         .collect()
 }
 
+/// Whether `DiCompileCommand`'s source passes `setup` to the area-config step:
+/// the `OperationFactory::AREA_CONFIG_GENERATOR => [ … ]` entry of
+/// `getOperationsConfiguration()`. `None` when the entry isn't there to read.
+fn area_config_scans_setup(src: &str) -> Option<bool> {
+    let start = src.find("OperationFactory::AREA_CONFIG_GENERATOR => [")?;
+    // The entry closes on its own `],` line; each path inside also ends in `],`
+    // (`$compiledPathsList['library'],`), so match the whole line.
+    let mut lines = src[start..].lines().skip(1);
+    let mut scans = false;
+    loop {
+        let line = lines.next()?.trim();
+        if line == "]," || line == "]" {
+            return Some(scans);
+        }
+        scans |= line.contains("$compiledPathsList['setup']");
+    }
+}
+
+/// Output-only entries of setup-application classes (their file under
+/// `setup/src`), as section-qualified expected keys (see [`section_key`]):
+/// `arguments` rows, and the InterceptorSubstitution preference to the class's
+/// own interceptor. Only when the
+/// checkout's `setup:di:compile` does not scan `setup/src` for the area config
+/// (before Magento 2.4.8). The archive is taken to come from this checkout;
+/// with no checkout, or a source that does scan setup (or can't be read),
+/// nothing is expected.
+pub fn setup_area_config_types(
+    report: &CompareReport,
+    archive: &Path,
+    output: &Path,
+    magento: Option<&magequery_core::Magento>,
+) -> HashSet<String> {
+    let Some(magento) = magento else { return HashSet::new() };
+    let command = magento.root().join("setup/src/Magento/Setup/Console/Command/DiCompileCommand.php");
+    let scans = fs::read_to_string(command).ok().and_then(|src| area_config_scans_setup(&src));
+    if scans != Some(false) {
+        return HashSet::new();
+    }
+    let setup_root = magento.root().join("setup/src");
+    let in_setup = |name: &str| {
+        let under = |n: &str| {
+            magento
+                .class_file(&magequery_core::ClassName::new(n.to_owned()))
+                .is_some_and(|f| f.starts_with(&setup_root))
+        };
+        // A generated name (`…Factory`) has no file; its subject does.
+        under(name) || crate::codegen::classify(name).is_some_and(|(_, subject)| under(&subject))
+    };
+
+    let mut keys = HashSet::new();
+    let mut verdict: std::collections::HashMap<String, bool> = Default::default();
+    let mut is_setup = |key: &str| {
+        *verdict.entry(key.to_owned()).or_insert_with(|| in_setup(&key.replace("\\\\", "\\")))
+    };
+    for rel in &report.changed {
+        if !rel.starts_with("metadata/") {
+            continue;
+        }
+        let (Ok(a), Ok(b)) =
+            (fs::read_to_string(archive.join(rel)), fs::read_to_string(output.join(rel)))
+        else {
+            continue;
+        };
+        let in_archive = section_entry_keys(&a);
+        let mut section = "";
+        for line in b.lines() {
+            let Some((sec, key)) = sectioned_key(line, &mut section) else { continue };
+            if in_archive.contains(&(sec, key)) {
+                continue;
+            }
+            // The class's own row, and the `X => X\Interceptor` preference the
+            // compiler chain's InterceptorSubstitution adds for that row. Any
+            // other entry keyed by a setup class is not this pattern.
+            let entry = match sec {
+                "arguments" => section_key(sec, key),
+                "preferences" if entry_value(line) == format!("'{key}\\\\Interceptor'") => {
+                    section_value_key(sec, key, entry_value(line))
+                }
+                _ => continue,
+            };
+            if is_setup(key) {
+                keys.insert(entry);
+            }
+        }
+    }
+    keys
+}
+
 /// The first file up `fqcn`'s `extends` chain that matches the eval-obfuscation
 /// signature (`eval(` and `base64_decode` in one source): a class declared only
 /// inside an encrypted payload, whose constructor no static parse can see.
@@ -2210,6 +2376,7 @@ mod tests {
             disabled_modules: disabled,
             null_arguments: &[],
             runtime_arguments: &[],
+            setup_area_config: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2356,6 +2523,7 @@ mod tests {
             disabled_modules: &disabled,
             null_arguments: &[],
             runtime_arguments: &[],
+            setup_area_config: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2628,6 +2796,7 @@ mod tests {
             disabled_modules: &disabled,
             null_arguments: &[],
             runtime_arguments: &[],
+            setup_area_config: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2719,6 +2888,7 @@ mod tests {
             disabled_modules: &disabled,
             null_arguments: &[],
             runtime_arguments: &[],
+            setup_area_config: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2768,6 +2938,7 @@ mod tests {
             disabled_modules: &disabled,
             null_arguments: &[],
             runtime_arguments: &[],
+            setup_area_config: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2814,6 +2985,7 @@ mod tests {
             disabled_modules: &disabled,
             null_arguments: &[],
             runtime_arguments: &[],
+            setup_area_config: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -2848,6 +3020,7 @@ mod tests {
             disabled_modules: &disabled,
             null_arguments: &[],
             runtime_arguments: &[],
+            setup_area_config: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -3004,6 +3177,7 @@ mod tests {
             disabled_modules: &disabled,
             null_arguments: &[],
             runtime_arguments: &[],
+            setup_area_config: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -3026,6 +3200,166 @@ mod tests {
         let ctx = ClassifyCtx { disabled_types: &other, ..bare };
         let c = classify(&report(&missing, &[], &[]), &ctx);
         assert_eq!(c.missing, vec!["code/Good/Mod/Model/Type/OnepageFactory.php"]);
+    }
+
+    /// `DiCompileCommand::getOperationsConfiguration()`'s area-config entry, as
+    /// magento/magento2 ships it before and after PR #33161 (2.4.8).
+    const AREA_CONFIG_2_4_7: &str = "            OperationFactory::AREA_CONFIG_GENERATOR => [
+                $compiledPathsList['application'],
+                $compiledPathsList['library'],
+                $compiledPathsList['generated_helpers'],
+            ],
+            OperationFactory::INTERCEPTION_CACHE => [
+                $compiledPathsList['application'],
+                $compiledPathsList['library'],
+                $compiledPathsList['generated_helpers'],
+            ],";
+    const AREA_CONFIG_2_4_8: &str = "            OperationFactory::AREA_CONFIG_GENERATOR => [
+                $compiledPathsList['application'],
+                $compiledPathsList['library'],
+                $compiledPathsList['setup'],
+                $compiledPathsList['generated_helpers'],
+            ],
+            OperationFactory::INTERCEPTION_CACHE => [
+                $compiledPathsList['application'],
+                $compiledPathsList['library'],
+                $compiledPathsList['generated_helpers'],
+            ],";
+
+    #[test]
+    fn reads_whether_the_area_config_step_scans_setup() {
+        assert_eq!(area_config_scans_setup(AREA_CONFIG_2_4_7), Some(false));
+        assert_eq!(area_config_scans_setup(AREA_CONFIG_2_4_8), Some(true));
+        // The NEXT operation reading `setup` must not count for this one.
+        let next_only = AREA_CONFIG_2_4_7.replacen(
+            "OperationFactory::INTERCEPTION_CACHE => [\n",
+            "OperationFactory::INTERCEPTION_CACHE => [\n                $compiledPathsList['setup'],\n",
+            1,
+        );
+        assert_eq!(area_config_scans_setup(&next_only), Some(false));
+        // A source we cannot read is not evidence either way.
+        assert_eq!(area_config_scans_setup("<?php class DiCompileCommand {}"), None);
+    }
+
+    #[test]
+    fn setup_classes_only_the_output_has_are_explained_when_the_reference_skips_setup() {
+        // Before 2.4.8 the area-config step did not scan setup/src, so a reference
+        // built there lacks every setup application class magecommand (2.4.9)
+        // writes. Verified by location: the class must resolve to a file under
+        // setup/src, and the checkout's own DiCompileCommand must not scan it.
+        let build = |area_config: &str| {
+            let root = tempfile::tempdir().unwrap();
+            let write = |rel: &str, c: &str| {
+                let p = root.path().join(rel);
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(p, c).unwrap();
+            };
+            write("app/etc/config.php", "<?php\nreturn ['modules' => ['Acme_Mod' => 1]];\n");
+            write(
+                "app/code/Acme/Mod/etc/module.xml",
+                "<?xml version=\"1.0\"?>\n<config><module name=\"Acme_Mod\"/></config>\n",
+            );
+            write("app/code/Acme/Mod/Model/Other.php", "<?php\nnamespace Acme\\Mod\\Model;\nclass Other {}\n");
+            write(
+                "composer.json",
+                r#"{"autoload": {"psr-4": {"Magento\\Setup\\": "setup/src/Magento/Setup/"}}}"#,
+            );
+            write(
+                "setup/src/Magento/Setup/Model/Thing.php",
+                "<?php\nnamespace Magento\\Setup\\Model;\nclass Thing {}\n",
+            );
+            write(
+                "setup/src/Magento/Setup/Console/Command/DiCompileCommand.php",
+                &format!("<?php\nclass DiCompileCommand {{\n    private function x() {{\n        return [\n{area_config}\n        ];\n    }}\n}}\n"),
+            );
+            root
+        };
+
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        let args = |body: &str| format!("<?php return array (\n  'arguments' => \n  array (\n{body}  ),\n);\n");
+        let shared = "    'Acme\\\\Mod\\\\Shared' => NULL,\n";
+        let prefs = |body: &str| format!("  'preferences' => \n  array (\n{body}  ),\n");
+        let with_prefs = |args_body: &str, prefs_body: &str| {
+            format!("{}{});\n", args(args_body).trim_end_matches(");\n"), prefs(prefs_body))
+        };
+        // Only a setup class added: explained — with the preference the chain's
+        // InterceptorSubstitution adds once that class's row is keyed by its
+        // interceptor.
+        write(archive.path(), "metadata/global.php", &with_prefs(shared, ""));
+        write(
+            output.path(),
+            "metadata/global.php",
+            &with_prefs(
+                &format!("{shared}    'Magento\\\\Setup\\\\Model\\\\Thing\\\\Interceptor' => NULL,\n"),
+                "    'Magento\\\\Setup\\\\Model\\\\Thing' => 'Magento\\\\Setup\\\\Model\\\\Thing\\\\Interceptor',\n",
+            ),
+        );
+        // A setup-keyed preference to anything else is not that: unexplained.
+        write(archive.path(), "metadata/adminhtml.php", &with_prefs(shared, ""));
+        write(
+            output.path(),
+            "metadata/adminhtml.php",
+            &with_prefs(shared, "    'Magento\\\\Setup\\\\Model\\\\Thing' => 'Acme\\\\Mod\\\\Model\\\\Other',\n"),
+        );
+        // A non-setup class added beside it: still unexplained.
+        write(archive.path(), "metadata/frontend.php", &args(shared));
+        write(
+            output.path(),
+            "metadata/frontend.php",
+            &args(&format!(
+                "    'Acme\\\\Mod\\\\Model\\\\Other' => NULL,\n{shared}    'Magento\\\\Setup\\\\Model\\\\Thing' => NULL,\n"
+            )),
+        );
+        let r = report(
+            &[],
+            &[],
+            &["metadata/adminhtml.php", "metadata/frontend.php", "metadata/global.php"],
+        );
+        let none = HashSet::new();
+
+        // A 2.4.7 checkout: the setup class is the expected difference.
+        let root = build(AREA_CONFIG_2_4_7);
+        let magento = magequery_core::Magento::open(root.path()).unwrap();
+        let setup = setup_area_config_types(&r, archive.path(), output.path(), Some(&magento));
+        assert_eq!(
+            setup,
+            HashSet::from([
+                section_key("arguments", "Magento\\\\Setup\\\\Model\\\\Thing"),
+                section_key("arguments", "Magento\\\\Setup\\\\Model\\\\Thing\\\\Interceptor"),
+                section_value_key(
+                    "preferences",
+                    "Magento\\\\Setup\\\\Model\\\\Thing",
+                    "'Magento\\\\Setup\\\\Model\\\\Thing\\\\Interceptor'",
+                ),
+            ]),
+            "the rows and the substitution preference — not adminhtml's other preference"
+        );
+
+        let mut ctx = ctx(&none, archive.path());
+        ctx.output = output.path();
+        ctx.setup_area_config = &setup;
+        let c = classify(&r, &ctx);
+        assert_eq!(c.changed, vec!["metadata/adminhtml.php", "metadata/frontend.php"]);
+        assert_eq!(c.known.len(), 1, "{:?}", c.known);
+        assert_eq!(c.known[0].kind, KnownKind::SetupAreaConfig);
+        assert_eq!(
+            c.known[0].items,
+            vec!["Magento\\Setup\\Model\\Thing", "Magento\\Setup\\Model\\Thing\\Interceptor"]
+        );
+
+        // A 2.4.8 checkout scans setup itself: nothing is expected, so a
+        // reference lacking the class is a real difference.
+        let root = build(AREA_CONFIG_2_4_8);
+        let magento = magequery_core::Magento::open(root.path()).unwrap();
+        assert!(setup_area_config_types(&r, archive.path(), output.path(), Some(&magento)).is_empty());
+        // And without a checkout nothing can be verified.
+        assert!(setup_area_config_types(&r, archive.path(), output.path(), None).is_empty());
     }
 
     #[test]
@@ -3121,6 +3455,7 @@ mod tests {
             disabled_modules: &disabled,
             null_arguments: &[],
             runtime_arguments: &[],
+            setup_area_config: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -3140,6 +3475,7 @@ mod tests {
             disabled_modules: &disabled,
             null_arguments: &[],
             runtime_arguments: &[],
+            setup_area_config: no_blocked(),
             disabled_reachable: &reachable,
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
@@ -3317,6 +3653,7 @@ mod tests {
             disabled_modules: &disabled,
             null_arguments: &[],
             runtime_arguments: &[],
+            setup_area_config: no_blocked(),
             disabled_reachable: no_blocked(),
             disabled_types: no_blocked(),
             outside_scan: no_blocked(),
