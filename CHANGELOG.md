@@ -51,6 +51,19 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.24.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.23.0...magequery-v0.24.0) (2026-11-04)
+
+
+### Features
+
+* **magecommand:** compile a never-installed root with --all-modules and --extra-app-code ([8d69b1f](https://github.com/cresset-tools/magequery/commit/8d69b1f721a2b907c076687bb97f58e6fb6698e9))
+* **magequery:** doctor E1006 flags a config.php module order Magento wouldn't write ([1c8470f](https://github.com/cresset-tools/magequery/commit/1c8470ff731673421b0309898487e5bb2abef162))
+
+
+### Bug Fixes
+
+* **magequery:** read module.xml's &lt;sequence&gt; the way Magento does ([80710b4](https://github.com/cresset-tools/magequery/commit/80710b459245e28d79a1afd9d10b5583951f8b0d))
+
 ## [0.23.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.22.0...magequery-v0.23.0) (2026-11-04)
 
 
