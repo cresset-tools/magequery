@@ -19,13 +19,14 @@ Run from the Magento root, or pass `--root <path>`.
 
 ### Without installing (bgx)
 
-[bougie](https://bougie.tools)'s `bgx` (like npx) runs magequery in an isolated,
+[bougie](https://bougie.tools)'s `bgx` (like npx) runs either tool in an isolated,
 globally-cached environment without adding it to your project. Everything after the package is
-forwarded straight to magequery:
+forwarded straight to the tool:
 
 ```console
 $ bgx cresset/magequery doctor
 $ bgx cresset/magequery di 'Magento\Catalog\Api\ProductRepositoryInterface'
+$ bgx cresset/magecommand di compile
 ```
 
 ## magequery: for AI agents and CI
