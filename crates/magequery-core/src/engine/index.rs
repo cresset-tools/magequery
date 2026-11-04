@@ -162,7 +162,11 @@ impl Index {
         // installer would write them.
         let ordered = match ordered {
             Some(o) => o,
-            None => sort_by_sequence(&discovered)?.into_iter().map(|n| (n, true)).collect(),
+            None => sort_by_sequence(discovered.iter().map(|(n, d)| (n, d.sequence.as_slice())))
+                .map_err(|detail| Error::Parse { file: PathBuf::from("etc/module.xml"), detail })?
+                .into_iter()
+                .map(|n| (n, true))
+                .collect(),
         };
 
         // Build the module list in config.php load order, and record any config entry that
@@ -249,23 +253,27 @@ impl Index {
 }
 
 /// Magento's module load order for a fresh install: a port of
-/// `Framework\Module\ModuleList\Loader::sortBySequence`, which is what writes
-/// `config.php` when there is none. Ported literally, quirks included, because
-/// the order decides how di.xml merges: names sorted bytewise (`ksort`), then
-/// every name *containing* `Magento_` moved first, then a pairwise swap pass
-/// that is neither stable nor a topological sort in general.
-fn sort_by_sequence(discovered: &HashMap<ModuleName, Discovered>) -> Result<Vec<ModuleName>> {
-    let mut names: Vec<&ModuleName> = discovered.keys().collect();
-    names.sort_by(|a, b| a.as_str().as_bytes().cmp(b.as_str().as_bytes()));
-    let (magento, others): (Vec<&ModuleName>, Vec<&ModuleName>) =
-        names.into_iter().partition(|n| n.as_str().contains("Magento_"));
+/// `Framework\Module\ModuleList\Loader::sortBySequence`, which writes `config.php`
+/// on install, `setup:upgrade` and `module:enable`. Ported literally, quirks
+/// included, because the order decides how di.xml merges: names sorted bytewise
+/// (`ksort`), then every name *containing* `Magento_` moved first, then a pairwise
+/// swap pass that is neither stable nor a topological sort in general. `Err` names
+/// a `<sequence>` cycle, as Magento's LogicException does.
+pub(crate) fn sort_by_sequence<'a>(
+    modules: impl IntoIterator<Item = (&'a ModuleName, &'a [ModuleName])>,
+) -> std::result::Result<Vec<ModuleName>, String> {
+    let sequences: HashMap<&str, &[ModuleName]> =
+        modules.into_iter().map(|(n, seq)| (n.as_str(), seq)).collect();
+    let mut names: Vec<&str> = sequences.keys().copied().collect();
+    names.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    let (magento, others): (Vec<&str>, Vec<&str>) =
+        names.into_iter().partition(|n| n.contains("Magento_"));
 
     let mut cache: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut expanded: Vec<(&str, std::collections::HashSet<&str>)> = Vec::new();
     for name in magento.into_iter().chain(others) {
-        let mut stack = Vec::new();
-        let seq = expand_sequence(discovered, name.as_str(), &mut cache, &mut stack)?;
-        expanded.push((name.as_str(), seq.into_iter().collect()));
+        let seq = expand_sequence(&sequences, name, &mut cache, &mut Vec::new())?;
+        expanded.push((name, seq.into_iter().collect()));
     }
 
     // The "bubble sort" from Loader, verbatim: `$j` starts at `$i`, and `$i` is
@@ -283,32 +291,28 @@ fn sort_by_sequence(discovered: &HashMap<ModuleName, Discovered>) -> Result<Vec<
 
 /// `Loader::expandSequence`: a module's direct and transitive `<sequence>`
 /// entries. A name no module declares still counts (it just has no sequence of
-/// its own). A cycle is an error, as in Magento.
+/// its own).
 fn expand_sequence<'a>(
-    discovered: &'a HashMap<ModuleName, Discovered>,
+    sequences: &HashMap<&'a str, &'a [ModuleName]>,
     name: &'a str,
     cache: &mut HashMap<&'a str, Vec<&'a str>>,
     stack: &mut Vec<&'a str>,
-) -> Result<Vec<&'a str>> {
+) -> std::result::Result<Vec<&'a str>, String> {
     if stack.contains(&name) {
         let parent = stack.last().copied().unwrap_or_default();
-        return Err(Error::Parse {
-            file: PathBuf::from("module.xml"),
-            detail: format!("circular sequence reference from '{parent}' to '{name}'"),
-        });
+        return Err(format!("circular sequence reference from '{parent}' to '{name}'"));
     }
     if let Some(seq) = cache.get(name) {
         return Ok(seq.clone());
     }
-    let direct: Vec<&'a str> = discovered
-        .iter()
-        .find(|(k, _)| k.as_str() == name)
-        .map(|(_, d)| d.sequence.iter().map(ModuleName::as_str).collect())
+    let direct: Vec<&'a str> = sequences
+        .get(name)
+        .map(|seq| seq.iter().map(ModuleName::as_str).collect())
         .unwrap_or_default();
     stack.push(name);
     let mut all: Vec<&'a str> = Vec::new();
     for dep in &direct {
-        for s in expand_sequence(discovered, dep, cache, stack)? {
+        for s in expand_sequence(sequences, dep, cache, stack)? {
             if !all.contains(&s) {
                 all.push(s);
             }

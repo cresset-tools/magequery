@@ -12,6 +12,7 @@ impl DoctorLint {
             Self::SequenceCycle => "modules' <sequence> declarations form a cycle",
             Self::ModuleDisabled => "an installed module is disabled in config.php",
             Self::DisabledModuleReferenced => "enabled di.xml references a class of a disabled module",
+            Self::ModuleOrderStale => "config.php's module order isn't the order Magento would write",
             Self::PreferenceTargetMissing => "a <preference> points at a class that doesn't exist",
             Self::PreferenceCycle => "<preference> declarations form a cycle",
             Self::VirtualTypeBaseMissing => "a <virtualType> is based on a class that doesn't exist",
@@ -84,6 +85,21 @@ so this config half-uses a module that is switched off.
 
 Fix: remove the disabled module with composer (see E1004), or remove the configuration
 that reaches into it.",
+
+            Self::ModuleOrderStale => "\
+app/etc/config.php lists exactly the modules on disk, but not in the order Magento
+computes from their <sequence> declarations, which is the order `setup:upgrade` and
+`module:enable` write. A hand-edited config.php or a merge conflict resolved by hand
+usually causes it.
+
+The order matters at runtime: Magento merges every module's di.xml, events.xml and
+layout in config.php order, so a module listed too early can have its overrides
+overridden again. The finding says where the order first differs and lists any module
+loaded before a module its own <sequence> requires: those are the merges that are
+wrong today. The rest changes the next time anyone runs `setup:upgrade`.
+
+Fix: run `bin/magento setup:upgrade` (or `module:enable --all` on a checkout that is
+not installed) and commit the rewritten config.php.",
 
             Self::PreferenceTargetMissing => "\
 A <preference for=\"A\" type=\"B\"/> makes the object manager build B whenever A is

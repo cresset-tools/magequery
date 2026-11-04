@@ -137,6 +137,8 @@ pub enum DoctorLint {
     ClassNameCaseMismatch,
     /// A class's declared namespace differs in letter case from its file path.
     ClassFileCaseMismatch,
+    /// config.php lists the modules on disk, but not in the order Magento writes them.
+    ModuleOrderStale,
 }
 
 /// The kebab-case name a finding is reported under: what `doctor --deny` takes.
@@ -151,12 +153,13 @@ impl std::fmt::Display for DoctorLint {
 
 impl DoctorLint {
     /// Every lint, in code order.
-    pub const ALL: [DoctorLint; 26] = [
+    pub const ALL: [DoctorLint; 27] = [
         Self::ModuleMissingOnDisk,
         Self::ModuleNotRegistered,
         Self::SequenceCycle,
         Self::ModuleDisabled,
         Self::DisabledModuleReferenced,
+        Self::ModuleOrderStale,
         Self::PreferenceTargetMissing,
         Self::PreferenceCycle,
         Self::VirtualTypeBaseMissing,
@@ -192,6 +195,7 @@ impl DoctorLint {
             Self::SequenceCycle => "E1003",
             Self::ModuleDisabled => "E1004",
             Self::DisabledModuleReferenced => "E1005",
+            Self::ModuleOrderStale => "E1006",
             Self::PreferenceTargetMissing => "E2001",
             Self::PreferenceCycle => "E2002",
             Self::VirtualTypeBaseMissing => "E2003",

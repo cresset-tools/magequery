@@ -1092,6 +1092,16 @@ wired **nowhere**. Candidates are verified by
 resolving the conventional class name back through PSR-4 to the same file (namespace-
 diverging modules are skipped, never misreported).
 
+**Module order** (warning, E1006 `module-order-stale`): config.php lists exactly the
+modules on disk but not in the order `setup:upgrade` writes, i.e. not what
+`engine::index::sort_by_sequence` (the Loader port) computes from their `<sequence>`s —
+a hand-resolved merge conflict, usually. Skipped when the module set drifts (E1001/E1002,
+which `setup:upgrade` fixes at the same time) or the sequences cycle (E1003). Anchored on
+the first differing config.php line; the message also lists modules loaded before one of
+their own direct `<sequence>` dependencies, the merges that are wrong today rather than
+after the next upgrade. Computed lazily from `Module::sequence`, so `open` pays nothing.
+Clean on five real stores; moving one line of a real config.php fires it.
+
 **Duplicate keys** (error, `duplicate-argument-key`): an `<argument name>` or array `<item
 name>` repeated for one type within one di.xml. The merged config only keeps the winner, so
 `di::build` records them (`DiIndex::duplicate_keys`) from the raw parse, beside the

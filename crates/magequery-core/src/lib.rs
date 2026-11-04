@@ -1743,6 +1743,48 @@ mod handle_tests {
         );
     }
 
+    /// config.php in a different order than Magento writes it: reported on the first
+    /// differing line, naming the module that loads before its own <sequence>
+    /// dependency. The order Magento writes, and a module-set drift (E1002's job),
+    /// are both quiet.
+    #[test]
+    fn doctor_flags_a_stale_module_order() {
+        let tree = TempTree::new("doctor-order");
+        let write = |rel: &str, content: &str| {
+            let path = tree.0.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        };
+        module_xml(&tree, "app/code/Acme/Base", "Acme_Base", &[]);
+        module_xml(&tree, "app/code/Acme/Widget", "Acme_Widget", &["Acme_Base"]);
+        let lint = crate::model::DoctorLint::ModuleOrderStale;
+        let order_findings = |config: &str| {
+            write("app/etc/config.php", config);
+            let magento = super::Magento::open(&tree.0).unwrap();
+            magento.doctor(None).findings.into_iter().filter(|f| f.lint == lint).collect::<Vec<_>>()
+        };
+
+        let stale = order_findings(
+            "<?php\nreturn ['modules' => [\n'Acme_Widget' => 1,\n'Acme_Base' => 1,\n]];\n",
+        );
+        assert_eq!(stale.len(), 1, "{stale:?}");
+        let f = &stale[0];
+        assert_eq!(f.subject.as_deref(), Some("Acme_Widget"));
+        assert_eq!(f.source.as_ref().map(|s| s.line), Some(3), "anchored on config.php");
+        assert_eq!(f.severity, crate::Severity::Warning);
+        assert!(f.message.contains("first at position 1: Acme_Widget is listed where Magento puts Acme_Base"), "{}", f.message);
+        assert!(f.message.contains("Acme_Widget loads before Acme_Base"), "{}", f.message);
+        assert_eq!(lint.code(), "E1006");
+
+        let fresh = order_findings(
+            "<?php\nreturn ['modules' => [\n'Acme_Base' => 1,\n'Acme_Widget' => 0,\n]];\n",
+        );
+        assert!(fresh.is_empty(), "Magento's own order, disabled module included: {fresh:?}");
+
+        let drift = order_findings("<?php\nreturn ['modules' => [\n'Acme_Widget' => 1,\n]];\n");
+        assert!(drift.is_empty(), "set drift is E1002's: {drift:?}");
+    }
+
     /// A module switched off in config.php is reported on its config.php line, and
     /// an enabled module's plugin on one of its classes is reported where it is
     /// declared; `deny` turns both into errors.
