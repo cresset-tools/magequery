@@ -394,8 +394,24 @@ pub fn fused_interceptor_bytes(
         ));
     }
 
+    // `InterceptorInterface` is the contract callers use to recognise an
+    // interceptor (Magento's integration-test `StoreManager::reinitStores()`
+    // reflects the parent's private `$data` only when it sees it). Creatuity
+    // omits it — creatuity/magento2-interceptors#27 — so implement it here,
+    // with the stock `Interceptor` trait's `___callParent`.
+    members.push(format!(
+        "{}\n    public function ___callParent($method, array $arguments)\n    {{\n        return parent::$method(...\\array_values($arguments));\n    }}",
+        docblock(&[
+            "Calls parent class method".to_owned(),
+            String::new(),
+            "@param string $method".to_owned(),
+            "@param array $arguments".to_owned(),
+            "@return mixed".to_owned(),
+        ]),
+    ));
+
     let header = format!(
-        "<?php\nnamespace {ns};\n\nuse Magento\\Framework\\Config\\ScopeInterface;\nuse Magento\\Framework\\ObjectManagerInterface;\n\n/**\n * Interceptor class for @see \\{ns}\n */\nclass Interceptor extends \\{ns}\n{{\n",
+        "<?php\nnamespace {ns};\n\nuse Magento\\Framework\\Config\\ScopeInterface;\nuse Magento\\Framework\\ObjectManagerInterface;\n\n/**\n * Interceptor class for @see \\{ns}\n */\nclass Interceptor extends \\{ns} implements \\Magento\\Framework\\Interception\\InterceptorInterface\n{{\n",
         ns = source_fqcn,
     );
     Some(format!("{header}{}\n}}\n", members.join("\n\n")))
