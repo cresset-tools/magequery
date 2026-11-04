@@ -11,7 +11,8 @@ use std::path::Path;
 
 use crate::ids::{Area, ClassName, EventName, ModuleName};
 use crate::model::{
-    AclResource, CatalogAttribute, CatalogAttributeGroup, CronJob, DbColumn, DbConstraint,
+    AclResource, CatalogAttribute, CatalogAttributeGroup, CronJob, CspPolicy, CspThemeWhitelist,
+    CspValue, CspValueKind, CspWhitelist, DbColumn, DbConstraint,
     Fieldset, FieldsetAspect, FieldsetField, FieldsetFieldHit,
     DbIndex, DbTable, EmailTemplate,
     EmailTemplateOverride, ExtendedType,
@@ -89,3 +90,5 @@ mod indexer;
 pub(crate) use indexer::IndexerIndex;
 mod admin;
 pub(crate) use admin::{AclIndex, SystemConfigIndex};
+mod csp;
+pub(crate) use csp::CspIndex;

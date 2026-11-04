@@ -7,6 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use magequery_core::model::ModuleSource;
 use magequery_core::{
     AclResource, ArgValue, Area, ChainStep, ClassName, ConfigSet, ConfigSourceKind, ConfigValue,
+    CspPolicy, CspValueKind,
     DbColumn, DbTable, Error, EventName, Indexer, Magento, MethodChain, Observer, Plugin,
     Preference, Resolution, Route, SalesDocKind, Source, UseRef, WebapiRoute,
 };
@@ -86,6 +87,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
             ("config", "Resolve a config path/section with its source (static, +--db)"),
             ("system-config", "Where each admin config path lives (Stores → Configuration)"),
             ("acl", "Admin ACL resource tree from acl.xml; resolve a <resource> id"),
+            ("csp", "Content Security Policy: csp_whitelist.xml per area + report-only mode"),
             ("menu", "Admin menu tree from menu.xml: what's where, guarded by which ACL"),
             ("admin-users", "Admin users from the DB: role, status, last login"),
             ("admin-roles", "Admin roles from the DB: members, permitted ACL resources"),
@@ -339,6 +341,8 @@ enum Command {
     SystemConfig(SystemConfigArgs),
     /// Admin ACL resource tree from acl.xml; resolve a <resource> id.
     Acl(AclArgs),
+    /// Content Security Policy: csp_whitelist.xml per area + report-only mode.
+    Csp(CspArgs),
     /// Admin menu tree from menu.xml: what's where, guarded by which ACL.
     Menu(MenuArgs),
     /// Admin users from the DB: role, active/locked status, last login.
@@ -1058,6 +1062,25 @@ struct CronArgs {
 }
 
 #[derive(clap::Args)]
+struct CspArgs {
+    /// Substring matched against host/hash, value id, or declaring module
+    /// (`google`, `Vendor_Module`). Omit to show every value.
+    filter: Option<String>,
+    /// Area: frontend, adminhtml, or global (the module-wide tier alone). Default:
+    /// frontend + adminhtml.
+    #[arg(long)]
+    area: Option<String>,
+    /// Only this directive, e.g. `script-src`.
+    #[arg(long)]
+    policy: Option<String>,
+    /// Read the mode from the database too (`core_config_data`).
+    #[arg(long)]
+    db: bool,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(clap::Args)]
 struct RoutesArgs {
     /// Area (default: frontend + adminhtml).
     #[arg(long)]
@@ -1284,6 +1307,7 @@ fn main() -> Result<()> {
         },
         Command::SystemConfig(args) => system_config(&mage, &args, &cli.root),
         Command::Acl(args) => acl(&mage, &args, &cli.root),
+        Command::Csp(args) => csp(&mage, &args, &cli.root),
         Command::Menu(args) => menu(&mage, &args, &cli.root),
         Command::Schema(args) => schema(&mage, &args, &cli.root),
         Command::UrlRewrites(args) => url_rewrites(&mage, &args),
@@ -7972,6 +7996,156 @@ fn render_indexer(mage: &Magento, ix: &Indexer, root: &Path) {
             style::path(&short_loc(&s.source, root)),
         );
     }
+}
+
+/// Keep only the policies/values matching `--policy` and the filter; drop emptied policies.
+fn csp_filter(policies: &mut Vec<CspPolicy>, policy: Option<&str>, needle: Option<&str>) {
+    let needle = needle.map(str::to_lowercase);
+    policies.retain(|p| policy.is_none_or(|want| p.id == want));
+    for p in policies.iter_mut() {
+        if let Some(n) = &needle {
+            p.values.retain(|v| {
+                v.value.to_lowercase().contains(n)
+                    || v.id.to_lowercase().contains(n)
+                    || v.source.module.as_str().to_lowercase().contains(n)
+            });
+        }
+    }
+    if needle.is_some() {
+        policies.retain(|p| !p.values.is_empty());
+    }
+}
+
+/// The config path holding an area's report-only flag (Magento_Csp's `ModeConfigManager`).
+fn csp_mode_path(area: Area) -> Option<&'static str> {
+    match area {
+        Area::Frontend => Some("csp/mode/storefront/report_only"),
+        Area::Adminhtml => Some("csp/mode/admin/report_only"),
+        _ => None,
+    }
+}
+
+fn csp(mage: &Magento, args: &CspArgs, root: &Path) -> Result<()> {
+    let areas: Vec<Area> = match &args.area {
+        Some(a) => vec![a.parse::<Area>().map_err(|e| anyhow!("{e}"))?],
+        None => vec![Area::Frontend, Area::Adminhtml],
+    };
+    // The mode is config; a store without Magento_Csp (or an unreadable env.php) just
+    // has no mode line. `--db` failures are real errors, though.
+    let set = match mage.config(args.db) {
+        Ok(set) => Some(set),
+        Err(e) if args.db => return Err(anyhow!(e)),
+        Err(_) => None,
+    };
+
+    let mut lists = Vec::new();
+    for &area in &areas {
+        let mut wl = mage.csp_whitelist(area);
+        csp_filter(&mut wl.policies, args.policy.as_deref(), args.filter.as_deref());
+        for t in &mut wl.themes {
+            csp_filter(&mut t.policies, args.policy.as_deref(), args.filter.as_deref());
+        }
+        wl.themes.retain(|t| !t.policies.is_empty());
+        // Report-only per scope: the default plus every scope that sets it explicitly.
+        let mode: Vec<ConfigValue> = match (csp_mode_path(area), &set) {
+            (Some(path), Some(set)) => {
+                let mut v = set.scopes_for(path);
+                if !v.iter().any(|c| c.scope == "default") {
+                    if let Some(d) = set.get("default", path) {
+                        v.insert(0, d.clone());
+                    }
+                }
+                v
+            }
+            _ => Vec::new(),
+        };
+        lists.push((wl, mode));
+    }
+
+    if args.json {
+        let out: Vec<serde_json::Value> = lists
+            .iter()
+            .map(|(wl, mode)| {
+                let mut v = serde_json::to_value(wl).expect("serializable");
+                v["report_only"] = serde_json::to_value(mode).expect("serializable");
+                v
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let mut total = 0;
+    for (i, (wl, mode)) in lists.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        println!("[{}]", style::area(wl.area.as_str()));
+        for m in mode {
+            let label = if m.value.trim() == "1" { style::err("report-only") } else { style::ok("enforced") };
+            println!(
+                "  mode  {label}  {}  {}  {}",
+                style::dim(&format!("scope={}", m.scope)),
+                source_tag(m.source),
+                config_loc(m, root),
+            );
+        }
+        if wl.policies.is_empty() && wl.themes.is_empty() {
+            println!("  {}", style::dim("(no whitelist entries match)"));
+            continue;
+        }
+        total += csp_render_policies(&wl.policies, root, true);
+        for t in &wl.themes {
+            println!(
+                "  {} {}  {}",
+                style::dim("theme"),
+                style::module(&t.theme),
+                style::dim("(applies only while this theme or a child is active)"),
+            );
+            total += csp_render_policies(&t.policies, root, false);
+        }
+    }
+    eprintln!("\n{total} whitelist entr{}", if total == 1 { "y" } else { "ies" });
+    Ok(())
+}
+
+/// Print each policy and its values; returns how many values were printed.
+fn csp_render_policies(policies: &[CspPolicy], root: &Path, show_module: bool) -> usize {
+    let mut n = 0;
+    for p in policies {
+        println!("  {}", style::name(&p.id));
+        let shown: Vec<String> = p
+            .values
+            .iter()
+            .map(|v| match v.kind {
+                CspValueKind::Host => v.value.clone(),
+                CspValueKind::Hash => {
+                    format!("'{}-{}'", v.algorithm.as_deref().unwrap_or("sha256"), v.value)
+                }
+            })
+            .collect();
+        let w = shown.iter().map(String::len).max().unwrap_or(0);
+        let idw = p.values.iter().map(|v| v.id.len()).max().unwrap_or(0);
+        for (v, text) in p.values.iter().zip(&shown) {
+            let pad = " ".repeat(w - text.len());
+            let idpad = " ".repeat(idw - v.id.len());
+            let module = if show_module { format!("{}  ", style::module(v.source.module.as_str())) } else { String::new() };
+            let over = if v.overrides.is_empty() {
+                String::new()
+            } else {
+                let from: Vec<&str> = v.overrides.iter().map(|s| s.module.as_str()).collect();
+                format!("  {}", style::dim(&format!("(overrides {})", from.join(", "))))
+            };
+            println!(
+                "    {}{pad}  {}{idpad}  {module}{}{over}",
+                style::target(text),
+                style::dim(&v.id),
+                style::path(&short_loc(&v.source, root)),
+            );
+            n += 1;
+        }
+    }
+    n
 }
 
 fn routes(mage: &Magento, args: &RoutesArgs, root: &Path) -> Result<()> {

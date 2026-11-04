@@ -502,3 +502,56 @@ pub struct UiComponentView {
     pub area: Area,
     pub contributions: Vec<UiComponentContribution>,
 }
+
+/// Whether a CSP whitelist entry is a source host or an inline-content hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CspValueKind {
+    Host,
+    Hash,
+}
+
+/// One whitelisted source in a CSP policy, from `csp_whitelist.xml`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CspValue {
+    /// The `<value id=…>` — the merge key across modules.
+    pub id: String,
+    pub kind: CspValueKind,
+    /// A host (`*.example.com`, `https://x.test`) or a base64 digest.
+    pub value: String,
+    /// Hash algorithm (`sha256`, …); hashes only.
+    pub algorithm: Option<String>,
+    /// The declaration that won.
+    pub source: Source,
+    /// Earlier declarations of the same entry that this one replaced, in load order.
+    pub overrides: Vec<Source>,
+}
+
+/// One CSP directive (`script-src`, `img-src`, …) and its whitelisted values.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CspPolicy {
+    pub id: String,
+    pub values: Vec<CspValue>,
+}
+
+/// A theme's own `etc/csp_whitelist.xml`. It applies only while that theme (or a child
+/// of it) is active, which is runtime state, so it is reported beside the module
+/// whitelist rather than merged into it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CspThemeWhitelist {
+    /// Theme id, e.g. `frontend/Hyva/default`.
+    pub theme: String,
+    pub file: std::path::PathBuf,
+    pub policies: Vec<CspPolicy>,
+}
+
+/// The `csp_whitelist.xml` whitelist as Magento_Csp sees it in one area: every enabled
+/// module's `etc/csp_whitelist.xml`, then its `etc/<area>/csp_whitelist.xml` on top.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct CspWhitelist {
+    pub area: Area,
+    /// Policies sorted by id; values in first-declared order.
+    pub policies: Vec<CspPolicy>,
+    /// Theme whitelists for this area (frontend/adminhtml only).
+    pub themes: Vec<CspThemeWhitelist>,
+}

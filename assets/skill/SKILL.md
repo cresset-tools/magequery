@@ -78,7 +78,7 @@ cache, `setup:upgrade`.
 | `acl.xml` | `acl` | `queue_*.xml`, `communication.xml` | `queue topology` |
 | `menu.xml` | `menu` | `schema.graphqls` | `graphql` |
 | `Setup/Patch/**` | `patches`, `eav` | `i18n/*.csv` | `translations` |
-| `fieldset.xml` | `fieldset` | | |
+| `fieldset.xml` | `fieldset` | `csp_whitelist.xml` | `csp` |
 
 **Wiring (the object manager)**
 - What does an interface/abstract class resolve to, with its args and plugins?

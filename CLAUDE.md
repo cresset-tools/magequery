@@ -764,6 +764,29 @@ each resource's `Source.area` is tagged `adminhtml`, its domain), merged in load
   `acl Magento_Catalog::products` resolves the very resource `webapi /V1/products` cites
   (`→ Catalog → Inventory`, grants `update_attributes` + …) — the loop the command closes.
 
+### `csp` (Content Security Policy whitelist from `csp_whitelist.xml`, static, done)
+
+*"Why is this host blocked by CSP / who whitelisted it / is the store report-only?"* A lazy
+`CspIndex` (`breadth/csp.rs`) reproducing Magento_Csp's `CspWhitelistXml\Data` (a `Scoped`
+reader) in two steps, because the keys differ between them:
+- **Per tier, DOM merge on value id.** The global tier is every enabled module's
+  `etc/csp_whitelist.xml`, the area tier every `etc/<area>/csp_whitelist.xml`, each merged in
+  load order on `policy@id` + `value@id` (the reader's `_idAttributes`).
+- **Then the converter's keys.** `Converter` stores hosts under the value id but hashes under
+  the **digest**, and `Scoped` lays the area tier over the global one by those keys. So an area
+  `<value id="h1" type="hash">` with a new digest does **not** replace the global `h1` — both
+  survive. The integration test (`tests/csp_whitelist.rs`) pins that.
+- Each value keeps the winning `Source` plus `overrides` (the replaced declarations, load order).
+- Theme `etc/csp_whitelist.xml` files (`Csp\…\CspWhitelistXml\FileResolver`) apply only for
+  the active theme's ancestry — runtime state — so they are reported per theme in
+  `CspWhitelist.themes`, not merged (same stance as layout/templates).
+- `Magento::csp_whitelist(area)`. CLI `magequery csp [<filter>] [--area] [--policy] [--db]`:
+  frontend + adminhtml by default (`--area global` = the module-wide tier alone); filter matches
+  host/digest, value id, or module. The mode line reads `csp/mode/storefront|admin/report_only`
+  through the normal `ConfigSet` (default scope + every scope that sets it; `--db` adds
+  `core_config_data`). Not modelled: the `csp/policies/*` config-driven policies and
+  controller/dynamic collectors — `config csp/policies` shows the former.
+
 ### `commands` (console commands from di.xml, static, done)
 
 "What custom `bin/magento` commands does this codebase add?" — a projection over the DI

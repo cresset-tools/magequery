@@ -317,6 +317,20 @@ impl Magento {
         self.acl_index().children(id)
     }
 
+    /// The Content Security Policy whitelist from `csp_whitelist.xml` for `area`: every
+    /// enabled module's global file, with its `etc/<area>/` file laid on top the way
+    /// Magento_Csp merges them, plus each theme's own whitelist for the area (reported
+    /// separately, since which theme is active is runtime state). Policies are sorted by
+    /// id. The report-only/restrict mode lives in config (`csp/mode/storefront|admin/
+    /// report_only`) and is read through [`Magento::config`].
+    pub fn csp_whitelist(&self, area: Area) -> CspWhitelist {
+        self.csp
+            .get_or_init(|| {
+                breadth::CspIndex::build(&self.index.modules, &self.index.vfs, &self.discover_themes())
+            })
+            .whitelist(area)
+    }
+
     fn indexer_index(&self) -> &breadth::IndexerIndex {
         self.indexers.get_or_init(|| breadth::IndexerIndex::build(&self.index.modules, &self.index.vfs))
     }
