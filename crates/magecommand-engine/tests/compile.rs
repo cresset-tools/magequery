@@ -28,7 +28,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use magecommand_engine::build::compute_outputs;
+use magecommand_engine::build::{compute_outputs, compute_outputs_opts};
 use magecommand_engine::definitions::Definitions;
 use magequery_core::Magento;
 
@@ -168,6 +168,51 @@ fn compile_fixtures() {
         "compile gate failed — a compile changed shape. Either a regression \
          (fix it) or an intentional change (re-bless and review the diff):\n\n{}",
         problems.join("\n\n")
+    );
+}
+
+/// Fused interceptors keep the interceptor contract: every one implements
+/// `InterceptorInterface` and its `___callParent`, as stock ones do. Creatuity's
+/// omit it (creatuity/magento2-interceptors#27), which breaks Magento's
+/// integration-test `StoreManager::reinitStores()`.
+#[test]
+fn fused_interceptors_implement_interceptor_interface() {
+    let dir = fixtures_dir();
+    let mut checked = 0usize;
+    for case in std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()) {
+        let case_in = case.join("in");
+        if !case_in.is_dir() {
+            continue;
+        }
+        let magento = Magento::open(&case_in).unwrap();
+        let mut defs = Definitions::scan(&magento, &case_in, &case_in.join("generated/code"));
+        let out = compute_outputs_opts(&magento, &mut defs, &case_in, true);
+        for (name, body) in &out.files {
+            if !name.ends_with("/Interceptor.php") {
+                continue;
+            }
+            checked += 1;
+            assert!(body.contains("____om()"), "{name}: not fused");
+            let decl = body
+                .lines()
+                .find(|l| l.starts_with("class Interceptor "))
+                .unwrap();
+            assert!(
+                decl.ends_with(
+                    " implements \\Magento\\Framework\\Interception\\InterceptorInterface"
+                ),
+                "{name}: {decl}"
+            );
+            assert!(
+                body.contains("public function ___callParent($method, array $arguments)"),
+                "{name}: no ___callParent"
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "no interceptors emitted under {}",
+        dir.display()
     );
 }
 
