@@ -1275,12 +1275,10 @@ pub(crate) fn setup_overrides(
         ),
     ];
 
-    // Keyed by where the ComponentRegistrar sees each module, which for a module
-    // read from an extra app/code tree is its deployed app/code path.
     let module_by_path: HashMap<&std::path::Path, bool> = magento
         .modules()
         .iter()
-        .map(|m| (magento.registered_path(m), m.enabled))
+        .map(|m| (m.path.as_path(), m.enabled))
         .collect();
     let library_set: HashSet<&std::path::Path> =
         magento.library_paths().iter().map(|p| p.as_path()).collect();
@@ -1363,13 +1361,6 @@ pub(crate) fn setup_overrides(
                 }
             }
         }
-    }
-    // Modules from an extra app/code tree (integration-test fixtures) are not on
-    // disk under app/code yet; they register there once deployed. Their glob order
-    // is filesystem order like the rest of app/code, so sorted is as faithful as
-    // any; a module already deployed was pushed above and is skipped by the dedup.
-    for (_, registered) in magento.mounted_modules() {
-        registration_dirs.push(registered.to_path_buf());
     }
 
     let mut seen_modules: HashSet<&std::path::Path> = HashSet::new();

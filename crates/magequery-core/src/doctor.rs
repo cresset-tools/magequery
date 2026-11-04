@@ -63,7 +63,6 @@ pub(crate) fn run(mage: &Magento, source_filter: Option<ModuleSource>) -> Doctor
     phase("module set", &mut d, &|d| d.check_module_set());
     phase("disabled modules", &mut d, &|d| d.check_disabled_modules());
     phase("sequence cycles", &mut d, &|d| d.check_sequence_cycles());
-    phase("module order", &mut d, &|d| d.check_module_order());
     phase("di", &mut d, &|d| d.check_di());
     phase("duplicate keys", &mut d, &|d| d.check_duplicate_keys());
     phase("class name case", &mut d, &|d| d.check_class_name_case());
@@ -428,66 +427,6 @@ impl Doctor<'_> {
                 Some(source),
             );
         }
-    }
-
-    /// config.php against the order Magento would write for the same modules. Only
-    /// meaningful when the sets agree: drift in the set is E1001/E1002, and
-    /// `setup:upgrade` fixes both at once. A cycle (E1003) has no order to compare.
-    fn check_module_order(&mut self) {
-        let check = self.mage.module_check();
-        if !check.in_config_not_on_disk.is_empty() || !check.on_disk_not_in_config.is_empty() {
-            return;
-        }
-        let modules = &self.mage.index.modules;
-        let Ok(expected) = crate::engine::index::sort_by_sequence(
-            modules.iter().map(|m| (&m.name, m.sequence.as_slice())),
-        ) else {
-            return;
-        };
-        let Some(first) = modules.iter().zip(&expected).position(|(m, e)| m.name != *e) else {
-            return;
-        };
-
-        // Modules listed before one of their own <sequence> dependencies: the
-        // merges that are wrong now, not just after the next setup:upgrade.
-        let position: HashMap<&str, usize> =
-            modules.iter().enumerate().map(|(i, m)| (m.name.as_str(), i)).collect();
-        let mut early: Vec<String> = Vec::new();
-        for (i, m) in modules.iter().enumerate() {
-            for dep in &m.sequence {
-                if position.get(dep.as_str()).is_some_and(|&p| p > i) {
-                    early.push(format!("{} loads before {dep}", m.name));
-                }
-            }
-        }
-
-        let listed = &modules[first].name;
-        let config_php = self.mage.root().join("app/etc/config.php");
-        let needle = format!("'{listed}'");
-        let line = self
-            .mage
-            .read_source(&config_php)
-            .ok()
-            .and_then(|text| text.lines().position(|l| l.contains(&needle)).map(|i| i as u32 + 1))
-            .unwrap_or(0);
-        let source = Source { module: listed.clone(), file: config_php, line, area: Area::Global };
-        let mut message = format!(
-            "config.php's module order differs from what `bin/magento setup:upgrade` writes, \
-first at position {}: {listed} is listed where Magento puts {}",
-            first + 1,
-            expected[first]
-        );
-        if !early.is_empty() {
-            let shown: Vec<&str> = early.iter().take(5).map(String::as_str).collect();
-            let more = early.len().saturating_sub(shown.len());
-            message.push_str(&format!(
-                "; {} module(s) load before a <sequence> dependency ({}{})",
-                early.len(),
-                shown.join(", "),
-                if more > 0 { format!(", and {more} more") } else { String::new() }
-            ));
-        }
-        self.warn_on(DoctorLint::ModuleOrderStale, listed, message, Some(source));
     }
 
     fn check_sequence_cycles(&mut self) {

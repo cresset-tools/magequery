@@ -51,39 +51,6 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
-## [0.24.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.24.0...magequery-v0.24.1) (2026-11-04)
-
-
-### Bug Fixes
-
-* drop the x86_64-apple-darwin target everywhere ([3b5f6a5](https://github.com/cresset-tools/magequery/commit/3b5f6a58f4127983fc62d9b5852a308d9467c40e))
-
-## [0.24.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.23.0...magequery-v0.24.0) (2026-11-04)
-
-
-### Features
-
-* **magecommand:** compile a never-installed root with --all-modules and --extra-app-code ([8d69b1f](https://github.com/cresset-tools/magequery/commit/8d69b1f721a2b907c076687bb97f58e6fb6698e9))
-* **magequery:** doctor E1006 flags a config.php module order Magento wouldn't write ([1c8470f](https://github.com/cresset-tools/magequery/commit/1c8470ff731673421b0309898487e5bb2abef162))
-
-
-### Bug Fixes
-
-* **magequery:** read module.xml's &lt;sequence&gt; the way Magento does ([80710b4](https://github.com/cresset-tools/magequery/commit/80710b459245e28d79a1afd9d10b5583951f8b0d))
-
-## [0.23.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.22.0...magequery-v0.23.0) (2026-11-04)
-
-
-### Features
-
-* **magequery:** add csp command for the csp_whitelist.xml whitelist ([3269567](https://github.com/cresset-tools/magequery/commit/3269567a91cd0e60bfc699b71d6fbe39ffdba1b6))
-* **magequery:** publish magecommand as its own Packagist package ([cfc20a6](https://github.com/cresset-tools/magequery/commit/cfc20a6fd794a7deb0af8255f015c178fd6054ee))
-
-
-### Bug Fixes
-
-* **magequery:** push cresset/magecommand with the app token, not GITHUB_TOKEN ([1c83e56](https://github.com/cresset-tools/magequery/commit/1c83e5609148ece747aaa856f64fb99e621489f1))
-
 ## [0.22.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.21.0...magequery-v0.22.0) (2026-11-02)
 
 

@@ -28,25 +28,6 @@ pub(crate) struct Index {
     pub packages: Vec<PackageMeta>,
     /// Library component paths (magento2-library packages), registration order.
     pub library_paths: Vec<PathBuf>,
-    /// Modules read from an [`OpenOptions::extra_app_code`] directory: their source
-    /// root on disk → the `app/code/<Vendor>/<Module>` path they are compiled as.
-    pub mounts: HashMap<PathBuf, PathBuf>,
-}
-
-/// How [`Index::build`] decides which modules exist and in what order.
-#[non_exhaustive]
-#[derive(Debug, Clone, Default)]
-pub struct OpenOptions {
-    /// Ignore `app/etc/config.php`: every discovered module is enabled, ordered the
-    /// way Magento orders a fresh install (`ModuleList\Loader::load`). For a
-    /// checkout that was never installed, such as the root an integration-test
-    /// sandbox is built from.
-    pub all_modules: bool,
-    /// Directories laid out like `app/code` (`<Vendor>/<Module>/etc/module.xml`).
-    /// Their modules are read from there but treated as if deployed under
-    /// `app/code`, which is what Magento's integration-test bootstrap does with
-    /// `dev/tests/integration/_files`.
-    pub extra_app_code: Vec<PathBuf>,
 }
 
 /// The slice of a composer package `deps`/`info` need: who it is, where it lives (to map
@@ -70,15 +51,9 @@ struct Discovered {
 }
 
 impl Index {
-    pub fn build(root: &Path, vfs: Arc<Vfs>, opts: &OpenOptions) -> Result<Index> {
+    pub fn build(root: &Path, vfs: Arc<Vfs>) -> Result<Index> {
         let config_php = root.join("app/etc/config.php");
-        // Without config.php, the skeleton's app/etc/di.xml is what marks a root.
-        let is_root = if opts.all_modules {
-            config_php.is_file() || root.join("app/etc/di.xml").is_file()
-        } else {
-            config_php.is_file()
-        };
-        if !is_root {
+        if !config_php.is_file() {
             return Err(Error::NotMagentoRoot {
                 path: root.to_path_buf(),
             });
@@ -87,18 +62,14 @@ impl Index {
         let mut diagnostics = Vec::new();
         let _p = std::time::Instant::now();
 
-        let ordered = if opts.all_modules {
-            None
-        } else {
-            let text = vfs.read_to_string(&config_php).map_err(|source| Error::Io {
-                file: config_php.clone(),
-                source,
-            })?;
-            Some(parse::config_php_modules(&text).map_err(|detail| Error::Parse {
-                file: config_php.clone(),
-                detail,
-            })?)
-        };
+        let text = vfs.read_to_string(&config_php).map_err(|source| Error::Io {
+            file: config_php.clone(),
+            source,
+        })?;
+        let ordered = parse::config_php_modules(&text).map_err(|detail| Error::Parse {
+            file: config_php.clone(),
+            detail,
+        })?;
         prof("config.php read+parse", &_p);
 
         // Parse composer metadata once — reused for vendor discovery and the class
@@ -127,29 +98,6 @@ impl Index {
         let _p = std::time::Instant::now();
         discover_app_code(root, &mut discovered, &mut diagnostics, &vfs);
         prof("app/code discovery", &_p);
-        // Extra app/code trees come after the real one (a module already deployed to
-        // app/code wins) and before vendor, matching where they will be registered.
-        let mut mounts = HashMap::new();
-        for dir in &opts.extra_app_code {
-            let mut found: HashMap<ModuleName, Discovered> = HashMap::new();
-            scan(dir, ModuleSource::App, 0, &mut found, &mut diagnostics, &vfs);
-            let mut found: Vec<_> = found.into_iter().collect();
-            found.sort_by(|a, b| a.0.cmp(&b.0));
-            for (name, d) in found {
-                // Mount only what merge keeps: a module already deployed to app/code
-                // wins, and its fixture copy is just the duplicate warning.
-                let mount = d
-                    .path
-                    .strip_prefix(dir)
-                    .ok()
-                    .map(|rel| (d.path.clone(), root.join("app/code").join(rel)));
-                let fresh = !discovered.contains_key(&name);
-                merge(&mut discovered, &mut diagnostics, name, d);
-                if let (true, Some((src, registered))) = (fresh, mount) {
-                    mounts.insert(src, registered);
-                }
-            }
-        }
         let _p = std::time::Instant::now();
         if !packages.is_empty() {
             discover_vendor(&packages, &mut discovered, &mut diagnostics, &vfs);
@@ -157,17 +105,6 @@ impl Index {
             scan(&vendor, ModuleSource::Vendor, 0, &mut discovered, &mut diagnostics, &vfs);
         }
         prof("vendor discovery", &_p);
-
-        // Without config.php, every module on disk is enabled, in the order Magento's
-        // installer would write them.
-        let ordered = match ordered {
-            Some(o) => o,
-            None => sort_by_sequence(discovered.iter().map(|(n, d)| (n, d.sequence.as_slice())))
-                .map_err(|detail| Error::Parse { file: PathBuf::from("etc/module.xml"), detail })?
-                .into_iter()
-                .map(|n| (n, true))
-                .collect(),
-        };
 
         // Build the module list in config.php load order, and record any config entry that
         // has no matching module on disk.
@@ -247,85 +184,8 @@ impl Index {
             diagnostics,
             packages,
             library_paths,
-            mounts,
         })
     }
-}
-
-/// Magento's module load order for a fresh install: a port of
-/// `Framework\Module\ModuleList\Loader::sortBySequence`, which writes `config.php`
-/// on install, `setup:upgrade` and `module:enable`. Ported literally, quirks
-/// included, because the order decides how di.xml merges: names sorted bytewise
-/// (`ksort`), then every name *containing* `Magento_` moved first, then a pairwise
-/// swap pass that is neither stable nor a topological sort in general. `Err` names
-/// a `<sequence>` cycle, as Magento's LogicException does.
-pub(crate) fn sort_by_sequence<'a>(
-    modules: impl IntoIterator<Item = (&'a ModuleName, &'a [ModuleName])>,
-) -> std::result::Result<Vec<ModuleName>, String> {
-    let sequences: HashMap<&str, &[ModuleName]> =
-        modules.into_iter().map(|(n, seq)| (n.as_str(), seq)).collect();
-    let mut names: Vec<&str> = sequences.keys().copied().collect();
-    names.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-    let (magento, others): (Vec<&str>, Vec<&str>) =
-        names.into_iter().partition(|n| n.contains("Magento_"));
-
-    let mut cache: HashMap<&str, Vec<&str>> = HashMap::new();
-    let mut expanded: Vec<(&str, std::collections::HashSet<&str>)> = Vec::new();
-    for name in magento.into_iter().chain(others) {
-        let seq = expand_sequence(&sequences, name, &mut cache, &mut Vec::new())?;
-        expanded.push((name, seq.into_iter().collect()));
-    }
-
-    // The "bubble sort" from Loader, verbatim: `$j` starts at `$i`, and `$i` is
-    // re-read after every swap.
-    let total = expanded.len();
-    for i in 0..total.saturating_sub(1) {
-        for j in i..total {
-            if expanded[i].1.contains(expanded[j].0) {
-                expanded.swap(i, j);
-            }
-        }
-    }
-    Ok(expanded.into_iter().map(|(n, _)| ModuleName::new(n)).collect())
-}
-
-/// `Loader::expandSequence`: a module's direct and transitive `<sequence>`
-/// entries. A name no module declares still counts (it just has no sequence of
-/// its own).
-fn expand_sequence<'a>(
-    sequences: &HashMap<&'a str, &'a [ModuleName]>,
-    name: &'a str,
-    cache: &mut HashMap<&'a str, Vec<&'a str>>,
-    stack: &mut Vec<&'a str>,
-) -> std::result::Result<Vec<&'a str>, String> {
-    if stack.contains(&name) {
-        let parent = stack.last().copied().unwrap_or_default();
-        return Err(format!("circular sequence reference from '{parent}' to '{name}'"));
-    }
-    if let Some(seq) = cache.get(name) {
-        return Ok(seq.clone());
-    }
-    let direct: Vec<&'a str> = sequences
-        .get(name)
-        .map(|seq| seq.iter().map(ModuleName::as_str).collect())
-        .unwrap_or_default();
-    stack.push(name);
-    let mut all: Vec<&'a str> = Vec::new();
-    for dep in &direct {
-        for s in expand_sequence(sequences, dep, cache, stack)? {
-            if !all.contains(&s) {
-                all.push(s);
-            }
-        }
-    }
-    stack.pop();
-    for s in &direct {
-        if !all.contains(s) {
-            all.push(s);
-        }
-    }
-    cache.insert(name, all.clone());
-    Ok(all)
 }
 
 fn prof(label: &str, since: &std::time::Instant) {
@@ -516,49 +376,5 @@ fn scan(
             continue;
         }
         scan(&entry.path(), source, depth + 1, out, diags, vfs);
-    }
-}
-
-#[cfg(test)]
-mod sort_tests {
-    use super::sort_by_sequence;
-    use crate::ids::ModuleName;
-
-    /// `sort_by_sequence` against goldens produced by Magento's own
-    /// `ModuleList\Loader` (scripts/module-order-goldens.php runs its sorting
-    /// methods verbatim): 200 random graphs aimed at the quirks, and the 359
-    /// modules of the bougie testing demo's integration sandbox.
-    #[test]
-    fn order_matches_magentos_loader_goldens() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/module-order");
-        let mut checked = 0;
-        for file in ["random.json", "real.json"] {
-            let text = std::fs::read_to_string(dir.join(file)).unwrap();
-            let cases: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
-            for case in &cases {
-                let name = case["name"].as_str().unwrap();
-                let modules: Vec<(ModuleName, Vec<ModuleName>)> = case["modules"]
-                    .as_object()
-                    .unwrap()
-                    .iter()
-                    .map(|(n, seq)| {
-                        let seq = seq.as_array().unwrap().iter();
-                        (ModuleName::new(n), seq.map(|s| ModuleName::new(s.as_str().unwrap())).collect())
-                    })
-                    .collect();
-                let got = sort_by_sequence(modules.iter().map(|(n, s)| (n, s.as_slice())));
-                match case["expected"].as_array() {
-                    Some(expected) => {
-                        let expected: Vec<&str> = expected.iter().map(|v| v.as_str().unwrap()).collect();
-                        let got = got.unwrap_or_else(|e| panic!("{file} {name}: {e}"));
-                        let got: Vec<&str> = got.iter().map(ModuleName::as_str).collect();
-                        assert_eq!(got, expected, "{file} {name}");
-                    }
-                    None => assert!(got.is_err(), "{file} {name}: Magento rejects a cycle"),
-                }
-                checked += 1;
-            }
-        }
-        assert_eq!(checked, 201);
     }
 }

@@ -43,7 +43,6 @@ mod whatis;
 pub mod laminas_alias;
 
 pub use error::{Diagnostic, Error, Result, Severity};
-pub use engine::index::OpenOptions;
 pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
 pub use model::{
     plugin_read_rank, DiExport, DiSummary, ObjectRef, PluginDecl, PreferenceDecl, TypeArgDecl,
@@ -171,13 +170,6 @@ impl Magento {
         Self::open_with_overlay(root, std::collections::HashMap::new())
     }
 
-    /// [`open`](Magento::open) with control over module discovery: ignore
-    /// `config.php` and enable everything on disk, or read extra modules from an
-    /// `app/code`-shaped directory. See [`OpenOptions`].
-    pub fn open_with_options(root: impl AsRef<Path>, opts: &OpenOptions) -> Result<Self> {
-        Self::build(root.as_ref(), std::collections::HashMap::new(), opts)
-    }
-
     /// [`open`](Magento::open) with unsaved-buffer contents overlaid on the checkout:
     /// every content read of a source file prefers `overlay` (keyed by absolute path)
     /// over disk, so an editor frontend can analyze what's in its buffers. The overlay
@@ -188,18 +180,9 @@ impl Magento {
         root: impl AsRef<Path>,
         overlay: std::collections::HashMap<PathBuf, String>,
     ) -> Result<Self> {
-        Self::build(root.as_ref(), overlay, &OpenOptions::default())
-    }
-
-    fn build(
-        root: &Path,
-        overlay: std::collections::HashMap<PathBuf, String>,
-        opts: &OpenOptions,
-    ) -> Result<Self> {
         let index = engine::index::Index::build(
-            root,
+            root.as_ref(),
             std::sync::Arc::new(engine::vfs::Vfs::new(overlay)),
-            opts,
         )?;
         Ok(Self {
             index,
@@ -297,22 +280,6 @@ impl Magento {
     /// order. The DI compiler scans these alongside module paths.
     pub fn library_paths(&self) -> &[std::path::PathBuf] {
         &self.index.library_paths
-    }
-
-    /// Where Magento's ComponentRegistrar will see `module`: its [`Module::path`],
-    /// except for a module read from [`OpenOptions::extra_app_code`], which is
-    /// registered at the `app/code` path it gets deployed to.
-    pub fn registered_path<'a>(&'a self, module: &'a Module) -> &'a Path {
-        self.index.mounts.get(&module.path).map_or(module.path.as_path(), PathBuf::as_path)
-    }
-
-    /// Modules read from [`OpenOptions::extra_app_code`], as `(source root,
-    /// registered app/code path)`, sorted by registered path.
-    pub fn mounted_modules(&self) -> Vec<(&Path, &Path)> {
-        let mut v: Vec<(&Path, &Path)> =
-            self.index.mounts.iter().map(|(s, r)| (s.as_path(), r.as_path())).collect();
-        v.sort_by(|a, b| a.1.cmp(b.1));
-        v
     }
 
     /// The fully merged DI configuration of `area`, exported wholesale: every
@@ -1210,106 +1177,6 @@ mod handle_tests {
         assert_eq!(found.as_deref(), Some(tree.0.join("shop").as_path()));
     }
 
-    /// A module.xml declaring `name` with `<sequence>` on `seq`.
-    fn module_xml(tree: &TempTree, dir: &str, name: &str, seq: &[&str]) {
-        let path = tree.0.join(dir).join("etc/module.xml");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let seq: String = seq.iter().map(|s| format!(r#"<module name="{s}"/>"#)).collect();
-        std::fs::write(
-            path,
-            format!(r#"<config><module name="{name}"><sequence>{seq}</sequence></module></config>"#),
-        )
-        .unwrap();
-    }
-
-    fn all_modules() -> super::OpenOptions {
-        let mut o = super::OpenOptions::default();
-        o.all_modules = true;
-        o
-    }
-
-    /// Without config.php the order is Magento's `ModuleList\Loader::sortBySequence`.
-    /// The expected list is what Magento's own code returns for this input (its three
-    /// sorting methods run verbatim), quirks and all: `Acme_Widget` lands before
-    /// `Acme_Base`, and `Acme_Magento_Bridge` sorts with the `Magento_` modules'
-    /// group because the check is "contains", not "starts with".
-    #[test]
-    fn all_modules_orders_like_magentos_loader() {
-        let tree = TempTree::new("all-modules-order");
-        tree.touch("app/etc/di.xml");
-        module_xml(&tree, "app/code/Magento/Theme", "Magento_Theme", &["Magento_Store"]);
-        module_xml(&tree, "app/code/Magento/Store", "Magento_Store", &[]);
-        module_xml(&tree, "app/code/Magento/Cms", "Magento_Cms", &["Magento_Theme"]);
-        module_xml(&tree, "app/code/Acme/Widget", "Acme_Widget", &["Magento_Cms"]);
-        module_xml(&tree, "app/code/Acme/Base", "Acme_Base", &[]);
-        module_xml(&tree, "app/code/Acme/MagentoBridge", "Acme_Magento_Bridge", &["Acme_Widget"]);
-        module_xml(&tree, "app/code/Zed/Early", "Zed_Early", &[]);
-
-        let m = super::Magento::open_with_options(&tree.0, &all_modules()).unwrap();
-        let names: Vec<&str> = m.modules().iter().map(|m| m.name.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "Magento_Store",
-                "Magento_Theme",
-                "Magento_Cms",
-                "Acme_Widget",
-                "Acme_Base",
-                "Acme_Magento_Bridge",
-                "Zed_Early",
-            ]
-        );
-        assert!(m.modules().iter().all(|m| m.enabled));
-        assert!(m.module_check().on_disk_not_in_config.is_empty());
-    }
-
-    #[test]
-    fn all_modules_rejects_a_sequence_cycle() {
-        let tree = TempTree::new("all-modules-cycle");
-        tree.touch("app/etc/di.xml");
-        module_xml(&tree, "app/code/Acme/A", "Acme_A", &["Acme_B"]);
-        module_xml(&tree, "app/code/Acme/B", "Acme_B", &["Acme_A"]);
-
-        let err = super::Magento::open_with_options(&tree.0, &all_modules()).err().unwrap();
-        assert!(err.to_string().contains("circular sequence"), "{err}");
-    }
-
-    /// Without `all_modules`, a root still needs config.php; di.xml alone is not one.
-    #[test]
-    fn config_php_is_still_required_by_default() {
-        let tree = TempTree::new("all-modules-default");
-        tree.touch("app/etc/di.xml");
-        assert!(matches!(
-            super::Magento::open(&tree.0),
-            Err(super::Error::NotMagentoRoot { .. })
-        ));
-    }
-
-    /// Integration-test fixtures: read from `_files`, registered at app/code, and
-    /// a module already deployed to app/code wins over its `_files` copy.
-    #[test]
-    fn extra_app_code_registers_modules_at_app_code() {
-        let tree = TempTree::new("extra-app-code");
-        tree.touch("app/etc/di.xml");
-        module_xml(&tree, "app/code/Acme/Widget", "Acme_Widget", &[]);
-        module_xml(&tree, "fixtures/Magento/TestModuleA", "Magento_TestModuleA", &[]);
-        module_xml(&tree, "fixtures/Acme/Widget", "Acme_Widget", &[]);
-
-        let mut opts = all_modules();
-        opts.extra_app_code.push(tree.0.join("fixtures"));
-        let m = super::Magento::open_with_options(&tree.0, &opts).unwrap();
-
-        let fixture = m.modules().iter().find(|m| m.name.as_str() == "Magento_TestModuleA").unwrap();
-        assert_eq!(fixture.path, tree.0.join("fixtures/Magento/TestModuleA"));
-        assert_eq!(m.registered_path(fixture), tree.0.join("app/code/Magento/TestModuleA"));
-        assert_eq!(fixture.source, crate::model::ModuleSource::App);
-
-        let widget = m.modules().iter().find(|m| m.name.as_str() == "Acme_Widget").unwrap();
-        assert_eq!(widget.path, tree.0.join("app/code/Acme/Widget"));
-        assert_eq!(m.registered_path(widget), widget.path);
-        assert_eq!(m.mounted_modules().len(), 1);
-    }
-
     #[test]
     fn find_root_returns_none_outside_an_installation() {
         let tree = TempTree::new("find-root-none");
@@ -1741,48 +1608,6 @@ mod handle_tests {
             "{:?}",
             diags.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
-    }
-
-    /// config.php in a different order than Magento writes it: reported on the first
-    /// differing line, naming the module that loads before its own <sequence>
-    /// dependency. The order Magento writes, and a module-set drift (E1002's job),
-    /// are both quiet.
-    #[test]
-    fn doctor_flags_a_stale_module_order() {
-        let tree = TempTree::new("doctor-order");
-        let write = |rel: &str, content: &str| {
-            let path = tree.0.join(rel);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, content).unwrap();
-        };
-        module_xml(&tree, "app/code/Acme/Base", "Acme_Base", &[]);
-        module_xml(&tree, "app/code/Acme/Widget", "Acme_Widget", &["Acme_Base"]);
-        let lint = crate::model::DoctorLint::ModuleOrderStale;
-        let order_findings = |config: &str| {
-            write("app/etc/config.php", config);
-            let magento = super::Magento::open(&tree.0).unwrap();
-            magento.doctor(None).findings.into_iter().filter(|f| f.lint == lint).collect::<Vec<_>>()
-        };
-
-        let stale = order_findings(
-            "<?php\nreturn ['modules' => [\n'Acme_Widget' => 1,\n'Acme_Base' => 1,\n]];\n",
-        );
-        assert_eq!(stale.len(), 1, "{stale:?}");
-        let f = &stale[0];
-        assert_eq!(f.subject.as_deref(), Some("Acme_Widget"));
-        assert_eq!(f.source.as_ref().map(|s| s.line), Some(3), "anchored on config.php");
-        assert_eq!(f.severity, crate::Severity::Warning);
-        assert!(f.message.contains("first at position 1: Acme_Widget is listed where Magento puts Acme_Base"), "{}", f.message);
-        assert!(f.message.contains("Acme_Widget loads before Acme_Base"), "{}", f.message);
-        assert_eq!(lint.code(), "E1006");
-
-        let fresh = order_findings(
-            "<?php\nreturn ['modules' => [\n'Acme_Base' => 1,\n'Acme_Widget' => 0,\n]];\n",
-        );
-        assert!(fresh.is_empty(), "Magento's own order, disabled module included: {fresh:?}");
-
-        let drift = order_findings("<?php\nreturn ['modules' => [\n'Acme_Widget' => 1,\n]];\n");
-        assert!(drift.is_empty(), "set drift is E1002's: {drift:?}");
     }
 
     /// A module switched off in config.php is reported on its config.php line, and

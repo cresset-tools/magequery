@@ -304,22 +304,6 @@ modules. Use composer metadata:
   roots; skips `Test`, `_files`, `var`, `generated`, …).
 - `config.php` order is the authoritative, already-sequence-resolved load order; disk
   discovery only supplies path/source/`<sequence>`.
-- **Without config.php** (`OpenOptions::all_modules`, magecommand `--all-modules`):
-  every discovered module is enabled and ordered by `sort_by_sequence` in
-  `engine/index.rs`, a literal port of `ModuleList\Loader::sortBySequence` — the code
-  that writes config.php on a fresh install. Keep it literal: the "bubble sort" is
-  neither stable nor topological, and the `Magento_` partition is a *contains* check,
-  and di.xml merge order depends on all of it. Verified identical to Magento's
-  config.php on five real roots (88–372 modules), and pinned by
-  `sort_tests::order_matches_magentos_loader_goldens` against
-  `tests/fixtures/module-order/` — goldens that `scripts/module-order-goldens.php`
-  produces by running Loader's own sorting methods verbatim (no PHP in CI, so the
-  goldens are committed; regenerate them when Loader changes).
-- **Extra app/code trees** (`OpenOptions::extra_app_code`, `--extra-app-code`): modules
-  read from an app/code-shaped directory (integration tests' `_files`) but *registered*
-  at `app/code/<rel>`. The registered path matters: the compiled area files bake module
-  paths into the setup scanner's exclusion regexes. Use `Magento::registered_path`, not
-  `Module::path`, anywhere a path reaches output.
 
 Result on the 2.4.8 store checkout: 655 modules (matches `config.php` exactly), ~16ms warm
 (was ~180ms with the brute walk).
@@ -1095,16 +1079,6 @@ classes under `Console/`/`Observer/`/`Plugin/` that are concrete, match their ba
 wired **nowhere**. Candidates are verified by
 resolving the conventional class name back through PSR-4 to the same file (namespace-
 diverging modules are skipped, never misreported).
-
-**Module order** (warning, E1006 `module-order-stale`): config.php lists exactly the
-modules on disk but not in the order `setup:upgrade` writes, i.e. not what
-`engine::index::sort_by_sequence` (the Loader port) computes from their `<sequence>`s —
-a hand-resolved merge conflict, usually. Skipped when the module set drifts (E1001/E1002,
-which `setup:upgrade` fixes at the same time) or the sequences cycle (E1003). Anchored on
-the first differing config.php line; the message also lists modules loaded before one of
-their own direct `<sequence>` dependencies, the merges that are wrong today rather than
-after the next upgrade. Computed lazily from `Module::sequence`, so `open` pays nothing.
-Clean on five real stores; moving one line of a real config.php fires it.
 
 **Duplicate keys** (error, `duplicate-argument-key`): an `<argument name>` or array `<item
 name>` repeated for one type within one di.xml. The merged config only keeps the winner, so
@@ -2098,10 +2072,9 @@ republish, clean shutdown/exit. The CI twin is `crates/magequery-lsp/tests/e2e.r
 `Connection::memory()` against a synthetic root (broken preference → diagnostic with
 code/line, definition, event hover, watched-file fix → diagnostic cleared, shutdown). dist targets grew `aarch64-unknown-linux-gnu` (native arm
 runner via `[dist.github-custom-runners]`; dist computes the release matrix from
-dist-workspace.toml at run time, so no release.yml regeneration was needed).
-`x86_64-apple-darwin` was added then and dropped again at 0.24.0, whose release build
-never got an Intel macOS runner — **the editor extensions' platform→triple download maps
-must stay in sync with the dist target list** (noted in dist-workspace.toml too). The VS Code
+dist-workspace.toml at run time, so no release.yml regeneration was needed) and
+`x86_64-apple-darwin` — **the editor extensions' platform→triple download maps must stay
+in sync with the dist target list** (noted in dist-workspace.toml too). The VS Code
 extension's `MIN_SERVER_VERSION` is 0.5.0 — the release that first ships `magequery lsp`.
 
 ## Future query tools (backlog — empty)

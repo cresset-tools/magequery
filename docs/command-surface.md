@@ -52,18 +52,10 @@ Global flags plus:
 
 ```
 di compile [--dry-run] [--force] [--incremental] [--fused]
-           [--all-modules] [--extra-app-code <DIR>]...
     Generate the DI config + generated code. --dry-run previews the work plan;
     --force overwrites an existing generated tree; --incremental skips the whole
     compile when no input changed since the last run (stat-fingerprint short-circuit);
     --fused emits fused interceptors (see below).
-    --all-modules ignores app/etc/config.php (it need not exist) and enables every
-    module on disk, ordered as Magento's installer would write them (a port of
-    ModuleList\Loader::sortBySequence). --extra-app-code reads modules from a
-    directory laid out like app/code and compiles them as if deployed there. Together
-    they compile for an integration-test sandbox without installing the root:
-    `--all-modules --extra-app-code dev/tests/integration/_files`. `di digest` takes
-    the same two flags.
 
 di verify --archive <DIR> --output <DIR> [--fail-on-diff] [--sample <N>]
           [--no-explain] [--strict-ordering] [--show-residual <FILE>]

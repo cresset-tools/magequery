@@ -83,63 +83,35 @@ pub(crate) struct ParsedModuleXml {
     pub sequence: Vec<ModuleName>,
 }
 
-/// Parse etc/module.xml the way Magento's `Module\Declaration\Converter\Dom` +
-/// `ModuleList\Loader` read it: the module is the FIRST `<module>` directly under the
-/// root, and its sequence is the `<module>` children of its LAST direct `<sequence>`
-/// child (each `<sequence>` replaces the previous one, an empty one included).
+/// Parse `<module name="...">` and its `<sequence><module name="..."/></sequence>` children.
 pub(crate) fn module_xml(xml: &str) -> Result<ParsedModuleXml, String> {
     let mut reader = Reader::from_str(xml);
     let mut name: Option<ModuleName> = None;
     let mut sequence = Vec::new();
-    // Element depth: the root is 1, its children (`<module>`) 2, a module's
-    // children (`<sequence>`) 3, a sequence's children 4.
-    let mut depth = 0usize;
-    let mut in_target = false; // inside the first top-level <module>
-    let mut pending: Option<Vec<ModuleName>> = None; // the <sequence> being read
+    let mut in_sequence = false;
     let mut buf = Vec::new();
 
     loop {
-        let event = reader.read_event_into(&mut buf);
-        match event {
+        match reader.read_event_into(&mut buf) {
             Err(e) => return Err(e.to_string()),
             Ok(Event::Eof) => break,
-            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
-                let empty = matches!(event, Ok(Event::Empty(_)));
-                let at = depth + 1;
-                match (e.name().as_ref(), at) {
-                    (b"module", 2) if name.is_none() => {
-                        name = attr(e, b"name").map(ModuleName::new);
-                        in_target = !empty;
-                    }
-                    (b"sequence", 3) if in_target => {
-                        if empty {
-                            sequence = Vec::new();
-                        } else {
-                            pending = Some(Vec::new());
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
+                b"sequence" => in_sequence = true,
+                b"module" => {
+                    if in_sequence {
+                        if let Some(n) = attr(&e, b"name") {
+                            sequence.push(ModuleName::new(n));
                         }
+                    } else if name.is_none() {
+                        name = attr(&e, b"name").map(ModuleName::new);
                     }
-                    (b"module", 4) => {
-                        if let (Some(seq), Some(n)) = (pending.as_mut(), attr(e, b"name")) {
-                            seq.push(ModuleName::new(n));
-                        }
-                    }
-                    _ => {}
                 }
-                if !empty {
-                    depth = at;
+                _ => {}
+            },
+            Ok(Event::End(e)) => {
+                if e.name().as_ref() == b"sequence" {
+                    in_sequence = false;
                 }
-            }
-            Ok(Event::End(ref e)) => {
-                match (e.name().as_ref(), depth) {
-                    (b"sequence", 3) => {
-                        if let Some(seq) = pending.take() {
-                            sequence = seq;
-                        }
-                    }
-                    (b"module", 2) => in_target = false,
-                    _ => {}
-                }
-                depth = depth.saturating_sub(1);
             }
             _ => {}
         }
@@ -347,63 +319,6 @@ return ['modules' => ['Acme_Odd' => 2, 'Acme_Weird' => 'yes', 'Acme_Null' => nul
     }
 
     /// No `modules` node at all is still an error — in either spelling.
-    fn module(xml: &str) -> (String, Vec<String>) {
-        let m = super::module_xml(xml).unwrap();
-        (m.name.as_str().to_owned(), m.sequence.iter().map(|s| s.as_str().to_owned()).collect())
-    }
-
-    #[test]
-    fn module_xml_reads_name_and_sequence() {
-        let (name, seq) = module(
-            r#"<?xml version="1.0"?>
-<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-    <module name="Acme_Widget">
-        <sequence>
-            <module name="Magento_Store"/>
-            <module name="Magento_Catalog"></module>
-        </sequence>
-    </module>
-</config>"#,
-        );
-        assert_eq!(name, "Acme_Widget");
-        assert_eq!(seq, ["Magento_Store", "Magento_Catalog"]);
-    }
-
-    /// Converter\Dom assigns `$moduleData['sequence']` per <sequence> child, so the
-    /// last one wins, an empty one included; and Loader keeps only the first
-    /// top-level <module> (`key($data)`), whose sequence is the only one read.
-    #[test]
-    fn module_xml_follows_magentos_converter_quirks() {
-        let (_, seq) = module(
-            r#"<config><module name="A_B">
-    <sequence><module name="X_One"/></sequence>
-    <sequence><module name="X_Two"/></sequence>
-</module></config>"#,
-        );
-        assert_eq!(seq, ["X_Two"], "the last <sequence> replaces the earlier ones");
-
-        let (_, seq) = module(
-            r#"<config><module name="A_B">
-    <sequence><module name="X_One"/></sequence>
-    <sequence/>
-</module></config>"#,
-        );
-        assert!(seq.is_empty(), "an empty <sequence/> replaces too");
-
-        let (name, seq) = module(
-            r#"<config>
-    <module name="A_First"><sequence><module name="X_One"/></sequence></module>
-    <module name="A_Second"><sequence><module name="X_Two"/></sequence></module>
-</config>"#,
-        );
-        assert_eq!((name.as_str(), seq), ("A_First", vec!["X_One".to_owned()]));
-
-        let (name, seq) = module(
-            r#"<config><module name="A_Empty"/><module name="A_Other"><sequence><module name="X"/></sequence></module></config>"#,
-        );
-        assert_eq!((name.as_str(), seq.len()), ("A_Empty", 0), "a self-closing first module has no sequence");
-    }
-
     #[test]
     fn a_missing_modules_node_is_an_error() {
         let err = config_php_modules("<?php\nreturn ['system' => []];\n").unwrap_err();
