@@ -2098,10 +2098,9 @@ republish, clean shutdown/exit. The CI twin is `crates/magequery-lsp/tests/e2e.r
 `Connection::memory()` against a synthetic root (broken preference → diagnostic with
 code/line, definition, event hover, watched-file fix → diagnostic cleared, shutdown). dist targets grew `aarch64-unknown-linux-gnu` (native arm
 runner via `[dist.github-custom-runners]`; dist computes the release matrix from
-dist-workspace.toml at run time, so no release.yml regeneration was needed).
-`x86_64-apple-darwin` was added then and dropped again at 0.24.0, whose release build
-never got an Intel macOS runner — **the editor extensions' platform→triple download maps
-must stay in sync with the dist target list** (noted in dist-workspace.toml too). The VS Code
+dist-workspace.toml at run time, so no release.yml regeneration was needed) and
+`x86_64-apple-darwin` — **the editor extensions' platform→triple download maps must stay
+in sync with the dist target list** (noted in dist-workspace.toml too). The VS Code
 extension's `MIN_SERVER_VERSION` is 0.5.0 — the release that first ships `magequery lsp`.
 
 ## Future query tools (backlog — empty)
