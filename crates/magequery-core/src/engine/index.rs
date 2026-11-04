@@ -9,7 +9,7 @@ use rayon::prelude::*;
 use crate::composer;
 use crate::error::{Diagnostic, Error, Result};
 use crate::ids::ModuleName;
-use crate::model::{DuplicateModule, Module, ModuleCheck, ModuleSource, UnregisteredModule};
+use crate::model::{Module, ModuleCheck, ModuleSource, UnregisteredModule};
 use crate::parse;
 use crate::engine::resolver;
 use crate::engine::vfs::Vfs;
@@ -69,13 +69,6 @@ struct Discovered {
     sequence: Vec<ModuleName>,
 }
 
-/// Modules found so far, by name, plus every name found in a second place.
-#[derive(Default)]
-struct Discoveries {
-    modules: HashMap<ModuleName, Discovered>,
-    duplicates: Vec<DuplicateModule>,
-}
-
 impl Index {
     pub fn build(root: &Path, vfs: Arc<Vfs>, opts: &OpenOptions) -> Result<Index> {
         let config_php = root.join("app/etc/config.php");
@@ -130,7 +123,7 @@ impl Index {
 
         // Discover modules on disk. app/code is scanned first so it wins over a vendor
         // copy of the same module name, matching Magento's app/code precedence.
-        let mut discovered = Discoveries::default();
+        let mut discovered: HashMap<ModuleName, Discovered> = HashMap::new();
         let _p = std::time::Instant::now();
         discover_app_code(root, &mut discovered, &mut diagnostics, &vfs);
         prof("app/code discovery", &_p);
@@ -138,22 +131,23 @@ impl Index {
         // app/code wins) and before vendor, matching where they will be registered.
         let mut mounts = HashMap::new();
         for dir in &opts.extra_app_code {
-            let mut found = Discoveries::default();
+            let mut found: HashMap<ModuleName, Discovered> = HashMap::new();
             scan(dir, ModuleSource::App, 0, &mut found, &mut diagnostics, &vfs);
-            discovered.duplicates.append(&mut found.duplicates);
-            let mut found: Vec<_> = found.modules.into_iter().collect();
+            let mut found: Vec<_> = found.into_iter().collect();
             found.sort_by(|a, b| a.0.cmp(&b.0));
             for (name, d) in found {
-                // A module already deployed to app/code wins, and its fixture copy is
-                // not a duplicate: the test bootstrap copies it rather than registering
-                // it where it is, so Magento only ever sees the one.
-                if discovered.modules.contains_key(&name) {
-                    continue;
+                // Mount only what merge keeps: a module already deployed to app/code
+                // wins, and its fixture copy is just the duplicate warning.
+                let mount = d
+                    .path
+                    .strip_prefix(dir)
+                    .ok()
+                    .map(|rel| (d.path.clone(), root.join("app/code").join(rel)));
+                let fresh = !discovered.contains_key(&name);
+                merge(&mut discovered, &mut diagnostics, name, d);
+                if let (true, Some((src, registered))) = (fresh, mount) {
+                    mounts.insert(src, registered);
                 }
-                if let Ok(rel) = d.path.strip_prefix(dir) {
-                    mounts.insert(d.path.clone(), root.join("app/code").join(rel));
-                }
-                discovered.modules.insert(name, d);
             }
         }
         let _p = std::time::Instant::now();
@@ -168,7 +162,7 @@ impl Index {
         // installer would write them.
         let ordered = match ordered {
             Some(o) => o,
-            None => sort_by_sequence(discovered.modules.iter().map(|(n, d)| (n, d.sequence.as_slice())))
+            None => sort_by_sequence(discovered.iter().map(|(n, d)| (n, d.sequence.as_slice())))
                 .map_err(|detail| Error::Parse { file: PathBuf::from("etc/module.xml"), detail })?
                 .into_iter()
                 .map(|n| (n, true))
@@ -180,7 +174,7 @@ impl Index {
         let mut modules = Vec::with_capacity(ordered.len());
         let mut in_config_not_on_disk = Vec::new();
         for (load_order, (name, enabled)) in ordered.into_iter().enumerate() {
-            match discovered.modules.remove(&name) {
+            match discovered.remove(&name) {
                 Some(d) => modules.push(Module {
                     name,
                     enabled,
@@ -196,10 +190,7 @@ impl Index {
         // Whatever is still in `discovered` exists on disk but isn't in config.php — the
         // "forgot setup:upgrade" case. Reported structurally via `module_check`, not as
         // always-on diagnostic noise.
-        let mut duplicates = discovered.duplicates;
-        duplicates.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.ignored.cmp(&b.ignored)));
         let mut on_disk_not_in_config: Vec<UnregisteredModule> = discovered
-            .modules
             .into_iter()
             .map(|(name, d)| UnregisteredModule { name, source: d.source, path: d.path })
             .collect();
@@ -251,7 +242,7 @@ impl Index {
             root: root.to_path_buf(),
             vfs,
             modules,
-            check: ModuleCheck { on_disk_not_in_config, in_config_not_on_disk, duplicates },
+            check: ModuleCheck { on_disk_not_in_config, in_config_not_on_disk },
             resolver,
             diagnostics,
             packages,
@@ -345,7 +336,7 @@ fn prof(label: &str, since: &std::time::Instant) {
 
 fn discover_app_code(
     root: &Path,
-    out: &mut Discoveries,
+    out: &mut HashMap<ModuleName, Discovered>,
     diags: &mut Vec<Diagnostic>,
     vfs: &Vfs,
 ) {
@@ -358,7 +349,7 @@ fn discover_app_code(
 
 fn discover_vendor(
     packages: &[composer::ComposerPackage],
-    out: &mut Discoveries,
+    out: &mut HashMap<ModuleName, Discovered>,
     diags: &mut Vec<Diagnostic>,
     vfs: &Vfs,
 ) {
@@ -448,32 +439,20 @@ fn read_module_root(dir: &Path, source: ModuleSource, vfs: &Vfs) -> Probe {
     }
 }
 
-/// Insert a discovered module, keeping the first occurrence on a name clash and
-/// recording the clash. Magento refuses the second registration of a module name
-/// (`ComponentRegistrar::register` throws), so a clash means a store that won't boot.
-/// The same directory found twice (a superpackage module that is also an
-/// `autoload.files` root) is one module, not a clash.
-fn merge(out: &mut Discoveries, diags: &mut Vec<Diagnostic>, name: ModuleName, d: Discovered) {
-    match out.modules.get(&name) {
-        Some(kept) if kept.path == d.path => {}
-        Some(kept) => {
-            diags.push(Diagnostic::warning(
-                format!(
-                    "module {name} is defined in both {} and {}; Magento refuses to register it twice, magequery keeps the first",
-                    kept.path.display(),
-                    d.path.display()
-                ),
-                None,
-            ));
-            out.duplicates.push(DuplicateModule {
-                name,
-                kept: kept.path.clone(),
-                ignored: d.path,
-            });
-        }
-        None => {
-            out.modules.insert(name, d);
-        }
+/// Insert a discovered module, keeping the first occurrence on a name clash.
+fn merge(
+    out: &mut HashMap<ModuleName, Discovered>,
+    diags: &mut Vec<Diagnostic>,
+    name: ModuleName,
+    d: Discovered,
+) {
+    if out.contains_key(&name) {
+        diags.push(Diagnostic::warning(
+            format!("module {name} declared in multiple locations; keeping the first"),
+            None,
+        ));
+    } else {
+        out.insert(name, d);
     }
 }
 
@@ -482,7 +461,7 @@ fn merge(out: &mut Discoveries, diags: &mut Vec<Diagnostic>, name: ModuleName, d
 fn try_module_root(
     dir: &Path,
     source: ModuleSource,
-    out: &mut Discoveries,
+    out: &mut HashMap<ModuleName, Discovered>,
     diags: &mut Vec<Diagnostic>,
     vfs: &Vfs,
 ) -> bool {
@@ -505,7 +484,7 @@ fn scan(
     dir: &Path,
     source: ModuleSource,
     depth: usize,
-    out: &mut Discoveries,
+    out: &mut HashMap<ModuleName, Discovered>,
     diags: &mut Vec<Diagnostic>,
     vfs: &Vfs,
 ) {

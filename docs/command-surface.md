@@ -63,8 +63,7 @@ di compile [--dry-run] [--force] [--incremental] [--fused]
     directory laid out like app/code and compiles them as if deployed there. Together
     they compile for an integration-test sandbox without installing the root:
     `--all-modules --extra-app-code dev/tests/integration/_files`. `di digest` takes
-    the same two flags. Refuses when a module name is defined in two directories
-    (doctor E1007), as Magento would: it doesn't boot with a module registered twice.
+    the same two flags.
 
 di verify --archive <DIR> --output <DIR> [--fail-on-diff] [--sample <N>]
           [--no-explain] [--strict-ordering] [--show-residual <FILE>]

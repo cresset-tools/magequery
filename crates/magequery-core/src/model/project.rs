@@ -41,27 +41,12 @@ pub struct ModuleCheck {
     pub on_disk_not_in_config: Vec<UnregisteredModule>,
     /// Listed in `config.php` but no `module.xml` found on disk (broken/removed module).
     pub in_config_not_on_disk: Vec<ModuleName>,
-    /// Module names defined in more than one directory, which Magento refuses to boot
-    /// with. Fixture copies read through `OpenOptions::extra_app_code` don't count.
-    pub duplicates: Vec<DuplicateModule>,
-}
-
-/// One module name found in two directories.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct DuplicateModule {
-    pub name: ModuleName,
-    /// The copy magequery reads (app/code before vendor, then discovery order).
-    pub kept: std::path::PathBuf,
-    /// The copy magequery ignores.
-    pub ignored: std::path::PathBuf,
 }
 
 impl ModuleCheck {
     /// True when the module set is consistent (nothing to report).
     pub fn is_clean(&self) -> bool {
-        self.on_disk_not_in_config.is_empty()
-            && self.in_config_not_on_disk.is_empty()
-            && self.duplicates.is_empty()
+        self.on_disk_not_in_config.is_empty() && self.in_config_not_on_disk.is_empty()
     }
 }
 
@@ -154,8 +139,6 @@ pub enum DoctorLint {
     ClassFileCaseMismatch,
     /// config.php lists the modules on disk, but not in the order Magento writes them.
     ModuleOrderStale,
-    /// One module name defined in two directories.
-    ModuleDefinedTwice,
 }
 
 /// The kebab-case name a finding is reported under: what `doctor --deny` takes.
@@ -170,14 +153,13 @@ impl std::fmt::Display for DoctorLint {
 
 impl DoctorLint {
     /// Every lint, in code order.
-    pub const ALL: [DoctorLint; 28] = [
+    pub const ALL: [DoctorLint; 27] = [
         Self::ModuleMissingOnDisk,
         Self::ModuleNotRegistered,
         Self::SequenceCycle,
         Self::ModuleDisabled,
         Self::DisabledModuleReferenced,
         Self::ModuleOrderStale,
-        Self::ModuleDefinedTwice,
         Self::PreferenceTargetMissing,
         Self::PreferenceCycle,
         Self::VirtualTypeBaseMissing,
@@ -214,7 +196,6 @@ impl DoctorLint {
             Self::ModuleDisabled => "E1004",
             Self::DisabledModuleReferenced => "E1005",
             Self::ModuleOrderStale => "E1006",
-            Self::ModuleDefinedTwice => "E1007",
             Self::PreferenceTargetMissing => "E2001",
             Self::PreferenceCycle => "E2002",
             Self::VirtualTypeBaseMissing => "E2003",

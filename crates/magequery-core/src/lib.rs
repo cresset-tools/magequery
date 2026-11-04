@@ -88,7 +88,7 @@ pub use model::{
     RedisConfig, RedisInstance, RedisPing, RulePrice, TierPrice,
     Resolution, Route, SchemaDrift, TableColumn, TranslationEntry, TranslationLayer,
     TranslationMatch, Translations, UiComponentContribution, UiComponentOp, UiComponentView,
-    DuplicateModule, UnregisteredModule, WebapiRoute, Widget,
+    UnregisteredModule, WebapiRoute, Widget,
     WidgetParam,
 };
 pub use model::{
@@ -1308,69 +1308,6 @@ mod handle_tests {
         assert_eq!(widget.path, tree.0.join("app/code/Acme/Widget"));
         assert_eq!(m.registered_path(widget), widget.path);
         assert_eq!(m.mounted_modules().len(), 1);
-    }
-
-    /// A module copied from vendor into app/code is a store Magento won't boot:
-    /// recorded as a duplicate (app/code kept, as before) and reported by doctor
-    /// on the ignored copy. A fixture copy of an app/code module read through
-    /// `extra_app_code` is not, since Magento never registers both.
-    #[test]
-    fn a_module_defined_twice_is_recorded_and_reported() {
-        let tree = TempTree::new("duplicate-module");
-        tree.touch("app/etc/di.xml");
-        module_xml(&tree, "app/code/Acme/Widget", "Acme_Widget", &[]);
-        module_xml(&tree, "vendor/acme/module-widget", "Acme_Widget", &[]);
-        tree.touch("vendor/acme/module-widget/registration.php");
-        module_xml(&tree, "fixtures/Acme/Widget", "Acme_Widget", &[]);
-
-        let mut opts = all_modules();
-        opts.extra_app_code.push(tree.0.join("fixtures"));
-        let m = super::Magento::open_with_options(&tree.0, &opts).unwrap();
-
-        let widget = m.modules().iter().find(|m| m.name.as_str() == "Acme_Widget").unwrap();
-        assert_eq!(widget.path, tree.0.join("app/code/Acme/Widget"));
-        let dups = &m.module_check().duplicates;
-        assert_eq!(dups.len(), 1, "the fixture copy is not a duplicate: {dups:?}");
-        assert_eq!(dups[0].kept, tree.0.join("app/code/Acme/Widget"));
-        assert_eq!(dups[0].ignored, tree.0.join("vendor/acme/module-widget"));
-        assert!(!m.module_check().is_clean());
-
-        let lint = crate::model::DoctorLint::ModuleDefinedTwice;
-        let found: Vec<_> =
-            m.doctor(None).findings.into_iter().filter(|f| f.lint == lint).collect();
-        assert_eq!(found.len(), 1, "{found:?}");
-        assert_eq!(found[0].severity, crate::Severity::Error);
-        assert_eq!(found[0].subject.as_deref(), Some("Acme_Widget"));
-        assert_eq!(
-            found[0].source.as_ref().map(|s| s.file.clone()),
-            Some(tree.0.join("vendor/acme/module-widget/registration.php"))
-        );
-        assert_eq!(lint.code(), "E1007");
-    }
-
-    /// One directory reached twice (a superpackage's `app/code` module that is also
-    /// an `autoload.files` root) is one module, not a duplicate.
-    #[test]
-    fn the_same_module_directory_found_twice_is_not_a_duplicate() {
-        let tree = TempTree::new("duplicate-same-dir");
-        tree.touch("app/etc/config.php");
-        let pkg = "vendor/acme/super";
-        module_xml(&tree, &format!("{pkg}/app/code/Acme/Widget"), "Acme_Widget", &[]);
-        tree.touch(&format!("{pkg}/app/code/Acme/Widget/registration.php"));
-        let installed = r#"{"packages":[{"name":"acme/super","version":"1.0.0","type":"magento2-module","install-path":"../acme/super","autoload":{"files":["app/code/Acme/Widget/registration.php"]}}]}"#;
-        let path = tree.0.join("vendor/composer/installed.json");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, installed).unwrap();
-        std::fs::write(
-            tree.0.join("app/etc/config.php"),
-            "<?php\nreturn ['modules' => ['Acme_Widget' => 1]];\n",
-        )
-        .unwrap();
-
-        let m = super::Magento::open(&tree.0).unwrap();
-        assert_eq!(m.modules().len(), 1);
-        assert!(m.module_check().duplicates.is_empty(), "{:?}", m.module_check().duplicates);
-        assert!(!m.diagnostics().iter().any(|d| d.message.contains("defined in both")));
     }
 
     #[test]

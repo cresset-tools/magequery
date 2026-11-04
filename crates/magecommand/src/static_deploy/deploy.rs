@@ -230,7 +230,7 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
             let scratch = scratch.clone().unwrap_or_else(|| static_root.clone());
             std::fs::create_dir_all(&scratch)
                 .with_context(|| format!("create probe scratch {}", scratch.display()))?;
-            super::bundle::OrderMode::probe(scratch)
+            super::bundle::OrderMode::Probe(scratch)
         }
     };
     // File-set exclusions contributed by DI plugins on `Deploy\Package\Package`
@@ -512,41 +512,20 @@ pub fn plan(
     Ok(Plan { groups, skipped })
 }
 
-/// The js/html phrase set of every area in `groups` that needs one — the
-/// expensive half of `js-translation.json`. It depends on the area only
-/// (`DataProvider::getData` ignores its theme), so each area is scanned ONCE
-/// for the whole run rather than once per locale group, and an area whose
-/// themes and locales all have an empty dictionary (an en_US-only deploy) is
-/// not scanned at all — see [`files::needs_area_phrases`].
-///
-/// Computed before the groups fan out, not lazily inside them: the scan runs
-/// its own rayon fan-out, and a pool thread blocked on a lazy cell while the
-/// initializer is running could steal a task that waits on that same cell.
-fn area_phrase_sets(
+/// Build ONE group's packages (all themes, in order, sharing a fresh cache).
+/// The `js-translation.json` (its js/html phrase scan is the expensive part) is
+/// computed here inside the parallel group task — [`files::js_translation_for`]
+/// skips the scan when the locale's dictionary is empty (en_US), and otherwise
+/// it overlaps across groups.
+fn build_group_packages(
     inputs: &DeployInputs,
-    groups: &[Group],
-) -> Vec<(String, HashSet<String>)> {
-    let mut areas: Vec<&str> = Vec::new();
-    for g in groups {
-        if !areas.contains(&g.area.as_str()) {
-            areas.push(&g.area);
-        }
-    }
-    areas
-        .into_par_iter()
-        .map(|area| {
-            let pairs = groups
-                .iter()
-                .filter(|g| g.area == area)
-                .flat_map(|g| g.theme_ids.iter().map(|t| (t.as_str(), g.locale.as_str())));
-            let set = if files::needs_area_phrases(inputs, area, pairs) {
-                files::area_phrases_for(inputs, area)
-            } else {
-                Default::default()
-            };
-            (area.to_string(), set)
-        })
-        .collect()
+    g: &Group,
+    opts: &PlacementOptions,
+) -> Result<Vec<ThemePackage>, DeployError> {
+    // The phrase scan is theme-independent (`getData` ignores its themePath),
+    // so hoist it out of the per-theme dictionary build inside `build_group`.
+    let area_phrases = files::area_phrases_for(inputs, &g.area);
+    files::build_group(inputs, &g.area, &g.theme_ids, &g.locale, &area_phrases, opts)
 }
 
 /// Wrap a fan-out closure in the requested thread pool. `--jobs 1` forces
@@ -578,12 +557,10 @@ pub fn area_sri_path(static_root: &std::path::Path, area: &str) -> PathBuf {
     static_root.join(area).join(files::SRI_HASHES_FILE_NAME)
 }
 
-/// Execute the plan and WRITE each package under `static_root` as soon as it
-/// is finalized — the memory-bounded path the CLI uses: a package's bytes live
-/// only from its build until its write, and writing early themes overlaps
-/// building later ones (see [`files::build_group_each`]). Fan-out over groups
-/// and, within a group, over themes; writes are to disjoint package dirs so
-/// they never race. Returns per-`(area, theme, locale)` stats.
+/// Execute the plan and WRITE each group's packages under `static_root` as it
+/// finishes — the memory-bounded path (one group's bytes live at a time per
+/// worker) the CLI uses. Fan-out over groups; writes are to disjoint package
+/// dirs so they never race. Returns per-`(area, theme, locale)` stats.
 pub fn execute_to_disk(
     inputs: &DeployInputs,
     groups: &[Group],
@@ -591,46 +568,66 @@ pub fn execute_to_disk(
     opts: &PlacementOptions,
     jobs: Option<usize>,
 ) -> Result<Vec<TupleStat>, DeployError> {
+    use files::PlacedKind as K;
+
     // Per group: the stat rows plus this group's contribution to its area's
     // `sri-hashes.json`. `par_iter().map().collect()` preserves group order, so
     // the accumulated integrity entries land in the run's deployment order —
     // the order a real deploy's successive `saveBunch` calls produce.
     type GroupOut = (Vec<TupleStat>, Vec<(String, files::PackageSri)>);
     let collected: Vec<GroupOut> = with_pool(jobs, || {
-        let phrases = area_phrase_sets(inputs, groups);
         groups
             .par_iter()
             .map(|g| {
-                let area_phrases = &phrases
-                    .iter()
-                    .find(|(a, _)| *a == g.area)
-                    .expect("phrase set for every planned area")
-                    .1;
-                // Each package is written the moment it is finalized (while
-                // later themes are still building) and its bytes dropped
-                // then; only its stat row and sri entries are kept, slotted by
-                // theme index so the group's output order stays the plan's.
-                let slots: std::sync::Mutex<Vec<Option<(TupleStat, files::PackageSri)>>> =
-                    std::sync::Mutex::new((0..g.theme_ids.len()).map(|_| None).collect());
-                files::build_group_each(
-                    inputs,
-                    &g.area,
-                    &g.theme_ids,
-                    &g.locale,
-                    area_phrases,
-                    opts,
-                    |i, pkg| {
-                        let row = write_and_post_process(inputs, g, &pkg, static_root, opts)?;
-                        slots.lock().expect("package slots")[i] = Some((row, pkg.sri));
-                        Ok(())
-                    },
-                )?;
-                let mut rows = Vec::with_capacity(g.theme_ids.len());
-                let mut sri = Vec::with_capacity(g.theme_ids.len());
-                for slot in slots.into_inner().expect("package slots") {
-                    let (row, pkg_sri) = slot.expect("every package written");
-                    rows.push(row);
-                    sri.push((g.area.clone(), pkg_sri));
+                let packages = build_group_packages(inputs, g, opts)?;
+                let mut rows = Vec::with_capacity(packages.len());
+                let mut sri: Vec<(String, files::PackageSri)> =
+                    Vec::with_capacity(packages.len());
+                for pkg in &packages {
+                    let target = files::package_dir(static_root, &g.area, &pkg.theme, &g.locale);
+                    write_package(pkg, &target, opts.symlink)?;
+                    // `Deploy\Package\Processor\PostProcessor\CssUrls` — runs
+                    // AFTER the package is on disk, as Magento does, because its
+                    // "does this url resolve?" checks read the static tree.
+                    let css_files: Vec<(String, Option<PathBuf>)> = pkg
+                        .files
+                        .iter()
+                        .map(|f| (f.path.clone(), f.source.clone()))
+                        .collect();
+                    super::cssurls::process_package(
+                        &css_files,
+                        &target,
+                        static_root,
+                        &g.area,
+                        &pkg.theme_path,
+                        &g.locale,
+                    )
+                    .map_err(|e| err(format!("css url post-process: {e}")))?;
+                    // `Csp\…\PostProcessor\Integrity` runs per package and
+                    // saves under `$package->getPath()`, so the file is a
+                    // sibling of the js it covers. Written here, with the
+                    // package, rather than accumulated: it holds only this
+                    // package's entries.
+                    if inputs.sri == files::SriLayout::PerPackage {
+                        files::write_package_sri(&target, &pkg.sri)
+                            .map_err(|e| err(format!("write package sri-hashes.json: {e}")))?;
+                    }
+                    sri.push((g.area.clone(), pkg.sri.clone()));
+                    rows.push(TupleStat {
+                        area: g.area.clone(),
+                        // Bare `Vendor/name` (the area is a separate field).
+                        theme: pkg.theme_path.clone(),
+                        locale: g.locale.clone(),
+                        output: target,
+                        files: pkg.files.len(),
+                        bytes: pkg.bytes(),
+                        copied: pkg.count(K::Copy),
+                        css_processed: pkg.count(K::CssProcessed),
+                        less_compiled: pkg.count(K::LessCompiled),
+                        requirejs: pkg.count(K::RequireJs),
+                        bundles: pkg.count(K::Bundle),
+                        warnings: pkg.warnings.clone(),
+                    });
                 }
                 Ok((rows, sri))
             })
@@ -678,59 +675,6 @@ pub fn execute_to_disk(
     }
 
     Ok(collected.into_iter().flat_map(|(rows, _)| rows).collect())
-}
-
-/// Put one finished package on disk the way the real deploy does, and return
-/// its stat row: the files, then `CssUrls` (which runs AFTER the package is on
-/// disk, as Magento does, because its "does this url resolve?" checks read the
-/// static tree), then — on the newer Csp — the package's own
-/// `sri-hashes.json`. Packages are independent here: `CssUrls` consults only
-/// this package and the never-deployed `Magento/base/default` ladder, so
-/// packages may be written in any order and concurrently.
-fn write_and_post_process(
-    inputs: &DeployInputs,
-    g: &Group,
-    pkg: &files::ThemePackage,
-    static_root: &std::path::Path,
-    opts: &PlacementOptions,
-) -> Result<TupleStat, DeployError> {
-    use files::PlacedKind as K;
-
-    let target = files::package_dir(static_root, &g.area, &pkg.theme, &g.locale);
-    write_package(pkg, &target, opts.symlink)?;
-    let css_files: Vec<(String, Option<PathBuf>)> =
-        pkg.files.iter().map(|f| (f.path.clone(), f.source.clone())).collect();
-    super::cssurls::process_package(
-        &css_files,
-        &target,
-        static_root,
-        &g.area,
-        &pkg.theme_path,
-        &g.locale,
-    )
-    .map_err(|e| err(format!("css url post-process: {e}")))?;
-    // `Csp\…\PostProcessor\Integrity` runs per package and saves under
-    // `$package->getPath()`, so the file is a sibling of the js it covers. It
-    // holds only this package's entries.
-    if inputs.sri == files::SriLayout::PerPackage {
-        files::write_package_sri(&target, &pkg.sri)
-            .map_err(|e| err(format!("write package sri-hashes.json: {e}")))?;
-    }
-    Ok(TupleStat {
-        area: g.area.clone(),
-        // Bare `Vendor/name` (the area is a separate field).
-        theme: pkg.theme_path.clone(),
-        locale: g.locale.clone(),
-        output: target,
-        files: pkg.files.len(),
-        bytes: pkg.bytes(),
-        copied: pkg.count(K::Copy),
-        css_processed: pkg.count(K::CssProcessed),
-        less_compiled: pkg.count(K::LessCompiled),
-        requirejs: pkg.count(K::RequireJs),
-        bundles: pkg.count(K::Bundle),
-        warnings: pkg.warnings.clone(),
-    })
 }
 
 /// Write one theme package to `target` (the real deploy's per-package
@@ -790,47 +734,23 @@ fn write_package(
                     _ => target_abs.clone(),
                 };
                 let rel = relative_path(&link_parent, &src_abs);
-                replace_existing(&path, || symlink_file(&rel, &path)).map_err(|e| {
+                let _ = std::fs::remove_file(&path);
+                symlink_file(&rel, &path).map_err(|e| {
                     err(format!("symlink {} -> {}: {e}", path.display(), rel.display()))
                 })
             }
-            // A derived file, or symlinking off: a real byte copy into a NEW
-            // file. `create_new` (O_EXCL) also fails on a leftover symlink from a
-            // previous `--symlink` run, so the write never goes THROUGH a link
-            // into the vendor source; on such a re-deploy the entry is removed
-            // and the create retried.
-            _ => replace_existing(&path, || write_new(&path, &f.content))
-                .map_err(|e| err(format!("write {}: {e}", path.display()))),
+            // A derived file, or symlinking off: a real byte copy. Remove any
+            // prior entry first — cheap ENOENT on a fresh target, but on a
+            // re-deploy over a PREVIOUS `--symlink` run it drops the leftover
+            // symlink so the write lands on a new real file instead of writing
+            // THROUGH the link into the vendor source.
+            _ => {
+                let _ = std::fs::remove_file(&path);
+                std::fs::write(&path, &f.content)
+                    .map_err(|e| err(format!("write {}: {e}", path.display())))
+            }
         }
     })
-}
-
-/// Run `create` — an exclusive create of `path` — and, only if an entry is
-/// already there, remove it and try once more. On a fresh target this is one
-/// syscall per file instead of an `unlink` (ENOENT) plus the create: directory
-/// entry operations are the dominant cost of writing ~300k files.
-fn replace_existing(
-    path: &Path,
-    create: impl Fn() -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    match create() {
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            std::fs::remove_file(path)?;
-            create()
-        }
-        r => r,
-    }
-}
-
-/// Write `content` to a file that must not exist yet (O_CREAT|O_EXCL: fails on
-/// any existing entry, a dangling or live symlink included).
-fn write_new(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?
-        .write_all(content)
 }
 
 /// The relative path from directory `from_dir` to `to` — both must be absolute.
@@ -1126,36 +1046,5 @@ mod tests {
         assert_eq!(std::fs::read(&out).unwrap(), b"REBUILT");
         // The source file is untouched — the symlink was never written through.
         assert_eq!(std::fs::read(&src).unwrap(), b"PRISTINE");
-    }
-
-    #[test]
-    fn redeploy_replaces_existing_entries() {
-        // Writes are exclusive creates; an entry already at the path (a real
-        // file, or a symlink from a symlink-mode run) is replaced, not an error.
-        let td = tempfile::tempdir().unwrap();
-        let root = td.path();
-        let src = root.join("vendor/v/mod/web/js/x.js");
-        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
-        std::fs::write(&src, b"SRC").unwrap();
-        let target = root.join("pub/static/frontend/Vendor/t/en_US");
-        let deploy = |content: &[u8], symlink| {
-            let pkg = pkg_with(vec![
-                placed("js/x.js", content, files::PlacedKind::Copy, Some(src.clone())),
-                placed("gen.json", content, files::PlacedKind::Translation, None),
-            ]);
-            write_package(&pkg, &target, symlink).unwrap();
-        };
-
-        deploy(b"ONE", Symlink::None);
-        deploy(b"TWO", Symlink::None); // real file over real file
-        assert_eq!(std::fs::read(target.join("js/x.js")).unwrap(), b"TWO");
-        assert_eq!(std::fs::read(target.join("gen.json")).unwrap(), b"TWO");
-
-        deploy(b"SRC", Symlink::ToSource); // symlink over real file
-        deploy(b"SRC", Symlink::ToSource); // symlink over symlink
-        let link = target.join("js/x.js");
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read(&link).unwrap(), b"SRC");
-        assert_eq!(std::fs::read(&src).unwrap(), b"SRC");
     }
 }

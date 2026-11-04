@@ -526,31 +526,9 @@ impl ModuleArgs {
         } else {
             " (no app/etc/config.php; pass --all-modules to compile every module on disk)"
         };
-        let magento = magequery_core::Magento::open_with_options(root, &opts)
-            .with_context(|| format!("not a Magento root: {}{hint}", root.display()))?;
-        refuse_duplicate_modules(&magento)?;
-        Ok(magento)
+        magequery_core::Magento::open_with_options(root, &opts)
+            .with_context(|| format!("not a Magento root: {}{hint}", root.display()))
     }
-}
-
-/// Magento won't boot with a module name registered twice (`ComponentRegistrar`
-/// throws), so neither would its own compiler. Output built from one of the two
-/// copies would describe a store that can't run.
-fn refuse_duplicate_modules(magento: &magequery_core::Magento) -> anyhow::Result<()> {
-    let duplicates = &magento.module_check().duplicates;
-    if duplicates.is_empty() {
-        return Ok(());
-    }
-    let list: Vec<String> = duplicates
-        .iter()
-        .map(|d| format!("  {}\n    {}\n    {}", d.name, d.kept.display(), d.ignored.display()))
-        .collect();
-    anyhow::bail!(
-        "{} module(s) defined in two directories; Magento refuses to register a module twice, \
-so the store won't boot. Remove one copy of each:\n{}",
-        duplicates.len(),
-        list.join("\n")
-    )
 }
 
 /// The whole `magecommand` CLI. Lives in this lib crate; the actual `[[bin]]`
@@ -1005,7 +983,6 @@ fn static_less(
     let root = std::path::absolute(&root).unwrap_or(root);
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
-    refuse_duplicate_modules(&magento)?;
     let orch = sdless::LessOrchestrator::from_magento(&magento, area, theme)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -1135,7 +1112,6 @@ fn static_requirejs(
     let root = std::path::absolute(&root).unwrap_or(root);
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
-    refuse_duplicate_modules(&magento)?;
     let cfg = match sdrjs::build_from_magento(&magento, area, theme) {
         Ok(c) => c,
         Err(e) => {
@@ -1286,7 +1262,6 @@ fn static_bundle(
     let root = std::path::absolute(&root).unwrap_or(root);
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
-    refuse_duplicate_modules(&magento)?;
 
     // Per-theme target dirs, decided up front so the probe can default to
     // the output filesystem (order must match what a deploy THERE produces).
@@ -1313,7 +1288,7 @@ fn static_bundle(
             };
             std::fs::create_dir_all(&scratch)
                 .with_context(|| format!("create probe scratch {}", scratch.display()))?;
-            sdb::OrderMode::probe(scratch)
+            sdb::OrderMode::Probe(scratch)
         }
         other => anyhow::bail!("--order must be `probe` or `sorted`, got `{other}`"),
     };
@@ -1422,7 +1397,6 @@ fn static_files(
     let root = std::path::absolute(&root).unwrap_or(root);
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
-    refuse_duplicate_modules(&magento)?;
 
     let static_root = match out {
         Some(dir) => dir.to_path_buf(),
@@ -1438,7 +1412,7 @@ fn static_files(
             };
             std::fs::create_dir_all(&scratch)
                 .with_context(|| format!("create probe scratch {}", scratch.display()))?;
-            sdb::OrderMode::probe(scratch)
+            sdb::OrderMode::Probe(scratch)
         }
         other => anyhow::bail!("--order must be `probe` or `sorted`, got `{other}`"),
     };

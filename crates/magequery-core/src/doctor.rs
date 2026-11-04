@@ -312,24 +312,6 @@ impl Doctor<'_> {
                 None,
             );
         }
-        for dup in &check.duplicates {
-            // Anchor on the copy magequery ignores: the one to delete in the usual case
-            // (a vendor module copied into app/code, or the reverse).
-            let registration = dup.ignored.join("registration.php");
-            let file = if registration.is_file() { registration } else { dup.ignored.join("etc/module.xml") };
-            let source = Source { module: dup.name.clone(), file, line: 1, area: Area::Global };
-            self.error_on(
-                DoctorLint::ModuleDefinedTwice,
-                &dup.name,
-                format!(
-                    "module {} is defined in both {} and {}; Magento refuses to register a module twice, so the store won't boot",
-                    dup.name,
-                    dup.kept.display(),
-                    dup.ignored.display()
-                ),
-                Some(source),
-            );
-        }
     }
 
     // ---------- disabled modules ----------

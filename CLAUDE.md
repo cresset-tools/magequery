@@ -304,13 +304,6 @@ modules. Use composer metadata:
   roots; skips `Test`, `_files`, `var`, `generated`, …).
 - `config.php` order is the authoritative, already-sequence-resolved load order; disk
   discovery only supplies path/source/`<sequence>`.
-- **One name in two directories**: discovery keeps the first (app/code before vendor)
-  and records the other in `ModuleCheck::duplicates`. Magento throws on the second
-  `ComponentRegistrar::register`, so doctor reports it (error, E1007
-  `module-defined-twice`) and magecommand's compile, digest and static commands refuse.
-  Not duplicates: the same directory reached twice (superpackage scan + `autoload.files`
-  root), and an `--extra-app-code` fixture whose name app/code already has (the test
-  bootstrap copies it, so Magento only registers one).
 - **Without config.php** (`OpenOptions::all_modules`, magecommand `--all-modules`):
   every discovered module is enabled and ordered by `sort_by_sequence` in
   `engine/index.rs`, a literal port of `ModuleList\Loader::sortBySequence` — the code
@@ -2105,10 +2098,9 @@ republish, clean shutdown/exit. The CI twin is `crates/magequery-lsp/tests/e2e.r
 `Connection::memory()` against a synthetic root (broken preference → diagnostic with
 code/line, definition, event hover, watched-file fix → diagnostic cleared, shutdown). dist targets grew `aarch64-unknown-linux-gnu` (native arm
 runner via `[dist.github-custom-runners]`; dist computes the release matrix from
-dist-workspace.toml at run time, so no release.yml regeneration was needed).
-`x86_64-apple-darwin` was added then and dropped again at 0.24.0, whose release build
-never got an Intel macOS runner — **the editor extensions' platform→triple download maps
-must stay in sync with the dist target list** (noted in dist-workspace.toml too). The VS Code
+dist-workspace.toml at run time, so no release.yml regeneration was needed) and
+`x86_64-apple-darwin` — **the editor extensions' platform→triple download maps must stay
+in sync with the dist target list** (noted in dist-workspace.toml too). The VS Code
 extension's `MIN_SERVER_VERSION` is 0.5.0 — the release that first ships `magequery lsp`.
 
 ## Future query tools (backlog — empty)

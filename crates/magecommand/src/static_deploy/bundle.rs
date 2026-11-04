@@ -460,114 +460,26 @@ pub enum OrderMode {
     /// directory's names in a scratch dir under the given root and reading
     /// them back. Byte-faithful to a real deploy on name-hash-ordered
     /// filesystems (ext4 htree); degrades to sorted on creation-ordered ones.
-    Probe(ProbeOrder),
+    Probe(PathBuf),
 }
 
-impl OrderMode {
-    /// [`OrderMode::Probe`] with a fresh cache, probing under `root`.
-    pub fn probe(root: PathBuf) -> Self {
-        OrderMode::Probe(ProbeOrder::new(root))
-    }
-}
-
-/// The readdir-order oracle behind [`OrderMode::Probe`].
-///
-/// The probed order is a pure function of a directory's NAME SET (on the
-/// filesystem the scratch root lives on), and the same name sets recur across
-/// every theme, locale and area of a run — the three locales of a theme, and
-/// sibling themes that share a parent, list the same directories. So results
-/// are cached for the lifetime of the mode, and clones share the cache: one
-/// probe per distinct name set per run, from any thread. The scratch tree is
-/// removed when the last clone is dropped.
-#[derive(Debug, Clone)]
-pub struct ProbeOrder(std::sync::Arc<ProbeShared>);
-
-#[derive(Debug)]
-struct ProbeShared {
-    root: PathBuf,
-    cache: std::sync::Mutex<HashMap<Vec<String>, Vec<String>>>,
-    /// The per-oracle scratch dir under `root`, created on first probe.
-    base: std::sync::Mutex<Option<PathBuf>>,
-    counter: std::sync::atomic::AtomicUsize,
-}
-
-impl ProbeOrder {
-    pub fn new(root: PathBuf) -> Self {
-        ProbeOrder(std::sync::Arc::new(ProbeShared {
-            root,
-            cache: std::sync::Mutex::new(HashMap::new()),
-            base: std::sync::Mutex::new(None),
-            counter: std::sync::atomic::AtomicUsize::new(0),
-        }))
-    }
-
-    /// The scratch root probes are created under.
-    pub fn root(&self) -> &Path {
-        &self.0.root
-    }
-
-    /// Order `key` (a sorted name list) as the filesystem lists it. The lock
-    /// is held only for the lookup and the insert, never across the probe, so
-    /// two threads may probe the same set at once — harmless, both get the
-    /// same answer.
-    fn order(&self, key: Vec<String>) -> Result<Vec<String>, BundleError> {
-        if let Some(hit) = self.0.cache.lock().expect("probe cache").get(&key) {
-            return Ok(hit.clone());
-        }
-        let base = self.base()?;
-        let n = self.0.counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = base.join(format!("p{n}"));
-        std::fs::create_dir(&dir)
-            .map_err(|e| err(format!("create probe dir {}: {e}", dir.display())))?;
-        for n in &key {
-            std::fs::File::create(dir.join(n)).map_err(|e| err(format!("probe touch {n}: {e}")))?;
-        }
-        let mut got = Vec::with_capacity(key.len());
-        let rd = std::fs::read_dir(&dir)
-            .map_err(|e| err(format!("probe readdir {}: {e}", dir.display())))?;
-        for e in rd {
-            let e = e.map_err(|e| err(format!("probe readdir entry: {e}")))?;
-            if let Some(n) = e.file_name().to_str() {
-                got.push(n.to_string());
-            }
-        }
-        self.0.cache.lock().expect("probe cache").insert(key, got.clone());
-        Ok(got)
-    }
-
-    fn base(&self) -> Result<PathBuf, BundleError> {
-        let mut base = self.0.base.lock().expect("probe base");
-        if let Some(b) = base.as_ref() {
-            return Ok(b.clone());
-        }
-        // Unique per oracle, not just per process — tests (and concurrent
-        // runs in one process) may hold several.
-        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let b = self.0.root.join(format!(".mq-order-probe-{}-{seq}", std::process::id()));
-        std::fs::create_dir_all(&b)
-            .map_err(|e| err(format!("create order-probe dir {}: {e}", b.display())))?;
-        *base = Some(b.clone());
-        Ok(b)
-    }
-}
-
-impl Drop for ProbeShared {
-    fn drop(&mut self) {
-        if let Some(base) = self.base.get_mut().ok().and_then(|b| b.take()) {
-            let _ = std::fs::remove_dir_all(base);
-        }
-    }
-}
-
-/// The per-name-set order oracle for one glob walk.
+/// The per-name-set order oracle. Probe results are cached (name sets repeat
+/// across themes), and the scratch tree is removed on drop.
 struct Orderer {
     mode: OrderMode,
+    cache: HashMap<Vec<String>, Vec<String>>,
+    counter: usize,
+    probe_base: Option<PathBuf>,
 }
 
 impl Orderer {
     fn new(mode: OrderMode) -> Self {
-        Orderer { mode }
+        Orderer {
+            mode,
+            cache: HashMap::new(),
+            counter: 0,
+            probe_base: None,
+        }
     }
 
     /// Order `names` (a sorted set) as a directory listing.
@@ -575,7 +487,57 @@ impl Orderer {
         let key: Vec<String> = names.iter().cloned().collect();
         match &self.mode {
             OrderMode::Sorted => Ok(key),
-            OrderMode::Probe(probe) => probe.order(key),
+            OrderMode::Probe(root) => {
+                if let Some(hit) = self.cache.get(&key) {
+                    return Ok(hit.clone());
+                }
+                let base = match &self.probe_base {
+                    Some(b) => b.clone(),
+                    None => {
+                        // Unique per Orderer, not just per process — tests
+                        // (and future parallel callers) may hold several.
+                        static SEQ: std::sync::atomic::AtomicUsize =
+                            std::sync::atomic::AtomicUsize::new(0);
+                        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let b = root.join(format!(
+                            ".mq-order-probe-{}-{seq}",
+                            std::process::id()
+                        ));
+                        std::fs::create_dir_all(&b).map_err(|e| {
+                            err(format!("create order-probe dir {}: {e}", b.display()))
+                        })?;
+                        self.probe_base = Some(b.clone());
+                        b
+                    }
+                };
+                let dir = base.join(format!("p{}", self.counter));
+                self.counter += 1;
+                std::fs::create_dir(&dir)
+                    .map_err(|e| err(format!("create probe dir {}: {e}", dir.display())))?;
+                for n in &key {
+                    std::fs::File::create(dir.join(n))
+                        .map_err(|e| err(format!("probe touch {n}: {e}")))?;
+                }
+                let mut got = Vec::with_capacity(key.len());
+                let rd = std::fs::read_dir(&dir)
+                    .map_err(|e| err(format!("probe readdir {}: {e}", dir.display())))?;
+                for e in rd {
+                    let e = e.map_err(|e| err(format!("probe readdir entry: {e}")))?;
+                    if let Some(n) = e.file_name().to_str() {
+                        got.push(n.to_string());
+                    }
+                }
+                self.cache.insert(key, got.clone());
+                Ok(got)
+            }
+        }
+    }
+}
+
+impl Drop for Orderer {
+    fn drop(&mut self) {
+        if let Some(base) = &self.probe_base {
+            let _ = std::fs::remove_dir_all(base);
         }
     }
 }
@@ -874,64 +836,6 @@ pub fn build_theme(
     exclude_prefixes: &[String],
     min_cache: &mut MinSiblingCache,
 ) -> Result<ThemeBundles, BundleError> {
-    let plan = plan_theme(
-        root,
-        area,
-        theme_id,
-        locale,
-        themes,
-        modules,
-        generated,
-        order,
-        exclude_prefixes,
-    )?;
-    let kept = plan.select(min_cache);
-    plan.render(&kept, generated)
-}
-
-/// One bundle candidate: a js/html path of the virtual deployed tree, in the
-/// bundler's iteration order.
-#[derive(Debug)]
-struct Candidate {
-    path: String,
-    /// `js` (→ `jsbuild`) rather than `html` (→ `text`).
-    js: bool,
-    /// `isExcluded` against the theme's view.xml — a pure function of the
-    /// path, so decided up front.
-    excluded: bool,
-    /// The source file, or `None` for a generated artifact (whose content is
-    /// passed to [`BundlePlan::render`]).
-    source: Option<PathBuf>,
-}
-
-/// Everything about one theme's bundles that does NOT depend on the other
-/// themes of the run: the virtual deployed tree, its glob order, the view
-/// config. Building it is the expensive part (a source-tree walk plus the
-/// readdir-order probe), and it is independent per theme, so a group's themes
-/// plan in parallel. Only [`BundlePlan::select`] — the `.min`-sibling cache —
-/// has to run in the group's theme order.
-#[derive(Debug)]
-pub struct BundlePlan {
-    theme: String,
-    chain: Vec<ThemeRef>,
-    max_kb: f64,
-    candidates: Vec<Candidate>,
-    tree_files: usize,
-}
-
-/// The theme-independent half of [`build_theme`]. See [`BundlePlan`].
-#[allow(clippy::too_many_arguments)]
-pub fn plan_theme(
-    root: &Path,
-    area: &str,
-    theme_id: &str,
-    locale: &str,
-    themes: &[(String, PathBuf)],
-    modules: &[ModuleRef],
-    generated: &[(String, String)],
-    order: &OrderMode,
-    exclude_prefixes: &[String],
-) -> Result<BundlePlan, BundleError> {
     let chain = theme_chain(area, theme_id, themes)?;
     let mut disk = deployed_tree(root, area, &chain, modules, locale);
     // The bundler keeps its own view of the deployed tree, so the package
@@ -943,8 +847,8 @@ pub fn plan_theme(
         // match theme-level paths only (see `files::apply_package_exclusions`).
         disk.retain(|deployed, _| !exclude_prefixes.iter().any(|p| deployed.starts_with(p.as_str())));
     }
-    let mut paths: std::collections::BTreeMap<String, Option<PathBuf>> =
-        disk.into_iter().map(|(k, v)| (k, Some(v))).collect();
+    let mut paths: std::collections::BTreeMap<String, Option<&PathBuf>> =
+        disk.iter().map(|(k, v)| (k.clone(), Some(v))).collect();
     for (p, _) in generated {
         paths.insert(p.clone(), None);
     }
@@ -958,86 +862,41 @@ pub fn plan_theme(
     let view_cfg = view_bundle_config(&chain, modules);
     let max_kb = view_cfg.max_size_kb();
 
-    let tree_files = paths.len();
-    let mut candidates = Vec::new();
-    for path in ordered {
+    let mut jsbuild: Vec<(String, String)> = Vec::new();
+    let mut text: Vec<(String, String)> = Vec::new();
+    for path in &ordered {
         let ext = path.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
         if ext != "js" && ext != "html" {
             continue;
         }
-        let js = ext == "js";
-        let excluded = is_excluded(&path, &view_cfg);
-        let source = paths.get(&path).cloned().flatten();
-        candidates.push(Candidate {
-            path,
-            js,
-            excluded,
-            source,
-        });
+        if min_cache.has_min_version(path) || is_excluded(path, &view_cfg) {
+            continue;
+        }
+        let content = match paths.get(path).and_then(|v| *v) {
+            Some(src) => read_utf8(src)?,
+            None => generated
+                .iter()
+                .find(|(p, _)| p == path)
+                .map(|(_, c)| c.clone())
+                .expect("generated path present"),
+        };
+        if ext == "js" {
+            jsbuild.push((path.clone(), content));
+        } else {
+            text.push((path.clone(), content));
+        }
     }
+    let pooled = (jsbuild.len(), text.len());
+    let files = flush(&jsbuild, &text, max_kb);
 
-    Ok(BundlePlan {
+    Ok(ThemeBundles {
         theme: theme_id.to_string(),
         chain,
-        max_kb,
-        candidates,
-        tree_files,
+        max_size_kb: max_kb,
+        files,
+        tree_files: paths.len(),
+        pooled,
     })
-}
-
-impl BundlePlan {
-    /// The ORDERED step: run every candidate through the run-scoped
-    /// `.min`-sibling cache, in iteration order, and return the indices of the
-    /// survivors. `hasMinVersion` is consulted for EVERY candidate (it records
-    /// a `.min` file's plain sibling even when the `.min` file itself is then
-    /// excluded), and `isExcluded` only for those it keeps — the PHP `||`.
-    /// String-set work only: cheap enough to run serially across a group.
-    pub fn select(&self, min_cache: &mut MinSiblingCache) -> Vec<usize> {
-        self.candidates
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| !(min_cache.has_min_version(&c.path) || c.excluded))
-            .map(|(i, _)| i)
-            .collect()
-    }
-
-    /// Read the survivors' content and flush them into bundle files.
-    /// Independent per theme. `generated` is the same list given to
-    /// [`plan_theme`].
-    pub fn render(
-        self,
-        kept: &[usize],
-        generated: &[(String, String)],
-    ) -> Result<ThemeBundles, BundleError> {
-        let mut jsbuild: Vec<(String, String)> = Vec::new();
-        let mut text: Vec<(String, String)> = Vec::new();
-        for &i in kept {
-            let c = &self.candidates[i];
-            let content = match &c.source {
-                Some(src) => read_utf8(src)?,
-                None => generated
-                    .iter()
-                    .find(|(p, _)| *p == c.path)
-                    .map(|(_, c)| c.clone())
-                    .expect("generated path present"),
-            };
-            if c.js {
-                jsbuild.push((c.path.clone(), content));
-            } else {
-                text.push((c.path.clone(), content));
-            }
-        }
-        let pooled = (jsbuild.len(), text.len());
-        let files = flush(&jsbuild, &text, self.max_kb);
-        Ok(ThemeBundles {
-            theme: self.theme,
-            chain: self.chain,
-            max_size_kb: self.max_kb,
-            files,
-            tree_files: self.tree_files,
-            pooled,
-        })
-    }
 }
 
 /// Read a source file as UTF-8. (The PHP side detours through
@@ -1520,7 +1379,7 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
 
-        let mut orderer = Orderer::new(OrderMode::probe(td.path().to_path_buf()));
+        let mut orderer = Orderer::new(OrderMode::Probe(td.path().to_path_buf()));
         let set: BTreeSet<String> = names.iter().map(|n| n.to_string()).collect();
         let probed = orderer.order(&set).unwrap();
         // On a hash-ordered fs both are the same hash order; on a
@@ -1545,7 +1404,7 @@ mod tests {
             // Creation-ordered fs (e.g. tmpfs): the probe can't reproduce a
             // historical readdir, but it must still be self-consistent — the
             // same name set probes to the same order every time.
-            let mut orderer2 = Orderer::new(OrderMode::probe(td.path().to_path_buf()));
+            let mut orderer2 = Orderer::new(OrderMode::Probe(td.path().to_path_buf()));
             assert_eq!(probed, orderer2.order(&set).unwrap());
             let mut back: Vec<String> = probed.clone();
             back.sort();
