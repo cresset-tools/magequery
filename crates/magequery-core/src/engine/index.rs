@@ -518,3 +518,47 @@ fn scan(
         scan(&entry.path(), source, depth + 1, out, diags, vfs);
     }
 }
+
+#[cfg(test)]
+mod sort_tests {
+    use super::sort_by_sequence;
+    use crate::ids::ModuleName;
+
+    /// `sort_by_sequence` against goldens produced by Magento's own
+    /// `ModuleList\Loader` (scripts/module-order-goldens.php runs its sorting
+    /// methods verbatim): 200 random graphs aimed at the quirks, and the 359
+    /// modules of the bougie testing demo's integration sandbox.
+    #[test]
+    fn order_matches_magentos_loader_goldens() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/module-order");
+        let mut checked = 0;
+        for file in ["random.json", "real.json"] {
+            let text = std::fs::read_to_string(dir.join(file)).unwrap();
+            let cases: Vec<serde_json::Value> = serde_json::from_str(&text).unwrap();
+            for case in &cases {
+                let name = case["name"].as_str().unwrap();
+                let modules: Vec<(ModuleName, Vec<ModuleName>)> = case["modules"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(n, seq)| {
+                        let seq = seq.as_array().unwrap().iter();
+                        (ModuleName::new(n), seq.map(|s| ModuleName::new(s.as_str().unwrap())).collect())
+                    })
+                    .collect();
+                let got = sort_by_sequence(modules.iter().map(|(n, s)| (n, s.as_slice())));
+                match case["expected"].as_array() {
+                    Some(expected) => {
+                        let expected: Vec<&str> = expected.iter().map(|v| v.as_str().unwrap()).collect();
+                        let got = got.unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                        let got: Vec<&str> = got.iter().map(ModuleName::as_str).collect();
+                        assert_eq!(got, expected, "{file} {name}");
+                    }
+                    None => assert!(got.is_err(), "{file} {name}: Magento rejects a cycle"),
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 201);
+    }
+}

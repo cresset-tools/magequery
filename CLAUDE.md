@@ -310,7 +310,11 @@ modules. Use composer metadata:
   that writes config.php on a fresh install. Keep it literal: the "bubble sort" is
   neither stable nor topological, and the `Magento_` partition is a *contains* check,
   and di.xml merge order depends on all of it. Verified identical to Magento's
-  config.php on five real roots (88–372 modules).
+  config.php on five real roots (88–372 modules), and pinned by
+  `sort_tests::order_matches_magentos_loader_goldens` against
+  `tests/fixtures/module-order/` — goldens that `scripts/module-order-goldens.php`
+  produces by running Loader's own sorting methods verbatim (no PHP in CI, so the
+  goldens are committed; regenerate them when Loader changes).
 - **Extra app/code trees** (`OpenOptions::extra_app_code`, `--extra-app-code`): modules
   read from an app/code-shaped directory (integration tests' `_files`) but *registered*
   at `app/code/<rel>`. The registered path matters: the compiled area files bake module
