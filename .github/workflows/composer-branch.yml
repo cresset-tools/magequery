@@ -85,9 +85,13 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      # persist-credentials: false, because checkout otherwise stores
+      # GITHUB_TOKEN as an http extraheader for all of github.com, and git
+      # sends that instead of the app token in MAGECOMMAND_REMOTE (403).
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       # GITHUB_TOKEN only reaches this repository; the bot app is installed on
       # cresset-tools/magecommand too.
