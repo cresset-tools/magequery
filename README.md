@@ -1,302 +1,58 @@
 # magequery
 
-magequery reads a Magento 2 codebase and tells you how it is wired: module load order, DI
-resolution (preferences, plugins, virtual types, constructor arguments), events, cron,
-routes, config across scopes, and the admin permission tree, among others. Every result
-cites the file and line it came from.
+Fast Magento 2 tooling that reads the source directly: no PHP, no database, no booting the
+framework. Two binaries:
 
-`bin/magento` and magerun boot the whole framework on every call, which takes one to three
-seconds. magequery parses the source XML and PHP directly and reimplements Magento's
-config-merge and DI rules, so it runs in milliseconds and works on a checkout that was never
-set up. It needs no database, no `setup:di:compile`, and no working PHP install.
-
-```console
-$ magequery modules      # 88 modules, load order resolved
-4 ms
-$ magequery di Magento\Catalog\Api\ProductRepositoryInterface
-19 ms
-$ magequery doctor       # scan every config reference in the codebase
-86 ms
-```
-
-Some commands can also read live data. Point them at the database from `env.php` (with
-`--db`, or as a dedicated live command) to read products, orders, indexer status, the scope
-tree, and similar runtime state. These commands report a clear error when the database is
-unreachable. The static commands never touch it.
+- **magequery** answers how a codebase is wired (DI, plugins, events, routes, config, …),
+  each result citing the file and line it came from.
+- **magecommand** builds it: `setup:di:compile` and `setup:static-content:deploy`,
+  reimplemented in Rust.
 
 ## Install
 
 ```console
-# Linux and macOS
-$ curl -LsSf https://bougie.tools/magequery.sh | sh
-
-# Windows (PowerShell)
-> irm https://bougie.tools/magequery.ps1 | iex
+$ curl -LsSf https://bougie.tools/magequery.sh | sh     # Linux, macOS
+> irm https://bougie.tools/magequery.ps1 | iex          # Windows
 ```
 
-Prebuilt binaries (Linux x64 gnu/musl and arm64 gnu, macOS arm64/x64, Windows x64) are
-attached to every [GitHub Release](https://github.com/cresset-tools/magequery/releases) and
-mirrored to cresset infrastructure.
+Or without installing: `bgx cresset/magequery doctor`. Run from the Magento root, or pass
+`--root <path>`.
 
-Or build from source. This needs a Rust toolchain, a C compiler, and CMake (the last two for
-the bundled MySQL client used by the live commands):
+## magequery: for AI agents and CI
 
-```console
-$ cargo install --git https://github.com/cresset-tools/magequery magequery
-```
-
-Point it at a store with `--root <path-to-magento>`, or run it from inside the Magento root
-(the default is the current directory).
-
-### Without installing (bgx)
-
-[bougie](https://bougie.tools)'s `bgx` (like npx) runs magequery in an isolated,
-globally-cached environment without adding it to your project. Everything after the package is
-forwarded straight to magequery:
-
-```console
-$ bgx cresset/magequery doctor
-$ bgx cresset/magequery di 'Magento\Catalog\Api\ProductRepositoryInterface'
-```
-
-### GitHub Action
-
-Use the reusable [magequery action](https://github.com/cresset-tools/magequery-action) in a
-Magento project's workflow after Bougie has installed the Magento source and its modules. It
-runs `magequery doctor` by default, which fails on broken configuration references or structural
-cycles. Static commands do not start Magento or need a database.
+`magequery doctor` checks every config reference in the codebase against what is on disk:
+missing classes, cycles, forgotten wiring. It runs in milliseconds and exits non-zero on
+errors, so it works as a CI gate:
 
 ```yaml
-- uses: actions/checkout@v4
-- uses: cresset-tools/setup-bougie@v1
-- run: bougie sync
-- uses: cresset-tools/magequery-action@v1
-  with:
-    root: .
+- uses: cresset-tools/magequery-action@v1   # runs doctor by default
 ```
 
-Pass any other magequery command through `args`; for example, `modules --check` fails when the
-modules on disk disagree with `app/etc/config.php`. The action downloads the latest published
-magequery binary for the runner platform by default, and can pin it independently:
-
-```yaml
-- uses: cresset-tools/magequery-action@v1
-  with:
-    version: 0.7.0
-    args: modules --check
-```
-
-## Examples
-
-`di` is the main command. It shows how the object manager assembles a type: the concrete
-class, the merged constructor arguments, and the plugin chain, each with its source.
-
-```console
-$ magequery di Magento\Catalog\Api\ProductRepositoryInterface
-Magento\Catalog\Api\ProductRepositoryInterface  (base)
-  → Magento\Catalog\Model\ProductRepository   # vendor/.../module-catalog/etc/di.xml:11
-
-arguments (1)
-  collectionProcessor = \Magento\Catalog\Model\Api\SearchCriteria\ProductCollectionProcessor   # .../etc/di.xml:939
-
-plugins (3)  run order
-    0 remove_images_from_gallery_after_removing_product  [around delete]
-    0 add_mutex_to_save_operation  [around save]
-   10 configurableProductSaveOptions  [before save, after save]
-```
-
-`doctor` checks every merged config reference against what exists on disk. It reports broken
-references, cycles, and wiring that looks forgotten, and exits non-zero only on errors, so
-you can run it in CI. It also warns about modules disabled in `config.php` and config that
-reaches into them: remove such modules with composer instead, since tools disagree about
-how a disabled module's code takes part. Each finding is printed with a stable code
-(`warn[E1004]`); `magequery doctor --explain E1004` says what it means and how to fix it,
-and a bare `--explain` lists every code. Pass a code to `--deny` to make that kind of
-warning fail the run once you have cleaned it up, or pass `--strict` to fail on every
-warning.
-`--source app` keeps only the findings declared in your own code (everything outside
-`vendor/`), and `--source vendor` keeps only those in installed packages.
-
-A reference to a missing class is only an error when something that can be built asks for
-it. Otherwise it is a warning (the package is installed, so the config is stale) or an
-info (no installed package provides it, so it is an optional integration). The lines
-under each finding show the chain that decided it. `--in <path|module|vendor>` keeps
-only the findings located there, e.g. `--in app/code/Acme` or `--in Acme`.
-
-```console
-$ magequery doctor
-error[E2001]  preference for ...\ProductRenderSearchResultsInterface points
-    at missing class ...\ProductRenderSearchResults   # .../module-catalog/etc/di.xml:54
-    └─▶ ...\ProductRenderSearchResultsInterface exists   # .../Api/Data/ProductRenderSearchResultsInterface.php
-warn[E2006]  di argument $defaultHandler of Magento\Indexer\Model\HandlerPool
-    injects missing class Magento\Indexer\Model\Handler\DefaultHandler   # .../module-indexer/etc/di.xml:30
-    └─▶ Magento\Indexer\Model\HandlerPool does not exist (its package Magento\Indexer is
-        installed: stale config)
-warn[E5002]  ...\CouponUsagesDecrement implements ObserverInterface but no
-    events.xml registers it
-info[E2003]  virtual type AmastyAttachmentExportEntity is based on missing
-    class Amasty\ExportCore\...\DemoEntityConfig
-    └─▶ injected as $demoEntities into Amasty\ExportCore\...\DemoEntitiesPool   # .../etc/adminhtml/di.xml:274
-        └─▶ Amasty\ExportCore\...\DemoEntitiesPool does not exist (no installed package
-            provides Amasty\ExportCore: an optional integration)
-```
-
-`info` prints a one-screen summary of the install. It reads the static config and fills in
-live values from the database when it can reach one.
-
-```console
-$ magequery info
-magento       2.4.7  (magento/product-community-edition)
-mode          developer
-maintenance   off
-
-base url      https://shop.example/
-admin         https://shop.example/admin_XXXXXX/
-
-frontend      Luma  (theme Magento/luma)
-search        opensearch @ 127.0.0.1:9200
-
-db            shop @ /run/mysqld/mysqld.sock
-cache         default: redis db5 · page_cache: redis db5 · fpc: built-in · 14/14 types on
-queue         amqp @ 127.0.0.1:5672
-
-stores        1 website(s), 1 store(s), 1 store view(s)
-modules       88 enabled, 0 disabled  (88 vendor, 0 app/code)
-```
-
-## Questions across many records
-
-The live commands look up one record. For reports and lists, `magequery sql` runs a
-read-only SQL statement against the database from `env.php`. It adds virtual tables that
-know Magento's layout: `orders` has the store code, the billing and shipping countries,
-and an `is_revenue` flag; `order_items` has only the lines a customer saw, so
-configurable and bundle children are never counted twice; and `products` has every EAV
-attribute as a column, with option labels, resolved for the store view you pass with
-`--store`. Real tables can be joined too.
-
-```console
-$ magequery sql --describe orders     # columns, and which amounts are safe to sum
-$ magequery sql "SELECT shipping_country, COUNT(*) orders, SUM(base_grand_total) revenue
-                 FROM orders WHERE is_revenue GROUP BY 1 ORDER BY revenue DESC"
-shipping_country  orders   revenue
-NL                     1  100.0000
-DE                     1   50.0000
-$ magequery sql --store nl "SELECT sku, name, color_label, qty FROM products
-                            WHERE status = 1 AND qty < 5"
-```
-
-Statements run in a read-only transaction with a 30-second server-side timeout
-(`--timeout`), and show at most 200 rows unless they have their own `LIMIT` (`--limit`).
-`--print` shows the SQL a statement expands to.
-
-## Notes
-
-Every result ends with a `# file:line` comment. It is written as a trailing comment so a
-copied line stays valid, and it points at the source that produced the fact.
-
-The static commands parse source files only. They do not read `var/cache` or `generated/`,
-so they work on a fresh checkout. Commands that can also use live data take `--db`; a few
-commands, such as `product`, `order`, and `stores`, read the database directly.
-
-DI, plugins, events, and routes vary by area. By default these commands show a collapsed
-diff: the global base plus the per-area differences. `--area <name>` shows a single area, and
-`--all-areas` expands every area in full.
-
-`--json` works on every command and is never colored. The single-value commands (`mode`,
-`base-url`, `maintenance`) print a bare value for use in scripts. Color is on when writing to
-a terminal, respects `NO_COLOR`, and can be set with `--color auto|always|never`.
-
-## Commands
-
-Grouped as `magequery --help` shows them.
-
-**Wiring** (the object manager): `di`, `preference`, `plugins`, `events`, `uses` (reverse DI).
-
-**Entry points**: `routes`, `actions`, `webapi`, `cron`, `commands`, `graphql`.
-
-**Data**: `schema`, `indexers`, `extension-attributes`, `catalog-attributes`, `fieldset`, `eav`,
-`product`, `product-links`, `price`, `category`, `order`, `customer`, `customer-groups`,
-`quote`, `invoice`, `shipment`, `creditmemo`, `order-statuses`, `sequences`, `sales-rule`,
-`catalog-rule`, `tax`, `sql`.
-
-**Frontend**: `layout`, `templates`, `widgets`, `email-templates`, `translations`,
-`ui-components`, `cms-page`, `cms-block`.
-
-**Config and admin**: `config`, `system-config`, `acl`, `menu`, `admin-users`,
-`admin-roles`, `integrations`.
-
-**Runtime** (from `env.php` and live connections): `db`, `redis`, `session`, `cache`,
-`lock`, `queue`, `url-rewrites`, `stores`.
-
-**Project**: `info`, `mode`, `maintenance`, `base-url`, `admin-url`, `modules`, `deps`,
-`doctor`, `whatis`, `patches`.
-
-The grammar is `magequery <command> [target] [flags]`. Run `magequery <command> --help` for
-the details of each.
-
-## Shell completions
-
-The `completions` subcommand prints a completion script to stdout. Add one line to your shell
-config:
-
-```console
-# bash (~/.bashrc)
-source <(magequery completions bash)
-
-# zsh (~/.zshrc, after 'autoload -Uz compinit && compinit')
-source <(magequery completions zsh)
-
-# fish (~/.config/fish/config.fish)
-magequery completions fish | source
-```
-
-`magequery man` prints a man page.
-
-## Agent skill
-
-magequery ships a skill that teaches an AI coding agent when and how to use it on a Magento
-codebase, so the agent reaches for magequery on wiring questions instead of grepping or booting
-the framework. Install it into a project (or your home directory) with:
+The agent skill teaches a coding agent to ask magequery wiring questions instead of grepping
+or booting Magento:
 
 ```console
 $ mkdir -p .claude/skills/magequery
 $ magequery skill > .claude/skills/magequery/SKILL.md
 ```
 
-The `skill` subcommand emits the file from the installed binary, so it always matches your
-version. It is plain markdown with YAML frontmatter, so it drops into a Cursor rule or your own
-docs just as well.
+Run `magequery --help` for the other commands (`di`, `plugins`, `events`, `config`, `sql`, …).
+`magequery lsp` is a language server for the XML config layer; see [`editors/`](editors).
 
-## Editor integration (LSP)
+## magecommand: build without PHP
 
-The binary doubles as a language server: `magequery lsp` speaks LSP over stdio. Inside the
-editor that gives you context-aware completions (classes, events, config paths, ACL ids),
-`doctor` findings as diagnostics while you type, go-to-definition and hover on
-class names in `di.xml`/`events.xml`/`webapi.xml`/`system.xml`/`schema.graphqls` (definition on
-an interface also jumps to the class its `<preference>` resolves to), find-references over the
-whole config graph (injections, virtual types, observers, cron, webapi, GraphQL, queues),
-layout navigation (templates through the theme-override chain, handles, block names), config
-outlines and workspace symbol search, code lenses on PHP classes (`N plugin(s)`,
-`wired in N config place(s)`), and rename for ACL ids, event names, and block names across
-the config XML and PHP string literals (the identifiers a PHP server can't see; classes and
-config paths stay with your PHP server).
+```console
+$ magecommand di compile                   # generated/code + generated/metadata
+$ magecommand static deploy en_US nl_NL    # pub/static
+```
 
-- **VS Code** — the extension in [`editors/vscode`](editors/vscode); it finds `magequery` on
-  PATH or downloads the release binary itself.
-- **Zed** — install **magequery LSP** from the Zed extension registry (source in
-  [`editors/zed`](editors/zed), registry id `magequery-lsp`); same binary resolution.
-- **Anything else** — point your editor's LSP client at `magequery lsp` for PHP and XML files.
+The output matches a real `bin/magento` run; `di verify` and `static verify` diff it against
+one. `di digest` gives a CI cache key for `generated/`, and `di watch` keeps it compiled while
+you edit. `magecommand skill` prints its agent skill.
 
-Open buffers overlay the checkout, so diagnostics and answers follow your unsaved edits as
-you type. The server complements a PHP
-language server rather than replacing one — magequery covers the XML config layer.
-
-## Scope
-
-The target is Magento 2.4 Open Source. Adobe Commerce, Mage-OS, OpenMage, and similar forks
-often work but are not the supported target. Live commands need a readable `app/etc/env.php`,
-and a reachable connection for the database.
+For a whole deploy build in one step (composer install, DI compile, and static deploy, run in
+parallel), use [magebuild](https://github.com/cresset-tools/magebuild).
 
 ## License
 
-[European Union Public Licence v1.2](LICENSE) (`EUPL-1.2`).
+[EUPL-1.2](LICENSE).
