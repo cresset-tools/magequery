@@ -304,6 +304,18 @@ modules. Use composer metadata:
   roots; skips `Test`, `_files`, `var`, `generated`, …).
 - `config.php` order is the authoritative, already-sequence-resolved load order; disk
   discovery only supplies path/source/`<sequence>`.
+- **Without config.php** (`OpenOptions::all_modules`, magecommand `--all-modules`):
+  every discovered module is enabled and ordered by `sort_by_sequence` in
+  `engine/index.rs`, a literal port of `ModuleList\Loader::sortBySequence` — the code
+  that writes config.php on a fresh install. Keep it literal: the "bubble sort" is
+  neither stable nor topological, and the `Magento_` partition is a *contains* check,
+  and di.xml merge order depends on all of it. Verified identical to Magento's
+  config.php on five real roots (88–372 modules).
+- **Extra app/code trees** (`OpenOptions::extra_app_code`, `--extra-app-code`): modules
+  read from an app/code-shaped directory (integration tests' `_files`) but *registered*
+  at `app/code/<rel>`. The registered path matters: the compiled area files bake module
+  paths into the setup scanner's exclusion regexes. Use `Magento::registered_path`, not
+  `Module::path`, anywhere a path reaches output.
 
 Result on the 2.4.8 store checkout: 655 modules (matches `config.php` exactly), ~16ms warm
 (was ~180ms with the brute walk).

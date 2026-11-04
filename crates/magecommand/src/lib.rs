@@ -432,6 +432,8 @@ enum DiCommand {
         /// only for now; multi-area classes still emit stock interceptors.
         #[arg(long)]
         fused: bool,
+        #[command(flatten)]
+        modules: ModuleArgs,
     },
     /// Long-running compile server: build once, then keep the parsed index in
     /// memory and recompile on file changes, writing only the delta. The fast
@@ -489,7 +491,44 @@ enum DiCommand {
         /// `--incremental` short-circuit and is NOT a portable CI key.
         #[arg(long)]
         stat: bool,
+        #[command(flatten)]
+        modules: ModuleArgs,
     },
+}
+
+/// Which modules a compile sees, for a root that was never installed.
+#[derive(clap::Args, Clone, Default)]
+struct ModuleArgs {
+    /// Ignore app/etc/config.php (it may not exist) and enable every module on
+    /// disk, in the order Magento's installer would write them. For a root that
+    /// is never installed itself, such as the one integration tests run from.
+    #[arg(long)]
+    all_modules: bool,
+    /// A directory laid out like app/code (`<Vendor>/<Module>/etc/module.xml`).
+    /// Its modules are compiled as if deployed under app/code, without copying
+    /// them there. Repeatable. For integration tests:
+    /// `--extra-app-code dev/tests/integration/_files`.
+    #[arg(long, value_name = "DIR")]
+    extra_app_code: Vec<PathBuf>,
+}
+
+impl ModuleArgs {
+    fn open(&self, root: &std::path::Path) -> anyhow::Result<magequery_core::Magento> {
+        let mut opts = magequery_core::OpenOptions::default();
+        opts.all_modules = self.all_modules;
+        for dir in &self.extra_app_code {
+            let dir = if dir.is_absolute() { dir.clone() } else { root.join(dir) };
+            anyhow::ensure!(dir.is_dir(), "--extra-app-code: no such directory: {}", dir.display());
+            opts.extra_app_code.push(dir);
+        }
+        let hint = if self.all_modules || root.join("app/etc/config.php").is_file() {
+            ""
+        } else {
+            " (no app/etc/config.php; pass --all-modules to compile every module on disk)"
+        };
+        magequery_core::Magento::open_with_options(root, &opts)
+            .with_context(|| format!("not a Magento root: {}{hint}", root.display()))
+    }
 }
 
 /// The whole `magecommand` CLI. Lives in this lib crate; the actual `[[bin]]`
@@ -527,10 +566,10 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
     match cli.command {
         Command::Skill => unreachable!("handled above"),
         Command::Di { command } => match command {
-            DiCommand::Compile { dry_run, force, incremental, fused } => {
-                compile(cli.root, cli.json, dry_run, force, incremental, fused)
+            DiCommand::Compile { dry_run, force, incremental, fused, modules } => {
+                compile(cli.root, cli.json, dry_run, force, incremental, fused, &modules)
             }
-            DiCommand::Digest { stat } => digest(cli.root, stat),
+            DiCommand::Digest { stat, modules } => digest(cli.root, stat, &modules),
             DiCommand::Watch { once } => watch::watch(cli.root, cli.json, once),
             DiCommand::Verify {
                 ref archive,
@@ -1759,6 +1798,7 @@ fn compile(
     force: bool,
     incremental: bool,
     fused: bool,
+    modules: &ModuleArgs,
 ) -> anyhow::Result<ExitCode> {
     use magequery_core::Area;
 
@@ -1790,8 +1830,7 @@ fn compile(
         };
     }
 
-    let magento = magequery_core::Magento::open(&root)
-        .with_context(|| format!("not a Magento root: {}", root.display()))?;
+    let magento = modules.open(&root)?;
     lap!("open + discovery");
 
     // Incremental short-circuit (the CAS design — see manifest.rs). Load the
@@ -2092,11 +2131,10 @@ fn warn_case_collapse(root: &std::path::Path, files: &[(String, String)]) {
 }
 
 /// `magecommand di digest [--stat]` — print the compile-input digest and exit.
-fn digest(root: Option<PathBuf>, stat: bool) -> anyhow::Result<ExitCode> {
+fn digest(root: Option<PathBuf>, stat: bool, modules: &ModuleArgs) -> anyhow::Result<ExitCode> {
     let root = root.unwrap_or_else(|| PathBuf::from("."));
     let root = std::path::absolute(&root).unwrap_or(root);
-    let magento = magequery_core::Magento::open(&root)
-        .with_context(|| format!("not a Magento root: {}", root.display()))?;
+    let magento = modules.open(&root)?;
     let mode = if stat {
         magecommand_engine::manifest::FingerprintMode::Stat
     } else {
