@@ -60,6 +60,9 @@ The output matches a real `bin/magento` run; `di verify` and `static verify` dif
 one. `di digest` gives a CI cache key for `generated/`, and `di watch` keeps it compiled while
 you edit. `magecommand skill` prints its agent skill.
 
+In a PHP project, `composer require --dev cresset/magecommand` gives you
+`vendor/bin/magecommand` (`cresset/magequery` ships both tools).
+
 For a whole deploy build in one step (composer install, DI compile, and static deploy, run in
 parallel), use [magebuild](https://github.com/cresset-tools/magebuild).
 

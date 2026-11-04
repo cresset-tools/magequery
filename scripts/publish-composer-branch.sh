@@ -1,26 +1,49 @@
 #!/usr/bin/env bash
-# Regenerate the orphan `composer` branch — the Packagist package for
-# cresset/magequery — from packaging/composer/, stamp the magequery version
-# it fetches, commit it as an orphan (no Rust history or source), tag
-# v<version>, and push branch + tag to origin.
+# Regenerate a Packagist package from packaging/, stamp the magequery version
+# its launcher fetches, commit it as an orphan (no Rust history or source),
+# tag v<version>, and push branch + tag.
+#
+#   magequery    cresset/magequery, from packaging/composer/. Pushed to the
+#                orphan `composer` branch of origin (this repo).
+#   magecommand  cresset/magecommand, from packaging/composer-magecommand/
+#                plus packaging/composer/src/Launcher.php. Pushed to `main` of
+#                $MAGECOMMAND_REMOTE (the cresset-tools/magecommand repo; a
+#                Packagist package needs a repository of its own).
 #
 # The branch is force-updated each release (its history is always a single
-# commit); the per-version tag is what Packagist serves. Run from a checkout
-# of the magequery repo with push access to origin.
+# commit); the per-version tag is what Packagist serves.
 #
-# Usage: scripts/publish-composer-branch.sh <version>   # e.g. 0.1.0
+# Usage: scripts/publish-composer-branch.sh <version> [magequery|magecommand]
 set -euo pipefail
 
-VERSION="${1:?usage: publish-composer-branch.sh <version, e.g. 0.1.0>}"
+VERSION="${1:?usage: publish-composer-branch.sh <version, e.g. 0.1.0> [magequery|magecommand]}"
+PACKAGE="${2:-magequery}"
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-# Assemble the package tree exactly as it should appear at the repo root on
-# the composer branch (no Rust, no packaging/ nesting).
-cp -R packaging/composer/. "$STAGE/"
+# Assemble the package tree exactly as it should appear at the root of the
+# published branch (no Rust, no packaging/ nesting).
+case "$PACKAGE" in
+    magequery)
+        cp -R packaging/composer/. "$STAGE/"
+        REMOTE=origin
+        BRANCH=composer
+        ;;
+    magecommand)
+        cp -R packaging/composer-magecommand/. "$STAGE/"
+        mkdir -p "$STAGE/src"
+        cp packaging/composer/src/Launcher.php "$STAGE/src/Launcher.php"
+        REMOTE="${MAGECOMMAND_REMOTE:?set MAGECOMMAND_REMOTE to the cresset-tools/magecommand push URL}"
+        BRANCH=main
+        ;;
+    *)
+        echo "unknown package: $PACKAGE (expected magequery or magecommand)" >&2
+        exit 2
+        ;;
+esac
 cp LICENSE "$STAGE/LICENSE"
 
 # Stamp the version the launcher fetches (matches the git tag we create).
@@ -54,12 +77,16 @@ export GIT_AUTHOR_DATE="2020-01-01T00:00:00 +0000"
 export GIT_COMMITTER_DATE="2020-01-01T00:00:00 +0000"
 
 COMMIT_SHA="$(git commit-tree "$TREE_SHA" \
-    -m "chore(composer): cresset/magequery ${VERSION} (fetches magequery-v${VERSION})")"
+    -m "chore(composer): cresset/${PACKAGE} ${VERSION} (fetches magequery-v${VERSION})")"
 
-git branch -f composer "$COMMIT_SHA"
-git tag -f "v${VERSION}" "$COMMIT_SHA"
+if [ "$PACKAGE" = magequery ]; then
+    git branch -f composer "$COMMIT_SHA"
+    git tag -f "v${VERSION}" "$COMMIT_SHA"
+fi
 
-git push -f origin composer
-git push -f origin "v${VERSION}"
+# Push the commit by id, so the magecommand package never creates local refs
+# that would collide with this repo's own `v*` tags.
+git push -f "$REMOTE" "${COMMIT_SHA}:refs/heads/${BRANCH}"
+git push -f "$REMOTE" "${COMMIT_SHA}:refs/tags/v${VERSION}"
 
-echo "published composer branch + tag v${VERSION} (launcher fetches magequery-v${VERSION})"
+echo "published cresset/${PACKAGE}: ${BRANCH} + tag v${VERSION} (launcher fetches magequery-v${VERSION})"

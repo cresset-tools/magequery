@@ -1,10 +1,13 @@
 name: composer-branch
 
-# On each magequery release, (re)generate the orphan `composer` branch + the
-# matching vX.Y.Z tag that Packagist serves for cresset/magequery. That
-# branch contains only the PHP launcher (no Rust source); the launcher
-# fetches the magequery-vX.Y.Z binary at runtime. Packagist's GitHub webhook
-# picks up the new tag automatically.
+# On each magequery release, (re)generate the two Packagist packages:
+#   - cresset/magequery: the orphan `composer` branch + vX.Y.Z tag of this repo.
+#   - cresset/magecommand: `main` + vX.Y.Z tag of cresset-tools/magecommand. A
+#     Packagist package needs a repository of its own, so this one is pushed
+#     cross-repo with a bot-app token.
+# Both contain only the PHP launcher (no Rust source); it fetches the
+# magequery-vX.Y.Z binary at runtime. Packagist's GitHub webhook picks up the
+# new tags automatically.
 #
 # Runs as a dist post-announce job (workflow_call from release.yml), so the
 # composer tag only publishes AFTER every binary is built and attached to
@@ -75,3 +78,47 @@ jobs:
           git config user.name "cresset-bot"
           git config user.email "noreply@cresset.tools"
           scripts/publish-composer-branch.sh "${{ steps.ver.outputs.version }}"
+
+  publish-magecommand:
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'magequery-v') }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # GITHUB_TOKEN only reaches this repository; the bot app is installed on
+      # cresset-tools/magecommand too.
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: Iv23liCDQHGQVKPD1b41
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+          owner: cresset-tools
+          repositories: magecommand
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            version='${{ github.event.release.tag_name }}'
+          else
+            version='${{ inputs.version }}'
+            if [ -z "$version" ]; then
+              version="$(gh release view --json tagName -q .tagName)"
+            fi
+          fi
+          version="${version#magequery-v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved magequery version: $version"
+
+      - name: Publish cresset/magecommand
+        env:
+          MAGECOMMAND_REMOTE: https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/cresset-tools/magecommand.git
+        run: |
+          git config user.name "cresset-bot"
+          git config user.email "noreply@cresset.tools"
+          scripts/publish-composer-branch.sh "${{ steps.ver.outputs.version }}" magecommand

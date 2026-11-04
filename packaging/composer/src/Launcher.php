@@ -22,6 +22,10 @@ require __DIR__ . '/version.php';
  * the ONE `magequery-{target}` archive (see dist-workspace.toml
  * [dist.binaries]); only the file staged out of it differs per tool.
  *
+ * cresset/magecommand (packaging/composer-magecommand/) ships a copy of this
+ * file with only the `bin/magecommand` shim; scripts/publish-composer-branch.sh
+ * copies it in at publish time.
+ *
  * The same download layout (URL bases, tag prefix, targets, cache path)
  * is declared machine-readably in composer.json under
  * `extra.bougie.native-binary`, so bougie can prefetch the binary at
