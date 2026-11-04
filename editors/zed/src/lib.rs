@@ -44,7 +44,6 @@ impl MagequeryExtension {
         let (platform, arch) = zed::current_platform();
         let triple = match (platform, arch) {
             (zed::Os::Mac, zed::Architecture::Aarch64) => "aarch64-apple-darwin",
-            (zed::Os::Mac, zed::Architecture::X8664) => "x86_64-apple-darwin",
             (zed::Os::Linux, zed::Architecture::Aarch64) => "aarch64-unknown-linux-gnu",
             (zed::Os::Linux, zed::Architecture::X8664) => "x86_64-unknown-linux-gnu",
             (zed::Os::Windows, zed::Architecture::X8664) => "x86_64-pc-windows-msvc",
