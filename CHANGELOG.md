@@ -51,6 +51,19 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.23.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.22.0...magequery-v0.23.0) (2026-11-04)
+
+
+### Features
+
+* **magequery:** add csp command for the csp_whitelist.xml whitelist ([3269567](https://github.com/cresset-tools/magequery/commit/3269567a91cd0e60bfc699b71d6fbe39ffdba1b6))
+* **magequery:** publish magecommand as its own Packagist package ([cfc20a6](https://github.com/cresset-tools/magequery/commit/cfc20a6fd794a7deb0af8255f015c178fd6054ee))
+
+
+### Bug Fixes
+
+* **magequery:** push cresset/magecommand with the app token, not GITHUB_TOKEN ([1c83e56](https://github.com/cresset-tools/magequery/commit/1c83e5609148ece747aaa856f64fb99e621489f1))
+
 ## [0.22.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.21.0...magequery-v0.22.0) (2026-11-02)
 
 
