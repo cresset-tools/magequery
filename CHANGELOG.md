@@ -51,6 +51,13 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.24.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.24.0...magequery-v0.24.1) (2026-11-04)
+
+
+### Bug Fixes
+
+* drop the x86_64-apple-darwin target everywhere ([3b5f6a5](https://github.com/cresset-tools/magequery/commit/3b5f6a58f4127983fc62d9b5852a308d9467c40e))
+
 ## [0.24.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.23.0...magequery-v0.24.0) (2026-11-04)
 
 
