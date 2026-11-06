@@ -13,6 +13,7 @@ impl DoctorLint {
             Self::ModuleDisabled => "an installed module is disabled in config.php",
             Self::DisabledModuleReferenced => "enabled di.xml references a class of a disabled module",
             Self::ModuleOrderStale => "config.php's module order isn't the order Magento would write",
+            Self::ModuleDefinedTwice => "one module name is defined in two directories",
             Self::PreferenceTargetMissing => "a <preference> points at a class that doesn't exist",
             Self::PreferenceCycle => "<preference> declarations form a cycle",
             Self::VirtualTypeBaseMissing => "a <virtualType> is based on a class that doesn't exist",
@@ -100,6 +101,19 @@ wrong today. The rest changes the next time anyone runs `setup:upgrade`.
 
 Fix: run `bin/magento setup:upgrade` (or `module:enable --all` on a checkout that is
 not installed) and commit the rewritten config.php.",
+
+            Self::ModuleDefinedTwice => "\
+Two directories declare the same module, usually a vendor module copied into app/code
+to patch it, or one module installed under two composer package names. Magento
+registers modules by name, and `ComponentRegistrar::register` throws on the second
+registration (\"Module 'X' from '...' has been already defined in '...'\"), so every
+request and every bin/magento command fails, setup:di:compile included.
+
+magequery reads the first copy (app/code before vendor) so the rest of the report
+still means something, and `magecommand` refuses to compile until it is fixed.
+
+Fix: delete the copy you don't want. To change a vendor module, use a composer patch
+or a plugin instead of a copy in app/code.",
 
             Self::PreferenceTargetMissing => "\
 A <preference for=\"A\" type=\"B\"/> makes the object manager build B whenever A is
