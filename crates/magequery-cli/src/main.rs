@@ -9253,6 +9253,14 @@ fn modules_check(mage: &Magento, json: bool) -> Result<()> {
         for name in &check.in_config_not_on_disk {
             println!("missing       {name}, listed in config.php but no module.xml found on disk");
         }
+        for d in &check.duplicates {
+            println!(
+                "duplicate     {}, defined twice; Magento won't boot until one copy is removed\n              {}\n              {}",
+                d.name,
+                d.kept.display(),
+                d.ignored.display(),
+            );
+        }
     }
 
     // Flush before exiting so piped output isn't lost, then signal lint failure.
