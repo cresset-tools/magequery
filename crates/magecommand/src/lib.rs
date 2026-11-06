@@ -1288,7 +1288,7 @@ fn static_bundle(
             };
             std::fs::create_dir_all(&scratch)
                 .with_context(|| format!("create probe scratch {}", scratch.display()))?;
-            sdb::OrderMode::Probe(scratch)
+            sdb::OrderMode::probe(scratch)
         }
         other => anyhow::bail!("--order must be `probe` or `sorted`, got `{other}`"),
     };
@@ -1412,7 +1412,7 @@ fn static_files(
             };
             std::fs::create_dir_all(&scratch)
                 .with_context(|| format!("create probe scratch {}", scratch.display()))?;
-            sdb::OrderMode::Probe(scratch)
+            sdb::OrderMode::probe(scratch)
         }
         other => anyhow::bail!("--order must be `probe` or `sorted`, got `{other}`"),
     };
