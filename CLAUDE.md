@@ -304,6 +304,13 @@ modules. Use composer metadata:
   roots; skips `Test`, `_files`, `var`, `generated`, …).
 - `config.php` order is the authoritative, already-sequence-resolved load order; disk
   discovery only supplies path/source/`<sequence>`.
+- **One name in two directories**: discovery keeps the first (app/code before vendor)
+  and records the other in `ModuleCheck::duplicates`. Magento throws on the second
+  `ComponentRegistrar::register`, so doctor reports it (error, E1007
+  `module-defined-twice`) and magecommand's compile, digest and static commands refuse.
+  Not duplicates: the same directory reached twice (superpackage scan + `autoload.files`
+  root), and an `--extra-app-code` fixture whose name app/code already has (the test
+  bootstrap copies it, so Magento only registers one).
 - **Without config.php** (`OpenOptions::all_modules`, magecommand `--all-modules`):
   every discovered module is enabled and ordered by `sort_by_sequence` in
   `engine/index.rs`, a literal port of `ModuleList\Loader::sortBySequence` — the code
