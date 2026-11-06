@@ -734,23 +734,47 @@ fn write_package(
                     _ => target_abs.clone(),
                 };
                 let rel = relative_path(&link_parent, &src_abs);
-                let _ = std::fs::remove_file(&path);
-                symlink_file(&rel, &path).map_err(|e| {
+                replace_existing(&path, || symlink_file(&rel, &path)).map_err(|e| {
                     err(format!("symlink {} -> {}: {e}", path.display(), rel.display()))
                 })
             }
-            // A derived file, or symlinking off: a real byte copy. Remove any
-            // prior entry first — cheap ENOENT on a fresh target, but on a
-            // re-deploy over a PREVIOUS `--symlink` run it drops the leftover
-            // symlink so the write lands on a new real file instead of writing
-            // THROUGH the link into the vendor source.
-            _ => {
-                let _ = std::fs::remove_file(&path);
-                std::fs::write(&path, &f.content)
-                    .map_err(|e| err(format!("write {}: {e}", path.display())))
-            }
+            // A derived file, or symlinking off: a real byte copy into a NEW
+            // file. `create_new` (O_EXCL) also fails on a leftover symlink from a
+            // previous `--symlink` run, so the write never goes THROUGH a link
+            // into the vendor source; on such a re-deploy the entry is removed
+            // and the create retried.
+            _ => replace_existing(&path, || write_new(&path, &f.content))
+                .map_err(|e| err(format!("write {}: {e}", path.display()))),
         }
     })
+}
+
+/// Run `create` — an exclusive create of `path` — and, only if an entry is
+/// already there, remove it and try once more. On a fresh target this is one
+/// syscall per file instead of an `unlink` (ENOENT) plus the create: directory
+/// entry operations are the dominant cost of writing ~300k files.
+fn replace_existing(
+    path: &Path,
+    create: impl Fn() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match create() {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(path)?;
+            create()
+        }
+        r => r,
+    }
+}
+
+/// Write `content` to a file that must not exist yet (O_CREAT|O_EXCL: fails on
+/// any existing entry, a dangling or live symlink included).
+fn write_new(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?
+        .write_all(content)
 }
 
 /// The relative path from directory `from_dir` to `to` — both must be absolute.
@@ -1046,5 +1070,36 @@ mod tests {
         assert_eq!(std::fs::read(&out).unwrap(), b"REBUILT");
         // The source file is untouched — the symlink was never written through.
         assert_eq!(std::fs::read(&src).unwrap(), b"PRISTINE");
+    }
+
+    #[test]
+    fn redeploy_replaces_existing_entries() {
+        // Writes are exclusive creates; an entry already at the path (a real
+        // file, or a symlink from a symlink-mode run) is replaced, not an error.
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        let src = root.join("vendor/v/mod/web/js/x.js");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, b"SRC").unwrap();
+        let target = root.join("pub/static/frontend/Vendor/t/en_US");
+        let deploy = |content: &[u8], symlink| {
+            let pkg = pkg_with(vec![
+                placed("js/x.js", content, files::PlacedKind::Copy, Some(src.clone())),
+                placed("gen.json", content, files::PlacedKind::Translation, None),
+            ]);
+            write_package(&pkg, &target, symlink).unwrap();
+        };
+
+        deploy(b"ONE", Symlink::None);
+        deploy(b"TWO", Symlink::None); // real file over real file
+        assert_eq!(std::fs::read(target.join("js/x.js")).unwrap(), b"TWO");
+        assert_eq!(std::fs::read(target.join("gen.json")).unwrap(), b"TWO");
+
+        deploy(b"SRC", Symlink::ToSource); // symlink over real file
+        deploy(b"SRC", Symlink::ToSource); // symlink over symlink
+        let link = target.join("js/x.js");
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&link).unwrap(), b"SRC");
+        assert_eq!(std::fs::read(&src).unwrap(), b"SRC");
     }
 }
