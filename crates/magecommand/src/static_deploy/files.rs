@@ -737,6 +737,42 @@ pub fn sri_hash(content: &[u8]) -> String {
     )
 }
 
+/// Run-scoped memo of LESS entry compiles, shared by every locale group.
+///
+/// A compiled entry is a function of the orchestrator's inputs — area, theme
+/// chain, modules, the area's plugin effects — plus the run's compress/profile
+/// options and the entry's logical path. None of these depend on the locale
+/// ([`LessOrchestrator::compile_entry`] models no `web/i18n/<locale>` overlay),
+/// so `(area, theme, entry)` is the full key and a multi-locale run compiles
+/// each entry once instead of once per locale. If an i18n overlay is ever
+/// modeled, the locale must join the key.
+///
+/// Each key holds a `OnceLock`, so groups racing on the same entry (they run
+/// in lockstep) wait for one compile instead of all doing it. Blocking is safe
+/// under rayon: a compile never waits on pool work (it evaluates on its own
+/// scoped OS thread), so the thread that owns a cell always makes progress.
+#[derive(Debug, Clone, Default)]
+pub struct LessCache(std::sync::Arc<std::sync::Mutex<LessCacheMap>>);
+
+type LessCacheMap = HashMap<(String, String, String), std::sync::Arc<std::sync::OnceLock<RenderedEntry>>>;
+
+impl LessCache {
+    fn get_or_compile(
+        &self,
+        area: &str,
+        theme_path: &str,
+        logical: &str,
+        compile: impl FnOnce() -> RenderedEntry,
+    ) -> RenderedEntry {
+        let cell = {
+            let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            let key = (area.to_string(), theme_path.to_string(), logical.to_string());
+            map.entry(key).or_default().clone()
+        };
+        cell.get_or_init(compile).clone()
+    }
+}
+
 /// Run-scoped memo of [`sri_hash`] for pure copies, keyed by source file. A
 /// [`PlacedKind::Copy`]'s bytes are its source verbatim, and the same source
 /// deploys once per locale and per inheriting theme — on a multi-locale store
@@ -904,6 +940,8 @@ pub struct PlacementOptions {
     pub less_profile: super::less::LessProfile,
     /// Shared `sri-hashes.json` hash memo for this run (see [`SriCache`]).
     pub sri_cache: SriCache,
+    /// Shared LESS compile memo for this run (see [`LessCache`]).
+    pub less_cache: LessCache,
 }
 
 impl Default for PlacementOptions {
@@ -917,6 +955,7 @@ impl Default for PlacementOptions {
             symlink: Symlink::None,
             less_profile: super::less::LessProfile::default(),
             sri_cache: SriCache::default(),
+            less_cache: LessCache::default(),
         }
     }
 }
@@ -933,29 +972,14 @@ fn render_entry(
     entry: &PackageEntry,
     orchestrator: &LessOrchestrator,
     less_opts: &LessDeployOptions,
+    less_cache: &LessCache,
     area: &str,
     theme_path: &str,
 ) -> Result<RenderedEntry, FilesError> {
     if entry.less {
-        // A LESS entry that will not compile is a per-file diagnostic, not a
-        // fatal run: `DeployPackage` catches the `ContentProcessorException`,
-        // logs it and deploys the rest of the package, leaving no file behind.
-        // Third-party stylesheets that compile on no install are common
-        // (Hyva_Email's `email-inline.less` imports a lib path that resolves
-        // in no fallback layer, and is absent from every real deploy on this
-        // machine's stores), so a hard error here would let one of them sink
-        // an otherwise complete deploy.
-        let compiled = match orchestrator.compile_entry(&entry.logical, less_opts) {
-            Ok(c) => c,
-            Err(e) => return Ok((None, vec![(entry.logical.clone(), format!("{e}"))])),
-        };
-        let css = cssnotation::module_notation(&compiled.css, &entry.deployed);
-        let warnings = compiled
-            .warnings
-            .into_iter()
-            .map(|w| (entry.logical.clone(), w))
-            .collect();
-        return Ok((Some((css.into_bytes(), PlacedKind::LessCompiled)), warnings));
+        return Ok(less_cache.get_or_compile(area, theme_path, &entry.logical, || {
+            compile_less_entry(entry, orchestrator, less_opts)
+        }));
     }
     let bytes = std::fs::read(&entry.source).map_err(|e| FilesError {
         entry: Some(entry.logical.clone()),
@@ -976,6 +1000,29 @@ fn render_entry(
         }
     }
     Ok((Some((bytes, PlacedKind::Copy)), Vec::new()))
+}
+
+/// Compile one LESS package entry (the uncached half of [`render_entry`]).
+fn compile_less_entry(
+    entry: &PackageEntry,
+    orchestrator: &LessOrchestrator,
+    less_opts: &LessDeployOptions,
+) -> RenderedEntry {
+    // A LESS entry that will not compile is a per-file diagnostic, not a fatal
+    // run: `DeployPackage` catches the `ContentProcessorException`, logs it and
+    // deploys the rest of the package, leaving no file behind. Third-party
+    // stylesheets that compile on no install are common (Hyva_Email's
+    // `email-inline.less` imports a lib path that resolves in no fallback
+    // layer, and is absent from every real deploy on this machine's stores),
+    // so a hard error here would let one of them sink an otherwise complete
+    // deploy.
+    let compiled = match orchestrator.compile_entry(&entry.logical, less_opts) {
+        Ok(c) => c,
+        Err(e) => return (None, vec![(entry.logical.clone(), format!("{e}"))]),
+    };
+    let css = cssnotation::module_notation(&compiled.css, &entry.deployed);
+    let warnings = compiled.warnings.into_iter().map(|w| (entry.logical.clone(), w)).collect();
+    (Some((css.into_bytes(), PlacedKind::LessCompiled)), warnings)
 }
 
 /// Place one theme's full package. `modules` is the enabled set in
@@ -1069,8 +1116,9 @@ fn build_theme_prebundle(
             if no_less && entry.less {
                 return Ok((None, Vec::new()));
             }
-            let (rendered, warns) =
-                render_entry(entry, &orchestrator, &less_opts, area, &theme_path)?;
+            let (rendered, warns) = render_entry(
+                entry, &orchestrator, &less_opts, &opts.less_cache, area, &theme_path,
+            )?;
             let placed = rendered.map(|(content, kind)| PlacedFile {
                 path: entry.deployed.clone(),
                 content,
@@ -2403,6 +2451,51 @@ mod tests {
         // Plain assets still copy (a Hyvä theme's Tailwind styles.css is one).
         assert!(lean.files.iter().any(|f| f.path == "spacer.gif"));
         assert!(lean.files.iter().any(|f| f.path == "css/mail.css"));
+    }
+
+    /// One run's locales share LESS compiles: the second locale is served from
+    /// the cache and places byte-identical css, keyed per (area, theme, entry).
+    #[test]
+    fn less_cache_shares_compiles_across_locales() {
+        let td = synth_root();
+        let r = td.path();
+        std::fs::write(
+            r.join("app/code/Acme/Widgets/view/frontend/web/css/lean.less"),
+            "@c: #fff; .lean { color: @c; }\n",
+        )
+        .unwrap();
+        let (themes, modules) = refs(r);
+        let opts = PlacementOptions::default();
+        let build = |locale: &str| {
+            let mut c = MinSiblingCache::new();
+            build_theme(
+                r, "frontend", "Acme/base", locale, &themes, &modules, &modules, "RESOLVER",
+                "[]", &opts, &mut c,
+            )
+            .expect("build")
+        };
+        let less_css = |pkg: &ThemePackage| -> Vec<(String, Vec<u8>)> {
+            pkg.files
+                .iter()
+                .filter(|f| f.kind == PlacedKind::LessCompiled)
+                .map(|f| (f.path.clone(), f.content.clone()))
+                .collect()
+        };
+
+        let en = build("en_US");
+        let cached = opts.less_cache.0.lock().unwrap().len();
+        assert!(cached > 0, "the first locale must populate the cache");
+        let nl = build("nl_NL");
+        assert_eq!(
+            opts.less_cache.0.lock().unwrap().len(),
+            cached,
+            "a second locale must reuse every entry, not add new ones"
+        );
+        assert_eq!(less_css(&en), less_css(&nl));
+        assert!(less_css(&en).iter().any(|(_, css)| css.starts_with(b".lean")));
+
+        // Fresh options are a fresh run: nothing carries over.
+        assert_eq!(PlacementOptions::default().less_cache.0.lock().unwrap().len(), 0);
     }
 
     /// A LESS entry that will not compile must not sink the package: a real

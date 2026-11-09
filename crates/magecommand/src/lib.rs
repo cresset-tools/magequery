@@ -1452,6 +1452,7 @@ fn static_files(
         symlink: sdf::Symlink::None,
         less_profile: sdf::detect_less_profile(&root).0,
         sri_cache: sdf::SriCache::default(),
+        less_cache: sdf::LessCache::default(),
     };
     let sri = sdf::sri_layout(&magento);
     let packages = match sdf::build_from_magento(&magento, area, themes, locale, &opts) {
