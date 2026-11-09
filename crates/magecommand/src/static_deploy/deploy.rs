@@ -46,7 +46,7 @@
 //! most a single package. It equals N separate per-`(area, locale)` real
 //! deploys, NOT one combined command.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
@@ -255,6 +255,7 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
         no_js_bundle: req.no_js_bundle,
         symlink: req.symlink,
         less_profile,
+        sri_cache: files::SriCache::default(),
     };
 
     // deployed_version.txt — ONE file at the static root, written first (only
@@ -748,32 +749,43 @@ fn write_package(
         std::fs::remove_dir_all(&bundle_dir)
             .map_err(|e| err(format!("clear {}: {e}", bundle_dir.display())))?;
     }
-    // Create every distinct parent directory ONCE up front (a package's ~1600
-    // files share ~100 dirs — a per-file `create_dir_all` re-walked each path).
-    // Then the writes themselves are independent (distinct paths) and I/O-bound,
-    // so fan them out: writing a package is otherwise a serial syscall storm
-    // (`openat`/`write`/`mkdir`) on the deploy's critical path.
-    let mut dirs: HashSet<PathBuf> = HashSet::new();
+    // Create every directory ONCE up front (a package's ~1600 files share ~100
+    // dirs). Each file's parent AND its ancestors, sorted so a parent always
+    // precedes its children: then every directory is exactly one `mkdir`
+    // (EEXIST on a re-deploy). A per-dir `create_dir_all` in hash order first
+    // failed on missing parents and re-`stat`ed existing ones — directory
+    // operations are the contended cost of a deploy. Then the writes themselves
+    // are independent (distinct paths) and I/O-bound, so fan them out: writing a
+    // package is otherwise a serial syscall storm on the deploy's critical path.
+    if symlink == Symlink::ToSource || !pkg.files.is_empty() {
+        std::fs::create_dir_all(target)
+            .map_err(|e| err(format!("mkdir {}: {e}", target.display())))?;
+    }
+    let mut dirs: BTreeSet<&Path> = BTreeSet::new();
     for f in &pkg.files {
-        if let Some(parent) = std::path::Path::new(&f.path).parent() {
-            if !parent.as_os_str().is_empty() {
-                dirs.insert(target.join(parent));
+        let mut p = Path::new(&f.path).parent();
+        // Stop at the first already-known dir: its ancestors are known too.
+        while let Some(d) = p.filter(|d| !d.as_os_str().is_empty()) {
+            if !dirs.insert(d) {
+                break;
             }
+            p = d.parent();
         }
     }
-    for dir in &dirs {
-        std::fs::create_dir_all(dir).map_err(|e| err(format!("mkdir {}: {e}", dir.display())))?;
+    for d in &dirs {
+        let dir = target.join(d);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+            Err(e) => return Err(err(format!("mkdir {}: {e}", dir.display()))),
+        }
     }
     // Symlink mode computes each link relative to the deployed file's parent, so
     // it needs the package dir as an ABSOLUTE base (a relative `target` would
     // yield a relative-to-cwd link parent and a wrong `..` count). Canonicalize
     // it ONCE — the per-file `src` canonicalize below is the only other realpath.
     let target_abs = match symlink {
-        Symlink::ToSource => {
-            std::fs::create_dir_all(target)
-                .map_err(|e| err(format!("mkdir {}: {e}", target.display())))?;
-            target.canonicalize().unwrap_or_else(|_| target.to_path_buf())
-        }
+        Symlink::ToSource => target.canonicalize().unwrap_or_else(|_| target.to_path_buf()),
         Symlink::None => PathBuf::new(),
     };
     pkg.files.par_iter().try_for_each(|f| {

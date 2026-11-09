@@ -737,6 +737,33 @@ pub fn sri_hash(content: &[u8]) -> String {
     )
 }
 
+/// Run-scoped memo of [`sri_hash`] for pure copies, keyed by source file. A
+/// [`PlacedKind::Copy`]'s bytes are its source verbatim, and the same source
+/// deploys once per locale and per inheriting theme — on a multi-locale store
+/// nearly every `.js` hash is a repeat. Cloned handles share one map; build a
+/// fresh one per run (sources may change between runs of a long-lived process).
+#[derive(Debug, Clone, Default)]
+pub struct SriCache(std::sync::Arc<std::sync::Mutex<HashMap<PathBuf, (usize, String)>>>);
+
+impl SriCache {
+    /// `sri_hash(&f.content)`, reused across packages for a pure copy. The
+    /// stored length is a cheap guard on the "verbatim" invariant.
+    pub fn hash(&self, f: &PlacedFile) -> String {
+        let Some(src) = f.source.as_ref().filter(|_| f.kind == PlacedKind::Copy) else {
+            return sri_hash(&f.content);
+        };
+        let lock = || self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((len, h)) = lock().get(src) {
+            if *len == f.content.len() {
+                return h.clone();
+            }
+        }
+        let h = sri_hash(&f.content);
+        lock().insert(src.clone(), (f.content.len(), h.clone()));
+        h
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Placement
 // ---------------------------------------------------------------------------
@@ -875,6 +902,8 @@ pub struct PlacementOptions {
     /// The less.php dialect the store runs (from its `wikimedia/less.php`
     /// version). Selects the math mode; see [`detect_less_profile`].
     pub less_profile: super::less::LessProfile,
+    /// Shared `sri-hashes.json` hash memo for this run (see [`SriCache`]).
+    pub sri_cache: SriCache,
 }
 
 impl Default for PlacementOptions {
@@ -887,6 +916,7 @@ impl Default for PlacementOptions {
             no_js_bundle: false,
             symlink: Symlink::None,
             less_profile: super::less::LessProfile::default(),
+            sri_cache: SriCache::default(),
         }
     }
 }
@@ -1173,6 +1203,7 @@ fn finalize_theme(
     area: &str,
     locale: &str,
     kept: &[usize],
+    sri_cache: &SriCache,
 ) -> Result<ThemePackage, FilesError> {
     let PrebuiltPackage {
         theme_id,
@@ -1219,7 +1250,7 @@ fn finalize_theme(
     // [`PackageSri::min_resolver`].
     let hashed = |f: &&PlacedFile| is_js(f) && f.path != requirejs::MIN_RESOLVER_FILE_NAME;
     let hash_all = |v: Vec<&PlacedFile>| -> Vec<(String, String)> {
-        v.into_iter().map(|f| (format!("{prefix}/{}", f.path), sri_hash(&f.content))).collect()
+        v.into_iter().map(|f| (format!("{prefix}/{}", f.path), sri_cache.hash(f))).collect()
     };
     // Phase 0 — the package files, as `DeployPackage` publishes them.
     let package_js: Vec<&PlacedFile> = files
@@ -1284,7 +1315,7 @@ fn build_theme(
         root, area, theme_id, locale, themes, modules, reg_modules, min_resolver, js_translation, opts,
     )?;
     let kept = select_bundle_files(&pre, min_cache);
-    finalize_theme(pre, area, locale, &kept)
+    finalize_theme(pre, area, locale, &kept, &opts.sri_cache)
 }
 
 /// The run-scoped, area/locale-INDEPENDENT inputs a deploy needs, computed
@@ -1921,7 +1952,8 @@ where
                             if failed.load(Ordering::Relaxed) {
                                 return;
                             }
-                            if let Err(e) = finalize_theme(pre, area, locale, &kept)
+                            if let Err(e) =
+                                finalize_theme(pre, area, locale, &kept, &opts.sri_cache)
                                 .and_then(|pkg| sink(idx, pkg))
                             {
                                 fail(e);
@@ -2476,5 +2508,28 @@ mod tests {
         assert!(saves_into_area_repository("$area = explode( '/' , $package->getPath() )[0];"));
         let newer = "$this->repositoryPool->get($package->getPath())->saveBunch($collectedData);";
         assert!(!saves_into_area_repository(newer));
+    }
+
+    #[test]
+    fn sri_cache_reuses_copies_only() {
+        let file = |content: &[u8], kind, source: Option<&str>| PlacedFile {
+            path: "js/x.js".into(),
+            content: content.to_vec(),
+            kind,
+            source: source.map(PathBuf::from),
+        };
+        let cache = SriCache::default();
+        let shared = cache.clone();
+        let a = file(b"AAA", PlacedKind::Copy, Some("/src/x.js"));
+        assert_eq!(cache.hash(&a), sri_hash(b"AAA"));
+        // A clone shares the map: the same source is served from the memo.
+        assert_eq!(shared.hash(&a), sri_hash(b"AAA"));
+        assert_eq!(cache.0.lock().unwrap().len(), 1);
+        // A length mismatch (broken "verbatim" invariant) is rehashed.
+        assert_eq!(cache.hash(&file(b"BBBB", PlacedKind::Copy, Some("/src/x.js"))), sri_hash(b"BBBB"));
+        // Derived kinds are never memoized.
+        let gen = file(b"CCC", PlacedKind::Bundle, None);
+        assert_eq!(cache.hash(&gen), sri_hash(b"CCC"));
+        assert_eq!(cache.0.lock().unwrap().len(), 1);
     }
 }
