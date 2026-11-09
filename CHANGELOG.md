@@ -51,6 +51,26 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.25.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.24.1...magequery-v0.25.0) (2026-11-09)
+
+
+### Features
+
+* **magequery:** report a module defined in two directories, and refuse to compile it ([8bb01fd](https://github.com/cresset-tools/magequery/commit/8bb01fdb0249761d9854f1f2f043acb127824cf4))
+
+
+### Bug Fixes
+
+* **magecommand:** implement InterceptorInterface in fused interceptors ([8f96959](https://github.com/cresset-tools/magequery/commit/8f96959ab50f3221447c80c2b88c81fa13d85f97))
+
+
+### Performance Improvements
+
+* **magecommand:** compile each LESS entry once per run, not per locale ([#180](https://github.com/cresset-tools/magequery/issues/180)) ([88851a3](https://github.com/cresset-tools/magequery/commit/88851a326e6c0dc7ddd9dba02ff2155de8880f3f))
+* **magecommand:** exclusive-create static files instead of unlink + write ([#177](https://github.com/cresset-tools/magequery/issues/177)) ([1bc0991](https://github.com/cresset-tools/magequery/commit/1bc09913bddbbf0536aaa50e7734c243cef24587))
+* **magecommand:** faster static deploy with lower peak memory ([#176](https://github.com/cresset-tools/magequery/issues/176)) ([436ec5f](https://github.com/cresset-tools/magequery/commit/436ec5fd529926ec516a87036b74264c87585f8f))
+* **magecommand:** memoize SRI hashes, one mkdir per dir, faster JSON escaping ([#179](https://github.com/cresset-tools/magequery/issues/179)) ([4bda883](https://github.com/cresset-tools/magequery/commit/4bda883b8803d1dc31030ef17852a331782aa00d))
+
 ## [0.24.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.24.0...magequery-v0.24.1) (2026-11-04)
 
 
