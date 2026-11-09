@@ -51,6 +51,13 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.25.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.25.0...magequery-v0.25.1) (2026-11-09)
+
+
+### Performance Improvements
+
+* **magecommand:** cap in-flight packages per group at one per thread ([#181](https://github.com/cresset-tools/magequery/issues/181)) ([50cdef6](https://github.com/cresset-tools/magequery/commit/50cdef6a60e9777ad02e535a2e6d9427d317fa5b))
+
 ## [0.25.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.24.1...magequery-v0.25.0) (2026-11-09)
 
 
