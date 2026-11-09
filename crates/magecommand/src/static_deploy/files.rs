@@ -1930,8 +1930,9 @@ pub fn build_group(
 ///
 /// Three steps per theme:
 ///
-/// - **A** ([`prebuild_theme`]) is independent per theme, so every theme is
-///   spawned at once.
+/// - **A** ([`prebuild_theme`]) is independent per theme. Themes start in
+///   order, at most one per pool thread in flight (built but not yet through
+///   `sink`), so finished packages do not pile up in memory behind the disk.
 /// - **B** ([`select_bundle_files`]) reads and mutates the group's ONE
 ///   `.min`-sibling cache, so it runs in theme order (blank-before-luma
 ///   poisoning preserved): theme `i` is selected as soon as A has finished for
@@ -1954,7 +1955,7 @@ pub fn build_group_each<F>(
 where
     F: Fn(usize, ThemePackage) -> Result<(), FilesError> + Sync,
 {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc::{self, TryRecvError};
     use std::sync::Mutex;
 
@@ -1965,21 +1966,33 @@ where
         failed.store(true, Ordering::Relaxed);
         first_err.lock().expect("first error").get_or_insert(e);
     };
-    let (failed, fail, sink) = (&failed, &fail, &sink);
+    // Packages built but not yet written are the deploy's memory. Writing is
+    // the bottleneck, so starting every theme at once only queues finished
+    // packages in memory; start the next theme's build once fewer than
+    // `window` of this group's packages are in flight. One per pool thread
+    // keeps every thread busy and scales with the machine (a bigger host has
+    // more threads and, as a rule, more memory). Themes start in index order,
+    // so the in-order step never waits on a theme that was not started.
+    let window = rayon::current_num_threads().max(1);
+    let done = AtomicUsize::new(0); // packages finished (written, failed or skipped)
+    let (failed, fail, sink, done) = (&failed, &fail, &sink, &done);
 
     rayon::in_place_scope(|s| {
         let (tx, rx) = mpsc::channel::<(usize, Result<PrebuiltPackage, FilesError>)>();
-        for (i, theme_id) in theme_ids.iter().enumerate() {
-            let tx = tx.clone();
-            s.spawn(move |_| {
-                if failed.load(Ordering::Relaxed) {
-                    return;
-                }
-                let pre = prebuild_theme(inputs, area, theme_id, locale, area_phrases, opts);
-                let _ = tx.send((i, pre));
-            });
-        }
-        drop(tx);
+        let mut started = 0usize;
+        let start_more = |started: &mut usize| {
+            while *started < n && *started - done.load(Ordering::Acquire) < window {
+                let (i, theme_id, tx) = (*started, &theme_ids[*started], tx.clone());
+                s.spawn(move |_| {
+                    if failed.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let pre = prebuild_theme(inputs, area, theme_id, locale, area_phrases, opts);
+                    let _ = tx.send((i, pre));
+                });
+                *started += 1;
+            }
+        };
 
         // The ordered step, on this thread. It must not BLOCK waiting for the
         // spawned work: under `--jobs 1` (or a pool whose every thread is a
@@ -1989,6 +2002,7 @@ where
         let mut next = 0usize;
         let mut min_cache = MinSiblingCache::new();
         while next < n && !failed.load(Ordering::Relaxed) {
+            start_more(&mut started);
             match rx.try_recv() {
                 Ok((i, Ok(pre))) => {
                     pending.insert(i, pre);
@@ -1997,15 +2011,15 @@ where
                         let idx = next;
                         next += 1;
                         s.spawn(move |_| {
-                            if failed.load(Ordering::Relaxed) {
-                                return;
+                            if !failed.load(Ordering::Relaxed) {
+                                if let Err(e) =
+                                    finalize_theme(pre, area, locale, &kept, &opts.sri_cache)
+                                        .and_then(|pkg| sink(idx, pkg))
+                                {
+                                    fail(e);
+                                }
                             }
-                            if let Err(e) =
-                                finalize_theme(pre, area, locale, &kept, &opts.sri_cache)
-                                .and_then(|pkg| sink(idx, pkg))
-                            {
-                                fail(e);
-                            }
+                            done.fetch_add(1, Ordering::Release);
                         });
                     }
                 }
@@ -2014,8 +2028,7 @@ where
                     Some(rayon::Yield::Executed) => {}
                     _ => std::thread::sleep(std::time::Duration::from_micros(200)),
                 },
-                // Every phase-A task has finished and been consumed; with
-                // `next < n` that can only follow a failure.
+                // Unreachable while this loop holds `tx`; kept for clarity.
                 Err(TryRecvError::Disconnected) => break,
             }
         }
