@@ -727,7 +727,66 @@ pub fn php_json_encode_map_opts(entries: &[(&str, &str)], escape_slashes: bool) 
     out
 }
 
+/// One JSON string literal, appended to `out`. Runs of bytes that need no
+/// escaping (printable ASCII) are copied as whole slices; escapes are written
+/// without a per-character `format!` — this encodes every bundled file's body.
 fn php_json_string(s: &str, out: &mut String, escape_slashes: bool) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    fn push_u(out: &mut String, cp: u32) {
+        out.push_str("\\u");
+        for shift in [12, 8, 4, 0] {
+            out.push(HEX[((cp >> shift) & 0xF) as usize] as char);
+        }
+    }
+    out.push('"');
+    let bytes = s.as_bytes();
+    let mut run = 0; // start of the pending unescaped run
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        let plain = (0x20..0x80).contains(&b) && b != b'"' && b != b'\\'
+            && !(escape_slashes && b == b'/');
+        if plain {
+            i += 1;
+            continue;
+        }
+        out.push_str(&s[run..i]);
+        if b < 0x80 {
+            match b {
+                b'"' => out.push_str("\\\""),
+                b'\\' => out.push_str("\\\\"),
+                b'/' => out.push_str("\\/"),
+                0x08 => out.push_str("\\b"),
+                0x09 => out.push_str("\\t"),
+                0x0a => out.push_str("\\n"),
+                0x0c => out.push_str("\\f"),
+                0x0d => out.push_str("\\r"),
+                _ => push_u(out, b as u32), // the remaining control chars
+            }
+            i += 1;
+        } else {
+            // A non-ASCII char starts here (`i` is on a char boundary: every
+            // byte before it was consumed as ASCII or as a whole char).
+            let c = s[i..].chars().next().expect("char boundary");
+            let cp = c as u32;
+            if cp <= 0xFFFF {
+                push_u(out, cp);
+            } else {
+                let v = cp - 0x1_0000;
+                push_u(out, 0xD800 + (v >> 10));
+                push_u(out, 0xDC00 + (v & 0x3FF));
+            }
+            i += c.len_utf8();
+        }
+        run = i;
+    }
+    out.push_str(&s[run..]);
+    out.push('"');
+}
+
+/// The straightforward per-char encoder [`php_json_string`] must match.
+#[cfg(test)]
+fn php_json_string_reference(s: &str, out: &mut String, escape_slashes: bool) {
     out.push('"');
     for c in s.chars() {
         match c {
@@ -1266,6 +1325,30 @@ mod tests {
             php_json_encode_map(&[("z", "1"), ("a", "2")]),
             r#"{"z":"1","a":"2"}"#
         );
+    }
+
+    /// The run-copying encoder is byte-identical to the per-char reference, on
+    /// every escape class, at run boundaries, and over every control char.
+    #[test]
+    fn php_json_string_matches_reference() {
+        let mut cases: Vec<String> = [
+            "", "plain ascii only", "\"", "\\", "/", "a/b", "/lead", "trail/", "\u{7f}",
+            "x\"y\\z/w\n", "ö", "aöb", "’’", "😀", "a😀b😀", "\u{ffff}\u{10000}\u{10ffff}",
+            "mixed \t\r\u{8}\u{c} ö’ 😀 \"q\" \\ / end", "\u{0}\u{1}\u{1f}",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        cases.push((0u8..0x80).map(char::from).collect());
+        cases.push(('\u{80}'..='\u{7ff}').step_by(37).collect());
+        for s in &cases {
+            for escape_slashes in [false, true] {
+                let (mut got, mut want) = (String::new(), String::new());
+                php_json_string(s, &mut got, escape_slashes);
+                php_json_string_reference(s, &mut want, escape_slashes);
+                assert_eq!(got, want, "input {s:?}, escape_slashes={escape_slashes}");
+            }
+        }
     }
 
     // ---- filters ----------------------------------------------------------
