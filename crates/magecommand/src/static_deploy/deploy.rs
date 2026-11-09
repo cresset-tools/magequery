@@ -256,6 +256,7 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
         symlink: req.symlink,
         less_profile,
         sri_cache: files::SriCache::default(),
+        less_cache: files::LessCache::default(),
     };
 
     // deployed_version.txt — ONE file at the static root, written first (only
