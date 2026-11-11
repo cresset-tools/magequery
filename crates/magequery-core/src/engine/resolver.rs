@@ -270,6 +270,17 @@ impl ClassResolver {
             .find(|p| name.starts_with(p))
     }
 
+    /// Whether PHP's autoloader would actually define `class`: some autoload prefix maps it
+    /// to a file, and that file declares this very type (PHP names are case-insensitive).
+    /// `None` when no PSR-4/PSR-0 prefix covers the name — a classmap might still provide
+    /// it, so "no" isn't knowable.
+    pub(crate) fn autoloads(&self, class: &ClassName) -> Option<bool> {
+        if !self.has_prefix_for(class) {
+            return None;
+        }
+        Some(self.header(class).is_some_and(|h| h.fqcn.as_str().eq_ignore_ascii_case(class.as_str())))
+    }
+
     /// Whether the class resolves to an existing source file.
     pub fn exists(&self, class: &ClassName) -> bool {
         self.file_for(class).is_some()
@@ -348,6 +359,41 @@ impl ClassResolver {
             }
         }
         result
+    }
+
+    /// The string a static, argument-less method returns when its body is a single literal
+    /// `return` (`getVersion()` on a `PatchVersionInterface` patch): a string literal or a
+    /// `self::`/`static::` constant. Looked up on the class, then its ancestors — the first
+    /// file declaring the method decides. `None` if no declaration returns a literal.
+#[cfg_attr(not(feature = "db"), allow(dead_code))] // used by `db status`
+    pub fn literal_return(&self, class: &ClassName, method: &str) -> Option<String> {
+        let mut chain = vec![class.clone()];
+        chain.extend(self.ancestors(class));
+        let mut consts: Vec<HashMap<String, String>> = Vec::new();
+        let mut found: Option<php::StrOrConst> = None;
+        for c in &chain {
+            let Some(src) = self.file_for(c).and_then(|f| self.vfs.read_to_string(&f).ok()) else {
+                continue;
+            };
+            let (ret, file_consts) = php::method_return(&src, method);
+            consts.push(file_consts);
+            if found.is_none() {
+                match ret {
+                    Some(r) => found = Some(r),
+                    // Declared but computed: stop — an ancestor's body isn't what runs.
+                    None if declares_method(&src, method) => return None,
+                    None => continue,
+                }
+            }
+            if let Some(php::StrOrConst::Str(s)) = &found {
+                return Some(s.clone());
+            }
+        }
+        match found? {
+            php::StrOrConst::Const(name) => consts.iter().find_map(|m| m.get(&name).cloned()),
+            php::StrOrConst::Str(s) => Some(s),
+            php::StrOrConst::Prop(_) => None,
+        }
     }
 
     /// The `bin/magento` name and description a console-command class declares
@@ -565,4 +611,16 @@ mod tests {
         assert!(!under_app_code(Path::new("/srv/app/lib/code/Thing")));
         assert!(!under_app_code(Path::new("/srv/app")));
     }
+}
+
+/// Whether `src` declares `function <method>` at all (case-insensitively, as PHP does).
+#[cfg_attr(not(feature = "db"), allow(dead_code))] // used by `db status`
+fn declares_method(src: &str, method: &str) -> bool {
+    let lower = src.to_ascii_lowercase();
+    let needle = method.to_ascii_lowercase();
+    lower.match_indices("function").any(|(i, _)| {
+        lower[i + "function".len()..].trim_start().strip_prefix(needle.as_str()).is_some_and(|rest| {
+            rest.trim_start().starts_with('(')
+        })
+    })
 }

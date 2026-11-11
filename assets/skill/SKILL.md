@@ -210,12 +210,18 @@ query over tables the virtual ones don't cover), and `--json` to parse results.
 **Runtime (env.php and live connections)**
 - `db info|ping`, `redis info|ping` — connections from `env.php`, plus a real
   connectivity test.
+- Does `setup:upgrade` have work to do (before or after a deploy)? → `db status` — a
+  drop-in `bin/magento setup:db:status` in milliseconds: the declarative-schema diff,
+  pending schema/data patches and `setup_module` version mismatches, each listed.
+  Same exit status as Magento's (0 up to date, 2 upgrade required, 1 error), so a
+  deploy script can branch on it.
 - `queue info|topology [<topic>]|backlog` — the queue wiring and whether anything is
   stuck. `session`, `cache`, `lock` — the configured backends (info-only).
 
 **Health and whole-class views**
 - Is anything in the merged config broken (missing classes, cycles, forgotten
-  wiring)? → `magequery doctor` (exits non-zero on errors only, so it fits CI;
+  wiring, setup patches or `db_schema.xml` keys that trip `setup:db:status`)? →
+  `magequery doctor` (exits non-zero on errors only, so it fits CI;
   `--deny <lint>` makes a warning such as `module-disabled` or
   `disabled-module-referenced` fail too). A missing class is an `error` only when
   something buildable asks for it; unreachable ones are `warn` (stale config) or
@@ -225,7 +231,8 @@ query over tables the virtual ones don't cover), and `--json` to parse results.
   (`warn[E5003]`): `magequery doctor --explain E5003` explains it (bare `--explain` lists
   all), `--deny E5003` fails on that kind, `--strict` fails on every warning.
 - Everything about one class in a single view → `whatis '<Class>'`.
-- Which setup patches exist or are pending? → `patches [--db|--pending]`.
+- Which setup patches exist or are pending? → `patches [--db|--pending]` (for the
+  whole "is an upgrade needed" answer, `db status`).
 
 ## Verifying a change landed
 
