@@ -274,7 +274,6 @@ impl ClassResolver {
     /// to a file, and that file declares this very type (PHP names are case-insensitive).
     /// `None` when no PSR-4/PSR-0 prefix covers the name — a classmap might still provide
     /// it, so "no" isn't knowable.
-#[cfg_attr(not(feature = "db"), allow(dead_code))] // used by `db status`
     pub(crate) fn autoloads(&self, class: &ClassName) -> Option<bool> {
         if !self.has_prefix_for(class) {
             return None;

@@ -159,6 +159,14 @@ pub enum DoctorLint {
     ModuleOrderStale,
     /// One module name defined in two directories.
     ModuleDefinedTwice,
+    /// A `Setup/Patch` file that doesn't define the class Magento's patch reader derives
+    /// from its file name.
+    PatchClassUnloadable,
+    /// Two indexes (or unique keys) of a table that get the same generated name, so
+    /// Magento's declarative schema keeps only the later one.
+    DuplicateSchemaKey,
+    /// `db_schema.xml` text Magento's foreign-key regex takes for a foreign key.
+    SchemaTextParsesAsForeignKey,
 }
 
 /// The kebab-case name a finding is reported under: what `doctor --deny` takes.
@@ -173,7 +181,7 @@ impl std::fmt::Display for DoctorLint {
 
 impl DoctorLint {
     /// Every lint, in code order.
-    pub const ALL: [DoctorLint; 28] = [
+    pub const ALL: [DoctorLint; 31] = [
         Self::ModuleMissingOnDisk,
         Self::ModuleNotRegistered,
         Self::SequenceCycle,
@@ -202,6 +210,9 @@ impl DoctorLint {
         Self::CommandUnregistered,
         Self::ObserverUnregistered,
         Self::PluginUnregistered,
+        Self::PatchClassUnloadable,
+        Self::DuplicateSchemaKey,
+        Self::SchemaTextParsesAsForeignKey,
     ];
 
     /// The lint's stable code, printed with every finding (`warn[E5003]`) and accepted
@@ -239,6 +250,9 @@ impl DoctorLint {
             Self::CommandUnregistered => "E5001",
             Self::ObserverUnregistered => "E5002",
             Self::PluginUnregistered => "E5003",
+            Self::PatchClassUnloadable => "E6001",
+            Self::DuplicateSchemaKey => "E6002",
+            Self::SchemaTextParsesAsForeignKey => "E6003",
         }
     }
 }

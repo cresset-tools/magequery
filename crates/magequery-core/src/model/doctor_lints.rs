@@ -35,6 +35,9 @@ impl DoctorLint {
             Self::CommandUnregistered => "a console command class is registered nowhere",
             Self::ObserverUnregistered => "an observer class is registered in no events.xml",
             Self::PluginUnregistered => "a plugin class is declared in no di.xml",
+            Self::PatchClassUnloadable => "a Setup/Patch file doesn't define the class its file name implies",
+            Self::DuplicateSchemaKey => "two indexes or unique keys of a table get the same generated name",
+            Self::SchemaTextParsesAsForeignKey => "db_schema.xml text that Magento reads as a foreign key",
         }
     }
 
@@ -307,6 +310,40 @@ A class under Plugin/ defines before/around/after methods but no di.xml declares
 also shows up here.
 
 Fix: declare it in di.xml on the type it should intercept, or delete the class.",
+
+            Self::PatchClassUnloadable => "\
+Magento finds setup patches by globbing Setup/Patch/Data/*.php and Setup/Patch/Schema/*.php
+and turns each file name into a class name (Vendor\\Module\\Setup\\Patch\\Data\\<file
+name>) — it never reads the file. When the file declares some other class, or none (a
+helper or a typo in the file name), loading that class fails.
+
+`bin/magento setup:db:status` loads every patch class, applied or not, so it fails on this
+one and reports \"upgrade required\" on every run: a deploy that gates `setup:upgrade` on it
+upgrades every time. An unapplied one also stops `setup:upgrade`.
+
+Fix: rename the file to match its class, or move non-patch classes out of Setup/Patch/Data
+and Setup/Patch/Schema.",
+
+            Self::DuplicateSchemaKey => "\
+Magento never uses an index's referenceId as its name: it generates one from the table and
+column names (TABLE_COLUMN_COLUMN, abbreviated and hashed past 64 characters), and matches
+declared keys to live ones by that name. Two indexes on the same columns — a btree and a
+fulltext, say — get the same name unless the name is long enough to be hashed, and the
+same goes for two unique keys.
+
+Only the later declaration survives: the earlier index is never created by setup:upgrade,
+and the database copy of it is compared against the wrong declaration.
+
+Fix: drop one of the two, or index a different column list.",
+
+            Self::SchemaTextParsesAsForeignKey => "\
+Magento reads foreign keys from SHOW CREATE TABLE with a regular expression, not from
+information_schema, so a table or column comment (or a default) that reads like
+`, CONSTRAINT `NAME` FOREIGN KEY (`col`) REFERENCES `table` (`col`)` is parsed as a real
+foreign key. If it names a table Magento can't see, `setup:db:status` fails and reports an
+upgrade on every run; otherwise a phantom key is compared against the declaration.
+
+Fix: reword the comment.",
         }
     }
 }

@@ -220,7 +220,8 @@ query over tables the virtual ones don't cover), and `--json` to parse results.
 
 **Health and whole-class views**
 - Is anything in the merged config broken (missing classes, cycles, forgotten
-  wiring)? → `magequery doctor` (exits non-zero on errors only, so it fits CI;
+  wiring, setup patches or `db_schema.xml` keys that trip `setup:db:status`)? →
+  `magequery doctor` (exits non-zero on errors only, so it fits CI;
   `--deny <lint>` makes a warning such as `module-disabled` or
   `disabled-module-referenced` fail too). A missing class is an `error` only when
   something buildable asks for it; unreachable ones are `warn` (stale config) or

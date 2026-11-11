@@ -1169,6 +1169,17 @@ argument, the `ProductRenderSearchResultsInterface` preference to a nonexistent 
 on disk is `UpdateRemoteTemplateList`; plus genuine Hyvä-modules-not-in-config.php drift).
 A synthetic broken module exercises every lint in one run.
 
+**Setup & schema (E6xxx)** — the cases where `db status` and Magento's own
+`setup:db:status` give an answer the code's author wouldn't expect, flagged before deploy:
+E6001 `patch-class-unloadable` (error: a `Setup/Patch/{Data,Schema}/*.php` file that doesn't
+define the class Magento derives from its file name — setup:db:status then fails on every
+run), E6002 `duplicate-schema-key` (two indexes, or two unique keys, of a table that get the
+same generated name — a btree and a fulltext index on the same columns do — so only the
+later is ever created; verified against a real `setup:db-schema:upgrade`), E6003
+`schema-text-parses-as-foreign-key` (a comment or default Magento's FK regex reads as a
+foreign key). They read the same merged `db_schema.xml` as `db status`
+(`schemadecl.rs`, no database needed) and the same patch glob (`doctor::patch_files`).
+
 ### `patches` (setup patches, static + `--db`, done)
 
 `magequery patches [<filter>] [--db|--pending]` — every `Setup/Patch/Data|Schema` class of

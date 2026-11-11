@@ -74,6 +74,8 @@ pub(crate) fn run(mage: &Magento, source_filter: Option<ModuleSource>) -> Doctor
     phase("commands", &mut d, &|d| d.check_commands());
     phase("mq", &mut d, &|d| d.check_mq());
     phase("graphql", &mut d, &|d| d.check_graphql());
+    phase("setup patches", &mut d, &|d| d.check_patch_classes());
+    phase("declarative schema", &mut d, &|d| d.check_schema_declarations());
     phase("templates", &mut d, &|d| d.check_templates());
     phase("unregistered", &mut d, &|d| d.check_unregistered(source_filter));
 
@@ -1289,6 +1291,127 @@ first at position {}: {listed} is listed where Magento puts {}",
 
     // ---------- unregistered code (exists on disk, wired nowhere) ----------
 
+    // ---------- setup patches & declarative schema ----------
+
+    /// E6001: a patch file whose derived class doesn't autoload. `setup:db:status` loads
+    /// every one, so it fails on every run.
+    fn check_patch_classes(&mut self) {
+        let mage = self.mage;
+        for m in mage.index.modules.iter().filter(|m| m.enabled) {
+            for kind in [PatchKind::Schema, PatchKind::Data] {
+                for (class, file) in patch_files(&m.path, &m.name, kind) {
+                    if mage.index.resolver.autoloads(&class) != Some(false) {
+                        continue;
+                    }
+                    let declared = mage
+                        .index
+                        .resolver
+                        .header_of(&class)
+                        .map_or_else(|| "no class".to_string(), |h| format!("class {}", h.fqcn));
+                    let source = Source { module: m.name.clone(), file, line: 1, area: Area::Global };
+                    self.error_on(
+                        DoctorLint::PatchClassUnloadable,
+                        &class,
+                        format!(
+                            "setup patch {class} doesn't autoload: Magento derives that name from the file name, but the file declares {declared}; setup:db:status fails on it and always reports an upgrade"
+                        ),
+                        Some(source),
+                    );
+                }
+            }
+        }
+    }
+
+    /// E6002 and E6003, over the merged `db_schema.xml` as Magento's setup code reads it.
+    fn check_schema_declarations(&mut self) {
+        let Ok(tables) = crate::schemadecl::merged_schema_xml(self.mage) else { return };
+        let module_of = |file: &Path| {
+            self.mage
+                .index
+                .modules
+                .iter()
+                .filter(|m| file.starts_with(&m.path))
+                .max_by_key(|m| m.path.as_os_str().len())
+                .map_or_else(|| ModuleName::new("app_etc"), |m| m.name.clone())
+        };
+        let src = |n: &crate::schemadecl::XNode| Source {
+            module: module_of(&n.file),
+            file: n.file.clone(),
+            line: n.line,
+            area: Area::Global,
+        };
+        let off = |n: &crate::schemadecl::XNode| matches!(n.get("disabled"), Some("true" | "1"));
+
+        for (table, t) in &tables {
+            if off(&t.node) {
+                continue;
+            }
+            // E6003: text the foreign-key regex would match. Only an element's own text
+            // reaches SHOW CREATE TABLE, so look at the comments and defaults.
+            let texts = std::iter::once((None, &t.node, "comment"))
+                .chain(t.columns.iter().filter(|(_, n)| !off(n)).flat_map(|(c, n)| {
+                    [(Some(c.as_str()), n, "comment"), (Some(c.as_str()), n, "default")]
+                }));
+            for (column, n, attr) in texts {
+                let Some(text) = n.get(attr) else { continue };
+                if let Some(fk) = crate::schemadecl::parse_foreign_keys(text).into_iter().next() {
+                    let what = column.map_or_else(|| format!("table {table}"), |c| format!("column {table}.{c}"));
+                    self.warn_on(
+                        DoctorLint::SchemaTextParsesAsForeignKey,
+                        table,
+                        format!(
+                            "the {attr} of {what} reads as foreign key {} to {}.{}: Magento parses foreign keys out of SHOW CREATE TABLE with a regex, so it takes this text for a real key",
+                            fk.name, fk.ref_table, fk.ref_column
+                        ),
+                        Some(src(n)),
+                    );
+                }
+            }
+
+            // E6002: keys whose generated names collide, per namespace (indexes; unique
+            // keys). Only the last one Magento merges survives.
+            let base = crate::schemadecl::origin_table(table);
+            let mut groups: Vec<(String, Vec<(&str, &crate::schemadecl::XNode)>)> = Vec::new();
+            let indexes = t.indexes.iter().filter(|(_, n)| !off(n)).map(|(id, n)| {
+                let ty = match n.get("indexType") {
+                    Some("fulltext") => "fulltext",
+                    _ => "index",
+                };
+                ("index", id, n, ty)
+            });
+            let uniques = t
+                .constraints
+                .iter()
+                .filter(|(_, n)| !off(n) && n.get("type") == Some("unique"))
+                .map(|(id, n)| ("unique key", id, n, "unique"));
+            for (kind, id, n, ty) in indexes.chain(uniques) {
+                if n.columns.is_empty() {
+                    continue;
+                }
+                let key = format!("{kind}:{}", generated_key(base, &n.columns, ty));
+                match groups.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, members)) => members.push((id, n)),
+                    None => groups.push((key, vec![(id, n)])),
+                }
+            }
+            for (key, members) in groups.into_iter().filter(|(_, m)| m.len() > 1) {
+                let (kind, name) = key.split_once(':').expect("kind:name");
+                let (winner, _) = members.last().expect("non-empty");
+                for (id, n) in &members[..members.len() - 1] {
+                    self.warn_on(
+                        DoctorLint::DuplicateSchemaKey,
+                        table,
+                        format!(
+                            "{kind} {id} on {table}({}) gets the same generated name {name} as {kind} {winner}; Magento keeps only {winner}, so {id} is never created",
+                            n.columns.join(", ")
+                        ),
+                        Some(src(n)),
+                    );
+                }
+            }
+        }
+    }
+
     fn check_unregistered(&mut self, source_filter: Option<ModuleSource>) {
         let started = std::time::Instant::now();
         // Registered sets, each widened by ancestors so a base class whose registered
@@ -1584,7 +1707,6 @@ pub(crate) fn walk_php(dir: &Path, depth: usize, f: &mut impl FnMut(&Path)) {
 /// `<Vendor>\<Module>\Setup\Patch\<Type>\<basename>` from the module name — no
 /// recursion, no PSR-4 check and no interface filter, exactly as Magento globs. (A helper
 /// class kept in that folder is therefore "pending" forever in Magento too.)
-#[cfg_attr(not(feature = "db"), allow(dead_code))] // used by `db status`
 pub(crate) fn patch_files(module_path: &Path, module: &ModuleName, kind: PatchKind) -> Vec<(ClassName, std::path::PathBuf)> {
     let ty = match kind {
         PatchKind::Schema => "Schema",
@@ -1608,4 +1730,18 @@ pub(crate) fn patch_files(module_path: &Path, module: &ModuleName, kind: PatchKi
     // glob() returns names sorted; keep the report in the same order.
     out.sort_by(|a, b| a.1.cmp(&b.1));
     out
+}
+
+/// The collision key of a generated index/unique name (`Pdo\Mysql::getIndexName`, before
+/// upper-casing): the abbreviated `table_col_col` when that fits in 64 characters; past
+/// that the name is a type prefix + md5, which only collides for the same type.
+fn generated_key(table: &str, columns: &[String], ty: &str) -> String {
+    let s = format!("{table}_{}", columns.join("_"));
+    let name = if s.len() <= 64 {
+        s
+    } else {
+        let short = crate::schemadecl::strtr_abbrev(&s);
+        if short.len() <= 64 { short } else { format!("{ty}#{s}") }
+    };
+    name.to_ascii_uppercase()
 }

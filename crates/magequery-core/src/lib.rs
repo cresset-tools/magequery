@@ -31,7 +31,6 @@ mod db;
 mod dbstatus;
 #[cfg(feature = "db")]
 mod schemadiff;
-#[cfg(feature = "db")]
 mod schemadecl;
 mod decrypt;
 mod deploy;
