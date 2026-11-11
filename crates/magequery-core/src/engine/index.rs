@@ -525,7 +525,16 @@ fn scan(
             Ok(ft) => ft,
             Err(_) => continue,
         };
-        if ft.is_symlink() || !ft.is_dir() {
+        // Magento registers app/code modules by globbing `app/code/*/*/registration.php`,
+        // which follows symlinks — the usual way a module under development is linked
+        // into a store. Follow them there (the depth cap bounds any loop); elsewhere a
+        // symlink is skipped.
+        let is_dir = if ft.is_symlink() {
+            source == ModuleSource::App && entry.path().is_dir()
+        } else {
+            ft.is_dir()
+        };
+        if !is_dir {
             continue;
         }
         let name = entry.file_name();

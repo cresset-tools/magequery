@@ -1228,6 +1228,29 @@ mod handle_tests {
         o
     }
 
+    /// A module symlinked into app/code (how one under development is linked into a
+    /// store) is registered by Magento's glob, so it must be discovered.
+    #[cfg(unix)]
+    #[test]
+    fn app_code_module_behind_a_symlink_is_discovered() {
+        let tree = TempTree::new("app-code-symlink");
+        tree.touch("app/etc/di.xml");
+        std::fs::write(
+            tree.0.join("app/etc/config.php"),
+            "<?php\nreturn ['modules' => ['Acme_Linked' => 1]];\n",
+        )
+        .unwrap();
+        module_xml(&tree, "elsewhere/linked", "Acme_Linked", &[]);
+        std::fs::create_dir_all(tree.0.join("app/code/Acme")).unwrap();
+        std::os::unix::fs::symlink(tree.0.join("elsewhere/linked"), tree.0.join("app/code/Acme/Linked"))
+            .unwrap();
+
+        let m = super::Magento::open(&tree.0).unwrap();
+        let names: Vec<&str> = m.modules().iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["Acme_Linked"]);
+        assert!(m.module_check().in_config_not_on_disk.is_empty());
+    }
+
     /// Without config.php the order is Magento's `ModuleList\Loader::sortBySequence`.
     /// The expected list is what Magento's own code returns for this input (its three
     /// sorting methods run verbatim), quirks and all: `Acme_Widget` lands before
