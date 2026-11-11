@@ -27,6 +27,12 @@ mod composer;
 mod engine;
 #[cfg(feature = "db")]
 mod db;
+#[cfg(feature = "db")]
+mod dbstatus;
+#[cfg(feature = "db")]
+mod schemadiff;
+#[cfg(feature = "db")]
+mod schemadecl;
 mod decrypt;
 mod deploy;
 mod doctor;
@@ -35,6 +41,7 @@ mod graphql;
 mod parse;
 mod php;
 mod phparray;
+pub mod phpver;
 mod redis;
 mod sql;
 mod queries;

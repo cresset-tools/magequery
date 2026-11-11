@@ -415,6 +415,82 @@ fn str_or_const(tokens: &[Token], i: usize) -> Option<StrOrConst> {
     }
 }
 
+// ---------- literal method return (`getVersion()` on setup patches) ----------
+
+/// What a method literally returns, by a flat token scan: the first `return` in the body
+/// of `function <method>(…)`, when it returns a string literal or a `self::`/`static::`
+/// constant — plus every `const NAME = '…'` in the file, to resolve the latter. `None`
+/// when the method isn't declared here or returns anything computed.
+#[cfg_attr(not(feature = "db"), allow(dead_code))] // used by `db status`
+pub(crate) fn method_return(src: &str, method: &str) -> (Option<StrOrConst>, HashMap<String, String>) {
+    let tokens = tokenize(src);
+    let mut consts = HashMap::new();
+    let mut ret = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Ident(k) if k == "const" => {
+                if let (Some(Token::Ident(name)), Some(Token::Punct('=')), Some(Token::Str(v))) =
+                    (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3))
+                {
+                    consts.insert(name.clone(), v.clone());
+                }
+            }
+            Token::Ident(k) if k == "function" && ret.is_none() => {
+                if matches!(tokens.get(i + 1), Some(Token::Ident(m)) if m.eq_ignore_ascii_case(method)) {
+                    ret = Some(first_return(&tokens, i + 2));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (ret.flatten(), consts)
+}
+
+/// From just after a method name: skip to the body's `{` and read its first `return`
+/// statement (only at the body's top brace level), if it is a whole literal/constant.
+#[cfg_attr(not(feature = "db"), allow(dead_code))] // used by `db status`
+fn first_return(tokens: &[Token], mut i: usize) -> Option<StrOrConst> {
+    while i < tokens.len() && !matches!(tokens[i], Token::Punct('{')) {
+        // An abstract/interface declaration ends at `;` and has no body.
+        if matches!(tokens[i], Token::Punct(';')) {
+            return None;
+        }
+        i += 1;
+    }
+    let mut depth = 0usize;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Punct('{') => depth += 1,
+            Token::Punct('}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return None;
+                }
+            }
+            Token::Ident(k) if k == "return" && depth == 1 => {
+                let ends = |j: usize| matches!(tokens.get(j), Some(Token::Punct(';')));
+                return match (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3), tokens.get(i + 4)) {
+                    (Some(Token::Str(s)), ..) if ends(i + 2) => Some(StrOrConst::Str(s.clone())),
+                    (
+                        Some(Token::Ident(recv)),
+                        Some(Token::Punct(':')),
+                        Some(Token::Punct(':')),
+                        Some(Token::Ident(c)),
+                    ) if (recv == "self" || recv == "static") && ends(i + 5) => {
+                        Some(StrOrConst::Const(c.clone()))
+                    }
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 // ---------- EAV setup-call scan (`$eavSetup->addAttribute(entity, code, [...])`) ----------
 
 /// A value in an `addAttribute` properties array — enough to render PHP-style.
@@ -1154,6 +1230,43 @@ class Pool
     #[test]
     fn no_constructor_means_inherited() {
         assert!(constructor_params("<?php class A extends B { function run($x) {} }").is_none());
+    }
+}
+
+#[cfg(test)]
+mod method_return_tests {
+    use super::{method_return, StrOrConst};
+
+    #[test]
+    fn reads_a_literal_return_past_a_heredoc_full_of_quotes() {
+        let src = r#"<?php
+class P {
+    public function apply() {
+        $html = <<<EOD
+<p>Don't "quote" me</p>
+EOD;
+        $x = <<<'NOW'
+    it's
+    NOW;
+    }
+    public static function getVersion()
+    {
+        return '2.0.0';
+    }
+}
+"#;
+        let (ret, _) = method_return(src, "getVersion");
+        assert!(matches!(ret, Some(StrOrConst::Str(v)) if v == "2.0.0"));
+    }
+
+    #[test]
+    fn computed_and_constant_returns() {
+        let src = "<?php class P { const V = '1.2.3'; static function getVersion() { return self::V; } \
+                   function other() { return '1.' . '0'; } }";
+        let (ret, consts) = method_return(src, "getVersion");
+        assert!(matches!(ret, Some(StrOrConst::Const(c)) if c == "V"));
+        assert_eq!(consts.get("V").map(String::as_str), Some("1.2.3"));
+        assert!(method_return(src, "other").0.is_none());
     }
 }
 

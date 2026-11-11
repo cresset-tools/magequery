@@ -95,3 +95,4 @@ mod admin;
 pub(crate) use admin::*;
 mod sql;
 pub(crate) use sql::*;
+pub(crate) mod status;

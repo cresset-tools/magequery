@@ -67,6 +67,7 @@ struct Discovered {
     source: ModuleSource,
     path: PathBuf,
     sequence: Vec<ModuleName>,
+    setup_version: Option<String>,
 }
 
 /// Modules found so far, by name, plus every name found in a second place.
@@ -187,6 +188,7 @@ impl Index {
                     source: d.source,
                     path: d.path,
                     sequence: d.sequence,
+                    setup_version: d.setup_version,
                     load_order,
                 }),
                 None => in_config_not_on_disk.push(name),
@@ -434,7 +436,12 @@ fn read_module_root(dir: &Path, source: ModuleSource, vfs: &Vfs) -> Probe {
         Ok(text) => match parse::module_xml(&text) {
             Ok(parsed) => Probe::Found(
                 parsed.name,
-                Discovered { source, path: dir.to_path_buf(), sequence: parsed.sequence },
+                Discovered {
+                    source,
+                    path: dir.to_path_buf(),
+                    sequence: parsed.sequence,
+                    setup_version: parsed.setup_version,
+                },
             ),
             Err(e) => Probe::Bad(Diagnostic::warning(
                 format!("parsing {}: {e}", module_xml.display()),

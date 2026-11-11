@@ -97,7 +97,7 @@ const HELP_GROUPS: &[(&str, &[(&str, &str)])] = &[
     (
         "Runtime",
         &[
-            ("db", "DB connections from env.php; info / ping"),
+            ("db", "DB connections from env.php; info / ping / status (setup:db:status)"),
             ("redis", "Redis/Valkey usage from env.php; info / ping"),
             ("session", "Session storage config from env.php"),
             ("cache", "Cache backends and type flags from env.php"),
@@ -1022,6 +1022,15 @@ enum DbCommand {
     Ping {
         /// Connection name (default: `default`).
         connection: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Whether `setup:upgrade` has work to do — a drop-in `bin/magento setup:db:status`.
+    ///
+    /// Runs Magento's four checks (declarative schema diff, schema patches, data patches,
+    /// setup_module versions) without booting Magento. Exit status matches Magento's:
+    /// 0 = up to date, 2 = upgrade required, 1 = error (e.g. database unreachable).
+    Status {
         #[arg(long)]
         json: bool,
     },
@@ -7183,7 +7192,91 @@ fn db(mage: &Magento, args: &DbArgs) -> Result<()> {
     match &args.command {
         DbCommand::Info { json } => db_info(mage, *json),
         DbCommand::Ping { connection, json } => db_ping(mage, connection.as_deref(), *json),
+        DbCommand::Status { json } => db_status(mage, *json),
     }
+}
+
+/// `setup:db:status`'s "upgrade required" exit code (`DbStatusCommand::EXIT_CODE_UPGRADE_REQUIRED`).
+const EXIT_UPGRADE_REQUIRED: i32 = 2;
+
+fn db_status(mage: &Magento, json: bool) -> Result<()> {
+    let status = mage.db_status().map_err(|e| anyhow!(e))?;
+    let exit = |up_to_date: bool| {
+        if !up_to_date {
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+            std::process::exit(EXIT_UPGRADE_REQUIRED);
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        exit(status.is_up_to_date());
+        return Ok(());
+    }
+
+    let root = mage.root();
+    let rel = |p: &Path| p.strip_prefix(root).unwrap_or(p).display().to_string();
+    let heading = |title: &str, n: usize| {
+        println!("{} {}", style::err(title), style::dim(&format!("({n})")));
+    };
+
+    if !status.schema_changes.is_empty() {
+        heading("Declarative schema is not up to date", status.schema_changes.len());
+        for c in &status.schema_changes {
+            let target = match &c.element {
+                Some(e) => format!("{}.{}", style::name(&c.table), style::name(e)),
+                None => style::name(&c.table),
+            };
+            println!("  {} {target}", style::kind(&format!("{:<20}", c.operation)));
+            for d in &c.detail {
+                println!("  {:<20} {}", "", style::dim(d));
+            }
+        }
+        println!();
+    }
+    for (title, patches) in [
+        ("Schema patches are not up to date", &status.schema_patches),
+        ("Data patches are not up to date", &status.data_patches),
+    ] {
+        if patches.is_empty() {
+            continue;
+        }
+        heading(title, patches.len());
+        for p in patches {
+            println!(
+                "  {}  {}",
+                style::class(p.class.as_str()),
+                style::path(&format!("# {}", rel(&p.file))),
+            );
+        }
+        println!();
+    }
+    if !status.module_versions.is_empty() {
+        heading("Module versions differ from setup_module", status.module_versions.len());
+        for v in &status.module_versions {
+            println!(
+                "  {}  {}  {} → {}",
+                style::module(v.module.as_str()),
+                style::kind(&format!("{:<6}", v.kind)),
+                v.current.as_deref().map_or_else(|| style::dim("none"), style::number),
+                style::number(&v.required),
+            );
+        }
+        println!();
+    }
+    for e in &status.errors {
+        println!("{} {e}", style::err("check failed:"));
+    }
+    for n in &status.notes {
+        eprintln!("{}", style::dim(&format!("note: {n}")));
+    }
+
+    if status.is_up_to_date() {
+        println!("{}", style::ok("All modules are up to date."));
+    } else {
+        println!("Run 'setup:upgrade' to update your DB schema and data.");
+    }
+    exit(status.is_up_to_date());
+    Ok(())
 }
 
 fn db_info(mage: &Magento, json: bool) -> Result<()> {

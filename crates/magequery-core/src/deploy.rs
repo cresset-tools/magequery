@@ -267,5 +267,6 @@ fn connection(name: String, v: &PhpValue) -> DbConnection {
         model: s("model"),
         engine: s("engine"),
         active,
+        init_statements: s("initStatements"),
     }
 }
