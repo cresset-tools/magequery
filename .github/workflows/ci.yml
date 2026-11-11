@@ -20,7 +20,10 @@ env:
 jobs:
   test:
     name: cargo test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    # macos-latest runs on the self-hosted Mac mini for code from this repo;
+    # fork PRs stay on GitHub's runner. Set the org variable
+    # MAC_MINI_DISABLED=true to send everything back to GitHub.
+    runs-on: ${{ matrix.os == 'macos-latest' && vars.MAC_MINI_DISABLED != 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","mac-mini"]') || matrix.os }}
     strategy:
       fail-fast: false
       matrix:
