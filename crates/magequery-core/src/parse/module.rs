@@ -81,8 +81,6 @@ pub(crate) fn config_php_modules(src: &str) -> Result<Vec<(ModuleName, bool)>, S
 pub(crate) struct ParsedModuleXml {
     pub name: ModuleName,
     pub sequence: Vec<ModuleName>,
-    /// The `setup_version` attribute, verbatim; `None` when absent.
-    pub setup_version: Option<String>,
 }
 
 /// Parse etc/module.xml the way Magento's `Module\Declaration\Converter\Dom` +
@@ -92,7 +90,6 @@ pub(crate) struct ParsedModuleXml {
 pub(crate) fn module_xml(xml: &str) -> Result<ParsedModuleXml, String> {
     let mut reader = Reader::from_str(xml);
     let mut name: Option<ModuleName> = None;
-    let mut setup_version: Option<String> = None;
     let mut sequence = Vec::new();
     // Element depth: the root is 1, its children (`<module>`) 2, a module's
     // children (`<sequence>`) 3, a sequence's children 4.
@@ -112,7 +109,6 @@ pub(crate) fn module_xml(xml: &str) -> Result<ParsedModuleXml, String> {
                 match (e.name().as_ref(), at) {
                     (b"module", 2) if name.is_none() => {
                         name = attr(e, b"name").map(ModuleName::new);
-                        setup_version = attr(e, b"setup_version");
                         in_target = !empty;
                     }
                     (b"sequence", 3) if in_target => {
@@ -151,7 +147,7 @@ pub(crate) fn module_xml(xml: &str) -> Result<ParsedModuleXml, String> {
     }
 
     let name = name.ok_or("no <module name=\"...\"> element")?;
-    Ok(ParsedModuleXml { name, sequence, setup_version })
+    Ok(ParsedModuleXml { name, sequence })
 }
 
 #[cfg(test)]

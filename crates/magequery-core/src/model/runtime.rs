@@ -49,9 +49,6 @@ pub struct DbConnection {
     pub model: Option<String>,
     pub engine: Option<String>,
     pub active: bool,
-    /// `initStatements`: SQL Magento runs on every new connection (typically
-    /// `SET NAMES …`). Absent means Magento's version-based `SET NAMES` default.
-    pub init_statements: Option<String>,
 }
 
 /// The `db` section of `env.php`: the table prefix and all configured connections.

@@ -67,7 +67,6 @@ struct Discovered {
     source: ModuleSource,
     path: PathBuf,
     sequence: Vec<ModuleName>,
-    setup_version: Option<String>,
 }
 
 /// Modules found so far, by name, plus every name found in a second place.
@@ -102,12 +101,10 @@ impl Index {
                 file: config_php.clone(),
                 source,
             })?;
-            let mut modules = parse::config_php_modules(&text).map_err(|detail| Error::Parse {
+            Some(parse::config_php_modules(&text).map_err(|detail| Error::Parse {
                 file: config_php.clone(),
                 detail,
-            })?;
-            merge_env_modules(root, &vfs, &mut modules, &mut diagnostics);
-            Some(modules)
+            })?)
         };
         prof("config.php read+parse", &_p);
 
@@ -190,7 +187,6 @@ impl Index {
                     source: d.source,
                     path: d.path,
                     sequence: d.sequence,
-                    setup_version: d.setup_version,
                     load_order,
                 }),
                 None => in_config_not_on_disk.push(name),
@@ -428,43 +424,6 @@ enum Probe {
     Bad(Diagnostic),
 }
 
-/// Magento reads deployment config as `config.php` with `env.php` laid over it
-/// (`array_replace_recursive`), so a `modules` section in `env.php` switches modules on or
-/// off, and adds ones `config.php` lacks at the end of the load order. Rare, but every
-/// runtime answer (and `setup:upgrade`) honours it. An unreadable `env.php` is left to the
-/// commands that need it.
-fn merge_env_modules(root: &Path, vfs: &Vfs, modules: &mut Vec<(ModuleName, bool)>, diags: &mut Vec<Diagnostic>) {
-    let env = root.join("app/etc/env.php");
-    if !env.is_file() {
-        return;
-    }
-    let Ok(text) = vfs.read_to_string(&env) else { return };
-    let value = match crate::phparray::parse(&text) {
-        Ok(v) => v,
-        Err(e) => {
-            diags.push(Diagnostic::warning(format!("parsing {}: {e}", env.display()), None));
-            return;
-        }
-    };
-    let Some(entries) = value.get("modules").and_then(|m| m.as_array()) else { return };
-    for (k, v) in entries {
-        let Some(name) = k.scalar_string() else { continue };
-        // PHP truthiness, as `array_filter` applies it.
-        let enabled = match v {
-            crate::phparray::PhpValue::Bool(b) => *b,
-            crate::phparray::PhpValue::Int(i) => *i != 0,
-            crate::phparray::PhpValue::Float(f) => *f != 0.0,
-            crate::phparray::PhpValue::Str(s) => !(s.is_empty() || s == "0"),
-            _ => false,
-        };
-        let name = ModuleName::new(name);
-        match modules.iter_mut().find(|(n, _)| *n == name) {
-            Some(slot) => slot.1 = enabled,
-            None => modules.push((name, enabled)),
-        }
-    }
-}
-
 /// Read+parse `dir/etc/module.xml` if present. Does no insertion — returns a [`Probe`].
 fn read_module_root(dir: &Path, source: ModuleSource, vfs: &Vfs) -> Probe {
     let module_xml = dir.join("etc/module.xml");
@@ -475,12 +434,7 @@ fn read_module_root(dir: &Path, source: ModuleSource, vfs: &Vfs) -> Probe {
         Ok(text) => match parse::module_xml(&text) {
             Ok(parsed) => Probe::Found(
                 parsed.name,
-                Discovered {
-                    source,
-                    path: dir.to_path_buf(),
-                    sequence: parsed.sequence,
-                    setup_version: parsed.setup_version,
-                },
+                Discovered { source, path: dir.to_path_buf(), sequence: parsed.sequence },
             ),
             Err(e) => Probe::Bad(Diagnostic::warning(
                 format!("parsing {}: {e}", module_xml.display()),
@@ -571,16 +525,7 @@ fn scan(
             Ok(ft) => ft,
             Err(_) => continue,
         };
-        // Magento registers app/code modules by globbing `app/code/*/*/registration.php`,
-        // which follows symlinks — the usual way a module under development is linked
-        // into a store. Follow them there (the depth cap bounds any loop); elsewhere a
-        // symlink is skipped.
-        let is_dir = if ft.is_symlink() {
-            source == ModuleSource::App && entry.path().is_dir()
-        } else {
-            ft.is_dir()
-        };
-        if !is_dir {
+        if ft.is_symlink() || !ft.is_dir() {
             continue;
         }
         let name = entry.file_name();
