@@ -1235,6 +1235,23 @@ mod handle_tests {
         o
     }
 
+    /// `env.php` is laid over `config.php` (`array_replace_recursive`), so its `modules`
+    /// section switches modules and appends new ones at the end of the load order.
+    #[test]
+    fn env_php_modules_override_config_php() {
+        let tree = TempTree::new("env-modules");
+        tree.touch("app/etc/di.xml");
+        let write = |rel: &str, body: &str| std::fs::write(tree.0.join(rel), body).unwrap();
+        write("app/etc/config.php", "<?php\nreturn ['modules' => ['Acme_A' => 1, 'Acme_B' => 1]];\n");
+        write("app/etc/env.php", "<?php\nreturn ['modules' => ['Acme_B' => 0, 'Acme_C' => 1]];\n");
+        for m in ["A", "B", "C"] {
+            module_xml(&tree, &format!("app/code/Acme/{m}"), &format!("Acme_{m}"), &[]);
+        }
+        let m = super::Magento::open(&tree.0).unwrap();
+        let got: Vec<(&str, bool)> = m.modules().iter().map(|m| (m.name.as_str(), m.enabled)).collect();
+        assert_eq!(got, [("Acme_A", true), ("Acme_B", false), ("Acme_C", true)]);
+    }
+
     /// A module symlinked into app/code (how one under development is linked into a
     /// store) is registered by Magento's glob, so it must be discovered.
     #[cfg(unix)]

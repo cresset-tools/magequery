@@ -301,9 +301,14 @@ modules. Use composer metadata:
   This is also *more correct* than scanning: it naturally excludes `dev/tests/.../_files`
   test-fixture modules.
 - **app/code**: small and not composer-managed → pruned recursive scan (stops at module
-  roots; skips `Test`, `_files`, `var`, `generated`, …).
+  roots; skips `Test`, `_files`, `var`, `generated`, …). Symlinked directories are
+  followed there (Magento's `app/code/*/*/registration.php` glob follows them — how a module
+  under development is linked in); elsewhere a symlink is skipped.
 - `config.php` order is the authoritative, already-sequence-resolved load order; disk
-  discovery only supplies path/source/`<sequence>`.
+  discovery only supplies path/source/`<sequence>`/`setup_version`. A `modules` section in
+  `env.php` is laid over it, as Magento's deployment config does (`array_replace_recursive`:
+  flags overwrite, new modules append). `MAGENTO_DC_*` variables never reach the module
+  list (`DeploymentConfig::get('modules')` reads the merged array, not the flattened keys).
 - **One name in two directories**: discovery keeps the first (app/code before vendor)
   and records the other in `ModuleCheck::duplicates`. Magento throws on the second
   `ComponentRegistrar::register`, so doctor reports it (error, E1007
