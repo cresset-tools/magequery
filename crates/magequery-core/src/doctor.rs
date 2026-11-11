@@ -27,8 +27,9 @@ use rayon::prelude::*;
 use crate::error::Severity;
 use crate::ids::{Area, ClassName};
 use crate::model::{
-    ArgValue, ChainNode, DoctorFinding, DoctorLint, DoctorReport, Module, ModuleSource,
+    ArgValue, ChainNode, DoctorFinding, DoctorLint, DoctorReport, Module, ModuleSource, PatchKind,
 };
+use crate::ids::ModuleName;
 use crate::source::Source;
 use crate::Magento;
 
@@ -1579,4 +1580,32 @@ pub(crate) fn walk_php(dir: &Path, depth: usize, f: &mut impl FnMut(&Path)) {
             f(&path);
         }
     }
+}/// `PatchReader::read`: every `*.php` directly in `<module>/Setup/Patch/<Type>/`, named
+/// `<Vendor>\<Module>\Setup\Patch\<Type>\<basename>` from the module name — no
+/// recursion, no PSR-4 check and no interface filter, exactly as Magento globs. (A helper
+/// class kept in that folder is therefore "pending" forever in Magento too.)
+#[cfg_attr(not(feature = "db"), allow(dead_code))] // used by `db status`
+pub(crate) fn patch_files(module_path: &Path, module: &ModuleName, kind: PatchKind) -> Vec<(ClassName, std::path::PathBuf)> {
+    let ty = match kind {
+        PatchKind::Schema => "Schema",
+        PatchKind::Data => "Data",
+    };
+    let Ok(entries) = std::fs::read_dir(module_path.join("Setup/Patch").join(ty)) else {
+        return Vec::new();
+    };
+    let ns = module.as_str().replace('_', "\\");
+    let mut out: Vec<(ClassName, std::path::PathBuf)> = entries
+        .flatten()
+        .map(|e| e.path())
+        // `*` never matches a dotfile.
+        .filter(|p| p.extension().is_some_and(|x| x == "php"))
+        .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+        .filter_map(|p| {
+            let stem = p.file_stem()?.to_str()?.to_string();
+            Some((ClassName::new(format!("{ns}\\Setup\\Patch\\{ty}\\{stem}")), p))
+        })
+        .collect();
+    // glob() returns names sorted; keep the report in the same order.
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
 }
