@@ -9,7 +9,7 @@ repository.workspace = true
 [features]
 default = []
 # Live database connection testing (pulls in the `mysql` client).
-db = ["dep:mysql"]
+db = ["dep:mysql", "dep:md-5"]
 
 [dependencies]
 thiserror.workspace = true
@@ -22,6 +22,8 @@ aes = "0.8"
 simple-rijndael = "0.3"
 base64 = "0.22"
 mysql = { version = "25", optional = true, default-features = false, features = ["minimal"] }
+# MD5 for Magento's generated index/FK names (`db status`).
+md-5 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

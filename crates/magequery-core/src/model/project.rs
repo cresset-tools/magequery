@@ -21,6 +21,9 @@ pub struct Module {
     pub path: std::path::PathBuf,
     /// `<sequence>` dependencies from `module.xml`; they influence merge/load order.
     pub sequence: Vec<ModuleName>,
+    /// `setup_version` from `module.xml`, verbatim. Modules without one (most since 2.3)
+    /// are versioned by patches alone, and `setup_module` checks skip them.
+    pub setup_version: Option<String>,
     /// 0-based position in the authoritative `config.php` load order.
     pub load_order: usize,
 }

@@ -575,6 +575,7 @@ mod template_tests {
             source: ModuleSource::App,
             path: module_root,
             sequence: Vec::new(),
+            setup_version: None,
             load_order: 0,
         };
         let index = LayoutIndex::build(
@@ -648,6 +649,7 @@ mod template_tests {
             source: ModuleSource::App,
             path: module_root,
             sequence: Vec::new(),
+            setup_version: None,
             load_order: 0,
         };
         let index = LayoutIndex::build(&[module], &Vfs::default(), &[]);

@@ -27,6 +27,12 @@ mod composer;
 mod engine;
 #[cfg(feature = "db")]
 mod db;
+#[cfg(feature = "db")]
+mod dbstatus;
+#[cfg(feature = "db")]
+mod schemadiff;
+#[cfg(feature = "db")]
+mod schemadecl;
 mod decrypt;
 mod deploy;
 mod doctor;
@@ -35,6 +41,7 @@ mod graphql;
 mod parse;
 mod php;
 mod phparray;
+pub mod phpver;
 mod redis;
 mod sql;
 mod queries;
@@ -1226,6 +1233,46 @@ mod handle_tests {
         let mut o = super::OpenOptions::default();
         o.all_modules = true;
         o
+    }
+
+    /// `env.php` is laid over `config.php` (`array_replace_recursive`), so its `modules`
+    /// section switches modules and appends new ones at the end of the load order.
+    #[test]
+    fn env_php_modules_override_config_php() {
+        let tree = TempTree::new("env-modules");
+        tree.touch("app/etc/di.xml");
+        let write = |rel: &str, body: &str| std::fs::write(tree.0.join(rel), body).unwrap();
+        write("app/etc/config.php", "<?php\nreturn ['modules' => ['Acme_A' => 1, 'Acme_B' => 1]];\n");
+        write("app/etc/env.php", "<?php\nreturn ['modules' => ['Acme_B' => 0, 'Acme_C' => 1]];\n");
+        for m in ["A", "B", "C"] {
+            module_xml(&tree, &format!("app/code/Acme/{m}"), &format!("Acme_{m}"), &[]);
+        }
+        let m = super::Magento::open(&tree.0).unwrap();
+        let got: Vec<(&str, bool)> = m.modules().iter().map(|m| (m.name.as_str(), m.enabled)).collect();
+        assert_eq!(got, [("Acme_A", true), ("Acme_B", false), ("Acme_C", true)]);
+    }
+
+    /// A module symlinked into app/code (how one under development is linked into a
+    /// store) is registered by Magento's glob, so it must be discovered.
+    #[cfg(unix)]
+    #[test]
+    fn app_code_module_behind_a_symlink_is_discovered() {
+        let tree = TempTree::new("app-code-symlink");
+        tree.touch("app/etc/di.xml");
+        std::fs::write(
+            tree.0.join("app/etc/config.php"),
+            "<?php\nreturn ['modules' => ['Acme_Linked' => 1]];\n",
+        )
+        .unwrap();
+        module_xml(&tree, "elsewhere/linked", "Acme_Linked", &[]);
+        std::fs::create_dir_all(tree.0.join("app/code/Acme")).unwrap();
+        std::os::unix::fs::symlink(tree.0.join("elsewhere/linked"), tree.0.join("app/code/Acme/Linked"))
+            .unwrap();
+
+        let m = super::Magento::open(&tree.0).unwrap();
+        let names: Vec<&str> = m.modules().iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["Acme_Linked"]);
+        assert!(m.module_check().in_config_not_on_disk.is_empty());
     }
 
     /// Without config.php the order is Magento's `ModuleList\Loader::sortBySequence`.

@@ -158,7 +158,7 @@ Foo`; grep-ability and muscle memory are the whole UX. Grouping is a *help-rende
 (the `Command` enum order + a hand-rendered root help screen), **not** a typing one.
 
 **Nesting earns its keep in exactly one case: a noun with multiple verbs** — `db info`/`db
-ping`, `redis info`/`redis ping`, `queue info`/`topology`/`backlog` (bare `queue` = `queue info`,
+ping`/`db status`, `redis info`/`redis ping`, `queue info`/`topology`/`backlog` (bare `queue` = `queue info`,
 kept for back-compat via an optional clap subcommand). Info-only nouns
 (`session`/`cache`/`lock`) stay flat.
 
@@ -208,7 +208,7 @@ FRONTEND      (presentation)
   cms-page|cms-block [<identifier>] [--id <n>] [--content]   (live DB)
 
 RUNTIME       (env.php config & live connections)
-  db info|ping     redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
+  db info|ping|status   redis info|ping     url-rewrites [<path>] [--store] [--redirects] [--limit]
   queue [info]|topology [<topic>]|backlog      session   cache   lock   (info-only)
   stores   (the scope tree, live DB)
 
@@ -301,9 +301,14 @@ modules. Use composer metadata:
   This is also *more correct* than scanning: it naturally excludes `dev/tests/.../_files`
   test-fixture modules.
 - **app/code**: small and not composer-managed → pruned recursive scan (stops at module
-  roots; skips `Test`, `_files`, `var`, `generated`, …).
+  roots; skips `Test`, `_files`, `var`, `generated`, …). Symlinked directories are
+  followed there (Magento's `app/code/*/*/registration.php` glob follows them — how a module
+  under development is linked in); elsewhere a symlink is skipped.
 - `config.php` order is the authoritative, already-sequence-resolved load order; disk
-  discovery only supplies path/source/`<sequence>`.
+  discovery only supplies path/source/`<sequence>`/`setup_version`. A `modules` section in
+  `env.php` is laid over it, as Magento's deployment config does (`array_replace_recursive`:
+  flags overwrite, new modules append). `MAGENTO_DC_*` variables never reach the module
+  list (`DeploymentConfig::get('modules')` reads the merged array, not the flattened keys).
 - **One name in two directories**: discovery keeps the first (app/code before vendor)
   and records the other in `ModuleCheck::duplicates`. Magento throws on the second
   `ComponentRegistrar::register`, so doctor reports it (error, E1007
@@ -1177,6 +1182,75 @@ reports **orphaned** applied entries no on-disk class explains (patches of remov
 `--db`) — the pre-deploy question. `Magento::patches(filter?, include_db)` → `Patches`.
 Validated: 133 patches on mageos-lite / 196 on commerce-store, all applied on both (fully
 upgraded stores), filter and pending modes exact.
+
+### `db status` (a native `setup:db:status`, done)
+
+`magequery db status [--json]` answers "does `setup:upgrade` have work to do" the way
+`bin/magento setup:db:status` does — same four validators, same exit status (0 up to date,
+2 upgrade required, 1 error) — so a deploy script (Deployer's `magento:upgrade` gate) can
+swap it in. ~40ms against Magento's ~1–4s. `Magento::db_status() -> DbStatus` in
+`dbstatus.rs`; the schema half is `schemadiff.rs`. **The goal is Magento's answer, not a
+better one**: where Magento is lossy or wrong, so is this, on purpose.
+
+- **Patches** (`UpToDateSchema`/`UpToDateData`): Magento's `PatchReader` globs
+  `Setup/Patch/{Schema,Data}/*.php` — non-recursive, no interface check, class name built
+  from the module name (so this does **not** reuse `patches`' PSR-4-verified scan). Pending =
+  not in `patch_list` (exact `in_array`, no backslash normalization) and not skipped by
+  `PatchVersionInterface::getVersion() <= setup_module` version. `getVersion()` is read
+  statically (`ClassResolver::literal_return`: a literal or `self::CONST`, ancestors
+  consulted); a computed one is reported pending with a note — the safe direction.
+- **Module versions** (`OldDbValidator`): `module.xml` `setup_version` (now on `Module`)
+  must `version_compare`-equal both `setup_module` columns. `phpver.rs` is a port of PHP's
+  `version_compare` checked against PHP 8.5 (it strips a trailing `.`; PHP 7 didn't).
+- **Declarative schema** (`UpToDateDeclarativeSchema`): two DTO sets compared by class +
+  `getDiffSensitiveParams()` with PHP `===` typing. Declared side re-merges `db_schema.xml`
+  with `Config\Dom` semantics (attributes overwrite; a changed `xsi:type` replaces the node;
+  index/constraint columns union) — **not** `SchemaIndex`, whose wholesale column replace is
+  right for `schema` and wrong here. Live side reads *every* base table (5 bulk
+  `information_schema` queries + `SHOW CREATE TABLE` for FK tables, parsed with Magento's FK
+  regex by hand). Index/FK names are generated (`strtr` abbreviations, md5 past 64 chars),
+  never read from `referenceId`; with a table prefix both sides recompute them. Removals
+  only count when `db_schema_whitelist.json` (every registered module, enabled or not) names
+  them; a changed index/key always counts (the re-add isn't gated). The five declared-schema
+  validation rules are ported too.
+- **"Magento would throw" = upgrade required.** `DbStatusCommand` counts a validator that
+  throws as outdated, and `bin/magento` turns warnings into exceptions; those cases land in
+  `DbStatus::errors`: any table in the database with a `mediumint`/`enum`/`binary`/… column
+  (even a non-Magento one), a functional index, an FK to a table not read (including one
+  "declared" by FK-shaped text in a comment — `SHOW CREATE TABLE` is regex-scanned, so tables
+  whose text says FOREIGN KEY are fetched too), an unsupported server version (checked
+  against Magento's pattern list *before* the 8.0.29 test, so MySQL 9 fails), a broken
+  declaration, a patch file that doesn't autoload (checked for applied patches too — the
+  `class_implements` runs first). An unreachable database is the same: exit 2, not 1. Only
+  a missing `install/date` is exit 1 (`Error::NotInstalled`). Several are permanent — say so
+  when a user asks why.
+- **The connection is set up like Magento's** (`db::status::open`): env.php
+  `initStatements` (split like `_splitMultiQuery`), else the version-based `SET NAMES`
+  default. The session charset changes what comments read back as (`SET NAMES latin1` turns
+  CJK into `??`, and Magento then reports a change), so text is read as bytes and decoded
+  lossily. Attribute values in `db_schema.xml` are whitespace-normalized like libxml (a
+  comment wrapped across lines compares equal to the single line Magento wrote), and
+  whitelists merge with PHP's `json_decode` + `array_replace_recursive` semantics (`[]` is
+  fine, `null` values fail `isset`). Duplicate keys under one generated name resolve in
+  `SHOW INDEXES` order, which is `information_schema.STATISTICS`'s natural order — keep its
+  query free of `ORDER BY`.
+- **Not ported:** the developer-mode XSD validation of the merged `db_schema.xml`.
+- **Permanent drift Magento also reports** (reproduced, not fixed): a comment with a
+  backslash (`\0` is stored as NUL — mageos-cacheguard's `object_hash` columns); `utf8`
+  charset defaults on MySQL < 8.0.29 / MariaDB 10.5, 10.7–10.10, 11.x ≠ 11.4/11.8, 12.x ≠
+  12.2/12.3 (every varchar/text column — inferred from code, not yet run on such a server);
+  `indexType="hash"` on InnoDB; MariaDB JSON columns past the first per table.
+
+Validated against `bin/magento setup:db:status` on template-parser-36 (clean), mageos-cacheguard
+(the same 3 `modify_column`s), and scratch copies with 10 schema mutations — unprefixed and
+with every table renamed to a `pfx_` prefix — where every reported change matched, generated
+names included; plus patch/version mutations, the mediumint crash, and a probe module
+(`app/code/Zz/Probe` in the scratch copy — whose `vendor/composer` must be a real copy, or
+Composer's `$baseDir` resolves to the original store and Magento never registers it) for
+`SET NAMES latin1`, a wrapped comment, a `[]` whitelist, a misnamed applied patch,
+FK-shaped comment text and duplicate keys. MariaDB 11.4 only: the
+MySQL-specific paths (JSON `DATA_TYPE`, `DEFAULT NULL` reporting, 8.0.29 charset switch)
+follow the code but haven't met a MySQL server.
 
 ### `whatis` (everything about one class, done)
 

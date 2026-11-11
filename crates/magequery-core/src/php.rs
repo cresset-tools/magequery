@@ -415,6 +415,82 @@ fn str_or_const(tokens: &[Token], i: usize) -> Option<StrOrConst> {
     }
 }
 
+// ---------- literal method return (`getVersion()` on setup patches) ----------
+
+/// What a method literally returns, by a flat token scan: the first `return` in the body
+/// of `function <method>(…)`, when it returns a string literal or a `self::`/`static::`
+/// constant — plus every `const NAME = '…'` in the file, to resolve the latter. `None`
+/// when the method isn't declared here or returns anything computed.
+#[cfg_attr(not(feature = "db"), allow(dead_code))] // used by `db status`
+pub(crate) fn method_return(src: &str, method: &str) -> (Option<StrOrConst>, HashMap<String, String>) {
+    let tokens = tokenize(src);
+    let mut consts = HashMap::new();
+    let mut ret = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Ident(k) if k == "const" => {
+                if let (Some(Token::Ident(name)), Some(Token::Punct('=')), Some(Token::Str(v))) =
+                    (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3))
+                {
+                    consts.insert(name.clone(), v.clone());
+                }
+            }
+            Token::Ident(k) if k == "function" && ret.is_none() => {
+                if matches!(tokens.get(i + 1), Some(Token::Ident(m)) if m.eq_ignore_ascii_case(method)) {
+                    ret = Some(first_return(&tokens, i + 2));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (ret.flatten(), consts)
+}
+
+/// From just after a method name: skip to the body's `{` and read its first `return`
+/// statement (only at the body's top brace level), if it is a whole literal/constant.
+#[cfg_attr(not(feature = "db"), allow(dead_code))] // used by `db status`
+fn first_return(tokens: &[Token], mut i: usize) -> Option<StrOrConst> {
+    while i < tokens.len() && !matches!(tokens[i], Token::Punct('{')) {
+        // An abstract/interface declaration ends at `;` and has no body.
+        if matches!(tokens[i], Token::Punct(';')) {
+            return None;
+        }
+        i += 1;
+    }
+    let mut depth = 0usize;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::Punct('{') => depth += 1,
+            Token::Punct('}') => {
+                depth -= 1;
+                if depth == 0 {
+                    return None;
+                }
+            }
+            Token::Ident(k) if k == "return" && depth == 1 => {
+                let ends = |j: usize| matches!(tokens.get(j), Some(Token::Punct(';')));
+                return match (tokens.get(i + 1), tokens.get(i + 2), tokens.get(i + 3), tokens.get(i + 4)) {
+                    (Some(Token::Str(s)), ..) if ends(i + 2) => Some(StrOrConst::Str(s.clone())),
+                    (
+                        Some(Token::Ident(recv)),
+                        Some(Token::Punct(':')),
+                        Some(Token::Punct(':')),
+                        Some(Token::Ident(c)),
+                    ) if (recv == "self" || recv == "static") && ends(i + 5) => {
+                        Some(StrOrConst::Const(c.clone()))
+                    }
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 // ---------- EAV setup-call scan (`$eavSetup->addAttribute(entity, code, [...])`) ----------
 
 /// A value in an `addAttribute` properties array — enough to render PHP-style.
@@ -856,6 +932,20 @@ fn tokenize_at(s: &str) -> (Vec<Token>, Vec<usize>) {
                 }
                 i += 2;
             }
+            // Heredoc / nowdoc (`<<<EOD`, `<<<"EOD"`, `<<<'EOD'`): one string token. Its
+            // body holds arbitrary quotes, which the quoted-string rule below would pair up
+            // wrongly and so desynchronize everything after it.
+            b'<' if b[i..].starts_with(b"<<<") => {
+                if let Some((body, end)) = heredoc(s, i) {
+                    offsets.push(i);
+                    out.push(Token::Str(body));
+                    i = end;
+                } else {
+                    offsets.push(i);
+                    out.push(Token::Punct('<'));
+                    i += 1;
+                }
+            }
             // Strings — captured (command names/descriptions live in literals). Escapes are
             // collapsed to the escaped byte, which is exact for `\'`/`\"`/`\\` (all that
             // matters in the identifiers we read).
@@ -890,6 +980,62 @@ fn tokenize_at(s: &str) -> (Vec<Token>, Vec<usize>) {
         }
     }
     (out, offsets)
+}
+
+/// A heredoc/nowdoc starting at `start` (the first `<`): its body and the byte offset just
+/// past the closing marker. PHP 7.3+ rules: the closing marker may be indented and is
+/// followed by anything that can't continue an identifier. `None` if it isn't one.
+fn heredoc(s: &str, start: usize) -> Option<(String, usize)> {
+    let b = s.as_bytes();
+    let mut i = start + 3;
+    while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+        i += 1;
+    }
+    let quote = match b.get(i) {
+        Some(&q @ (b'\'' | b'"')) => {
+            i += 1;
+            Some(q)
+        }
+        _ => None,
+    };
+    let label_start = i;
+    while i < b.len() && (b[i] == b'_' || b[i].is_ascii_alphanumeric()) {
+        i += 1;
+    }
+    if i == label_start {
+        return None;
+    }
+    let label = &s[label_start..i];
+    if let Some(q) = quote {
+        if b.get(i) != Some(&q) {
+            return None;
+        }
+        i += 1;
+    }
+    // The opening line must end right after the label.
+    match b.get(i) {
+        Some(b'\n') => i += 1,
+        Some(b'\r') if b.get(i + 1) == Some(&b'\n') => i += 2,
+        _ => return None,
+    }
+    let body_start = i;
+    let mut line_start = i;
+    while line_start <= b.len() {
+        let line_end = s[line_start..].find('\n').map_or(b.len(), |n| line_start + n);
+        let trimmed = s[line_start..line_end].trim_start_matches([' ', '\t']);
+        if let Some(rest) = trimmed.strip_prefix(label) {
+            if !rest.bytes().next().is_some_and(|c| c == b'_' || c.is_ascii_alphanumeric()) {
+                let marker_end = line_end - rest.len();
+                let body_end = line_start.saturating_sub(1).max(body_start);
+                return Some((s[body_start..body_end].to_string(), marker_end));
+            }
+        }
+        if line_end == b.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    None
 }
 
 fn is_ident(c: u8) -> bool {
@@ -1084,5 +1230,68 @@ class Pool
     #[test]
     fn no_constructor_means_inherited() {
         assert!(constructor_params("<?php class A extends B { function run($x) {} }").is_none());
+    }
+}
+
+#[cfg(test)]
+mod method_return_tests {
+    use super::{method_return, StrOrConst};
+
+    #[test]
+    fn reads_a_literal_return_past_a_heredoc_full_of_quotes() {
+        let src = r#"<?php
+class P {
+    public function apply() {
+        $html = <<<EOD
+<p>Don't "quote" me</p>
+EOD;
+        $x = <<<'NOW'
+    it's
+    NOW;
+    }
+    public static function getVersion()
+    {
+        return '2.0.0';
+    }
+}
+"#;
+        let (ret, _) = method_return(src, "getVersion");
+        assert!(matches!(ret, Some(StrOrConst::Str(v)) if v == "2.0.0"));
+    }
+
+    #[test]
+    fn computed_and_constant_returns() {
+        let src = "<?php class P { const V = '1.2.3'; static function getVersion() { return self::V; } \
+                   function other() { return '1.' . '0'; } }";
+        let (ret, consts) = method_return(src, "getVersion");
+        assert!(matches!(ret, Some(StrOrConst::Const(c)) if c == "V"));
+        assert_eq!(consts.get("V").map(String::as_str), Some("1.2.3"));
+        assert!(method_return(src, "other").0.is_none());
+    }
+}
+
+#[cfg(test)]
+mod heredoc_tests {
+    use super::{command_info, StrOrConst};
+
+    /// Quotes inside a heredoc used to pair up with the string rule and shift every token
+    /// after it, so a command declared below one lost its name.
+    #[test]
+    fn a_heredoc_full_of_quotes_does_not_desync_the_scan() {
+        let src = r#"<?php
+class C extends Command {
+    private $help = <<<EOD
+Don't "quote" me
+EOD;
+    private $more = <<<'NOW'
+    it's
+    NOW;
+    protected function configure() {
+        $this->setName('acme:run');
+    }
+}
+"#;
+        let info = command_info(src);
+        assert!(matches!(info.name, Some(StrOrConst::Str(n)) if n == "acme:run"));
     }
 }

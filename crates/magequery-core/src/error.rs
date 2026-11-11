@@ -56,6 +56,11 @@ pub enum Error {
     /// A `magequery sql` statement was refused before it reached the database.
     #[error("sql: {0}")]
     Sql(String),
+
+    /// The deployment config has no `install/date`: Magento itself treats the
+    /// application as not installed and refuses database checks.
+    #[error("the Magento application is not installed (no install/date in app/etc/env.php)")]
+    NotInstalled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
