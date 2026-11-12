@@ -2022,14 +2022,6 @@ fn compile(
         // set. This is the exact path `watch` runs, so the two emit identical
         // bytes. Per-phase timings print under MAGECOMMAND_PROFILE from inside.
         let out = magecommand_engine::build::compute_outputs_opts(&magento, &mut defs, &root, fused);
-        if !out.unresolved.is_empty() {
-            eprintln!(
-                "{} {} class name(s) unresolvable via autoload maps (first: {})",
-                style::stderr::note("note:"),
-                out.unresolved.len(),
-                out.unresolved.first().map(String::as_str).unwrap_or("")
-            );
-        }
         lap!("compute outputs (in memory)");
         // Write the whole tree (the compute cleared it first). Direct parallel
         // write, no reconcile — on APFS reusing unchanged files costs more than
