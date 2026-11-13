@@ -39,7 +39,7 @@ mod eav;
 mod graphql;
 mod parse;
 mod php;
-mod phparray;
+pub mod phparray;
 pub mod phpver;
 mod redis;
 mod sql;

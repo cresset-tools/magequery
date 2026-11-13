@@ -1,11 +1,13 @@
-//! A small parser for the PHP array literals in `app/etc/env.php` / `config.php`. These
-//! files are machine-generated `<?php return [ ... ];` — plain nested literals (strings,
-//! ints, floats, bools, null, arrays), occasionally with a `\Class::CONST` reference (kept
-//! verbatim as `Const`). We never execute PHP; this is a focused literal parser.
+//! A small parser and writer for the PHP array literals in `app/etc/env.php` /
+//! `config.php`. These files are machine-generated `<?php return [ ... ];` — plain
+//! nested literals (strings, ints, floats, bools, null, arrays), occasionally with a
+//! `\Class::CONST` reference (kept verbatim as `Const`). We never execute PHP; this is
+//! a focused literal parser, and [`PhpValue::to_php_file`] writes a tree back out so a
+//! deploy tool can derive one env.php from another.
 
 /// A parsed PHP value.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum PhpValue {
+pub enum PhpValue {
     /// Ordered `(key, value)` pairs. Auto-indexed items get an `Int` key.
     Array(Vec<(PhpValue, PhpValue)>),
     Str(String),
@@ -26,6 +28,79 @@ impl PhpValue {
                 _ => None,
             }),
             _ => None,
+        }
+    }
+
+    /// Look up a string key in an array value, mutably.
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut PhpValue> {
+        match self {
+            PhpValue::Array(items) => items.iter_mut().find_map(|(k, v)| match k {
+                PhpValue::Str(s) if s == key => Some(v),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Set a string key in an array value: replaces the value in place when the key
+    /// exists (keeping its position), appends it otherwise. A non-array is replaced
+    /// by an array holding just this key.
+    pub fn set(&mut self, key: &str, value: PhpValue) {
+        if !matches!(self, PhpValue::Array(_)) {
+            *self = PhpValue::Array(Vec::new());
+        }
+        if let Some(slot) = self.get_mut(key) {
+            *slot = value;
+        } else if let PhpValue::Array(items) = self {
+            items.push((PhpValue::Str(key.to_string()), value));
+        }
+    }
+
+    /// Write this value as a whole `<?php return …;` file, in the short-array style
+    /// Magento's own config writer uses (four-space indent, every key explicit).
+    /// Parsing the output gives back an equal tree.
+    pub fn to_php_file(&self) -> String {
+        let mut out = String::from("<?php\nreturn ");
+        self.write_php(&mut out, 0);
+        out.push_str(";\n");
+        out
+    }
+
+    fn write_php(&self, out: &mut String, depth: usize) {
+        match self {
+            PhpValue::Array(items) if items.is_empty() => out.push_str("[]"),
+            PhpValue::Array(items) => {
+                out.push_str("[\n");
+                for (k, v) in items {
+                    out.push_str(&"    ".repeat(depth + 1));
+                    k.write_php(out, depth + 1);
+                    out.push_str(" => ");
+                    v.write_php(out, depth + 1);
+                    out.push_str(",\n");
+                }
+                out.push_str(&"    ".repeat(depth));
+                out.push(']');
+            }
+            PhpValue::Str(s) => {
+                out.push('\'');
+                for c in s.chars() {
+                    if c == '\\' || c == '\'' {
+                        out.push('\\');
+                    }
+                    out.push(c);
+                }
+                out.push('\'');
+            }
+            PhpValue::Int(i) => out.push_str(&i.to_string()),
+            PhpValue::Float(f) if f.is_nan() => out.push_str("NAN"),
+            PhpValue::Float(f) if f.is_infinite() => {
+                out.push_str(if *f > 0.0 { "INF" } else { "-INF" })
+            }
+            // Debug keeps a decimal point or exponent, so PHP reads it back as a float.
+            PhpValue::Float(f) => out.push_str(&format!("{f:?}")),
+            PhpValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            PhpValue::Null => out.push_str("null"),
+            PhpValue::Const(c) => out.push_str(c),
         }
     }
 
@@ -72,7 +147,7 @@ enum Tok {
 }
 
 /// Parse a `<?php return [...];` file into its `PhpValue`.
-pub(crate) fn parse(src: &str) -> Result<PhpValue, String> {
+pub fn parse(src: &str) -> Result<PhpValue, String> {
     let toks = tokenize(src)?;
     let mut p = Parser { toks: &toks, pos: 0 };
     // Skip a leading `return`.
@@ -287,7 +362,9 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
 }
 
 fn read_string(b: &[u8], mut i: usize, quote: u8, single: bool) -> Result<(String, usize), String> {
-    let mut out = String::new();
+    // Collect bytes, not chars: a multi-byte UTF-8 character (a password, a store
+    // name) must survive as itself, not as one Latin-1 char per byte.
+    let mut out: Vec<u8> = Vec::new();
     while i < b.len() {
         let c = b[i];
         if c == b'\\' {
@@ -295,30 +372,29 @@ fn read_string(b: &[u8], mut i: usize, quote: u8, single: bool) -> Result<(Strin
             if single {
                 // PHP single quotes only escape \\ and \'.
                 match n {
-                    b'\\' | b'\'' => out.push(n as char),
+                    b'\\' | b'\'' => out.push(n),
                     _ => {
-                        out.push('\\');
-                        out.push(n as char);
+                        out.push(b'\\');
+                        out.push(n);
                     }
                 }
             } else {
                 match n {
-                    b'\\' | b'"' | b'$' | b'/' => out.push(n as char),
-                    b'n' => out.push('\n'),
-                    b't' => out.push('\t'),
-                    b'r' => out.push('\r'),
+                    b'\\' | b'"' | b'$' | b'/' => out.push(n),
+                    b'n' => out.push(b'\n'),
+                    b't' => out.push(b'\t'),
+                    b'r' => out.push(b'\r'),
                     _ => {
-                        out.push('\\');
-                        out.push(n as char);
+                        out.push(b'\\');
+                        out.push(n);
                     }
                 }
             }
             i += 2;
         } else if c == quote {
-            return Ok((out, i + 1));
+            return Ok((String::from_utf8_lossy(&out).into_owned(), i + 1));
         } else {
-            // Bytes may be UTF-8; push the raw byte sequence as chars best-effort.
-            out.push(c as char);
+            out.push(c);
             i += 1;
         }
     }
@@ -362,4 +438,86 @@ fn is_ident_start(c: u8) -> bool {
 
 fn is_ident(c: u8) -> bool {
     c == b'_' || c == b'\\' || c.is_ascii_alphanumeric()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ENV: &str = r#"<?php
+return [
+    'backend' => ['frontName' => 'admin'],
+    'crypt' => array('key' => 'base64abc'),
+    'db' => [
+        'connection' => [
+            'default' => [
+                'host' => 'localhost',
+                'password' => 'pa\'ss\\wörd',
+                'active' => '1',
+            ],
+        ],
+    ],
+    'cache' => [
+        'frontend' => [
+            'default' => [
+                'id_prefix' => 'abc_',
+                'backend' => 'Magento\\Framework\\Cache\\Backend\\Redis',
+                'backend_options' => ['database' => '0', 'port' => 6379, 'compress_data' => true],
+            ],
+        ],
+    ],
+    'list' => ['a', 'b'],
+    'ratio' => 0.5,
+    'nothing' => null,
+    'mode' => \Magento\Framework\App\State::MODE_PRODUCTION,
+    'empty' => [],
+];
+"#;
+
+    #[test]
+    fn written_file_parses_back_to_the_same_tree() {
+        let v = parse(ENV).unwrap();
+        let again = parse(&v.to_php_file()).unwrap();
+        assert_eq!(v, again);
+    }
+
+    #[test]
+    fn multibyte_strings_survive_parsing() {
+        let v = parse(ENV).unwrap();
+        let pw = v
+            .get("db")
+            .and_then(|d| d.get("connection"))
+            .and_then(|c| c.get("default"))
+            .and_then(|d| d.get("password"));
+        assert_eq!(pw.and_then(PhpValue::as_str), Some("pa'ss\\wörd"));
+    }
+
+    #[test]
+    fn set_replaces_in_place_and_appends_new_keys() {
+        let mut v = parse(ENV).unwrap();
+        let fe = v
+            .get_mut("cache")
+            .and_then(|c| c.get_mut("frontend"))
+            .and_then(|f| f.get_mut("default"))
+            .unwrap();
+        fe.set("id_prefix", PhpValue::Str("r36_".into()));
+        fe.set("new_key", PhpValue::Int(1));
+        let keys: Vec<_> = fe
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|(k, _)| k.scalar_string().unwrap())
+            .collect();
+        assert_eq!(keys, ["id_prefix", "backend", "backend_options", "new_key"]);
+        assert_eq!(fe.get("id_prefix").and_then(PhpValue::as_str), Some("r36_"));
+    }
+
+    #[test]
+    fn writer_uses_short_arrays_and_explicit_keys() {
+        let v = parse("<?php return ['a' => ['x', true], 'b' => 1.0];").unwrap();
+        assert_eq!(
+            v.to_php_file(),
+            "<?php\nreturn [\n    'a' => [\n        0 => 'x',\n        1 => true,\n    ],\n    'b' => 1.0,\n];\n"
+        );
+    }
 }
