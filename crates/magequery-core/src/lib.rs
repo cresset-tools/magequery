@@ -43,6 +43,7 @@ mod php;
 pub mod phparray;
 pub mod phpver;
 mod redis;
+mod registration;
 mod sql;
 mod queries;
 mod sysconfig;

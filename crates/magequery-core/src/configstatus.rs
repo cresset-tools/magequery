@@ -229,14 +229,14 @@ fn parse_serialized_string_map(s: &str) -> Option<std::collections::HashMap<Stri
 
 /// A PHP array key after PHP's key normalization.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Key {
+pub(crate) enum Key {
     Int(i64),
     Str(String),
 }
 
 /// A PHP value with PHP's array semantics applied.
 #[derive(Debug, Clone, PartialEq)]
-enum Php {
+pub(crate) enum Php {
     Arr(Vec<(Key, Php)>),
     Str(String),
     Int(i64),
@@ -246,7 +246,7 @@ enum Php {
 }
 
 impl Php {
-    fn from_value(v: &PhpValue) -> Result<Php> {
+    pub(crate) fn from_value(v: &PhpValue) -> Result<Php> {
         Ok(match v {
             PhpValue::Array(items) => {
                 let mut out: Vec<(Key, Php)> = Vec::with_capacity(items.len());
@@ -272,7 +272,7 @@ impl Php {
         })
     }
 
-    fn get(&self, key: &Key) -> Option<&Php> {
+    pub(crate) fn get(&self, key: &Key) -> Option<&Php> {
         match self {
             Php::Arr(items) => items.iter().find(|(k, _)| k == key).map(|(_, v)| v),
             _ => None,
@@ -331,7 +331,7 @@ fn replace_recursive(base: Php, replacement: Php) -> Php {
 }
 
 /// PHP `json_encode($value)` with no flags.
-fn json_encode(v: &Php) -> Result<String> {
+pub(crate) fn json_encode(v: &Php) -> Result<String> {
     let mut out = String::new();
     encode(v, &mut out)?;
     Ok(out)
@@ -421,7 +421,7 @@ fn encode_str(s: &str, out: &mut String) {
     out.push('"');
 }
 
-fn sha1_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha1_hex(bytes: &[u8]) -> String {
     use sha1::{Digest, Sha1};
     Sha1::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
