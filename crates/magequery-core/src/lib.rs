@@ -24,6 +24,7 @@ pub mod source;
 
 mod breadth;
 mod composer;
+mod configstatus;
 mod engine;
 #[cfg(feature = "db")]
 mod db;
@@ -48,6 +49,7 @@ mod sysconfig;
 mod whatis;
 pub mod laminas_alias;
 
+pub use configstatus::{ConfigSection, ConfigStatus, Section as ConfigSectionHash};
 pub use error::{Diagnostic, Error, Result, Severity};
 pub use engine::index::OpenOptions;
 pub use ids::{Area, ClassName, ConfigPath, EventName, ModuleName};
