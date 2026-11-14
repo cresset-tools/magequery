@@ -246,6 +246,16 @@ impl Parser<'_> {
             if self.peek() == Some(&Tok::Arrow) {
                 self.pos += 1;
                 let val = self.value()?;
+                // As in PHP, an explicit integer key (or integer-like string) moves
+                // the next automatic key past it: `[5 => 'a', 'b']` gives 'b' key 6.
+                let explicit = match &first {
+                    PhpValue::Int(i) => Some(*i),
+                    PhpValue::Str(s) => integer_key(s),
+                    _ => None,
+                };
+                if let Some(k) = explicit.filter(|k| *k >= auto) {
+                    auto = k.saturating_add(1);
+                }
                 items.push((first, val));
             } else {
                 items.push((PhpValue::Int(auto), first));
@@ -379,11 +389,51 @@ fn read_string(b: &[u8], mut i: usize, quote: u8, single: bool) -> Result<(Strin
                     }
                 }
             } else {
+                // PHP's double-quoted escapes; any other backslash stays as written.
+                let hex = |c: u8| (c as char).to_digit(16);
                 match n {
-                    b'\\' | b'"' | b'$' | b'/' => out.push(n),
+                    b'\\' | b'"' | b'$' => out.push(n),
                     b'n' => out.push(b'\n'),
                     b't' => out.push(b'\t'),
                     b'r' => out.push(b'\r'),
+                    b'v' => out.push(0x0b),
+                    b'e' => out.push(0x1b),
+                    b'f' => out.push(0x0c),
+                    b'0'..=b'7' => {
+                        let mut v: u32 = 0;
+                        let mut j = i + 1;
+                        while j < i + 4 && j < b.len() && (b'0'..=b'7').contains(&b[j]) {
+                            v = v * 8 + u32::from(b[j] - b'0');
+                            j += 1;
+                        }
+                        out.push(v as u8); // PHP keeps the low byte: "\400" is "\0".
+                        i = j;
+                        continue;
+                    }
+                    b'x' if b.get(i + 2).copied().and_then(hex).is_some() => {
+                        let mut v = 0;
+                        let mut j = i + 2;
+                        while j < i + 4 && j < b.len() {
+                            let Some(d) = hex(b[j]) else { break };
+                            v = v * 16 + d;
+                            j += 1;
+                        }
+                        out.push(v as u8);
+                        i = j;
+                        continue;
+                    }
+                    b'u' if b.get(i + 2) == Some(&b'{') => {
+                        let close = b[i + 3..].iter().position(|&c| c == b'}').ok_or("unterminated \\u{")?;
+                        let digits = std::str::from_utf8(&b[i + 3..i + 3 + close]).map_err(|e| e.to_string())?;
+                        let ch = u32::from_str_radix(digits, 16)
+                            .ok()
+                            .and_then(char::from_u32)
+                            .ok_or_else(|| format!("invalid \\u{{{digits}}}"))?;
+                        let mut buf = [0u8; 4];
+                        out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                        i += 4 + close;
+                        continue;
+                    }
                     _ => {
                         out.push(b'\\');
                         out.push(n);
@@ -393,6 +443,11 @@ fn read_string(b: &[u8], mut i: usize, quote: u8, single: bool) -> Result<(Strin
             i += 2;
         } else if c == quote {
             return Ok((String::from_utf8_lossy(&out).into_owned(), i + 1));
+        } else if !single
+            && ((c == b'$' && b.get(i + 1).is_some_and(|&n| is_ident_start(n)))
+                || (c == b'{' && b.get(i + 1) == Some(&b'$')))
+        {
+            return Err("a double-quoted string interpolates a variable".into());
         } else {
             out.push(c);
             i += 1;
@@ -430,6 +485,18 @@ fn read_number(b: &[u8], start: usize) -> Result<(Tok, usize), String> {
     } else {
         raw.parse::<i64>().map(|n| (Tok::Int(n), i)).map_err(|e| e.to_string())
     }
+}
+
+/// A string key PHP stores as an integer: "0", "42", "-5", but not "05" or "-0".
+pub(crate) fn integer_key(s: &str) -> Option<i64> {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if (digits.len() > 1 && digits.starts_with('0')) || s == "-0" {
+        return None;
+    }
+    s.parse().ok()
 }
 
 fn is_ident_start(c: u8) -> bool {
@@ -490,6 +557,32 @@ return [
             .and_then(|c| c.get("default"))
             .and_then(|d| d.get("password"));
         assert_eq!(pw.and_then(PhpValue::as_str), Some("pa'ss\\wörd"));
+    }
+
+    #[test]
+    fn double_quoted_escapes_follow_php() {
+        let v = parse(r#"<?php return ["a\x01\101\u{e9}\/\q\v\$"];"#).unwrap();
+        let s = v.as_array().unwrap()[0].1.as_str().unwrap().to_string();
+        assert_eq!(s, "a\u{1}A\u{e9}\\/\\q\u{b}$");
+        assert!(parse(r#"<?php return ["$x"];"#).is_err());
+        assert!(parse(r#"<?php return ['$x'];"#).is_ok());
+    }
+
+    #[test]
+    fn automatic_keys_follow_the_largest_integer_key() {
+        let v = parse("<?php return [5 => 'a', 'b', '9' => 'c', 'd', 'x' => 'e', 'f'];").unwrap();
+        let keys: Vec<_> = v.as_array().unwrap().iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(
+            keys,
+            [
+                PhpValue::Int(5),
+                PhpValue::Int(6),
+                PhpValue::Str("9".into()),
+                PhpValue::Int(10),
+                PhpValue::Str("x".into()),
+                PhpValue::Int(11),
+            ]
+        );
     }
 
     #[test]
