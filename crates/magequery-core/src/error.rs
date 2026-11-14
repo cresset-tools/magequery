@@ -61,6 +61,11 @@ pub enum Error {
     /// application as not installed and refuses database checks.
     #[error("the Magento application is not installed (no install/date in app/etc/env.php)")]
     NotInstalled,
+
+    /// The input is valid for Magento but outside what this port reproduces
+    /// exactly; the PHP command gives the answer.
+    #[error("not supported natively: {0}")]
+    Unsupported(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

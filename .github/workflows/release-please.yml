@@ -80,7 +80,7 @@ jobs:
       # A release just published — nudge magebuild to re-pin its magequery /
       # magecommand git deps to it. magebuild links these engines by exact
       # commit, so a repository_dispatch there opens its bump PR within seconds
-      # (magebuild/.github/workflows/bump-git-pins.yml). A separate app token
+      # (magebuild/.github/workflows/bump-magequery.yml). A separate app token
       # scoped to magebuild authorizes the cross-repo call — the same bot app is
       # installed on both repos; the release-please token above is magequery-only.
       - name: Mint magebuild token
