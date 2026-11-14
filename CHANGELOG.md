@@ -51,6 +51,26 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.26.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.25.1...magequery-v0.26.0) (2026-11-14)
+
+
+### Features
+
+* **magequery:** check theme and queue registration natively ([70cca89](https://github.com/cresset-tools/magequery/commit/70cca891da18e12f2eb219f4f091346c09ecb6e9))
+* **magequery:** db status, a native setup:db:status ([db86ad8](https://github.com/cresset-tools/magequery/commit/db86ad87ceb43ad897f9b314faffc93b89522b5f))
+* **magequery:** doctor lints for setup patches and db_schema keys ([7e9de82](https://github.com/cresset-tools/magequery/commit/7e9de82e1a4f3d5a13c5303c9880dfbd353fb9e8))
+* **magequery:** expose the env.php array parser and add a writer ([01bbd27](https://github.com/cresset-tools/magequery/commit/01bbd27564ade07fa085852d7156b62214f7e253))
+* **magequery:** native app:config:status ([2311f59](https://github.com/cresset-tools/magequery/commit/2311f5969fbb4fd5a98d707ee0b53504bd9c2e0e))
+
+
+### Bug Fixes
+
+* **magecommand:** stop printing the unresolvable-class note on di compile ([d9a4bc6](https://github.com/cresset-tools/magequery/commit/d9a4bc6d1d5b038d9b3b6ce8445d9f3803fbef41))
+* **magequery:** discover app/code modules behind symlinks ([7fa7b55](https://github.com/cresset-tools/magequery/commit/7fa7b55e070680a43f721e9639dac7baa7ca05cb))
+* **magequery:** honour a modules section in env.php ([e62a817](https://github.com/cresset-tools/magequery/commit/e62a81756e26f60557118239d4e99669c281b290))
+* **magequery:** read PHP array keys and double-quoted strings as PHP does ([8262c1c](https://github.com/cresset-tools/magequery/commit/8262c1ce0df275a39a1a55c2a8e5090aeb6be78e))
+* **magequery:** read PHP heredocs as one string ([c1b6987](https://github.com/cresset-tools/magequery/commit/c1b69870682ac6b4ab6177bd017ac4d7e5b75280))
+
 ## [0.25.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.25.0...magequery-v0.25.1) (2026-11-09)
 
 
