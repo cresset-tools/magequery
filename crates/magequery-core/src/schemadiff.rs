@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::db::status::{fetch_raw_schema, RawColumn, RawSchema};
 use crate::db::Db;
-use crate::model::SchemaChange;
+use crate::model::{Online, SchemaChange};
 use crate::phpver::version_compare;
 use crate::schemadecl::{
     last_json_columns, merged_schema_xml, origin_table, parse_foreign_keys, strtr_abbrev, XNode, XTable,
@@ -41,7 +41,7 @@ pub(crate) fn diff(mage: &Magento, db: &mut Db, table_prefix: &str) -> Res<Vec<S
     let json_columns = if table_prefix.is_empty() { last_json_columns(&xml) } else { HashMap::new() };
     let live = build_live(&raw, &names, &server, &json_columns)?;
     let mut whitelist = Whitelist::load(mage);
-    compare(&declared, &live, &mut whitelist)
+    compare(&declared, &live, &mut whitelist, &server)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -172,6 +172,8 @@ struct Server {
     /// `DefaultCharsetCollationMap` for this server's version key.
     charset: &'static str,
     collation: &'static str,
+    /// `ADD COLUMN` at the end of a table is metadata only: MariaDB 10.3+, MySQL 8.0.12+.
+    instant_add_column: bool,
 }
 
 impl Server {
@@ -184,8 +186,14 @@ impl Server {
         );
         let (charset, collation) =
             if utf8mb4 { ("utf8mb4", "utf8mb4_general_ci") } else { ("utf8", "utf8_general_ci") };
-        Ok(Server { mariadb, charset, collation })
+        Ok(Server { mariadb, charset, collation, instant_add_column: instant_add_column(version, mariadb) })
     }
+}
+
+fn instant_add_column(version: &str, mariadb: bool) -> bool {
+    let mut parts = version.split(|c: char| !c.is_ascii_digit()).map(|p| p.parse::<u32>().unwrap_or(0));
+    let v = (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0));
+    if mariadb { v >= (10, 3, 0) } else { v >= (8, 0, 12) }
 }
 
 /// `SqlVersionProvider`. Every path first runs `getSqlVersion()`, which throws unless the
@@ -358,6 +366,10 @@ struct Table {
     /// primary/unique key and index (auto-indexes included).
     fks: Vec<(String, String, String)>,
     key_columns: Vec<Vec<String>>,
+    /// Declared side: columns with an `onCreate` trigger (`migrateDataFrom(…)`).
+    migrated: Vec<String>,
+    /// Live side: the `TABLE_ROWS` estimate.
+    rows: Option<u64>,
 }
 
 /// Insert keyed by name; a later element with the same key replaces the earlier one in
@@ -700,10 +712,14 @@ fn declared_shell(raw: &str, t: &XTable, names: &Names, server: &Server, connect
         ("collation", Val::Str(t.node.get("collation").unwrap_or(server.collation).into())),
     ];
     let mut columns = Vec::new();
+    let mut migrated = Vec::new();
     for (cname, n) in &t.columns {
         let what = format!("table {raw} column {cname}");
         if is_disabled(n, &what)? {
             continue;
+        }
+        if n.get("onCreate").is_some() {
+            migrated.push(cname.clone());
         }
         let ty = n.get("type").unwrap_or_default().to_string();
         // `Factories\Timestamp`: a truthy value other than CURRENT_TIMESTAMP goes through
@@ -746,6 +762,8 @@ fn declared_shell(raw: &str, t: &XTable, names: &Names, server: &Server, connect
         indexes: Vec::new(),
         fks: Vec::new(),
         key_columns: Vec::new(),
+        migrated,
+        rows: None,
     })
 }
 
@@ -894,7 +912,7 @@ fn live_column(c: &RawColumn, server: &Server, json: bool) -> Res<Element> {
 fn build_live(raw: &RawSchema, names: &Names, server: &Server, json_columns: &HashMap<String, String>) -> Res<Vec<Table>> {
     let mut tables: Vec<Table> = Vec::new();
     let mut by_name: HashMap<&str, usize> = HashMap::new();
-    for (real, engine, collation, table_comment) in &raw.tables {
+    for (real, engine, collation, table_comment, rows) in &raw.tables {
         if !names.prefix.is_empty() && !real.starts_with(&names.prefix) {
             // Magento prefixes the name and then fails to SHOW CREATE the table.
             return Err(format!("table {real} is outside the table prefix '{}'", names.prefix));
@@ -924,6 +942,8 @@ fn build_live(raw: &RawSchema, names: &Names, server: &Server, json_columns: &Ha
             indexes: Vec::new(),
             fks: Vec::new(),
             key_columns: Vec::new(),
+            migrated: Vec::new(),
+            rows: *rows,
         });
     }
 
@@ -1099,16 +1119,34 @@ fn read_whitelists(files: &[std::path::PathBuf]) -> Res<Php> {
 // The diff
 // ---------------------------------------------------------------------------------------
 
-fn change(op: &str, table: &str, element: Option<&str>, detail: Vec<String>) -> SchemaChange {
+type Verdict = (Online, String);
+
+fn change(op: &str, table: &str, element: Option<&str>, detail: Vec<String>, verdict: Verdict) -> SchemaChange {
     SchemaChange {
         operation: op.to_string(),
         table: table.to_string(),
         element: element.map(str::to_string),
         detail,
+        online: verdict.0,
+        why: verdict.1,
+        rows: None,
     }
 }
 
-fn compare(declared: &[Table], live: &[Table], wl: &mut Whitelist) -> Res<Vec<SchemaChange>> {
+fn compare(declared: &[Table], live: &[Table], wl: &mut Whitelist, server: &Server) -> Res<Vec<SchemaChange>> {
+    let mut out = changes(declared, live, wl, server)?;
+    // Magento sends a table's changes as one ALTER TABLE, so the slowest part sets the
+    // pace for all of them; rows say how much work that is.
+    let rows: HashMap<&str, Option<u64>> = live.iter().map(|t| (t.name.as_str(), t.rows)).collect();
+    for c in &mut out {
+        if c.online != Online::Yes {
+            c.rows = rows.get(c.table.as_str()).copied().flatten();
+        }
+    }
+    Ok(out)
+}
+
+fn changes(declared: &[Table], live: &[Table], wl: &mut Whitelist, server: &Server) -> Res<Vec<SchemaChange>> {
     let live_by_name: HashMap<&str, &Table> = live.iter().map(|t| (t.name.as_str(), t)).collect();
     let mut out = Vec::new();
     let mut declared_sorted: Vec<&Table> = declared.iter().collect();
@@ -1116,14 +1154,15 @@ fn compare(declared: &[Table], live: &[Table], wl: &mut Whitelist) -> Res<Vec<Sc
 
     for t in declared_sorted {
         let Some(d) = live_by_name.get(t.name.as_str()) else {
-            out.push(change("create_table", &t.name, None, Vec::new()));
+            out.push(change("create_table", &t.name, None, Vec::new(), (Online::Yes, "a new table".into())));
             continue;
         };
         // A resource change recreates the table, and nothing else about it is compared.
         if t.resource != d.resource {
             if wl.has_table(&t.nwp)? {
                 let detail = vec![format!("resource: '{}' → '{}'", d.resource, t.resource)];
-                out.push(change("recreate_table", &t.name, None, detail));
+                let v = (Online::No, "drops and recreates the table".into());
+                out.push(change("recreate_table", &t.name, None, detail, v));
             }
             continue;
         }
@@ -1135,21 +1174,26 @@ fn compare(declared: &[Table], live: &[Table], wl: &mut Whitelist) -> Res<Vec<Sc
                 .filter(|(a, b)| a.1 != b.1)
                 .map(|(a, b)| format!("{}: {} → {}", a.0, b.1.render(), a.1.render()))
                 .collect();
-            out.push(change("modify_table", &t.name, None, detail));
+            out.push(change("modify_table", &t.name, None, detail, modify_table(&d.params, &t.params)));
         }
 
         for (name, c) in &t.columns {
             match d.columns.iter().find(|(n, _)| n == name) {
-                None => out.push(change("add_column", &t.name, Some(name), Vec::new())),
+                None => {
+                    let v = add_column(c, t.migrated.contains(name), server);
+                    out.push(change("add_column", &t.name, Some(name), Vec::new(), v))
+                }
                 Some((_, lc)) if !lc.same(c) => {
-                    out.push(change("modify_column", &t.name, Some(name), Element::describe_change(lc, c)))
+                    let detail = Element::describe_change(lc, c);
+                    out.push(change("modify_column", &t.name, Some(name), detail, modify_column(lc, c)))
                 }
                 Some(_) => {}
             }
         }
         for (name, _) in &d.columns {
             if !t.columns.iter().any(|(n, _)| n == name) && wl.has(&d.nwp, "column", name)? {
-                out.push(change("drop_element", &t.name, Some(name), vec!["column".into()]));
+                let v = (Online::No, "the old code still uses the column".into());
+                out.push(change("drop_element", &t.name, Some(name), vec!["column".into()], v));
             }
         }
 
@@ -1161,6 +1205,7 @@ fn compare(declared: &[Table], live: &[Table], wl: &mut Whitelist) -> Res<Vec<Sc
                         &t.name,
                         Some(&e.name),
                         vec![format!("{kind} missing live")],
+                        add_complex_element(e),
                     )),
                     // A changed index or key is dropped and re-added; the re-add is never
                     // whitelist-gated, so it always counts.
@@ -1168,11 +1213,11 @@ fn compare(declared: &[Table], live: &[Table], wl: &mut Whitelist) -> Res<Vec<Sc
                         // The drop half is gated like any removal; Magento lists it first.
                         if wl.has(&d.nwp, kind, key)? {
                             let op = if le.class == "Reference" { "drop_reference" } else { "drop_element" };
-                            out.push(change(op, &t.name, Some(&le.name), vec![kind.to_string()]));
+                            out.push(change(op, &t.name, Some(&le.name), vec![kind.to_string()], drop_complex_element(le)));
                         }
                         let mut detail = vec![format!("{kind} differs")];
                         detail.extend(Element::describe_change(le, e));
-                        out.push(change("add_complex_element", &t.name, Some(&e.name), detail));
+                        out.push(change("add_complex_element", &t.name, Some(&e.name), detail, add_complex_element(e)));
                     }
                     Some(_) => {}
                 }
@@ -1180,7 +1225,7 @@ fn compare(declared: &[Table], live: &[Table], wl: &mut Whitelist) -> Res<Vec<Sc
             for (key, le) in liv {
                 if !decl.iter().any(|(k, _)| k == key) && wl.has(&d.nwp, kind, key)? {
                     let op = if le.class == "Reference" { "drop_reference" } else { "drop_element" };
-                    out.push(change(op, &t.name, Some(&le.name), vec![kind.to_string()]));
+                    out.push(change(op, &t.name, Some(&le.name), vec![kind.to_string()], drop_complex_element(le)));
                 }
             }
         }
@@ -1191,10 +1236,126 @@ fn compare(declared: &[Table], live: &[Table], wl: &mut Whitelist) -> Res<Vec<Sc
     extra.sort_by(|a, b| a.name.cmp(&b.name));
     for d in extra {
         if wl.has_table(&d.nwp)? {
-            out.push(change("drop_table", &d.name, None, Vec::new()));
+            let v = (Online::No, "the old code still uses the table".into());
+            out.push(change("drop_table", &d.name, None, Vec::new(), v));
         }
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------------------
+// Online or not: can the change run with the previous release still serving?
+//
+// The upgrade runs before the swap, so only the old code meets the new schema: a change
+// is safe when that code keeps working on it (expand, never contract) and the server
+// applies it without blocking writes. Magento sends no ALGORITHM or LOCK clause, so the
+// server picks the cheapest it can. Anything not shown to be safe needs maintenance.
+// The algorithms were checked against MariaDB 11.4 by running each statement with
+// ALGORITHM=INSTANT / NOCOPY / INPLACE, LOCK=NONE on empty copies of Magento tables.
+// ---------------------------------------------------------------------------------------
+
+fn param_of<'a>(e: &'a Element, key: &str) -> Option<&'a Val> {
+    e.params.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+}
+
+/// Keys whose values differ between two elements of the same class.
+fn changed_keys(live: &Element, declared: &Element) -> Vec<&'static str> {
+    declared.params.iter().filter(|(k, v)| param_of(live, k) != Some(v)).map(|(k, _)| *k).collect()
+}
+
+fn modify_table(live: &[(&'static str, Val)], declared: &[(&'static str, Val)]) -> Verdict {
+    let changed: Vec<&str> = declared.iter().zip(live).filter(|(a, b)| a.1 != b.1).map(|(a, _)| a.0).collect();
+    // Magento sends `DEFAULT CHARSET` / `DEFAULT COLLATE`, which only set what new
+    // columns get; existing columns show up as their own modify_column.
+    if changed.iter().all(|k| matches!(*k, "comment" | "charset" | "collation")) {
+        (Online::Yes, "only the table's comment or defaults change, metadata only".into())
+    } else {
+        (Online::No, format!("changing the table's {} rebuilds it", changed.join(" and ")))
+    }
+}
+
+fn add_column(c: &Element, migrated: bool, server: &Server) -> Verdict {
+    if migrated {
+        return (Online::No, "onCreate copies data into it, and later writes by the old code would be missed".into());
+    }
+    if param_of(c, "identity") == Some(&Val::Bool(true)) {
+        return (Online::No, "an auto-increment column rebuilds the table".into());
+    }
+    let nullable = param_of(c, "nullable") == Some(&Val::Bool(true));
+    let has_default = match param_of(c, "default") {
+        None | Some(Val::Null) => false,
+        // A timestamp's default reads 'NULL' when none is declared.
+        Some(Val::Str(d)) => c.class != "Timestamp" || d != "NULL",
+        Some(_) => true,
+    };
+    if !nullable && !has_default {
+        return (Online::No, "NOT NULL without a default: the old code's inserts would fail".into());
+    }
+    if server.instant_add_column {
+        (Online::Yes, "added at the end of the table, metadata only".into())
+    } else {
+        (Online::Slow, "this server version rebuilds the table to add a column".into())
+    }
+}
+
+/// Bytes a `varchar` length takes, for the 1-or-2 length-prefix boundary at 256 bytes.
+fn varchar_bytes(e: &Element) -> Option<i64> {
+    let Some(Val::Int(len)) = param_of(e, "length") else { return None };
+    let per_char = match param_of(e, "charset") {
+        Some(Val::Str(c)) if c.starts_with("utf8mb4") => 4,
+        Some(Val::Str(c)) if c.starts_with("utf8") => 3,
+        _ => 1,
+    };
+    Some(len * per_char)
+}
+
+fn modify_column(live: &Element, declared: &Element) -> Verdict {
+    if live.class != declared.class {
+        return (Online::No, "a type change copies the table".into());
+    }
+    let changed = changed_keys(live, declared);
+    if changed.iter().all(|k| matches!(*k, "comment" | "default")) {
+        return (Online::Yes, "only the default or comment changes".into());
+    }
+    let rest: Vec<&str> = changed.iter().copied().filter(|k| !matches!(*k, "comment" | "default")).collect();
+    // A longer varchar keeps working for the old code; it is metadata only while the
+    // length prefix stays the same size.
+    if rest == ["length"] && param_of(declared, "type") == Some(&Val::Str("varchar".into())) {
+        if let (Some(a), Some(b)) = (varchar_bytes(live), varchar_bytes(declared)) {
+            if b > a && (b < 256) == (a < 256) {
+                return (Online::Yes, "a longer varchar, metadata only".into());
+            }
+        }
+    }
+    if rest == ["nullable"] && param_of(declared, "nullable") == Some(&Val::Bool(true)) {
+        return (Online::Slow, "becoming nullable rebuilds the table in place".into());
+    }
+    (Online::No, format!("changing {} copies the table or can break the old code", rest.join(", ")))
+}
+
+fn add_complex_element(e: &Element) -> Verdict {
+    match (e.class, param_of(e, "type"), param_of(e, "indexType")) {
+        ("Index", _, Some(Val::Str(t))) if t == "fulltext" => {
+            (Online::No, "building a full-text index blocks writes".into())
+        }
+        ("Index", ..) => (Online::Slow, "the index is built in place, writes continue".into()),
+        ("Internal", Some(Val::Str(t)), _) if t == "unique" => {
+            (Online::No, "a unique key can reject the old code's writes".into())
+        }
+        ("Reference", ..) => (
+            Online::No,
+            "a foreign key is added with checks on, which copies the table and can reject the old code's writes".into(),
+        ),
+        _ => (Online::No, "a primary key change rebuilds the table and can reject the old code's writes".into()),
+    }
+}
+
+fn drop_complex_element(e: &Element) -> Verdict {
+    match e.class {
+        "Index" => (Online::Yes, "dropping an index needs no rebuild".into()),
+        "Reference" => (Online::Yes, "dropping a foreign key is metadata only".into()),
+        _ => (Online::No, "dropping a key changes what the old code's writes do".into()),
+    }
 }
 
 #[cfg(test)]
@@ -1268,6 +1429,75 @@ mod tests {
         let server = Server::new("11.4.4-MariaDB").unwrap();
         let names = Names { prefix: String::new() };
         build_declared(&parse_schema_file(xml).unwrap(), &names, &server, &["default".into()])
+    }
+
+    #[test]
+    fn online_verdicts() {
+        let new = Server::new("11.4.4-MariaDB").unwrap();
+        let old = Server::new("10.2.44-MariaDB").unwrap();
+        assert!(new.instant_add_column && !old.instant_add_column);
+        assert!(Server::new("8.0.36").unwrap().instant_add_column);
+        assert!(!Server::new("5.7.44-log").unwrap().instant_add_column);
+
+        let t = |xml: &str| declare(xml).unwrap().remove(0);
+        let added = t(r#"<schema xmlns:xsi="x"><table name="t">
+            <column xsi:type="int" name="a" nullable="true"/>
+            <column xsi:type="int" name="b" nullable="false"/>
+            <column xsi:type="int" name="c" nullable="false" default="0"/>
+            <column xsi:type="varchar" name="d" length="32" nullable="false" onCreate="migrateDataFrom(a)"/>
+            <column xsi:type="timestamp" name="e" nullable="false" default="CURRENT_TIMESTAMP"/>
+            <column xsi:type="timestamp" name="f" nullable="false"/>
+            <column xsi:type="text" name="g" nullable="false"/>
+            <column xsi:type="varchar" name="h" length="40"/>
+            <column xsi:type="varchar" name="i" length="80"/>
+            <column xsi:type="int" name="j" nullable="true" comment="x"/>
+            <column xsi:type="int" name="k" nullable="false"/>
+        </table></schema>"#);
+        let col = |n: &str| &added.columns.iter().find(|(c, _)| c == n).unwrap().1;
+        let verdict = |n: &str| add_column(col(n), added.migrated.iter().any(|m| m == n), &new).0;
+        assert_eq!(verdict("a"), Online::Yes);
+        assert_eq!(verdict("b"), Online::No);
+        assert_eq!(verdict("c"), Online::Yes);
+        assert_eq!(verdict("d"), Online::No);
+        assert_eq!(verdict("e"), Online::Yes);
+        assert_eq!(verdict("f"), Online::No);
+        assert_eq!(verdict("g"), Online::No);
+        assert_eq!(add_column(col("a"), false, &old).0, Online::Slow);
+
+        let modify = |a: &str, b: &str| modify_column(col(a), col(b)).0;
+        assert_eq!(modify("a", "j"), Online::Yes, "comment only");
+        assert_eq!(modify("a", "c"), Online::No, "becomes NOT NULL");
+        assert_eq!(modify("k", "a"), Online::Slow, "becomes nullable");
+        assert_eq!(modify("h", "i"), Online::No, "160 → 320 bytes crosses the length prefix");
+        assert_eq!(modify("i", "h"), Online::No, "shorter");
+        assert_eq!(modify("a", "h"), Online::No, "type change");
+
+        let keys = t(r#"<schema xmlns:xsi="x"><table name="t">
+            <column xsi:type="int" name="a"/>
+            <column xsi:type="int" name="p" nullable="false"/>
+            <column xsi:type="text" name="x"/>
+            <constraint xsi:type="primary" referenceId="PRIMARY"><column name="p"/></constraint>
+            <constraint xsi:type="unique" referenceId="U"><column name="a"/></constraint>
+            <index referenceId="I" indexType="btree"><column name="a"/></index>
+            <index referenceId="F" indexType="fulltext"><column name="x"/></index>
+        </table></schema>"#);
+        let all: Vec<&Element> = keys.constraints.iter().chain(&keys.indexes).map(|(_, e)| e).collect();
+        let by = |pred: &dyn Fn(&Element) -> bool| *all.iter().find(|e| pred(e)).unwrap();
+        let idx = by(&|e| param_of(e, "indexType") == Some(&Val::Str("btree".into())));
+        let fti = by(&|e| param_of(e, "indexType") == Some(&Val::Str("fulltext".into())));
+        let unq = by(&|e| param_of(e, "type") == Some(&Val::Str("unique".into())));
+        let pk = by(&|e| param_of(e, "type") == Some(&Val::Str("primary".into())));
+        assert_eq!(add_complex_element(idx).0, Online::Slow);
+        assert_eq!(add_complex_element(fti).0, Online::No);
+        assert_eq!(add_complex_element(unq).0, Online::No);
+        assert_eq!(add_complex_element(pk).0, Online::No);
+        assert_eq!(drop_complex_element(idx).0, Online::Yes);
+        assert_eq!(drop_complex_element(unq).0, Online::No);
+
+        let charset = |c: &str| vec![("comment", Val::Null), ("charset", Val::Str(c.into()))];
+        assert_eq!(modify_table(&charset("utf8"), &charset("utf8mb4")).0, Online::Yes);
+        let engine = |e: &str| vec![("engine", Val::Str(e.into()))];
+        assert_eq!(modify_table(&engine("memory"), &engine("innodb")).0, Online::No);
     }
 
     #[test]
