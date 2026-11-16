@@ -1,0 +1,11 @@
+# cargo-deny configuration. Only the advisory check runs (see
+# .github/workflows/advisories.yml); licences, bans and sources are not checked.
+#
+# Every ignored advisory needs a reason that says why it does not apply or
+# what has to happen before the entry can go.
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.36 only parses the XML of the project being analysed. Remove once the parsers move to quick-xml 0.41 or later" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.36 only parses the XML of the project being analysed. Remove once the parsers move to quick-xml 0.41 or later" },
+    { id = "RUSTSEC-2026-0235", reason = "rkyv 0.7 arrives through parcel_sourcemap, a lightningcss dependency; magecommand never reads rkyv archives" },
+]
