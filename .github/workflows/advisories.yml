@@ -1,0 +1,30 @@
+name: Advisories
+
+# Fails when a dependency in Cargo.lock has a RustSec advisory that deny.toml
+# does not list as a known exception. The daily run is what catches an
+# advisory published against a lockfile nobody has touched.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "**/Cargo.lock"
+      - "**/Cargo.toml"
+      - deny.toml
+      - .github/workflows/advisories.yml
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: cargo deny check advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
