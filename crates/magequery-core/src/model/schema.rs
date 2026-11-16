@@ -77,6 +77,26 @@ impl DbStatus {
             && self.data_patches.is_empty()
             && self.module_versions.is_empty()
     }
+
+    /// Why applying this upgrade needs maintenance mode, or nothing when it could run
+    /// while the previous release keeps serving: every schema change is
+    /// [`Online::Yes`] or [`Online::Slow`], and no PHP (patches, old-style setup scripts)
+    /// is pending. Recurring setup scripts run on every upgrade and are not counted.
+    pub fn maintenance_reasons(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.errors.iter().map(|e| format!("could not check: {e}")).collect();
+        for c in self.schema_changes.iter().filter(|c| c.online == Online::No) {
+            let target = c.element.as_ref().map_or_else(|| c.table.clone(), |e| format!("{}.{e}", c.table));
+            out.push(format!("{} {target}: {}", c.operation, c.why));
+        }
+        let patches = self.schema_patches.len() + self.data_patches.len();
+        if patches > 0 {
+            out.push(format!("{patches} pending setup patch(es) run PHP"));
+        }
+        if !self.module_versions.is_empty() {
+            out.push("a module's setup_version changed, so old-style setup scripts may run".into());
+        }
+        out
+    }
 }
 
 /// A setup patch `setup:upgrade` would still apply.
@@ -110,4 +130,40 @@ pub struct SchemaChange {
     /// What differs, e.g. `type: varchar(64) → varchar(32)`; empty when nothing more
     /// specific than the operation applies.
     pub detail: Vec<String>,
+    /// Whether the change can be applied while the previous release keeps serving.
+    pub online: Online,
+    /// Why, in a few words.
+    pub why: String,
+    /// `information_schema.TABLES.TABLE_ROWS` of the live table (an estimate for InnoDB),
+    /// when the change rebuilds, scans or copies it.
+    pub rows: Option<u64>,
+}
+
+/// Whether a schema change can be applied with the previous release still serving.
+///
+/// Judged on two things: whether code written for the old schema keeps working on the
+/// new one (the upgrade runs before the swap, so the new code never sees the old
+/// schema), and whether the server applies the change without blocking writes. Anything
+/// not shown to be safe is [`Online::No`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Online {
+    /// Old code keeps working and the server changes only metadata, or drops an index.
+    Yes,
+    /// As `Yes`, but the server rebuilds or scans the table in place without blocking
+    /// writes; the time grows with the table.
+    Slow,
+    /// Needs maintenance: old code may break on it, or writes block while the table is
+    /// copied.
+    No,
+}
+
+impl std::fmt::Display for Online {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Online::Yes => "online",
+            Online::Slow => "online, slow",
+            Online::No => "maintenance",
+        })
+    }
 }

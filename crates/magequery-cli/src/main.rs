@@ -7230,6 +7230,8 @@ fn db_status(mage: &Magento, json: bool) -> Result<()> {
             for d in &c.detail {
                 println!("  {:<20} {}", "", style::dim(d));
             }
+            let rows = c.rows.map(|r| format!(", ~{r} rows")).unwrap_or_default();
+            println!("  {:<20} {}", "", style::dim(&format!("{}: {}{rows}", c.online, c.why)));
         }
         println!();
     }
@@ -7273,6 +7275,15 @@ fn db_status(mage: &Magento, json: bool) -> Result<()> {
     if status.is_up_to_date() {
         println!("{}", style::ok("All modules are up to date."));
     } else {
+        let reasons = status.maintenance_reasons();
+        if reasons.is_empty() {
+            println!("{}", style::dim("The upgrade could run without maintenance mode (recurring setup scripts not counted)."));
+        } else {
+            println!("{}", style::dim("The upgrade needs maintenance mode:"));
+            for r in &reasons {
+                println!("  {}", style::dim(r));
+            }
+        }
         println!("Run 'setup:upgrade' to update your DB schema and data.");
     }
     exit(status.is_up_to_date());

@@ -155,11 +155,15 @@ pub(crate) struct RawIndexColumn {
 }
 
 /// Everything the declarative-schema diff reads from the database.
+/// `(name, engine, collation, comment, rows)`; `rows` is `TABLE_ROWS`, an estimate for
+/// InnoDB.
+pub(crate) type RawTable = (String, Option<String>, Option<String>, String, Option<u64>);
+
 pub(crate) struct RawSchema {
     /// `SHOW variables LIKE "version"`.
     pub version: String,
-    /// Base tables: `(name, engine, collation, comment)`, in `information_schema` order.
-    pub tables: Vec<(String, Option<String>, Option<String>, String)>,
+    /// Base tables, in `information_schema` order.
+    pub tables: Vec<RawTable>,
     /// Table collation → its character set, as Magento's join on
     /// `COLLATION_CHARACTER_SET_APPLICABILITY` resolves it (first row wins).
     pub collation_charsets: HashMap<String, String>,
@@ -191,12 +195,15 @@ pub(crate) fn fetch_raw_schema(db: &mut Db) -> Result<RawSchema, String> {
         .ok_or("the server reported no version")?;
 
     let tables = db
-        .query::<(B, Option<B>, Option<B>, Option<B>)>(
-            "SELECT TABLE_NAME, ENGINE, TABLE_COLLATION, TABLE_COMMENT FROM information_schema.TABLES \
+        .query::<(B, Option<B>, Option<B>, Option<B>, Option<B>)>(
+            "SELECT TABLE_NAME, ENGINE, TABLE_COLLATION, TABLE_COMMENT, TABLE_ROWS FROM information_schema.TABLES \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'",
         )?
         .into_iter()
-        .map(|(n, e, c, comment)| (txt(n), opt_txt(e), opt_txt(c), opt_txt(comment).unwrap_or_default()))
+        .map(|(n, e, c, comment, rows)| {
+            let rows = opt_txt(rows).and_then(|r| r.parse().ok());
+            (txt(n), opt_txt(e), opt_txt(c), opt_txt(comment).unwrap_or_default(), rows)
+        })
         .collect();
 
     // MariaDB 10.10+ joins on FULL_COLLATION_NAME when the column exists.
