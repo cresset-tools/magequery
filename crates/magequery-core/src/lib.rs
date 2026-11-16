@@ -59,12 +59,12 @@ pub use model::{
     TypeNodePosition, TypeSharedDecl, VirtualTypeDecl,
 };
 pub use model::{
-    AclResource, AdminRole, AdminRule, AdminUser, ArgItem, ArgValue, Argument, ByArea,
+    AclResource, AdminRole, AdminRule, AdminUser, ArgItem, ArgValue, Argument, BaselineEntry, BaselineOutcome, ByArea,
     ChainNode, ChainPluginRef, ChainStep, ConfigSourceKind, ConfigValue,
     ConsoleCommand, ControllerAction, CronJob, CronJobLive, CronJobs, CronRun,
     CspPolicy, CspThemeWhitelist, CspValue, CspValueKind, CspWhitelist,
     DbColumn, DbConfig, DbConnection, DbConstraint, DbIndex, DbPing,
-    DbTable, DepEdge, DoctorFinding, DoctorLint, DoctorReport, EavAttribute, EavAttributeCard,
+    DbTable, DepEdge, DoctorBaseline, DoctorFinding, StaleEntry, DoctorLint, DoctorReport, EavAttribute, EavAttributeCard,
     EavCatalogFlags, EavEntityType, EavScope, EavSetMembership, EavSetupKind, EavSetupProp,
     EavSetupRef, EavValueKind, EmailTemplate,
     EmailTemplateOverride, ExtendedType, ExtensionAttribute,

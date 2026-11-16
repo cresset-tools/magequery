@@ -215,7 +215,7 @@ RUNTIME       (env.php config & live connections)
 PROJECT       (the codebase itself)
   info      mode   maintenance   base-url [--secure]   admin-url   (single-fact views of info)
   modules [--check] [--enabled|--disabled] [--source app|vendor]
-  deps <module>   doctor [--source] [--in] [--strict] [--deny] [--explain]   whatis <class>   patches [--db|--pending]
+  deps <module>   doctor [--source] [--in] [--strict] [--deny] [--explain] [--generate-baseline] [--prune-baseline]   whatis <class>   patches [--db|--pending]
 ```
 
 **Tooling meta-commands** (`completions <shell>`, `man`, `skill`, `lsp`) sit *outside* the
@@ -1041,7 +1041,7 @@ for the preference join).
 
 ### `doctor` (cross-index lints, done)
 
-`magequery doctor [--source app|vendor] [--deny <lint>…] [--strict] [--in <scope>…]` — everything the merged config
+`magequery doctor [--source app|vendor] [--deny <lint>…] [--strict] [--in <scope>…] [--generate-baseline [file]] [--prune-baseline] [--baseline <file>|--no-baseline]` — everything the merged config
 references that doesn't exist, structural breakage, and probably-forgotten wiring. Pure
 projection over the existing indexes (~90–140ms); exits 1 on **errors** only, so warnings
 can't fail CI — unless a lint is passed to `--deny` (repeatable), which upgrades its findings
@@ -1067,6 +1067,24 @@ findings located in a root-relative path prefix, a module, a module vendor (`Acm
 `Acme_*`) or a theme/theme vendor; sourceless findings match on their subject (module-set
 drift carries the module). `DoctorReport::retain_in`, applied after `deny`, so the exit
 code follows the filtered set.
+
+**Baseline** (phpstan's `--generate-baseline`): `--generate-baseline [file]` writes every
+current finding to `magequery-baseline.json` at the root (`DoctorBaseline`,
+`model/doctor_baseline.rs`) and exits 0; it refuses `--source`/`--in`, since a partial
+baseline would overwrite the full one. Each entry is code + root-relative file (no line, so
+edits elsewhere in the file don't break the match) + message, with a `count` for repeats;
+sorted, so regenerating diffs cleanly. Every run reads that file when it exists (`--baseline
+<file>` for another, which must exist; `--no-baseline` to skip) and
+`DoctorReport::apply_baseline`, after `retain_in`, drops what it accepts and records
+`baseline: {suppressed, unmatched}` on the report (in `--json` too). Entries are matched
+one by one in file order, so `unmatched` holds each `StaleEntry` as itself: its index, the
+line it starts on in the file (`entry_lines`, a depth scan of the JSON) and how many findings
+it matched. Every stale entry is an `error[baseline]` cited at `file:line` and fails the run
+(a stale entry would hide its finding if it came back). `--prune-baseline` fixes exactly
+that: `DoctorBaseline::prune` removes the entries that matched nothing, lowers `count` on the
+ones that matched some, leaves every other entry alone and adds no new findings. Stale
+entries are cleared in a `--source`/`--in` run (the rest wasn't looked at), and
+`--prune-baseline` refuses one. The LSP applies the root baseline too.
 
 **Speed** (~0.5s on a 600-module store, from ~0.9s): `MQ_PROFILE=1` times every doctor
 phase. `class_known` is memoized (each area repeats the same references, each answer is
