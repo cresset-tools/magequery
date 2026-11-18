@@ -913,6 +913,65 @@ pub enum Symlink {
     /// default). Emitted relative so the tree survives extraction to any path
     /// and an atomic `current → releases/N` swap.
     ToSource,
+    /// Every package directory (`Magento_Catalog/`, `js/`, …) whose files are
+    /// byte-identical to another deployed directory becomes ONE relative
+    /// symlink to it, at the highest level where it matches. Across locales
+    /// and sibling themes most module directories repeat verbatim, so this
+    /// writes a small fraction of the entries. The real copy of each content
+    /// is the one at the smallest path, so the layout is the same on every run
+    /// whatever order the packages finished in. Everything stays inside
+    /// `pub/static` (unlike [`Symlink::ToSource`]); the web server must follow
+    /// symlinks, and editing a deployed file in place would show in every
+    /// package that links to it.
+    IdenticalDirs,
+}
+
+/// Run-scoped registry for [`Symlink::IdenticalDirs`]. While packages are
+/// written it maps each directory content key to the first directory deployed
+/// with it (identical directories after it are not written), and records every
+/// directory's key; once the run is done, [`DirLinkState`] is settled into the
+/// canonical layout and the links are made. Cloned handles share one
+/// registry; build a fresh one per run.
+#[derive(Debug, Clone, Default)]
+pub struct DirLinks(std::sync::Arc<std::sync::Mutex<DirLinkState>>);
+
+/// What [`DirLinks`] has recorded so far.
+#[derive(Debug, Default)]
+pub struct DirLinkState {
+    /// Content key → the directory holding the real copy.
+    pub owners: HashMap<[u8; 32], PathBuf>,
+    /// Every deployed package directory (absolute) and its content key,
+    /// linked or not, at every depth.
+    pub dirs: Vec<(PathBuf, [u8; 32])>,
+}
+
+impl DirLinks {
+    /// The directory already deployed with `key`, or `None` after recording
+    /// `dir` as the one that will be (the caller then writes it).
+    pub fn claim(&self, key: [u8; 32], dir: &Path) -> Option<PathBuf> {
+        let mut state = self.lock();
+        match state.owners.get(&key) {
+            Some(first) => Some(first.clone()),
+            None => {
+                state.owners.insert(key, dir.to_path_buf());
+                None
+            }
+        }
+    }
+
+    /// Record the content keys of one package's directories.
+    pub fn record(&self, dirs: impl IntoIterator<Item = (PathBuf, [u8; 32])>) {
+        self.lock().dirs.extend(dirs);
+    }
+
+    /// Take everything recorded, leaving the registry empty.
+    pub fn take(&self) -> DirLinkState {
+        std::mem::take(&mut *self.lock())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, DirLinkState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// Deploy options.
@@ -942,6 +1001,8 @@ pub struct PlacementOptions {
     pub sri_cache: SriCache,
     /// Shared LESS compile memo for this run (see [`LessCache`]).
     pub less_cache: LessCache,
+    /// The [`Symlink::IdenticalDirs`] registry for this run.
+    pub dir_links: DirLinks,
 }
 
 impl Default for PlacementOptions {
@@ -956,6 +1017,7 @@ impl Default for PlacementOptions {
             less_profile: super::less::LessProfile::default(),
             sri_cache: SriCache::default(),
             less_cache: LessCache::default(),
+            dir_links: DirLinks::default(),
         }
     }
 }

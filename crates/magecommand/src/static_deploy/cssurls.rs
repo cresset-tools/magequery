@@ -243,6 +243,57 @@ pub fn process_package(
     theme_path: &str,
     locale: &str,
 ) -> std::io::Result<usize> {
+    let in_package = |p: &str| static_root.join(p).is_file();
+    let read = |path: &str| std::fs::read_to_string(package_dir.join(path)).ok();
+    let mut rewritten = 0usize;
+    for (path, updated) in
+        rewrite_package_css(files, &read, &in_package, static_root, area, theme_path, locale)
+    {
+        std::fs::write(package_dir.join(path), updated)?;
+        rewritten += 1;
+    }
+    Ok(rewritten)
+}
+
+/// [`process_package`] BEFORE the package is written: the same decisions over
+/// the package's in-memory files, returning `(path, rewritten css)` for each
+/// css file the pass changes. "Does this resolve in the package?" consults the
+/// package's own file list first (what the written package would hold), then
+/// the disk, exactly the check [`process_package`] makes after writing.
+pub fn rewrite_package_css_in_memory(
+    files: &[(String, Option<std::path::PathBuf>, &[u8])],
+    static_root: &std::path::Path,
+    area: &str,
+    theme_path: &str,
+    locale: &str,
+) -> Vec<(String, String)> {
+    let package_prefix = format!("{area}/{theme_path}/{locale}/");
+    let own: std::collections::HashMap<&str, &[u8]> =
+        files.iter().map(|(p, _, c)| (p.as_str(), *c)).collect();
+    let in_package = |p: &str| {
+        p.strip_prefix(&package_prefix).is_some_and(|rel| own.contains_key(rel))
+            || static_root.join(p).is_file()
+    };
+    let read = |path: &str| {
+        own.get(path).and_then(|c| std::str::from_utf8(c).ok()).map(str::to_owned)
+    };
+    let listing: Vec<(String, Option<std::path::PathBuf>)> =
+        files.iter().map(|(p, s, _)| (p.clone(), s.clone())).collect();
+    rewrite_package_css(&listing, &read, &in_package, static_root, area, theme_path, locale)
+}
+
+/// The pass itself: every css file in `files` whose urls it changes, with its
+/// new content. `read` yields a css file's current content (package-relative
+/// path); `in_package` answers step 1 for a static-root-relative path.
+fn rewrite_package_css(
+    files: &[(String, Option<std::path::PathBuf>)],
+    read: &dyn Fn(&str) -> Option<String>,
+    in_package: &dyn Fn(&str) -> bool,
+    static_root: &std::path::Path,
+    area: &str,
+    theme_path: &str,
+    locale: &str,
+) -> Vec<(String, String)> {
     let package_path = format!("{area}/{theme_path}/{locale}");
 
     // Module assets, grouped by the parent package they also belong to, in the
@@ -267,21 +318,19 @@ pub fn process_package(
         .filter_map(|p| by_parent.get(p).cloned())
         .collect();
 
-    let in_package = |p: &str| static_root.join(p).is_file();
     let on_disk = |p: &str| static_root.join(p).is_file();
     let ctx = UrlContext {
         package_path: &package_path,
         area,
         locale,
         parents: &parents,
-        in_package: &in_package,
+        in_package,
         on_disk: &on_disk,
     };
 
-    let mut rewritten = 0usize;
+    let mut out = Vec::new();
     for (path, _) in files.iter().filter(|(p, _)| p.ends_with(".css")) {
-        let file = package_dir.join(path);
-        let Ok(content) = std::fs::read_to_string(&file) else { continue };
+        let Some(content) = read(path) else { continue };
 
         // One decision per DISTINCT url text — `updateCssUrls` then replaces
         // every occurrence of it, so a url resolved once is rewritten wherever
@@ -300,11 +349,10 @@ pub fn process_package(
         }
         let updated = apply_url_map(&content, &map);
         if updated != content {
-            std::fs::write(&file, updated)?;
-            rewritten += 1;
+            out.push((path.clone(), updated));
         }
     }
-    Ok(rewritten)
+    out
 }
 
 /// The view area a module source file sits in (`…/view/<area>/web/…`).
