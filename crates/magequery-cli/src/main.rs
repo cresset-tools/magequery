@@ -2,13 +2,13 @@ mod style;
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use magequery_core::model::ModuleSource;
 use magequery_core::{
     AclResource, ArgValue, Area, ChainStep, ClassName, ConfigSet, ConfigSourceKind, ConfigValue,
     CspPolicy, CspValueKind,
-    DbColumn, DbTable, Error, EventName, Indexer, Magento, MethodChain, Observer, Plugin,
+    DbColumn, DbTable, DoctorBaseline, Error, EventName, Indexer, Magento, MethodChain, Observer, Plugin,
     Preference, Resolution, Route, SalesDocKind, Source, UseRef, WebapiRoute,
 };
 
@@ -460,6 +460,23 @@ struct DoctorArgs {
     /// modules and themes). Repeatable. The exit code follows the filtered findings.
     #[arg(long = "in", value_name = "PATH|MODULE|VENDOR")]
     in_: Vec<String>,
+    /// Accept every current finding: write them to the baseline file (default
+    /// `magequery-baseline.json` at the Magento root) so later runs report only new ones,
+    /// as phpstan's baseline. Commit the file; regenerate it as findings get fixed.
+    #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "")]
+    generate_baseline: Option<PathBuf>,
+    /// Read the baseline from FILE instead of `magequery-baseline.json` at the Magento
+    /// root (which is read whenever it exists).
+    #[arg(long, value_name = "FILE", conflicts_with = "no_baseline")]
+    baseline: Option<PathBuf>,
+    /// Ignore the baseline: report every finding.
+    #[arg(long)]
+    no_baseline: bool,
+    /// Remove the baseline entries that no longer match (each reported as
+    /// `error[baseline]`), and nothing else: an entry that matches fewer findings than
+    /// its `count` keeps a count of what it matches. New findings are not added.
+    #[arg(long, conflicts_with_all = ["generate_baseline", "no_baseline"])]
+    prune_baseline: bool,
     #[arg(long)]
     json: bool,
 }
@@ -9258,11 +9275,77 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
     });
     let mut report = mage.doctor(source);
     report.deny(&args.deny);
+
+    let baseline_path = |explicit: Option<&PathBuf>| match explicit {
+        Some(path) if !path.as_os_str().is_empty() => path.clone(),
+        _ => root.join(DoctorBaseline::FILE),
+    };
+    if let Some(out) = &args.generate_baseline {
+        // A partial baseline would overwrite the full one and un-accept everything else.
+        if source.is_some() || !args.in_.is_empty() {
+            bail!("--generate-baseline records the whole project; drop --source and --in");
+        }
+        let path = baseline_path(Some(out).filter(|p| !p.as_os_str().is_empty()).or(args.baseline.as_ref()));
+        let baseline = DoctorBaseline::from_report(&report, root);
+        std::fs::write(&path, baseline.to_json())
+            .with_context(|| format!("writing {}", path.display()))?;
+        println!(
+            "{}",
+            style::ok(&format!(
+                "wrote {} finding(s) to {}",
+                report.findings.len(),
+                path.strip_prefix(root).unwrap_or(&path).display()
+            ))
+        );
+        return Ok(());
+    }
     report.retain_in(root, &args.in_);
+    // In a narrowed run, accepted findings outside the scope just weren't looked at.
+    let scoped = source.is_some() || !args.in_.is_empty();
+    if args.prune_baseline && scoped {
+        bail!("--prune-baseline needs the whole project to know what is stale; drop --source and --in");
+    }
+    let baseline_file = (!args.no_baseline).then(|| baseline_path(args.baseline.as_ref()));
+    let mut baseline = None;
+    if let Some(path) = &baseline_file {
+        baseline = DoctorBaseline::read(path).map_err(|e| anyhow!(e))?;
+        match &baseline {
+            Some(baseline) => report.apply_baseline(baseline, root),
+            // Only the default file is optional.
+            None if args.baseline.is_some() || args.prune_baseline => {
+                bail!("baseline {} does not exist", path.display())
+            }
+            None => {}
+        }
+    }
+    if let Some(outcome) = report.baseline.as_mut().filter(|_| scoped) {
+        outcome.unmatched.clear();
+    }
+    let stale = report.baseline.as_ref().map_or(&[][..], |b| &b.unmatched[..]);
+
+    if let (true, Some(mut baseline), Some(path)) = (args.prune_baseline, baseline, &baseline_file) {
+        let shown = path.strip_prefix(root).unwrap_or(path).display();
+        if stale.is_empty() {
+            println!("{}", style::ok(&format!("{shown} has no stale entries")));
+            return Ok(());
+        }
+        let removed = stale.iter().filter(|s| s.matched == 0).count();
+        baseline.prune(stale);
+        std::fs::write(path, baseline.to_json()).with_context(|| format!("writing {}", path.display()))?;
+        println!(
+            "{}",
+            style::ok(&format!(
+                "{shown}: removed {removed} entr{}, lowered the count of {}",
+                if removed == 1 { "y" } else { "ies" },
+                stale.len() - removed
+            ))
+        );
+        return Ok(());
+    }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&report)?);
-    } else if report.findings.is_empty() {
+    } else if report.findings.is_empty() && stale.is_empty() {
         println!("{}", style::ok("OK, nothing to report"));
     } else {
         for f in &report.findings {
@@ -9281,18 +9364,44 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
             println!("{tag}  {}{loc}", f.message);
             print_chain(&f.chain, "    ", root);
         }
+        // A stale entry would hide its finding if it came back, so it is an error that
+        // points at the entry itself.
+        let shown = baseline_file.as_deref().map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string());
+        for s in stale {
+            let e = &s.entry;
+            let file = e.file.as_deref().map(|f| format!(" in {f}")).unwrap_or_default();
+            let found = match s.matched {
+                0 => "no longer occurs".to_string(),
+                n => format!("is accepted {} times but occurs {n}", e.count),
+            };
+            let loc = match (&shown, s.line) {
+                (Some(path), 0) => format!("   {}", style::path(&format!("# {path}"))),
+                (Some(path), line) => format!("   {}", style::path(&format!("# {path}:{line}"))),
+                (None, _) => String::new(),
+            };
+            println!("{}  {} \"{}\"{file} {found}{loc}", style::err("error[baseline]"), e.code, e.message);
+        }
         eprintln!(
             "\n{} error(s), {} warning(s), {} info; `magequery doctor --explain <code>` explains a code",
-            report.errors(),
+            report.errors() + stale.len(),
             report.warnings(),
             report.infos(),
         );
     }
+    if let (false, Some(outcome)) = (args.json, &report.baseline) {
+        if outcome.suppressed > 0 {
+            eprintln!("{}", style::dim(&format!("{} finding(s) accepted by the baseline", outcome.suppressed)));
+        }
+        if !stale.is_empty() {
+            eprintln!("`magequery doctor --prune-baseline` removes the stale baseline entries, and nothing else");
+        }
+    }
 
-    // Errors fail the run (CI-able); warnings alone don't, unless --deny'd or --strict.
+    // Errors and stale baseline entries fail the run (CI-able); warnings alone don't,
+    // unless --deny'd or --strict.
     use std::io::Write;
     std::io::stdout().flush().ok();
-    if report.errors() > 0 || (args.strict && report.warnings() > 0) {
+    if report.errors() > 0 || !stale.is_empty() || (args.strict && report.warnings() > 0) {
         std::process::exit(1);
     }
     Ok(())

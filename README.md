@@ -39,6 +39,10 @@ errors, so it works as a CI gate:
 - uses: cresset-tools/magequery-action@v1   # runs doctor by default
 ```
 
+On an existing shop, `magequery doctor --generate-baseline` accepts today's findings into
+`magequery-baseline.json` (commit it), so CI fails only on new ones, as with phpstan's
+baseline.
+
 The agent skill teaches a coding agent to ask magequery wiring questions instead of grepping
 or booting Magento:
 

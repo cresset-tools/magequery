@@ -4,13 +4,14 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use lsp_types::{DiagnosticSeverity, NumberOrString, Position, Range};
-use magequery_core::{Magento, Severity, Source};
+use magequery_core::{DoctorBaseline, Magento, Severity, Source};
 
 /// Everything the index knows to be wrong, keyed by the file to publish it on: doctor
 /// findings (dangling references, cycles, drift — each tagged with its kebab-case lint id
 /// as the diagnostic code) plus per-file parse diagnostics. Findings without a source
 /// file (e.g. module-set drift) have nowhere to render and are skipped — the CLI's
-/// `doctor` remains the complete view.
+/// `doctor` remains the complete view. Findings the project's baseline accepts are left
+/// out, as in the CLI.
 pub(crate) fn diagnostics_by_file(
     magento: &Magento,
 ) -> HashMap<PathBuf, Vec<lsp_types::Diagnostic>> {
@@ -18,7 +19,12 @@ pub(crate) fn diagnostics_by_file(
 
     // Doctor first: it builds every lazy index, so the diagnostics() sweep below also
     // sees each file's parse problems.
-    for finding in magento.doctor(None).findings {
+    let mut report = magento.doctor(None);
+    // An unreadable baseline hides nothing; the CLI reports why.
+    if let Ok(Some(baseline)) = DoctorBaseline::read(&magento.root().join(DoctorBaseline::FILE)) {
+        report.apply_baseline(&baseline, magento.root());
+    }
+    for finding in report.findings {
         let Some(source) = finding.source else { continue };
         // DoctorLint serializes kebab-case ("preference-target-missing") — reuse that as
         // the LSP diagnostic code rather than maintaining a parallel name table.

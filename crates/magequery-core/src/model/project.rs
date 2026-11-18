@@ -309,6 +309,9 @@ pub struct ChainNode {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorReport {
     pub findings: Vec<DoctorFinding>,
+    /// What [`DoctorReport::apply_baseline`] hid, once one is applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<BaselineOutcome>,
 }
 
 impl DoctorReport {

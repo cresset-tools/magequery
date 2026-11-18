@@ -79,7 +79,7 @@ pub(crate) fn run(mage: &Magento, source_filter: Option<ModuleSource>) -> Doctor
     phase("templates", &mut d, &|d| d.check_templates());
     phase("unregistered", &mut d, &|d| d.check_unregistered(source_filter));
 
-    let mut report = DoctorReport { findings: d.findings };
+    let mut report = DoctorReport { findings: d.findings, baseline: None };
     if let Some(wanted) = source_filter {
         report.findings.retain(|f| finding_source(mage, f).is_none_or(|s| s == wanted));
     }

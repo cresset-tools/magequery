@@ -8,6 +8,8 @@ use crate::source::Source;
 mod project;
 pub use project::*;
 mod doctor_lints;
+mod doctor_baseline;
+pub use doctor_baseline::*;
 mod wiring;
 pub use wiring::*;
 mod runtime;
