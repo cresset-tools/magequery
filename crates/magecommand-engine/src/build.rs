@@ -180,18 +180,42 @@ pub fn compute_outputs_opts(
     // `add_generated_code` adds nothing and the loop body never runs — that path
     // stays byte-identical with zero extra work.
     let mut interception = interception::interception_map(magento, defs);
+    ilap!(_it, "interception map");
     let mut area_files = areaconfig::build_all_area_files(magento, defs, root);
+    ilap!(_it, "area files");
     let mut code =
         codegen::generate_code(magento, defs, root.to_path_buf(), &area_files, &interception, fused);
-    ilap!(_it, "areas + code (round 1)");
+    ilap!(_it, "code (round 1)");
     // Bounded: the generated universe is finite and each round only adds classes,
     // so this converges in a couple of rounds; the cap is a runaway backstop.
     for _round in 0..8 {
-        if defs.add_generated_code(&code.files, root) == 0 {
+        let added = defs.add_generated_code(&code.files, root);
+        ilap!(_it, "fold (re-parse)");
+        if added == 0 {
             break;
         }
+        // A full round costs the area files, and most of what the next one
+        // would discover needs none of them: a proxy of a factory the last
+        // round generated, an interceptor on a generated class. Find those
+        // with one area-free round first, so the full round below usually runs
+        // over the closed universe and is the last. It is a head start only:
+        // each file is what the full round would emit over these definitions,
+        // and the full round still decides whether the universe is closed
+        // (anything only the area sweep asks for sends the loop round again).
         interception = interception::interception_map(magento, defs);
+        let new = codegen::generate_new_without_areas(
+            magento,
+            defs,
+            root.to_path_buf(),
+            &interception,
+            fused,
+        );
+        if defs.add_generated_code(&new.files, root) > 0 {
+            interception = interception::interception_map(magento, defs);
+        }
+        ilap!(_it, "area-free round");
         area_files = areaconfig::build_all_area_files(magento, defs, root);
+        ilap!(_it, "area files");
         code = codegen::generate_code(
             magento,
             defs,
@@ -200,7 +224,7 @@ pub fn compute_outputs_opts(
             &interception,
             fused,
         );
-        ilap!(_it, "areas + code (fold round)");
+        ilap!(_it, "code (fold round)");
     }
 
     let mut lost_arguments: std::collections::BTreeSet<(String, String)> = Default::default();
