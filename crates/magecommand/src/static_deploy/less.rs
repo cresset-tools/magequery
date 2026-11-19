@@ -293,6 +293,25 @@ pub struct LessOrchestrator {
     /// [`CompatFallback`]). Empty when the plugin is unregistered or the
     /// deployed theme is not a Hyvä theme.
     compat: CompatFallback,
+    /// `Swissup\Rtl\Plugin\AssetSource`, when registered: `Some(is_rtl)` for
+    /// the deployed locale (see [`LessOrchestrator::with_modrtl`]).
+    modrtl: Option<bool>,
+    /// The text the `// @modrtl` placeholder expands to, rendered on first use.
+    modrtl_mixins: std::sync::OnceLock<String>,
+}
+
+/// `Swissup\Rtl\Model\MixinsRenderer::PLACEHOLDER`.
+const MODRTL_PLACEHOLDER: &str = "// @modrtl";
+
+/// `Swissup\Rtl\Helper\Data::isRtl`: the language half of the locale is looked
+/// up in the module's own RTL-language list; a locale without `_` is `en`.
+pub fn swissup_rtl_is_rtl(locale: &str) -> bool {
+    const RTL_LANGUAGES: [&str; 12] = [
+        "ar", "arc", "dv", "ha", "he", "ks", "khw", "ku", "ps", "fa", "ur", "yi",
+    ];
+    locale
+        .split_once('_')
+        .is_some_and(|(language, _)| RTL_LANGUAGES.contains(&language))
 }
 
 /// `Hyva\CompatModuleFallback\Plugin\ViewFileOverride` — for a Hyvä theme, a
@@ -347,7 +366,63 @@ impl LessOrchestrator {
             lib_web: root.join("lib").join("web"),
             extra_web_dirs: Vec::new(),
             compat: CompatFallback::default(),
+            modrtl: None,
+            modrtl_mixins: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Model `Swissup\Rtl\Plugin\AssetSource` (an `afterGetContent` plugin on
+    /// `Magento\Framework\View\Asset\Source`) when the store registers it.
+    ///
+    /// The plugin `str_replace`s every `// @modrtl` in ANY asset's content with
+    /// `Swissup_Rtl::css/_vars_ltr.less` (`_vars_rtl.less` for an RTL locale)
+    /// followed by `Swissup_Rtl::css/_mixins.less`, both resolved through the
+    /// deployed theme's fallback. Swissup's modules and themes ship
+    /// `_modrtl.less` partials that are nothing BUT that comment, so the
+    /// direction-aware mixins (`.padding-left()`, `.margin()`, `.right()`,
+    /// `.text-align()`, …) every Breeze stylesheet calls exist only after the
+    /// substitution — without it those calls are undefined mixins, in stock
+    /// Luma/blank too, because `Swissup_Breeze`'s `_module.less` is spliced
+    /// into every theme's `styles-m`/`styles-l`.
+    ///
+    /// The direction makes the compiled CSS locale-dependent, so it is part of
+    /// a compile's identity: see [`LessOrchestrator::direction`].
+    pub fn with_modrtl(mut self, registered: bool, locale: &str) -> Self {
+        self.modrtl = registered.then(|| swissup_rtl_is_rtl(locale));
+        self.modrtl_mixins = std::sync::OnceLock::new();
+        self
+    }
+
+    /// `Some(is_rtl)` when the compiled CSS depends on the locale's text
+    /// direction (the modrtl plugin is registered), `None` when it does not.
+    pub fn direction(&self) -> Option<bool> {
+        self.modrtl
+    }
+
+    /// `MixinsRenderer::render`: the vars partial for the direction, then the
+    /// mixins. A partial that resolves nowhere contributes nothing (PHP
+    /// concatenates `getContent`'s `false`).
+    fn modrtl_mixins(&self, rtl: bool) -> &str {
+        self.modrtl_mixins.get_or_init(|| {
+            let vars = if rtl { "_vars_rtl.less" } else { "_vars_ltr.less" };
+            [vars, "_mixins.less"]
+                .iter()
+                .filter_map(|file| self.probe(&format!("Swissup_Rtl/css/{file}")))
+                .filter_map(|(path, _)| std::fs::read_to_string(path).ok())
+                .collect()
+        })
+    }
+
+    /// Read a LESS source the way `Asset\Source::getContent` hands it to the
+    /// compiler: the file's text, after the content plugins we model.
+    fn read_source(&self, path: &Path) -> std::io::Result<String> {
+        let source = std::fs::read_to_string(path)?;
+        match self.modrtl {
+            Some(rtl) if source.contains(MODRTL_PLACEHOLDER) => {
+                Ok(source.replace(MODRTL_PLACEHOLDER, self.modrtl_mixins(rtl)))
+            }
+            _ => Ok(source),
+        }
     }
 
     /// Append extra NON-modular fallback dirs (a registered
@@ -532,7 +607,7 @@ impl LessOrchestrator {
                 ),
             });
         };
-        let source = std::fs::read_to_string(&entry_file).map_err(|e| LessDeployError {
+        let source = self.read_source(&entry_file).map_err(|e| LessDeployError {
             entry: Some(logical.clone()),
             module: None,
             file: Some(entry_file.clone()),
@@ -950,7 +1025,7 @@ impl ImportResolver for OrchestratorResolver<'_> {
             }
         };
         let (physical, _module) = hit;
-        let source = std::fs::read_to_string(&physical).map_err(|e| ImportError::Io {
+        let source = self.orch.read_source(&physical).map_err(|e| ImportError::Io {
             path: physical.display().to_string(),
             message: e.to_string(),
         })?;
@@ -1509,6 +1584,114 @@ mod tests {
         let orch = compat_orchestrator(r, "Acme/child", HYVA_BASE);
         let (hit, _) = orch.probe("Acme_Widgets/css/b.less").expect("resolves");
         assert!(hit.ends_with("compat/view/frontend/web/css/b.less"), "{hit:?}");
+    }
+
+    // ---- Swissup_Rtl's `// @modrtl` content plugin --------------------------
+
+    /// A theme entry that gets its direction-aware mixins the way every
+    /// Swissup stylesheet does: by importing a `_modrtl.less` partial that is
+    /// nothing but the placeholder comment. Returns the orchestrator's inputs
+    /// with `Swissup_Rtl` among the modules.
+    fn modrtl_tree() -> (tempfile::TempDir, Vec<ModuleRef>) {
+        let td = synth_tree();
+        let r = td.path();
+        wf(r, "vendor/acme/theme-base/web/css/source/_modrtl.less", "// @modrtl\n");
+        wf(
+            r,
+            "vendor/acme/theme-base/web/css/rtl.less",
+            "@import 'source/_modrtl.less';\n.a { .padding-left(1px); dir: @modrtl-dir; }\n",
+        );
+        let rtl = "vendor/swissup/module-rtl/view/base/web/css";
+        wf(r, &format!("{rtl}/_vars_ltr.less"), "@modrtl-dir: ltr;\n@modrtl-dir-left: left;\n");
+        wf(r, &format!("{rtl}/_vars_rtl.less"), "@modrtl-dir: rtl;\n@modrtl-dir-left: right;\n");
+        wf(
+            r,
+            &format!("{rtl}/_mixins.less"),
+            ".padding-left(@d) { padding-@{modrtl-dir-left}: @d; }\n",
+        );
+        let mut mods = modules(r);
+        mods.push(ModuleRef {
+            name: "Swissup_Rtl".to_string(),
+            dir: r.join("vendor/swissup/module-rtl"),
+        });
+        (td, mods)
+    }
+
+    fn modrtl_css(registered: bool, locale: &str) -> Result<String, LessDeployError> {
+        let (td, mods) = modrtl_tree();
+        let r = td.path();
+        let orch = LessOrchestrator::new(r, "frontend", "Acme/base", &themes(r), mods)
+            .unwrap()
+            .with_modrtl(registered, locale);
+        orch.compile_entry("rtl", &LessDeployOptions::default()).map(|c| c.css)
+    }
+
+    /// With the plugin registered, `// @modrtl` expands to Swissup_Rtl's vars
+    /// partial for the locale's direction followed by its mixins — the mixins
+    /// the importing stylesheet calls exist, and follow the direction.
+    #[test]
+    fn modrtl_placeholder_expands_to_the_direction_mixins() {
+        assert_eq!(
+            modrtl_css(true, "en_US").unwrap(),
+            ".a {\n  padding-left: 1px;\n  dir: ltr;\n}\n"
+        );
+        assert_eq!(
+            modrtl_css(true, "ar_SA").unwrap(),
+            ".a {\n  padding-right: 1px;\n  dir: rtl;\n}\n"
+        );
+    }
+
+    /// Without the plugin the placeholder is the plain comment it looks like,
+    /// so the call is an undefined mixin — exactly what Magento does when
+    /// Swissup_Rtl is absent or disabled.
+    #[test]
+    fn modrtl_placeholder_is_a_comment_without_the_plugin() {
+        let err = modrtl_css(false, "en_US").unwrap_err();
+        assert!(err.message.contains(".padding-left is undefined"), "{}", err.message);
+    }
+
+    /// The mixin partials resolve through the theme fallback like any modular
+    /// asset (`MixinsRenderer` builds a `Swissup_Rtl::css/…` asset for the
+    /// deployed theme), so a theme override wins.
+    #[test]
+    fn modrtl_mixins_resolve_through_the_theme_fallback() {
+        let (td, mods) = modrtl_tree();
+        let r = td.path();
+        wf(
+            r,
+            "vendor/acme/theme-base/Swissup_Rtl/web/css/_mixins.less",
+            ".padding-left(@d) { themed: @d; }\n",
+        );
+        let orch = LessOrchestrator::new(r, "frontend", "Acme/base", &themes(r), mods)
+            .unwrap()
+            .with_modrtl(true, "en_US");
+        let css = orch.compile_entry("rtl", &LessDeployOptions::default()).unwrap().css;
+        assert_eq!(css, ".a {\n  themed: 1px;\n  dir: ltr;\n}\n");
+    }
+
+    /// `Helper\Data::isRtl`: only the language half counts, against the
+    /// module's own list; a locale with no `_` is treated as `en`.
+    #[test]
+    fn swissup_rtl_direction_follows_the_locale_language() {
+        for rtl in ["ar_SA", "he_IL", "fa_IR", "ur_PK", "arc_SY"] {
+            assert!(swissup_rtl_is_rtl(rtl), "{rtl}");
+        }
+        for ltr in ["en_US", "nl_NL", "az_AZ", "ar", "he", ""] {
+            assert!(!swissup_rtl_is_rtl(ltr), "{ltr}");
+        }
+        // The direction is part of a compile's identity only when the plugin
+        // is registered.
+        let (td, mods) = modrtl_tree();
+        let r = td.path();
+        let orch = |registered, locale| {
+            LessOrchestrator::new(r, "frontend", "Acme/base", &themes(r), mods.clone())
+                .unwrap()
+                .with_modrtl(registered, locale)
+                .direction()
+        };
+        assert_eq!(orch(false, "ar_SA"), None);
+        assert_eq!(orch(true, "ar_SA"), Some(true));
+        assert_eq!(orch(true, "en_US"), Some(false));
     }
 
     #[test]

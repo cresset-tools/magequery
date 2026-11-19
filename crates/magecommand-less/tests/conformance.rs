@@ -447,6 +447,94 @@ fn php_reference_extend_grafts_are_visible() {
     );
 }
 
+/// A non-rooted at-rule (`@supports`, `@document`) nested in a RULESET of a
+/// `(reference)` file (probed 2026-11 against less.php 5.5.1).
+///
+/// - less.js semantics (default profile): hidden with the rest of the file.
+/// - less.php 5.5.1: the at-rule ESCAPES the reference visibility — it
+///   renders, carrying the enclosing selector, while the ruleset around it
+///   stays hidden. Its own declarations, its nested rulesets and a deeper
+///   `@supports` all render; a `@media` inside it stays hidden (unless
+///   extended), but a `@supports` nested deeper in THAT media leaks again and
+///   keeps the media shell. The same at-rule at the reference file's top level
+///   stays hidden, as does one in a mixin that is never called.
+///
+/// Breeze-real: `abstracts/mixins/_slideout.less` is reference-imported and
+/// `.breeze-slideout-close` holds `@supports (color: contrast-color(white))`;
+/// the real SCD `deferred-checkout.css` contains that block, and nothing else
+/// of the rule.
+#[test]
+fn php_reference_leaks_non_rooted_at_rules_nested_in_rulesets() {
+    let files: Vec<(&'static str, &'static str)> = vec![(
+        "lib.less",
+        ".a {\n\
+           color: red;\n\
+           @supports (x: y) {\n\
+             color: blue;\n\
+             .n { color: teal; }\n\
+             @media (min-width: 1px) { color: green; .q { @supports (p: q) { color: pink; } } }\n\
+             @supports (r: s) { color: gold; }\n\
+           }\n\
+           @-moz-document url-prefix() { color: navy; }\n\
+           @media (min-width: 2px) { color: grey; }\n\
+         }\n\
+         @supports (x: z) { .b { color: red; } }\n\
+         .m() { @supports (m: m) { color: blue; } }\n\
+         .unused() { @supports (u: u) { color: blue; } }\n\
+         .c { .m(); }\n",
+    )];
+    let src = "@import (reference) 'lib.less';\n.z { color: black; }\n";
+
+    let js = {
+        let resolver = MapResolver(files.clone());
+        magecommand_less::compile(src, &LessOptions::default(), &resolver)
+            .expect("must compile")
+            .code
+    };
+    assert_eq!(js, ".z {\n  color: black;\n}\n");
+
+    let php_opts = LessOptions {
+        php_reference_visibility: true,
+        ..LessOptions::default()
+    };
+    let php = {
+        let resolver = MapResolver(files.clone());
+        magecommand_less::compile(src, &php_opts, &resolver)
+            .expect("must compile")
+            .code
+    };
+    assert_eq!(
+        php,
+        "@supports (x: y) {\n  .a {\n    color: blue;\n  }\n  .a .n {\n    color: teal;\n  }\n\
+         \x20 @media (min-width: 1px) {\n    @supports (p: q) {\n      .a .q {\n        color: pink;\n      }\n    }\n  }\n\
+         \x20 @supports (r: s) {\n    .a {\n      color: gold;\n    }\n  }\n}\n\
+         @-moz-document url-prefix() {\n  .a {\n    color: navy;\n  }\n}\n\
+         @supports (m: m) {\n  .c {\n    color: blue;\n  }\n}\n\
+         .z {\n  color: black;\n}\n"
+    );
+
+    // An extend of the hidden ruleset still re-enables what it always did
+    // (the rule itself, and its `@media`); the leaked blocks gain the graft.
+    let extended = {
+        let resolver = MapResolver(files);
+        let src = "@import (reference) 'lib.less';\n.y:extend(.a all) {}\n";
+        magecommand_less::compile(src, &php_opts, &resolver)
+            .expect("must compile")
+            .code
+    };
+    assert_eq!(
+        extended,
+        ".y {\n  color: red;\n}\n\
+         @supports (x: y) {\n  .a,\n  .y {\n    color: blue;\n  }\n  .a .n,\n  .y .n {\n    color: teal;\n  }\n\
+         \x20 @media (min-width: 1px) {\n    .y {\n      color: green;\n    }\n\
+         \x20   @supports (p: q) {\n      .a .q,\n      .y .q {\n        color: pink;\n      }\n    }\n  }\n\
+         \x20 @supports (r: s) {\n    .a,\n    .y {\n      color: gold;\n    }\n  }\n}\n\
+         @-moz-document url-prefix() {\n  .a,\n  .y {\n    color: navy;\n  }\n}\n\
+         @media (min-width: 2px) {\n  .y {\n    color: grey;\n  }\n}\n\
+         @supports (m: m) {\n  .c {\n    color: blue;\n  }\n}\n"
+    );
+}
+
 /// §2.8 element granularity through `&`-concatenation (probed 2026-07,
 /// `amp_ref2` triple): `.abs-tax-total { &-expanded { .mixsym(); } }` joins
 /// to elements `.abs-tax-total` + `-expanded` — NOT one element
