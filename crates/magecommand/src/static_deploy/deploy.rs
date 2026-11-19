@@ -1535,7 +1535,11 @@ mod tests {
                 let rel = p.strip_prefix(dir).unwrap().to_path_buf();
                 let ft = std::fs::symlink_metadata(&p).unwrap().file_type();
                 let what = if ft.is_symlink() {
-                    format!("L:{}", std::fs::read_link(&p).unwrap().display())
+                    // `/`-joined components, whatever the platform separator.
+                    let target = std::fs::read_link(&p).unwrap();
+                    let parts: Vec<_> =
+                        target.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+                    format!("L:{}", parts.join("/"))
                 } else if ft.is_dir() {
                     stack.push(p);
                     "D".to_string()
