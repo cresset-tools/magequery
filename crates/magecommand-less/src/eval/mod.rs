@@ -118,6 +118,11 @@ pub struct Ctx<'a> {
     /// Depth of enclosing `(reference)`-imported bodies (§2.8): output
     /// produced while >0 is visibility-blocked until referenced.
     visibility_blocks: usize,
+    /// The `visibility_blocks` count a non-rooted at-rule nested in a ruleset
+    /// LIFTED for its body (less.php profile — see `eval_at_rule`); 0 when no
+    /// such lift is active. A nested `@media`/`@container` puts it back for
+    /// its own body, so at most one of the two counters is ever non-zero.
+    lifted_visibility_blocks: usize,
     /// Extend targets already warned about as complex selectors (source-span
     /// keyed, so a mixin-replayed extend warns once like less.js's
     /// parse-time warning).
@@ -471,6 +476,7 @@ impl<'a> Ctx<'a> {
             once_imported,
             file_stack: vec![entry],
             visibility_blocks: 0,
+            lifted_visibility_blocks: 0,
             complex_extend_warned: rustc_hash::FxHashSet::default(),
             decl_file: Vec::new(),
             warnings: Vec::new(),
@@ -1556,11 +1562,37 @@ impl<'a> Ctx<'a> {
                 // must not bubble past this block.
                 let saved_path = std::mem::take(&mut self.media_path);
                 let saved_blocks = self.media_blocks.take();
+                // less.php profile (probed v5.5.1): a non-rooted at-rule
+                // nested in a RULESET escapes `(reference)` visibility — the
+                // at-rule renders, carrying the enclosing selector, although
+                // the ruleset around it stays hidden:
+                //
+                //   // _lib.less, imported with (reference)
+                //   .a { color: red; @supports (x: y) { color: blue; } }
+                //
+                // emits `@supports (x: y) { .a { color: blue; } }` and no
+                // `.a { color: red; }`. Its declarations and nested rulesets
+                // (and a `@supports` nested deeper) all render; a `@media`
+                // inside it stays hidden (`eval_nestable_at_rule` re-blocks),
+                // and so does the same at-rule at the reference file's top
+                // level. Breeze-real: `.breeze-slideout-close`'s
+                // `@supports (color: contrast-color(white))` reaches
+                // `deferred-checkout.css` this way. less.js keeps it hidden.
+                let lift = wraps
+                    && self.opts.php_reference_visibility
+                    && self.visibility_blocks > 0
+                    && parent_paths.is_some_and(|p| !p.is_empty());
+                let saved_vis = (self.visibility_blocks, self.lifted_visibility_blocks);
+                if lift {
+                    self.lifted_visibility_blocks = self.visibility_blocks;
+                    self.visibility_blocks = 0;
+                }
                 self.push_frame(frame_of(rules.to_vec()));
                 self.at_rule_depth += 1;
                 let res = self.process_body(rules, inner_parent);
                 self.at_rule_depth -= 1;
                 self.pop_frame();
+                (self.visibility_blocks, self.lifted_visibility_blocks) = saved_vis;
                 self.media_path = saved_path;
                 self.media_blocks = saved_blocks;
                 let (own, children) = res?;
@@ -1608,10 +1640,13 @@ impl<'a> Ctx<'a> {
                 if body_outs.is_empty() {
                     return Ok(Vec::new());
                 }
-                Ok(vec![Out::At {
+                let out = Out::At {
                     header,
                     body: AtBody::Rules(body_outs),
-                }])
+                };
+                // Shield the lifted block from the enclosing region's Hidden
+                // wrap, like a visibly-defined mixin's expansion.
+                Ok(vec![if lift { Out::Visible(Box::new(out)) } else { out }])
             }
         }
     }
@@ -1622,6 +1657,24 @@ impl<'a> Ctx<'a> {
     /// as SIBLINGS of the outermost block, in depth-first entry order; a
     /// nested block of the OTHER kind stays in place unmerged.
     fn eval_nestable_at_rule(
+        &mut self,
+        a: &crate::ast::AtRule,
+        base: &str,
+        parent_paths: Option<&[String]>,
+    ) -> Result<Vec<Out>, LessError> {
+        // Inside a non-rooted at-rule that lifted `(reference)` visibility
+        // (see `eval_at_rule`), a `@media` is hidden again: less.php's leak
+        // covers the at-rule's own rulesets, not the media blocks in it.
+        if self.visibility_blocks > 0 || self.lifted_visibility_blocks == 0 {
+            return self.eval_nestable_at_rule_inner(a, base, parent_paths);
+        }
+        self.visibility_blocks = std::mem::take(&mut self.lifted_visibility_blocks);
+        let res = self.eval_nestable_at_rule_inner(a, base, parent_paths);
+        self.lifted_visibility_blocks = std::mem::take(&mut self.visibility_blocks);
+        Ok(res?.into_iter().map(|o| Out::Hidden(Box::new(o))).collect())
+    }
+
+    fn eval_nestable_at_rule_inner(
         &mut self,
         a: &crate::ast::AtRule,
         base: &str,
