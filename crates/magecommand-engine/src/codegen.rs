@@ -1100,6 +1100,7 @@ pub fn generate_code(
         let intercepted: Vec<String> = plan.methods.keys().cloned().collect();
         crate::pluginlist::scope_chains(magento, defs, &intercepted)
     });
+    ilap!(_it, "fused scope_chains");
     // Each interceptor's bytes are an independent pure function of the (already
     // fully-populated) definitions, and the final `files.sort_by` makes push
     // order irrelevant — so generate them in parallel (2489 on the oracle).
