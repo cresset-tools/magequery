@@ -1011,8 +1011,12 @@ fn static_less(
     let magento = magequery_core::Magento::open(&root)
         .with_context(|| format!("not a Magento root: {}", root.display()))?;
     refuse_duplicate_modules(&magento)?;
+    // The one deploy plugin that rewrites LESS SOURCES; without it a store
+    // with Swissup_Rtl compiles no theme stylesheet at all.
+    let modrtl = static_deploy::files::deploy_plugin_effects(&magento).for_area(area).modrtl;
     let orch = sdless::LessOrchestrator::from_magento(&magento, area, theme)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        .with_modrtl(modrtl, locale);
 
     eprintln!(
         "{} {}",
