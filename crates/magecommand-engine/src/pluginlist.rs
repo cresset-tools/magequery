@@ -460,7 +460,10 @@ pub struct ScopeChains {
 /// command inheriting a plugin on the Symfony `run` base) still has a resolved
 /// per-method chain.
 pub fn scope_chains(magento: &Magento, defs: &Definitions, intercepted: &[String]) -> ScopeChains {
-    let global = plugin_chains(magento, defs, Area::Global, intercepted);
+    // Seven independent passes over read-only inputs (the global scope and
+    // each area): run them at once. They dominated a fused compile of a large
+    // store, serially ~3.5s each.
+    use rayon::prelude::*;
     let areas = [
         ("frontend", Area::Frontend),
         ("adminhtml", Area::Adminhtml),
@@ -468,11 +471,17 @@ pub fn scope_chains(magento: &Magento, defs: &Definitions, intercepted: &[String
         ("webapi_rest", Area::WebapiRest),
         ("webapi_soap", Area::WebapiSoap),
         ("graphql", Area::Graphql),
-    ]
-    .into_iter()
-    .map(|(name, area)| (name, plugin_chains(magento, defs, area, intercepted)))
-    .collect();
-    ScopeChains { global, areas }
+    ];
+    let (global, areas) = rayon::join(
+        || plugin_chains(magento, defs, Area::Global, intercepted),
+        || {
+            areas
+                .into_par_iter()
+                .map(|(name, area)| (name, plugin_chains(magento, defs, area, intercepted)))
+                .collect::<Vec<_>>()
+        },
+    );
+    ScopeChains { global, areas: areas.into_iter().collect() }
 }
 
 /// Run the global-scope inherit/process pass (mirroring `generate`'s Global
