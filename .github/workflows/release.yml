@@ -112,7 +112,10 @@ jobs:
       # - 1 "global" task that builds universal installers
       # - N "local" tasks that build each platform's binaries and platform-specific installers
       matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
-    runs-on: ${{ matrix.runner }}
+    # Hand-edited: dist plans the macOS build on the self-hosted Mac mini
+    # (`mac-mini`); the org variable MAC_MINI_DISABLED=true sends it back to
+    # GitHub. Re-apply after `dist generate`.
+    runs-on: ${{ matrix.runner == 'mac-mini' && vars.MAC_MINI_DISABLED == 'true' && 'macos-15' || matrix.runner }}
     container: ${{ matrix.container && matrix.container.image || null }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

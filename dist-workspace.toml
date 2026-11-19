@@ -145,8 +145,12 @@ cmake = '*'
 
 # arm64 Linux builds natively on GitHub's free arm runners (dist doesn't
 # cross-compile gnu targets by itself).
-# dist 0.32.0 builds aarch64-apple-darwin on `macos-14` by default. GitHub
-# retired that image on 2026-11-02, so pin a supported one.
 [dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
-aarch64-apple-darwin = "macos-15"
+# The macOS release binary builds on the self-hosted Mac mini (runner label
+# `mac-mini`), not on GitHub's macOS runners, whose arm64 queue kept
+# cancelling release jobs. The release workflow's build-local-artifacts job
+# sends it back to GitHub's macos-15 when the org variable
+# MAC_MINI_DISABLED=true (that `runs-on` is hand-edited; re-apply it after
+# `dist generate`).
+aarch64-apple-darwin = { runner = "mac-mini", host = "aarch64-apple-darwin" }
