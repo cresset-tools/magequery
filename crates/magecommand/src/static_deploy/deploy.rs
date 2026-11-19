@@ -849,7 +849,7 @@ fn write_package(
                     Ok(m) if m.is_dir() => {}
                     // A directory link from an earlier `--symlink dir` run: this
                     // package needs a real directory here.
-                    Ok(m) if m.file_type().is_symlink() => std::fs::remove_file(&dir)
+                    Ok(m) if m.file_type().is_symlink() => remove_link(&dir)
                         .and_then(|()| std::fs::create_dir(&dir))
                         .map_err(|e| err(format!("mkdir {}: {e}", dir.display())))?,
                     _ => return Err(err(format!("mkdir {}: {e}", dir.display()))),
@@ -1063,12 +1063,17 @@ fn settle_dir_links(dir_links: &files::DirLinks) -> Result<(), DeployError> {
     })
 }
 
-/// Remove whatever entry is at `path`: a directory tree, a file, or a link
-/// (Windows removes directory links as directories).
+/// Remove whatever entry is at `path`: a directory tree, a file, or a link.
 fn remove_entry(path: &Path) -> std::io::Result<()> {
     if std::fs::symlink_metadata(path)?.is_dir() {
         return std::fs::remove_dir_all(path);
     }
+    remove_link(path)
+}
+
+/// Remove a file or a symlink. Windows removes a DIRECTORY symlink only as a
+/// directory (`remove_file` is denied), so fall back to that.
+fn remove_link(path: &Path) -> std::io::Result<()> {
     std::fs::remove_file(path).or_else(|e| std::fs::remove_dir(path).map_err(|_| e))
 }
 
@@ -1090,12 +1095,7 @@ fn replace_dir_entry(
 ) -> std::io::Result<()> {
     match create() {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let is_dir = std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
-            if is_dir {
-                std::fs::remove_dir_all(path)?;
-            } else {
-                std::fs::remove_file(path)?;
-            }
+            remove_entry(path)?;
             create()
         }
         r => r,
