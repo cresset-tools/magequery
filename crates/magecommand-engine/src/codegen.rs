@@ -992,6 +992,38 @@ pub fn generate_code(
     has_plugins: &std::collections::BTreeMap<String, bool>,
     fused: bool,
 ) -> GeneratedCode {
+    generate(magento, defs, root, Some(area_files), has_plugins, fused, false)
+}
+
+/// The generated classes the definitions do not hold yet that can be found
+/// WITHOUT the area files: what the scanner sweep and the interception plan
+/// ask for, minus the area files' incidental `class_exists` sweep. Each file
+/// is byte-for-byte what [`generate_code`] would emit for it over the same
+/// definitions, so folding these in is a head start on the fixpoint, never a
+/// different answer — a full round still has the last word (see
+/// `build::compute_outputs_opts`).
+pub fn generate_new_without_areas(
+    magento: &Magento,
+    defs: &Definitions,
+    root: PathBuf,
+    has_plugins: &std::collections::BTreeMap<String, bool>,
+    fused: bool,
+) -> GeneratedCode {
+    generate(magento, defs, root, None, has_plugins, fused, true)
+}
+
+/// `area_files: None` skips the area sweep; `only_new` renders only the classes
+/// `defs` does not hold yet (and the fused chains only when an interceptor is
+/// among them).
+fn generate(
+    magento: &Magento,
+    defs: &Definitions,
+    root: PathBuf,
+    area_files: Option<&[crate::areaconfig::CompiledArea]>,
+    has_plugins: &std::collections::BTreeMap<String, bool>,
+    fused: bool,
+    only_new: bool,
+) -> GeneratedCode {
     let _prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
     macro_rules! ilap {
         ($t:expr, $label:expr) => {
@@ -1032,7 +1064,7 @@ pub fn generate_code(
     // OM does know). Verified on the oracle: `mg-install-310` declares 36
     // `…Factory` virtualTypes, and the archive holds a file for exactly the 2
     // declared in an `etc/adminhtml/di.xml` — none of the 34 global ones.
-    for ca in area_files {
+    for ca in area_files.unwrap_or_default() {
         let file = &ca.file;
         let names: Vec<String> = file
             .arguments
@@ -1052,6 +1084,9 @@ pub fn generate_code(
     let mut files: Vec<(String, String)> = Vec::new();
     let mut findings: Vec<String> = Vec::new();
     for (name, kind) in &cg.emitted {
+        if only_new && defs.classes.contains_key(name.as_str()) {
+            continue;
+        }
         let content = match kind {
             GenKind::Factory | GenKind::ExtensionInterfaceFactory => factory_bytes(name, *kind),
             GenKind::Extension | GenKind::ExtensionInterface => {
@@ -1096,7 +1131,12 @@ pub fn generate_code(
     // chains (creatuity's technique) — a flat body for global-only classes, a
     // per-area `switch (getCurrentScope())` otherwise. The per-scope chains are
     // computed once (global + each real area).
-    let fused_chains = fused.then(|| {
+    let wanted = |class: &String| {
+        !only_new || !defs.classes.contains_key(format!("{class}\\Interceptor").as_str())
+    };
+    let fused_chains = (fused && plan.methods.keys().any(wanted)).then(|| {
+        // Always over EVERY intercepted class, also when only some are
+        // rendered: the chains are order-dependent on the seed list.
         let intercepted: Vec<String> = plan.methods.keys().cloned().collect();
         crate::pluginlist::scope_chains(magento, defs, &intercepted)
     });
@@ -1108,6 +1148,7 @@ pub fn generate_code(
     let interceptors: Vec<Result<(String, String), String>> = plan
         .methods
         .par_iter()
+        .filter(|(class, _)| wanted(class))
         .map(|(class, methods)| {
             let bytes = fused_chains
                 .as_ref()
