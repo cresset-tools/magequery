@@ -747,6 +747,11 @@ pub fn sri_hash(content: &[u8]) -> String {
 /// each entry once instead of once per locale. If an i18n overlay is ever
 /// modeled, the locale must join the key.
 ///
+/// The one locale-derived input is the text DIRECTION, on a store that
+/// registers Swissup's modrtl plugin ([`LessOrchestrator::direction`]): an RTL
+/// locale compiles different CSS, so the direction is the key's fourth part
+/// (`None` everywhere else, which keeps the one-compile-per-entry sharing).
+///
 /// Each key holds a `OnceLock`, so groups racing on the same entry (they run
 /// in lockstep) wait for one compile instead of all doing it. Blocking is safe
 /// under rayon: a compile never waits on pool work (it evaluates on its own
@@ -754,7 +759,8 @@ pub fn sri_hash(content: &[u8]) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct LessCache(std::sync::Arc<std::sync::Mutex<LessCacheMap>>);
 
-type LessCacheMap = HashMap<(String, String, String), std::sync::Arc<std::sync::OnceLock<RenderedEntry>>>;
+type LessCacheKey = (String, String, String, Option<bool>);
+type LessCacheMap = HashMap<LessCacheKey, std::sync::Arc<std::sync::OnceLock<RenderedEntry>>>;
 
 impl LessCache {
     fn get_or_compile(
@@ -762,11 +768,12 @@ impl LessCache {
         area: &str,
         theme_path: &str,
         logical: &str,
+        direction: Option<bool>,
         compile: impl FnOnce() -> RenderedEntry,
     ) -> RenderedEntry {
         let cell = {
             let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
-            let key = (area.to_string(), theme_path.to_string(), logical.to_string());
+            let key = (area.to_string(), theme_path.to_string(), logical.to_string(), direction);
             map.entry(key).or_default().clone()
         };
         cell.get_or_init(compile).clone()
@@ -1039,7 +1046,8 @@ fn render_entry(
     theme_path: &str,
 ) -> Result<RenderedEntry, FilesError> {
     if entry.less {
-        return Ok(less_cache.get_or_compile(area, theme_path, &entry.logical, || {
+        let direction = orchestrator.direction();
+        return Ok(less_cache.get_or_compile(area, theme_path, &entry.logical, direction, || {
             compile_less_entry(entry, orchestrator, less_opts)
         }));
     }
@@ -1153,7 +1161,8 @@ fn build_theme_prebundle(
 
     let orchestrator = LessOrchestrator::new(root, area, theme_id, themes, modules.to_vec())?
         .with_extra_web_dirs(&plugins.extra_web_dirs)
-        .with_compat_modules(&plugins.compat_modules, &plugins.hyva_base_themes);
+        .with_compat_modules(&plugins.compat_modules, &plugins.hyva_base_themes)
+        .with_modrtl(plugins.modrtl, locale);
     let less_opts = LessDeployOptions {
         skip_broken_modules: false,
         compress: opts.compress,
@@ -1479,6 +1488,13 @@ const RECOGNIZED_DEPLOY_PLUGINS: &[&str] = &[
     "Magento\\Csp\\Plugin\\GenerateMergedAssetIntegrity",
 ];
 
+/// `Asset\Source` is not modelled as an extension point (it is one of the
+/// [`UNMODELLED_TARGETS`]), but this ONE plugin on it is: it rewrites LESS
+/// sources before they compile, and every Swissup Breeze stylesheet depends on
+/// the rewrite ([`super::less::LessOrchestrator::with_modrtl`]).
+const ASSET_SOURCE: &str = "Magento\\Framework\\View\\Asset\\Source";
+const SWISSUP_MODRTL_PLUGIN: &str = "Swissup\\Rtl\\Plugin\\AssetSource";
+
 /// Extension points on the deploy path that we do not model AT ALL. A plugin
 /// here MAY change the output, but plugins on these types are common and often
 /// deploy-irrelevant (Amasty hangs a runtime meta-tag plugin on
@@ -1531,6 +1547,10 @@ pub struct DeployPluginEffects {
     /// `HyvaThemes`' `hyvaBaseThemes` argument. The compat fallback applies
     /// only when the DEPLOYED theme's chain intersects this set.
     pub hyva_base_themes: Vec<String>,
+    /// `Swissup\Rtl\Plugin\AssetSource` is registered: every `// @modrtl`
+    /// placeholder in a LESS source expands to Swissup_Rtl's direction-aware
+    /// mixins — see [`super::less::LessOrchestrator::with_modrtl`].
+    pub modrtl: bool,
 }
 
 impl DeployPluginEffects {
@@ -1749,6 +1769,10 @@ pub fn deploy_plugin_effects(magento: &magequery_core::Magento) -> AreaPluginEff
             }
             let Some(class) = p.class.as_ref() else { continue };
             let class = class.as_str().trim_start_matches('\\');
+            if class == SWISSUP_MODRTL_PLUGIN && target == ASSET_SOURCE {
+                out.modrtl = true;
+                continue;
+            }
             if !modelled {
                 if !RECOGNIZED_DEPLOY_PLUGINS.contains(&class) {
                     out.unmodelled_surface.push(format!("{class} (on {target})"));
