@@ -51,6 +51,14 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.27.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.0...magequery-v0.27.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **magequery:** expand Swissup_Rtl's // [@modrtl](https://github.com/modrtl) placeholder in LESS sources ([8796856](https://github.com/cresset-tools/magequery/commit/87968563544ea9bec56bd6fdbf10c15d6b7b6030))
+* **magequery:** let [@supports](https://github.com/supports) nested in a reference-imported ruleset render ([046c0a8](https://github.com/cresset-tools/magequery/commit/046c0a8cc3e3133dcf960bee15ebacaf90037ca8))
+
 ## [0.27.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.26.0...magequery-v0.27.0) (2026-11-19)
 
 
