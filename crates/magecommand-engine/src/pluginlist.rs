@@ -209,6 +209,7 @@ pub fn plugin_instances_across_scopes(
                 inherited: Vec::new(),
                 inherited_index: HashMap::new(),
                 processed: Vec::new(),
+                processed_index: HashMap::new(),
                 findings: Vec::new(),
             };
             // `_loadScopedData` inherits the scope's typed virtual types FIRST,
@@ -363,6 +364,7 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
             inherited: Vec::new(),
             inherited_index: HashMap::new(),
             processed: Vec::new(),
+                processed_index: HashMap::new(),
             findings: Vec::new(),
         };
         for (_, _, seed) in &vtype_seeds {
@@ -419,6 +421,7 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
             inherited: Vec::new(),
             inherited_index: HashMap::new(),
             processed: Vec::new(),
+                processed_index: HashMap::new(),
             findings: Vec::new(),
         };
         for (_, _, seed) in &vtype_seeds {
@@ -460,7 +463,10 @@ pub struct ScopeChains {
 /// command inheriting a plugin on the Symfony `run` base) still has a resolved
 /// per-method chain.
 pub fn scope_chains(magento: &Magento, defs: &Definitions, intercepted: &[String]) -> ScopeChains {
-    let global = plugin_chains(magento, defs, Area::Global, intercepted);
+    // Seven independent passes over read-only inputs (the global scope and
+    // each area): run them at once. They dominated a fused compile of a large
+    // store, serially ~3.5s each.
+    use rayon::prelude::*;
     let areas = [
         ("frontend", Area::Frontend),
         ("adminhtml", Area::Adminhtml),
@@ -468,11 +474,17 @@ pub fn scope_chains(magento: &Magento, defs: &Definitions, intercepted: &[String
         ("webapi_rest", Area::WebapiRest),
         ("webapi_soap", Area::WebapiSoap),
         ("graphql", Area::Graphql),
-    ]
-    .into_iter()
-    .map(|(name, area)| (name, plugin_chains(magento, defs, area, intercepted)))
-    .collect();
-    ScopeChains { global, areas }
+    ];
+    let (global, areas) = rayon::join(
+        || plugin_chains(magento, defs, Area::Global, intercepted),
+        || {
+            areas
+                .into_par_iter()
+                .map(|(name, area)| (name, plugin_chains(magento, defs, area, intercepted)))
+                .collect::<Vec<_>>()
+        },
+    );
+    ScopeChains { global, areas: areas.into_iter().collect() }
 }
 
 /// Run the global-scope inherit/process pass (mirroring `generate`'s Global
@@ -522,6 +534,7 @@ pub fn plugin_chains(
         inherited: Vec::new(),
         inherited_index: HashMap::new(),
         processed: Vec::new(),
+                processed_index: HashMap::new(),
         findings: Vec::new(),
     };
     for (_, _, seed) in &vtype_seeds {
@@ -582,6 +595,7 @@ struct Inherit<'a> {
     inherited_index: HashMap<String, usize>,
     /// `{type}_{method}_{prev}` -> (listener -> value), insertion ordered.
     processed: Vec<(String, Vec<(i64, ProcessedValue)>)>,
+    processed_index: HashMap<String, usize>,
     findings: Vec<String>,
 }
 
@@ -728,13 +742,15 @@ impl Inherit<'_> {
                     .cloned()
                     .unwrap_or_else(|| "__self".to_owned());
                 let key = format!("{type_name}_{target}_{current}");
-                let slot = match self.processed.iter_mut().find(|(k, _)| *k == key) {
-                    Some((_, v)) => v,
+                let at = match self.processed_index.get(&key) {
+                    Some(&i) => i,
                     None => {
                         self.processed.push((key.clone(), Vec::new()));
-                        &mut self.processed.last_mut().unwrap().1
+                        self.processed_index.insert(key.clone(), self.processed.len() - 1);
+                        self.processed.len() - 1
                     }
                 };
+                let slot = &mut self.processed[at].1;
                 if bits & LISTENER_AROUND != 0 {
                     match slot.iter_mut().find(|(l, _)| *l == LISTENER_AROUND) {
                         Some((_, v)) => *v = ProcessedValue::Around(plugin_name.clone()),
@@ -942,6 +958,7 @@ mod tests {
             inherited: Vec::new(),
             inherited_index: HashMap::new(),
             processed: Vec::new(),
+                processed_index: HashMap::new(),
             findings: Vec::new(),
         }
     }
