@@ -171,7 +171,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
- "syn 2.0.119",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -656,7 +656,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 2.0.119",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -821,9 +821,9 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.3"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
+checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
 ]
@@ -1243,15 +1243,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libmimalloc-sys"
-version = "0.1.49"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "libtest-mimic"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1378,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "magecommand"
-version = "0.27.4"
+version = "0.27.1"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -1406,14 +1397,13 @@ dependencies = [
 
 [[package]]
 name = "magecommand-engine"
-version = "0.27.4"
+version = "0.27.1"
 dependencies = [
  "blake3",
  "magecommand-php",
  "magequery-core",
  "quick-xml",
  "rayon",
- "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",
@@ -1422,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "magecommand-less"
-version = "0.27.4"
+version = "0.27.1"
 dependencies = [
  "cssparser 0.37.0",
  "fancy-regex",
@@ -1435,7 +1425,7 @@ dependencies = [
 
 [[package]]
 name = "magecommand-php"
-version = "0.27.4"
+version = "0.27.1"
 dependencies = [
  "memchr",
  "rayon",
@@ -1445,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "magequery"
-version = "0.27.4"
+version = "0.27.1"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -1456,7 +1446,6 @@ dependencies = [
  "magecommand",
  "magequery-core",
  "magequery-lsp",
- "mimalloc",
  "serde_json",
  "sha2",
  "tempfile",
@@ -1464,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "magequery-core"
-version = "0.27.4"
+version = "0.27.1"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -1484,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "magequery-lsp"
-version = "0.27.4"
+version = "0.27.1"
 dependencies = [
  "crossbeam-channel",
  "lsp-server",
@@ -1516,15 +1505,6 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
-
-[[package]]
-name = "mimalloc"
-version = "0.1.52"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
-dependencies = [
- "libmimalloc-sys",
-]
 
 [[package]]
 name = "minimal-lexical"
@@ -3007,9 +2987,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.9"
+version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
+checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
 dependencies = [
  "form_urlencoded",
  "idna",

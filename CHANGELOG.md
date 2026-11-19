@@ -51,29 +51,6 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
-## [0.27.4](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.3...magequery-v0.27.4) (2026-11-20)
-
-
-### Performance Improvements
-
-* **magecommand:** read each static source file once per deploy ([5c58c0f](https://github.com/cresset-tools/magequery/commit/5c58c0ffa3af4e530ae2034ee8a323d7385cbf47))
-
-## [0.27.3](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.2...magequery-v0.27.3) (2026-11-20)
-
-
-### Bug Fixes
-
-* **magequery:** build the macOS release without brew bundle exec ([3e22b51](https://github.com/cresset-tools/magequery/commit/3e22b51c0b22fb95670474f4707b90a74cb4a838))
-
-## [0.27.2](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.1...magequery-v0.27.2) (2026-11-20)
-
-
-### Performance Improvements
-
-* **magequery:** cut the di compile's serial and repeated work ([36c2538](https://github.com/cresset-tools/magequery/commit/36c25384f38431d1c9310da3e9c7962e77e15336))
-* **magequery:** let go of a round's results before rebuilding them ([bd13764](https://github.com/cresset-tools/magequery/commit/bd137646ea8da1e8c0890b22f89bfe5b253f3c03))
-* **magequery:** use mimalloc in the magequery and magecommand binaries ([e81fe51](https://github.com/cresset-tools/magequery/commit/e81fe51e16464ae0d840e43c2fea6baca7e49770))
-
 ## [0.27.1](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.0...magequery-v0.27.1) (2026-11-19)
 
 

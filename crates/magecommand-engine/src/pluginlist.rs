@@ -207,11 +207,10 @@ pub fn plugin_instances_across_scopes(
                     .map(|(i, (t, _))| (t.as_str(), i))
                     .collect(),
                 inherited: Vec::new(),
-                inherited_index: Default::default(),
+                inherited_index: HashMap::new(),
                 processed: Vec::new(),
-                processed_index: Default::default(),
+                processed_index: HashMap::new(),
                 findings: Vec::new(),
-                inherited_only: true,
             };
             // `_loadScopedData` inherits the scope's typed virtual types FIRST,
             // then the class definitions (seeds). Inheriting a virtual type
@@ -363,11 +362,10 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
                 .map(|(i, (t, _))| (t.as_str(), i))
                 .collect(),
             inherited: Vec::new(),
-            inherited_index: Default::default(),
+            inherited_index: HashMap::new(),
             processed: Vec::new(),
-                processed_index: Default::default(),
+                processed_index: HashMap::new(),
             findings: Vec::new(),
-            inherited_only: false,
         };
         for (_, _, seed) in &vtype_seeds {
             state.inherit(seed);
@@ -421,11 +419,10 @@ pub fn generate(magento: &Magento, defs: &Definitions) -> GeneratedPluginLists {
                 .map(|(i, (t, _))| (t.as_str(), i))
                 .collect(),
             inherited: Vec::new(),
-            inherited_index: Default::default(),
+            inherited_index: HashMap::new(),
             processed: Vec::new(),
-                processed_index: Default::default(),
+                processed_index: HashMap::new(),
             findings: Vec::new(),
-            inherited_only: false,
         };
         for (_, _, seed) in &vtype_seeds {
             state.inherit(seed);
@@ -535,11 +532,10 @@ pub fn plugin_chains(
         plugin_data: &plugin_data,
         plugin_index: plugin_data.iter().enumerate().map(|(i, (t, _))| (t.as_str(), i)).collect(),
         inherited: Vec::new(),
-        inherited_index: Default::default(),
+        inherited_index: HashMap::new(),
         processed: Vec::new(),
-                processed_index: Default::default(),
+                processed_index: HashMap::new(),
         findings: Vec::new(),
-            inherited_only: false,
     };
     for (_, _, seed) in &vtype_seeds {
         state.inherit(seed);
@@ -556,25 +552,23 @@ pub fn plugin_chains(
         state.inherit(name.trim_start_matches('\\'));
     }
 
-    // The walk is over: take its strings instead of copying them.
-    let Inherit { processed, inherited, .. } = state;
-    let mut nodes = HashMap::with_capacity(processed.len());
-    for (key, listeners) in processed {
+    let mut nodes = HashMap::new();
+    for (key, listeners) in &state.processed {
         let mut before = Vec::new();
         let mut around = None;
         let mut after = Vec::new();
         for (l, v) in listeners {
-            match (l, v) {
-                (LISTENER_BEFORE, ProcessedValue::List(names)) => before = names,
-                (LISTENER_AROUND, ProcessedValue::Around(name)) => around = Some(name),
-                (LISTENER_AFTER, ProcessedValue::List(names)) => after = names,
+            match (*l, v) {
+                (LISTENER_BEFORE, ProcessedValue::List(names)) => before = names.clone(),
+                (LISTENER_AROUND, ProcessedValue::Around(name)) => around = Some(name.clone()),
+                (LISTENER_AFTER, ProcessedValue::List(names)) => after = names.clone(),
                 _ => {}
             }
         }
-        nodes.insert(key, (before, around, after));
+        nodes.insert(key.clone(), (before, around, after));
     }
     let mut instances = HashMap::new();
-    for (t, v) in &inherited {
+    for (t, v) in &state.inherited {
         if let Some(plugins) = v {
             let list: Vec<(String, String)> = plugins
                 .iter()
@@ -595,18 +589,14 @@ struct Inherit<'a> {
     defs: &'a Definitions,
     global_vtypes: &'a HashMap<String, String>,
     plugin_data: &'a PluginData,
-    plugin_index: rustc_hash::FxHashMap<&'a str, usize>,
+    plugin_index: HashMap<&'a str, usize>,
     /// type -> None (no plugins) | sorted plugin map — insertion ordered.
     inherited: Vec<(String, Option<Vec<(String, Entry)>>)>,
-    inherited_index: rustc_hash::FxHashMap<String, usize>,
+    inherited_index: HashMap<String, usize>,
     /// `{type}_{method}_{prev}` -> (listener -> value), insertion ordered.
     processed: Vec<(String, Vec<(i64, ProcessedValue)>)>,
-    processed_index: rustc_hash::FxHashMap<String, usize>,
+    processed_index: HashMap<String, usize>,
     findings: Vec<String>,
-    /// Leave `processed` (and the findings `process` reports) empty: for a walk
-    /// whose caller reads `inherited` only. `process` reads nothing `inherit`
-    /// writes and writes nothing `inherit` reads, so `inherited` is the same.
-    inherited_only: bool,
 }
 
 enum ProcessedValue {
@@ -663,8 +653,8 @@ impl Inherit<'_> {
             }
         } else if let Some(record) = self.defs.get(&key) {
             if record.meta.kind == magecommand_php::ClassKind::Class {
-                for relation in self.defs.relations_of(&key).iter() {
-                    if let Some(relation_plugins) = self.inherit(relation) {
+                for relation in self.defs.relations_of(&key) {
+                    if let Some(relation_plugins) = self.inherit(&relation) {
                         replace_recursive_plugins(&mut plugins, relation_plugins);
                     }
                 }
@@ -687,9 +677,7 @@ impl Inherit<'_> {
             plugins.retain(|(_, e)| e.instance.is_some());
             // Stable sort by sortOrder.
             plugins.sort_by_key(|(_, e)| e.sort_order);
-            if !self.inherited_only {
-                self.process(&key, &plugins);
-            }
+            self.process(&key, &plugins);
             Some(plugins)
         };
         let index = self.inherited.len();
@@ -731,7 +719,7 @@ impl Inherit<'_> {
             // the first prefix-method seen), then per target the checks run
             // in fixed AROUND, BEFORE, AFTER order.
             let mut method_bits: Vec<(String, i64)> = Vec::new();
-            for method in self.defs.public_methods(&plugin_type).iter() {
+            for method in self.defs.public_methods(&plugin_type) {
                 let prefix = &method[..method.len().min(5)];
                 let (listener, cut) = match prefix {
                     "befor" => (LISTENER_BEFORE, 6),
@@ -968,11 +956,10 @@ mod tests {
                 .map(|(i, (t, _))| (t.as_str(), i))
                 .collect(),
             inherited: Vec::new(),
-            inherited_index: Default::default(),
+            inherited_index: HashMap::new(),
             processed: Vec::new(),
-                processed_index: Default::default(),
+                processed_index: HashMap::new(),
             findings: Vec::new(),
-            inherited_only: false,
         }
     }
 

@@ -27,7 +27,6 @@ clap_mangen = "0.2"
 serde_json = "1"
 anyhow = "1"
 anstyle = "1"
-mimalloc = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

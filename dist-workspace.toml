@@ -125,11 +125,8 @@ Using an AI coding agent? Install both agent skills into your project:
 cmake = '*'
 musl-tools = '*'
 
-# No homebrew entry for macOS: one makes dist run the whole build under `brew
-# bundle exec`, which fails on the self-hosted Mac mini (exit 1, no output) and
-# left every release from 0.25.0 to 0.27.2 without binaries. CMake is already
-# on the mini and in GitHub's macOS image; magebuild builds the same MySQL
-# client there without declaring it.
+[dist.dependencies.homebrew]
+cmake = '*'
 
 # The binaries every release ships: magequery (read side) and magecommand
 # (write side), BOTH from the `magequery` package — magecommand's `[[bin]]`

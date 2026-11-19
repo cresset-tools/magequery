@@ -823,19 +823,10 @@ impl<'a> Codegen<'a> {
         // immutable `defs`, so they run in parallel; results stay in `names` order
         // so Pass 2's order-sensitive `ensure` sequence is byte-identical.
         use rayon::prelude::*;
-        // An interface's extension return type comes with them: it is read from
-        // the declaring interface's source file and from `defs`, nothing `ensure`
-        // touches.
-        let this = &*self;
-        let ctor_candidates: Vec<(Vec<String>, Option<String>)> = names
+        let ctor_candidates: Vec<Vec<String>> = names
             .par_iter()
             .map(|name| {
-                let is_interface = defs
-                    .get(name)
-                    .is_some_and(|r| r.meta.kind == magecommand_php::ClassKind::Interface);
-                let extension_return =
-                    if is_interface { this.extension_return(name) } else { None };
-                let candidates = if let Ok(Some(ctor)) = defs.constructor_of(name) {
+                if let Ok(Some(ctor)) = defs.constructor_of(name) {
                     let types: Vec<&str> =
                         ctor.params.iter().filter_map(|p| p.ty.as_deref()).collect();
                     types
@@ -846,13 +837,12 @@ impl<'a> Codegen<'a> {
                         .collect()
                 } else {
                     Vec::new()
-                };
-                (candidates, extension_return)
+                }
             })
             .collect();
         // Pass 2 (sequential, order-sensitive): `ensure` mutates the shared emitted
         // state, so it must run in the exact prior order.
-        for (candidates, extension_return) in ctor_candidates {
+        for (name, candidates) in names.into_iter().zip(ctor_candidates) {
             // Factories AND proxies from constructor parameters (reflection
             // walks to the nearest inherited constructor, as constructor_of
             // does). A `…Factory` param is caught by PhpScanner's
@@ -869,7 +859,11 @@ impl<'a> Codegen<'a> {
             }
             // The extension-attributes sweep: interfaces declaring (or
             // inheriting) getExtensionAttributes.
-            let Some(ret) = extension_return else { continue };
+            let record = defs.get(name).expect("filtered above");
+            if record.meta.kind != magecommand_php::ClassKind::Interface {
+                continue;
+            }
+            let Some(ret) = self.extension_return(name) else { continue };
             let ret = ret.trim_start_matches('\\').to_owned();
             // shouldGenerateClass(ret, 'ExtensionInterface'):
             //   `class_exists($ret)` is FALSE for interfaces — hand-written
@@ -1070,28 +1064,18 @@ fn generate(
     // OM does know). Verified on the oracle: `mg-install-310` declares 36
     // `…Factory` virtualTypes, and the archive holds a file for exactly the 2
     // declared in an `etc/adminhtml/di.xml` — none of the 34 global ones.
-    //
-    // Nearly every name here is an ordinary class, in every area's file alike,
-    // and `ensure` can only do something for a name the generator registry
-    // recognizes (anything else it looks up, finds nothing to generate, and
-    // remembers as failed). So each name is asked once, and only if it is
-    // generatable at all: the same `emitted`, without a million lookups.
-    let mut swept: rustc_hash::FxHashSet<&str> = Default::default();
     for ca in area_files.unwrap_or_default() {
         let file = &ca.file;
-        let names = file
+        let names: Vec<String> = file
             .arguments
             .keys()
+            .cloned()
             // An omitted key was still a Reader key for Magento.
-            .chain(file.omitted.iter())
-            .chain(file.instance_types.iter().map(|(_, v)| v))
-            .map(String::as_str)
-            .filter(|n| !n.ends_with("\\Proxy") && !n.ends_with("\\Interceptor"));
-        for name in names {
-            if swept.insert(name) && classify(name.trim_start_matches('\\')).is_some() {
-                cg.ensure(name);
-            }
-        }
+            .chain(file.omitted.iter().cloned())
+            .chain(file.instance_types.iter().map(|(_, v)| v.clone()))
+            .filter(|n| !n.ends_with("\\Proxy") && !n.ends_with("\\Interceptor"))
+            .collect();
+        cg.ensure_all(names.iter().map(String::as_str));
     }
     ilap!(_it, "area+custom sweep");
 
@@ -1183,7 +1167,6 @@ fn generate(
         }
     }
 
-    crate::build::drop_off_thread(fused_chains);
     ilap!(_it, "interceptor bytes");
     files.sort_by(|a, b| a.0.cmp(&b.0));
     ilap!(_it, "sort");
