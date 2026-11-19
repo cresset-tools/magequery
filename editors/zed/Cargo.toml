@@ -9,7 +9,7 @@
 [package]
 name = "zed-magequery"
 version = "0.1.1"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 publish = false
 

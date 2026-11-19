@@ -2720,8 +2720,8 @@ mod tests {
         // A length mismatch (broken "verbatim" invariant) is rehashed.
         assert_eq!(cache.hash(&file(b"BBBB", PlacedKind::Copy, Some("/src/x.js"))), sri_hash(b"BBBB"));
         // Derived kinds are never memoized.
-        let gen = file(b"CCC", PlacedKind::Bundle, None);
-        assert_eq!(cache.hash(&gen), sri_hash(b"CCC"));
+        let generated = file(b"CCC", PlacedKind::Bundle, None);
+        assert_eq!(cache.hash(&generated), sri_hash(b"CCC"));
         assert_eq!(cache.0.lock().unwrap().len(), 1);
     }
 }

@@ -1384,9 +1384,9 @@ mod tests {
         assert_eq!(std::fs::read(&link).unwrap(), b"SOURCE-BYTES");
 
         // The generated file is a real file with its own content.
-        let gen = target.join("js-translation.json");
-        assert!(!std::fs::symlink_metadata(&gen).unwrap().file_type().is_symlink());
-        assert_eq!(std::fs::read(&gen).unwrap(), b"[]");
+        let generated = target.join("js-translation.json");
+        assert!(!std::fs::symlink_metadata(&generated).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&generated).unwrap(), b"[]");
     }
 
     #[test]

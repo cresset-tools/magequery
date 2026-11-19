@@ -86,7 +86,7 @@ pub fn render_root(root: &Node) -> String {
     if let Node::Root(rules) = root {
         gen_root_rules(rules, &mut ctx, &mut out);
     } else {
-        gen(root, &mut ctx, &mut out);
+        gen_node(root, &mut ctx, &mut out);
     }
     out
 }
@@ -118,7 +118,7 @@ pub(crate) fn render_value_cz(
         php_numbers,
     };
     let mut out = String::new();
-    gen(node, &mut ctx, &mut out);
+    gen_node(node, &mut ctx, &mut out);
     out
 }
 
@@ -129,7 +129,7 @@ fn gen_root_rules(rules: &[Node], ctx: &mut GenContext, out: &mut String) {
         if i > 0 {
             out.push('\n'); // tabRuleStr == "" at root
         }
-        gen(rule, ctx, out);
+        gen_node(rule, ctx, out);
     }
     if !visible.is_empty() {
         out.push('\n'); // firstRoot trailing newline
@@ -137,18 +137,18 @@ fn gen_root_rules(rules: &[Node], ctx: &mut GenContext, out: &mut String) {
 }
 
 /// Serialize one node (dispatch mirroring each `tree/*.js` `genCSS`).
-fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
+fn gen_node(node: &Node, ctx: &mut GenContext, out: &mut String) {
     match node {
         Node::Root(rules) => gen_root_rules(rules, ctx, out),
         // Transparent for serialization — the file tag only matters at eval.
-        Node::WithFile { inner, .. } => gen(inner, ctx, out),
+        Node::WithFile { inner, .. } => gen_node(inner, ctx, out),
         // Inline JS never renders — eval always errors on it first (§C-jserr).
         Node::JavaScript { .. } => {}
         Node::Ruleset(r) => gen_ruleset(&r.selectors, &r.rules, ctx, out),
         Node::Declaration(d) => {
             out.push_str(&d.name);
             out.push_str(if ctx.compress { ":" } else { ": " });
-            gen(&d.value, ctx, out);
+            gen_node(&d.value, ctx, out);
             out.push_str(&d.important);
             out.push(';');
         }
@@ -156,7 +156,7 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
             out.push_str(&a.name);
             if let Some(p) = &a.prelude {
                 out.push(' ');
-                gen(p, ctx, out);
+                gen_node(p, ctx, out);
             }
             match &a.block {
                 AtRuleBlock::None => out.push(';'),
@@ -167,10 +167,10 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
             path, features, ..
         } => {
             out.push_str("@import ");
-            gen(path, ctx, out);
+            gen_node(path, ctx, out);
             if let Some(f) = features {
                 out.push(' ');
-                gen(f, ctx, out);
+                gen_node(f, ctx, out);
             }
             out.push(';');
         }
@@ -188,7 +188,7 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
                     // join that compresses (`Call` args keep `, ` even then).
                     out.push_str(if ctx.compress { "," } else { ", " });
                 }
-                gen(it, ctx, out);
+                gen_node(it, ctx, out);
             }
         }
         Node::Expression(items) => {
@@ -200,7 +200,7 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
                         out.push(' ');
                     }
                 }
-                gen(it, ctx, out);
+                gen_node(it, ctx, out);
             }
         }
         Node::Anonymous(s) => out.push_str(s),
@@ -248,24 +248,24 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                gen(a, ctx, out);
+                gen_node(a, ctx, out);
             }
             out.push(')');
         }
         Node::Url(inner) => {
             out.push_str("url(");
-            gen(inner, ctx, out);
+            gen_node(inner, ctx, out);
             out.push(')');
         }
         Node::Paren { inner, .. } => {
             out.push('(');
-            gen(inner, ctx, out);
+            gen_node(inner, ctx, out);
             out.push(')');
         }
         Node::Assignment { key, value } => {
             out.push_str(key);
             out.push('=');
-            gen(value, ctx, out);
+            gen_node(value, ctx, out);
         }
         Node::Operation {
             op,
@@ -273,7 +273,7 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
             right,
             spaced,
         } => {
-            gen(left, ctx, out);
+            gen_node(left, ctx, out);
             if *spaced {
                 out.push(' ');
             }
@@ -281,11 +281,11 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
             if *spaced {
                 out.push(' ');
             }
-            gen(right, ctx, out);
+            gen_node(right, ctx, out);
         }
         Node::Negative(inner) => {
             out.push('-');
-            gen(inner, ctx, out);
+            gen_node(inner, ctx, out);
         }
         Node::Variable { name, .. } => {
             out.push('@');
@@ -310,7 +310,7 @@ fn gen(node: &Node, ctx: &mut GenContext, out: &mut String) {
             out.push_str("()");
         }
         Node::Lookup { target, keys, .. } => {
-            gen(target, ctx, out);
+            gen_node(target, ctx, out);
             for k in keys {
                 out.push('[');
                 out.push_str(k);
@@ -395,7 +395,7 @@ fn gen_ruleset(
             out.push('\n');
             out.push_str(&tab_rule);
         }
-        gen(rule, ctx, out);
+        gen_node(rule, ctx, out);
     }
 
     out.push('\n');
@@ -420,7 +420,7 @@ fn gen_at_block(rules: &[Node], ctx: &mut GenContext, out: &mut String) {
             if i > 0 {
                 out.push_str(&tab_rule);
             }
-            gen(rule, ctx, out);
+            gen_node(rule, ctx, out);
         }
         out.push_str(&format!("{tab_set}}}"));
     }
