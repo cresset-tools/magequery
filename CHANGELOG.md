@@ -51,6 +51,22 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.27.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.26.0...magequery-v0.27.0) (2026-11-19)
+
+
+### Features
+
+* **magecommand:** --symlink dir links identical package directories ([#200](https://github.com/cresset-tools/magequery/issues/200)) ([6cc5c7e](https://github.com/cresset-tools/magequery/commit/6cc5c7e90e79cfdc07910f78a2e354e47125a71d))
+* **magequery:** doctor baseline, as phpstan's ([#198](https://github.com/cresset-tools/magequery/issues/198)) ([9746a03](https://github.com/cresset-tools/magequery/commit/9746a032b3174e560a786ef9b27bfccc2f9089fc))
+
+
+### Performance Improvements
+
+* **magequery:** build custom areas in the same parallel batch as the fixed ones ([e27f89a](https://github.com/cresset-tools/magequery/commit/e27f89a14d8e38d9c01d7cb38ab7b65890800f8f))
+* **magequery:** find second-order generated classes without the area files ([9b74f67](https://github.com/cresset-tools/magequery/commit/9b74f67917a83eafa1debbcee53d39706a21a12e))
+* **magequery:** index the plugin walk's processed chains ([e24870a](https://github.com/cresset-tools/magequery/commit/e24870abf48eec492156133ad7e47de05e6ebea2))
+* **magequery:** run the fused compile's scope-chain passes in parallel ([f4f2ba6](https://github.com/cresset-tools/magequery/commit/f4f2ba6dad1263f40a8e46773e76920b54877132))
+
 ## [0.26.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.25.1...magequery-v0.26.0) (2026-11-16)
 
 
