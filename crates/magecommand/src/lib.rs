@@ -70,12 +70,15 @@ enum Command {
     Skill,
 }
 
-/// `--symlink` strategies. Only `file` (pure copies symlink to source) exists
-/// today; a future `locale` (dedup identical locale trees) would slot in here.
+/// `--symlink` strategies.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum SymlinkMode {
     /// Each byte-identical asset becomes a relative symlink to its source.
     File,
+    /// Each package directory identical to one already deployed (the same
+    /// module across locales and sibling themes) becomes a relative symlink to
+    /// that first copy, inside `pub/static`.
+    Dir,
 }
 
 /// `magecommand static <subcommand>` — the static-content group. Only the
@@ -324,13 +327,15 @@ enum StaticCommand {
         /// (magecommand byte-copies `.html` and never minifies it).
         #[arg(long)]
         no_html_minify: bool,
-        /// Materialize each byte-identical asset as a RELATIVE symlink to its
-        /// vendor/app/lib source instead of copying it (`--symlink file`).
-        /// Smaller + faster output, but the source tree must ship alongside
-        /// `pub/static` (true in a build artifact) and the web server must
-        /// follow symlinks. Derived files (LESS/css-processed/bundles) stay
-        /// real. Omit for a self-contained byte copy.
-        #[arg(long, value_name = "file", value_enum)]
+        /// Write symlinks instead of copies. `file`: each byte-identical asset
+        /// becomes a RELATIVE symlink to its vendor/app/lib source (the source
+        /// tree must ship alongside `pub/static`; derived files stay real).
+        /// `dir`: each package directory identical to one already deployed —
+        /// the same module across locales and sibling themes — becomes a
+        /// relative symlink to that first copy (self-contained in
+        /// `pub/static`; far fewer files written). Either way the web server
+        /// must follow symlinks. Omit for a plain byte copy.
+        #[arg(long, value_name = "file|dir", value_enum)]
         symlink: Option<SymlinkMode>,
         /// Print per-entry LESS compiler diagnostics ("extend has no matches",
         /// complex-selector notes) and any un-compilable entry that was skipped.
@@ -1453,6 +1458,7 @@ fn static_files(
         less_profile: sdf::detect_less_profile(&root).0,
         sri_cache: sdf::SriCache::default(),
         less_cache: sdf::LessCache::default(),
+        dir_links: sdf::DirLinks::default(),
     };
     let sri = sdf::sri_layout(&magento);
     let packages = match sdf::build_from_magento(&magento, area, themes, locale, &opts) {
@@ -1621,6 +1627,7 @@ fn static_deploy(
         no_html_minify,
         symlink: match symlink {
             Some(SymlinkMode::File) => sdf::Symlink::ToSource,
+            Some(SymlinkMode::Dir) => sdf::Symlink::IdenticalDirs,
             None => sdf::Symlink::None,
         },
     };

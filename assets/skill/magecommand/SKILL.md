@@ -90,7 +90,9 @@ Writes the `pub/static` packages, or `--out <DIR>`.
   restricts areas. Magento's skip flags exist: `--no-less`, `--no-js-bundle`,
   `--no-compress` (developer-mode uncompressed css). `--jobs N` caps the parallel
   fan-out; `--symlink file` symlinks byte-identical assets to their source instead
-  of copying.
+  of copying; `--symlink dir` (experimental) writes each repeated directory once
+  and links the identical ones to it inside `pub/static` (the web server must
+  follow symlinks).
 - One theme's package → `static files --theme Vendor/Name [--area] [--locale]`.
 - One artifact only → `static less`, `static requirejs`, `static bundle`.
 - Minify one file → `static minify`. Semantic equivalence via lightningcss and

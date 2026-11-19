@@ -257,6 +257,7 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
         less_profile,
         sri_cache: files::SriCache::default(),
         less_cache: files::LessCache::default(),
+        dir_links: files::DirLinks::default(),
     };
 
     // deployed_version.txt — ONE file at the static root, written first (only
@@ -600,7 +601,7 @@ pub fn execute_to_disk(
     type GroupOut = (Vec<TupleStat>, Vec<(String, files::PackageSri)>);
     let collected: Vec<GroupOut> = with_pool(jobs, || {
         let phrases = area_phrase_sets(inputs, groups);
-        groups
+        let out = groups
             .par_iter()
             .map(|g| {
                 let area_phrases = &phrases
@@ -636,7 +637,11 @@ pub fn execute_to_disk(
                 }
                 Ok((rows, sri))
             })
-            .collect::<Result<Vec<_>, DeployError>>()
+            .collect::<Result<Vec<_>, DeployError>>()?;
+        if opts.symlink == Symlink::IdenticalDirs {
+            settle_dir_links(&opts.dir_links)?;
+        }
+        Ok(out)
     })?;
 
     // The OLDER Csp's layout: one `sri-hashes.json` per area at the static
@@ -699,18 +704,41 @@ fn write_and_post_process(
     use files::PlacedKind as K;
 
     let target = files::package_dir(static_root, &g.area, &pkg.theme, &g.locale);
-    write_package(pkg, &target, opts.symlink)?;
-    let css_files: Vec<(String, Option<PathBuf>)> =
-        pkg.files.iter().map(|f| (f.path.clone(), f.source.clone())).collect();
-    super::cssurls::process_package(
-        &css_files,
-        &target,
-        static_root,
-        &g.area,
-        &pkg.theme_path,
-        &g.locale,
-    )
-    .map_err(|e| err(format!("css url post-process: {e}")))?;
+    if opts.symlink == Symlink::IdenticalDirs {
+        // The css url pass runs BEFORE writing here: a directory can only be
+        // linked to an identical one if its final bytes are known up front, and
+        // the pass's result can differ per package (step 3 is per locale).
+        let in_memory: Vec<(String, Option<PathBuf>, &[u8])> = pkg
+            .files
+            .iter()
+            .map(|f| (f.path.clone(), f.source.clone(), f.content.as_slice()))
+            .collect();
+        let rewritten: std::collections::HashMap<String, String> =
+            super::cssurls::rewrite_package_css_in_memory(
+                &in_memory,
+                static_root,
+                &g.area,
+                &pkg.theme_path,
+                &g.locale,
+            )
+            .into_iter()
+            .collect();
+        write_package(pkg, &target, opts.symlink, &rewritten, &opts.dir_links)?;
+    } else {
+        let none = std::collections::HashMap::new();
+        write_package(pkg, &target, opts.symlink, &none, &opts.dir_links)?;
+        let css_files: Vec<(String, Option<PathBuf>)> =
+            pkg.files.iter().map(|f| (f.path.clone(), f.source.clone())).collect();
+        super::cssurls::process_package(
+            &css_files,
+            &target,
+            static_root,
+            &g.area,
+            &pkg.theme_path,
+            &g.locale,
+        )
+        .map_err(|e| err(format!("css url post-process: {e}")))?;
+    }
     // `Csp\…\PostProcessor\Integrity` runs per package and saves under
     // `$package->getPath()`, so the file is a sibling of the js it covers. It
     // holds only this package's entries.
@@ -744,9 +772,20 @@ fn write_package(
     pkg: &ThemePackage,
     target: &std::path::Path,
     symlink: Symlink,
+    rewritten: &std::collections::HashMap<String, String>,
+    dir_links: &files::DirLinks,
 ) -> Result<(), DeployError> {
+    // A previous `--symlink dir` run may have left directory SYMLINKS at any
+    // depth, and nothing may be written THROUGH one (that would change the
+    // package it points at). The mkdir pass below replaces any link it meets
+    // with a real directory; the bundle dir is only cleared when it is real.
     let bundle_dir = target.join(super::bundle::BUNDLE_JS_DIR);
-    if bundle_dir.is_dir() {
+    let is_symlink =
+        |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink());
+    if bundle_dir.is_dir()
+        && !is_symlink(&bundle_dir)
+        && !bundle_dir.parent().is_some_and(is_symlink)
+    {
         std::fs::remove_dir_all(&bundle_dir)
             .map_err(|e| err(format!("clear {}: {e}", bundle_dir.display())))?;
     }
@@ -758,13 +797,41 @@ fn write_package(
     // operations are the contended cost of a deploy. Then the writes themselves
     // are independent (distinct paths) and I/O-bound, so fan them out: writing a
     // package is otherwise a serial syscall storm on the deploy's critical path.
-    if symlink == Symlink::ToSource || !pkg.files.is_empty() {
+    if symlink != Symlink::None || !pkg.files.is_empty() {
         std::fs::create_dir_all(target)
             .map_err(|e| err(format!("mkdir {}: {e}", target.display())))?;
     }
+    // Symlink modes compute each link relative to its parent, so they need the
+    // package dir as an ABSOLUTE base (a relative `target` would yield a
+    // relative-to-cwd link parent and a wrong `..` count). Canonicalize it ONCE
+    // — the per-file `src` canonicalize below is the only other realpath.
+    let target_abs = match symlink {
+        Symlink::ToSource | Symlink::IdenticalDirs => {
+            target.canonicalize().unwrap_or_else(|_| target.to_path_buf())
+        }
+        Symlink::None => PathBuf::new(),
+    };
+    // `--symlink dir`: a directory identical to one this run already deployed
+    // (at the highest level where it matches) is not written at all, nor is
+    // anything under it; [`settle_dir_links`] makes it a link once the run is
+    // done. Only its parent is created here.
+    let linked = if symlink == Symlink::IdenticalDirs {
+        plan_dir_links(pkg, rewritten, &target_abs, dir_links)
+    } else {
+        HashSet::new()
+    };
+    let is_linked = |path: &str| {
+        !linked.is_empty() && path.match_indices('/').any(|(i, _)| linked.contains(&path[..i]))
+    };
     let mut dirs: BTreeSet<&Path> = BTreeSet::new();
-    for f in &pkg.files {
-        let mut p = Path::new(&f.path).parent();
+    let real_parents = pkg
+        .files
+        .iter()
+        .filter(|f| !is_linked(&f.path))
+        .filter_map(|f| Path::new(&f.path).parent())
+        .chain(linked.iter().filter_map(|d| Path::new(*d).parent()));
+    for parent in real_parents {
+        let mut p = Some(parent);
         // Stop at the first already-known dir: its ancestors are known too.
         while let Some(d) = p.filter(|d| !d.as_os_str().is_empty()) {
             if !dirs.insert(d) {
@@ -777,19 +844,21 @@ fn write_package(
         let dir = target.join(d);
         match std::fs::create_dir(&dir) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                match std::fs::symlink_metadata(&dir) {
+                    Ok(m) if m.is_dir() => {}
+                    // A directory link from an earlier `--symlink dir` run: this
+                    // package needs a real directory here.
+                    Ok(m) if m.file_type().is_symlink() => remove_link(&dir)
+                        .and_then(|()| std::fs::create_dir(&dir))
+                        .map_err(|e| err(format!("mkdir {}: {e}", dir.display())))?,
+                    _ => return Err(err(format!("mkdir {}: {e}", dir.display()))),
+                }
+            }
             Err(e) => return Err(err(format!("mkdir {}: {e}", dir.display()))),
         }
     }
-    // Symlink mode computes each link relative to the deployed file's parent, so
-    // it needs the package dir as an ABSOLUTE base (a relative `target` would
-    // yield a relative-to-cwd link parent and a wrong `..` count). Canonicalize
-    // it ONCE — the per-file `src` canonicalize below is the only other realpath.
-    let target_abs = match symlink {
-        Symlink::ToSource => target.canonicalize().unwrap_or_else(|_| target.to_path_buf()),
-        Symlink::None => PathBuf::new(),
-    };
-    pkg.files.par_iter().try_for_each(|f| {
+    pkg.files.par_iter().filter(|f| !is_linked(&f.path)).try_for_each(|f| {
         let path = target.join(&f.path);
         match (symlink, &f.source) {
             // A pure copy in symlink mode: point a RELATIVE symlink at the
@@ -812,7 +881,7 @@ fn write_package(
             // previous `--symlink` run, so the write never goes THROUGH a link
             // into the vendor source; on such a re-deploy the entry is removed
             // and the create retried.
-            _ => replace_existing(&path, || write_new(&path, &f.content))
+            _ => replace_existing(&path, || write_new(&path, content_of(f, rewritten)))
                 .map_err(|e| err(format!("write {}: {e}", path.display()))),
         }
     })
@@ -829,6 +898,204 @@ fn replace_existing(
     match create() {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             std::fs::remove_file(path)?;
+            create()
+        }
+        r => r,
+    }
+}
+
+/// The [`Symlink::IdenticalDirs`] plan for one package: the package-relative
+/// directories that match one already deployed, and so are not written.
+///
+/// Every directory gets a content key, bottom-up: SHA-256 over its files'
+/// names and contents and its subdirectories' names and keys. A pure copy is
+/// keyed by its source file instead of its bytes (its bytes ARE the source's,
+/// and hashing every copy would cost more than it saves); anything derived or
+/// rewritten by a hash of its content. Then top-down, each top-level directory
+/// is looked up: a match becomes a link, and only a directory that does NOT
+/// match is descended into — so each link sits at the highest level possible.
+/// Every directory that is written for real is registered for later packages.
+fn plan_dir_links<'a>(
+    pkg: &'a ThemePackage,
+    rewritten: &std::collections::HashMap<String, String>,
+    target_abs: &Path,
+    dir_links: &files::DirLinks,
+) -> HashSet<&'a str> {
+    use sha2::Digest as _;
+    let mut files_in: std::collections::HashMap<&str, Vec<&files::PlacedFile>> =
+        std::collections::HashMap::new();
+    let mut children: std::collections::HashMap<&str, BTreeSet<&str>> =
+        std::collections::HashMap::new();
+    let mut tops: BTreeSet<&str> = BTreeSet::new();
+    for f in &pkg.files {
+        let Some((dir, _)) = f.path.rsplit_once('/') else { continue };
+        files_in.entry(dir).or_default().push(f);
+        // Register the dir and its ancestors as parent → child edges.
+        let mut d = dir;
+        loop {
+            match d.rsplit_once('/') {
+                Some((parent, _)) => {
+                    if !children.entry(parent).or_default().insert(d) {
+                        break;
+                    }
+                    d = parent;
+                }
+                None => {
+                    tops.insert(d);
+                    break;
+                }
+            }
+        }
+    }
+    // Bottom-up keys: deepest directories first.
+    let mut all: Vec<&str> = files_in.keys().chain(children.keys()).copied().collect();
+    all.sort();
+    all.dedup();
+    all.sort_by_key(|d| std::cmp::Reverse(d.matches('/').count()));
+    let mut keys: std::collections::HashMap<&str, [u8; 32]> = std::collections::HashMap::new();
+    for d in all {
+        let mut h = sha2::Sha256::new();
+        let mut fs: Vec<&files::PlacedFile> = files_in.get(d).cloned().unwrap_or_default();
+        fs.sort_by(|a, b| a.path.cmp(&b.path));
+        for f in fs {
+            h.update(b"F");
+            h.update(&f.path.as_bytes()[d.len() + 1..]);
+            h.update([0]);
+            match (&f.source, f.kind == files::PlacedKind::Copy && !rewritten.contains_key(&f.path))
+            {
+                (Some(src), true) => {
+                    h.update(b"S");
+                    h.update(src.as_os_str().as_encoded_bytes());
+                    h.update([0]);
+                    h.update((f.content.len() as u64).to_le_bytes());
+                }
+                _ => {
+                    h.update(b"C");
+                    h.update(sha2::Sha256::digest(content_of(f, rewritten)));
+                }
+            }
+        }
+        for c in children.get(d).into_iter().flatten() {
+            h.update(b"D");
+            h.update(&c.as_bytes()[d.len() + 1..]);
+            h.update([0]);
+            h.update(keys[c]);
+        }
+        keys.insert(d, h.finalize().into());
+    }
+    dir_links.record(keys.iter().map(|(d, k)| (target_abs.join(d), *k)));
+    // Top-down: link at the highest match, descend only where none.
+    let mut linked = HashSet::new();
+    let mut stack: Vec<&str> = tops.into_iter().rev().collect();
+    while let Some(d) = stack.pop() {
+        match dir_links.claim(keys[d], &target_abs.join(d)) {
+            Some(_) => {
+                linked.insert(d);
+            }
+            None => stack.extend(children.get(d).into_iter().flatten().rev()),
+        }
+    }
+    linked
+}
+
+/// Finish a [`Symlink::IdenticalDirs`] run: put every real copy in its
+/// canonical place and make the links, so the layout does not depend on which
+/// package happened to be written first.
+///
+/// During the run the FIRST directory written with some content holds the real
+/// copy and later identical ones are skipped. Canonically, the real copy of
+/// each content is the one at the smallest path, and every other directory with
+/// that content is a link to it at the highest level where it matches. (That
+/// smallest copy never sits under a linked ancestor: the ancestor's own target
+/// would hold an identical copy at a smaller path.) Every content has exactly
+/// one real copy either way, so this only moves real directories (one `rename`
+/// each, never a copy), then creates each link once.
+fn settle_dir_links(dir_links: &files::DirLinks) -> Result<(), DeployError> {
+    let files::DirLinkState { owners, mut dirs } = dir_links.take();
+    // `Path` orders by component, so sorting gives every directory before its
+    // descendants, and the first directory seen with a content is its smallest.
+    dirs.sort();
+    let mut canon_owner: std::collections::HashMap<[u8; 32], &Path> =
+        std::collections::HashMap::new();
+    for (d, k) in &dirs {
+        canon_owner.entry(*k).or_insert(d);
+    }
+    // Where each content's real copy is now; moving a directory carries its
+    // real subdirectories along, so their entries are re-rooted with it.
+    let mut physical = owners;
+    let mut under_link: Option<&Path> = None;
+    let mut links: Vec<(&Path, &Path)> = Vec::new();
+    for (d, k) in &dirs {
+        if under_link.is_some_and(|l| d.starts_with(l)) {
+            continue;
+        }
+        let owner = canon_owner[k];
+        if owner != d.as_path() {
+            links.push((d, owner));
+            under_link = Some(d);
+            continue;
+        }
+        let Some(from) = physical.get(k).cloned() else {
+            return Err(err(format!("settle links: no deployed copy of {}", d.display())));
+        };
+        if from == *d {
+            continue;
+        }
+        // The canonical spot was skipped this run, so anything there is left
+        // over from an earlier deploy.
+        if std::fs::symlink_metadata(d).is_ok() {
+            remove_entry(d).map_err(|e| err(format!("clear {}: {e}", d.display())))?;
+        }
+        std::fs::rename(&from, d)
+            .map_err(|e| err(format!("move {} -> {}: {e}", from.display(), d.display())))?;
+        for p in physical.values_mut() {
+            if let Ok(rest) = p.strip_prefix(&from) {
+                *p = d.join(rest);
+            }
+        }
+    }
+    // Distinct paths in directories that now all exist: independent, and
+    // directory entry operations are the deploy's contended cost.
+    links.par_iter().try_for_each(|(l, owner)| {
+        let rel = relative_path(l.parent().unwrap_or(l), owner);
+        replace_dir_entry(l, || symlink_dir(&rel, l))
+            .map_err(|e| err(format!("symlink {} -> {}: {e}", l.display(), rel.display())))
+    })
+}
+
+/// Remove whatever entry is at `path`: a directory tree, a file, or a link.
+fn remove_entry(path: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(path)?.is_dir() {
+        return std::fs::remove_dir_all(path);
+    }
+    remove_link(path)
+}
+
+/// Remove a file or a symlink. Windows removes a DIRECTORY symlink only as a
+/// directory (`remove_file` is denied), so fall back to that.
+fn remove_link(path: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(path).or_else(|e| std::fs::remove_dir(path).map_err(|_| e))
+}
+
+/// The bytes a file is written with: its css-url-rewritten form when the pass
+/// ran in memory ([`Symlink::IdenticalDirs`]), else its placed content.
+fn content_of<'a>(
+    f: &'a files::PlacedFile,
+    rewritten: &'a std::collections::HashMap<String, String>,
+) -> &'a [u8] {
+    rewritten.get(&f.path).map_or(f.content.as_slice(), |css| css.as_bytes())
+}
+
+/// Like [`replace_existing`] for a directory entry: on `AlreadyExists` remove
+/// whatever is there (a real directory from an earlier run, or a link) and
+/// retry once.
+fn replace_dir_entry(
+    path: &Path,
+    create: impl Fn() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    match create() {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            remove_entry(path)?;
             create()
         }
         r => r,
@@ -875,10 +1142,24 @@ fn symlink_file(original: &Path, link: &Path) -> std::io::Result<()> {
 fn symlink_file(original: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_file(original, link)
 }
+/// A directory symlink `link` → `original` (Windows distinguishes the two).
+#[cfg(unix)]
+fn symlink_dir(original: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(original, link)
+}
+#[cfg(windows)]
+fn symlink_dir(original: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(original, link)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `write_package` without the in-memory css rewrite, on a fresh registry.
+    fn write_pkg(pkg: &ThemePackage, target: &Path, symlink: Symlink) -> Result<(), DeployError> {
+        write_package(pkg, target, symlink, &std::collections::HashMap::new(), &files::DirLinks::default())
+    }
 
     fn inputs_with_themes(themes: &[&str]) -> DeployInputs {
         DeployInputs {
@@ -1093,7 +1374,7 @@ mod tests {
             placed("js/x.js", b"SOURCE-BYTES", files::PlacedKind::Copy, Some(src.clone())),
             placed("js-translation.json", b"[]", files::PlacedKind::Translation, None),
         ]);
-        write_package(&pkg, &target, Symlink::ToSource).unwrap();
+        write_pkg(&pkg, &target, Symlink::ToSource).unwrap();
 
         // The copy is a RELATIVE symlink that resolves to the source bytes.
         let link = target.join("js/x.js");
@@ -1120,14 +1401,14 @@ mod tests {
         std::fs::write(&src, b"PRISTINE").unwrap();
         let target = root.join("pub/static/frontend/Vendor/t/en_US");
 
-        write_package(
+        write_pkg(
             &pkg_with(vec![placed("js/x.js", b"PRISTINE", files::PlacedKind::Copy, Some(src.clone()))]),
             &target,
             Symlink::ToSource,
         )
         .unwrap();
         // Now a plain deploy (symlinking off) of new bytes to the same path.
-        write_package(
+        write_pkg(
             &pkg_with(vec![placed("js/x.js", b"REBUILT", files::PlacedKind::Copy, Some(src.clone()))]),
             &target,
             Symlink::None,
@@ -1156,7 +1437,7 @@ mod tests {
                 placed("js/x.js", content, files::PlacedKind::Copy, Some(src.clone())),
                 placed("gen.json", content, files::PlacedKind::Translation, None),
             ]);
-            write_package(&pkg, &target, symlink).unwrap();
+            write_pkg(&pkg, &target, symlink).unwrap();
         };
 
         deploy(b"ONE", Symlink::None);
@@ -1170,5 +1451,184 @@ mod tests {
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
         assert_eq!(std::fs::read(&link).unwrap(), b"SRC");
         assert_eq!(std::fs::read(&src).unwrap(), b"SRC");
+    }
+
+    #[test]
+    fn symlink_dir_links_identical_package_dirs() {
+        // Two packages (locales) with the same module dir and the same `js/`, but
+        // a different root file and a different `css/`: the repeats become ONE
+        // relative symlink each, the differences stay real.
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        let src = root.join("vendor/v/mod/web/js/x.js");
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, b"X").unwrap();
+        let links = files::DirLinks::default();
+        let none = std::collections::HashMap::new();
+        let pkg = |locale_css: &[u8], root_file: &[u8]| {
+            pkg_with(vec![
+                placed("Vendor_Mod/js/x.js", b"X", files::PlacedKind::Copy, Some(src.clone())),
+                placed("Vendor_Mod/template/a.html", b"<a/>", files::PlacedKind::Copy, None),
+                placed("js/app.js", b"APP", files::PlacedKind::RequireJs, None),
+                placed("css/styles.css", locale_css, files::PlacedKind::LessCompiled, None),
+                placed("js-translation.json", root_file, files::PlacedKind::Translation, None),
+            ])
+        };
+        let en = root.join("pub/static/frontend/V/t/en_US");
+        let nl = root.join("pub/static/frontend/V/t/nl_NL");
+        write_package(&pkg(b"EN", b"[]"), &en, Symlink::IdenticalDirs, &none, &links).unwrap();
+        write_package(&pkg(b"NL", b"{}"), &nl, Symlink::IdenticalDirs, &none, &links).unwrap();
+        settle_dir_links(&links).unwrap();
+
+        let is_link = |p: &Path| std::fs::symlink_metadata(p).unwrap().file_type().is_symlink();
+        // The first package is all real.
+        assert!(!is_link(&en.join("Vendor_Mod")) && !is_link(&en.join("js")));
+        // The second links the identical dirs, relatively, and keeps the rest.
+        assert!(is_link(&nl.join("Vendor_Mod")) && is_link(&nl.join("js")));
+        assert_eq!(std::fs::read_link(nl.join("js")).unwrap(), Path::new("../en_US/js"));
+        assert!(!is_link(&nl.join("css")) && !is_link(&nl.join("js-translation.json")));
+        // Content reads the same through the links.
+        assert_eq!(std::fs::read(nl.join("Vendor_Mod/js/x.js")).unwrap(), b"X");
+        assert_eq!(std::fs::read(nl.join("css/styles.css")).unwrap(), b"NL");
+        assert_eq!(std::fs::read(nl.join("js-translation.json")).unwrap(), b"{}");
+    }
+
+    #[test]
+    fn redeploy_never_writes_through_a_linked_dir() {
+        // A `--symlink dir` run links nl_NL/js -> en_US/js. A later plain run
+        // writing DIFFERENT js for nl_NL must replace the link with a real dir,
+        // leaving en_US untouched.
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        let links = files::DirLinks::default();
+        let none = std::collections::HashMap::new();
+        let pkg = |js: &[u8]| pkg_with(vec![placed("js/app.js", js, files::PlacedKind::RequireJs, None)]);
+        let en = root.join("s/en_US");
+        let nl = root.join("s/nl_NL");
+        write_package(&pkg(b"SAME"), &en, Symlink::IdenticalDirs, &none, &links).unwrap();
+        write_package(&pkg(b"SAME"), &nl, Symlink::IdenticalDirs, &none, &links).unwrap();
+        settle_dir_links(&links).unwrap();
+        assert!(std::fs::symlink_metadata(nl.join("js")).unwrap().file_type().is_symlink());
+
+        write_pkg(&pkg(b"DIFFERENT"), &nl, Symlink::None).unwrap();
+        assert!(!std::fs::symlink_metadata(nl.join("js")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(nl.join("js/app.js")).unwrap(), b"DIFFERENT");
+        assert_eq!(std::fs::read(en.join("js/app.js")).unwrap(), b"SAME");
+
+        // And the reverse: a real dir from a plain run becomes a link again.
+        let links2 = files::DirLinks::default();
+        write_package(&pkg(b"SAME"), &en, Symlink::IdenticalDirs, &none, &links2).unwrap();
+        write_package(&pkg(b"SAME"), &nl, Symlink::IdenticalDirs, &none, &links2).unwrap();
+        settle_dir_links(&links2).unwrap();
+        assert!(std::fs::symlink_metadata(nl.join("js")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(nl.join("js/app.js")).unwrap(), b"SAME");
+    }
+
+    /// Every entry under `dir`, without following links: `(relative path,
+    /// "D" | "F:<content>" | "L:<target>")`, sorted.
+    fn layout(dir: &Path) -> Vec<(PathBuf, String)> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                let rel = p.strip_prefix(dir).unwrap().to_path_buf();
+                let ft = std::fs::symlink_metadata(&p).unwrap().file_type();
+                let what = if ft.is_symlink() {
+                    // `/`-joined components, whatever the platform separator.
+                    let target = std::fs::read_link(&p).unwrap();
+                    let parts: Vec<_> =
+                        target.components().map(|c| c.as_os_str().to_string_lossy()).collect();
+                    format!("L:{}", parts.join("/"))
+                } else if ft.is_dir() {
+                    stack.push(p);
+                    "D".to_string()
+                } else {
+                    format!("F:{}", String::from_utf8_lossy(&std::fs::read(&p).unwrap()))
+                };
+                out.push((rel, what));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn symlink_dir_layout_does_not_depend_on_write_order() {
+        // `aa` and `cc` share a whole module, `bb` only its `js/`. Written in
+        // either order, the settled tree is the same: the smallest path holds
+        // each real copy, so a run that wrote `cc` first has its copies MOVED
+        // to `aa` (nested `js/` along with its module) and the links re-pointed.
+        let pkg = |tpl: &[u8]| {
+            pkg_with(vec![
+                placed("Vendor_Mod/js/x.js", b"X", files::PlacedKind::RequireJs, None),
+                placed("Vendor_Mod/template/t.html", tpl, files::PlacedKind::Translation, None),
+            ])
+        };
+        let none = std::collections::HashMap::new();
+        let deploy = |root: &Path, order: &[(&str, &[u8])]| {
+            let links = files::DirLinks::default();
+            for (locale, tpl) in order {
+                let target = root.join(locale);
+                write_package(&pkg(tpl), &target, Symlink::IdenticalDirs, &none, &links).unwrap();
+            }
+            settle_dir_links(&links).unwrap();
+            layout(root)
+        };
+        let forward_order: &[(&str, &[u8])] = &[("aa", b"A"), ("bb", b"B"), ("cc", b"A")];
+        let backward_order: &[(&str, &[u8])] = &[("cc", b"A"), ("bb", b"B"), ("aa", b"A")];
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let forward = deploy(a.path(), forward_order);
+        assert_eq!(forward, deploy(b.path(), backward_order));
+        // Re-deploying in the other order over an existing tree: the stale
+        // copy at the canonical spot is replaced by this run's.
+        assert_eq!(forward, deploy(a.path(), backward_order));
+        assert_eq!(forward, deploy(a.path(), forward_order));
+        let entry = |p: &str| forward.iter().find(|(r, _)| r == Path::new(p)).unwrap().1.clone();
+        assert_eq!(entry("aa/Vendor_Mod"), "D");
+        assert_eq!(entry("aa/Vendor_Mod/js/x.js"), "F:X");
+        assert_eq!(entry("bb/Vendor_Mod"), "D");
+        assert_eq!(entry("bb/Vendor_Mod/js"), "L:../../aa/Vendor_Mod/js");
+        assert_eq!(entry("cc/Vendor_Mod"), "L:../aa/Vendor_Mod");
+        assert_eq!(forward.iter().filter(|(_, w)| w.starts_with('L')).count(), 2);
+    }
+
+    #[test]
+    fn symlink_dir_links_at_the_highest_matching_level() {
+        // The module differs in one file, so it stays real, but its `js/`
+        // subtree is identical and becomes a link one level down. A plain
+        // re-deploy must then replace that NESTED link, not write through it.
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        let links = files::DirLinks::default();
+        let none = std::collections::HashMap::new();
+        let pkg = |tpl: &[u8], js: &[u8]| {
+            pkg_with(vec![
+                placed("Vendor_Mod/js/a/x.js", js, files::PlacedKind::RequireJs, None),
+                placed("Vendor_Mod/js/y.js", b"Y", files::PlacedKind::RequireJs, None),
+                placed("Vendor_Mod/template/t.html", tpl, files::PlacedKind::Translation, None),
+            ])
+        };
+        let en = root.join("s/en_US");
+        let nl = root.join("s/nl_NL");
+        write_package(&pkg(b"EN", b"X"), &en, Symlink::IdenticalDirs, &none, &links).unwrap();
+        write_package(&pkg(b"NL", b"X"), &nl, Symlink::IdenticalDirs, &none, &links).unwrap();
+        settle_dir_links(&links).unwrap();
+
+        let is_link = |p: &Path| std::fs::symlink_metadata(p).unwrap().file_type().is_symlink();
+        assert!(!is_link(&nl.join("Vendor_Mod")), "differs as a whole: stays real");
+        assert!(is_link(&nl.join("Vendor_Mod/js")), "identical subtree: linked");
+        assert_eq!(
+            std::fs::read_link(nl.join("Vendor_Mod/js")).unwrap(),
+            Path::new("../../en_US/Vendor_Mod/js")
+        );
+        assert_eq!(std::fs::read(nl.join("Vendor_Mod/js/a/x.js")).unwrap(), b"X");
+        assert_eq!(std::fs::read(nl.join("Vendor_Mod/template/t.html")).unwrap(), b"NL");
+
+        // Plain re-deploy with different js: the nested link becomes a real dir.
+        write_pkg(&pkg(b"NL", b"CHANGED"), &nl, Symlink::None).unwrap();
+        assert!(!is_link(&nl.join("Vendor_Mod/js")));
+        assert_eq!(std::fs::read(nl.join("Vendor_Mod/js/a/x.js")).unwrap(), b"CHANGED");
+        assert_eq!(std::fs::read(en.join("Vendor_Mod/js/a/x.js")).unwrap(), b"X");
     }
 }
