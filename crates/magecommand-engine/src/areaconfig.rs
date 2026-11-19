@@ -321,34 +321,41 @@ pub struct CompiledArea {
 /// to write the `<code>.php` metadata and again for codegen's incidental
 /// `class_exists` sweep. Build it once here and share both consumers. The areas
 /// are independent, so they build — and render — in parallel; `collect` into an
-/// indexed `Vec` preserves the fixed-then-custom order the sweep and metadata
-/// write rely on.
+/// indexed `Vec` preserves the fixed-then-custom (sorted) order the sweep and
+/// metadata write rely on.
 pub fn build_all_area_files(
     magento: &Magento,
     defs: &Definitions,
     root: &std::path::Path,
 ) -> Vec<CompiledArea> {
     use rayon::prelude::*;
-    let custom = custom_area_codes(magento);
-    let mut files: Vec<CompiledArea> = AREA_CODES
-        .par_iter()
-        .map(|(area, code)| {
-            let file = build_area_file(magento, defs, *area, root);
-            let rendered = file.render();
-            CompiledArea { code: (*code).to_owned(), file, rendered }
-        })
+    // Fixed and custom areas in ONE parallel batch. Building the custom ones
+    // after the fixed ones had finished left a store's single custom area
+    // (0.85s on a large store) running alone, in every compile round.
+    enum Which<'a> {
+        Fixed(Area, &'a str),
+        Custom(String),
+    }
+    let all: Vec<Which> = AREA_CODES
+        .iter()
+        .map(|(area, code)| Which::Fixed(*area, code))
+        .chain(custom_area_codes(magento).into_iter().map(Which::Custom))
         .collect();
-    let custom_files: Vec<CompiledArea> = custom
-        .par_iter()
-        .map(|code| {
-            let export = magento.di_export_custom_area(code);
-            let file = build_area_file_from_export(magento, defs, &export, root);
+    all.par_iter()
+        .map(|which| {
+            let (code, file) = match which {
+                Which::Fixed(area, code) => {
+                    ((*code).to_owned(), build_area_file(magento, defs, *area, root))
+                }
+                Which::Custom(code) => {
+                    let export = magento.di_export_custom_area(code);
+                    (code.clone(), build_area_file_from_export(magento, defs, &export, root))
+                }
+            };
             let rendered = file.render();
-            CompiledArea { code: code.clone(), file, rendered }
+            CompiledArea { code, file, rendered }
         })
-        .collect();
-    files.extend(custom_files);
-    files
+        .collect()
 }
 
 /// Chain\NonLazyTypes (PHP >= 8.4, active on the oracle): which candidate
