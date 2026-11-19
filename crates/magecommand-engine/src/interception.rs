@@ -28,7 +28,7 @@ pub fn interception_map(magento: &Magento, defs: &Definitions) -> BTreeMap<Strin
     let mut resolver = Resolver {
         defs,
         vtypes: global_vtypes,
-        map: Default::default(),
+        map: HashMap::new(),
     };
 
     // 1. Every type carrying plugin declarations in ANY scope (disabled
@@ -63,7 +63,7 @@ pub fn interception_map(magento: &Magento, defs: &Definitions) -> BTreeMap<Strin
 struct Resolver<'a> {
     defs: &'a Definitions,
     vtypes: HashMap<&'a str, &'a str>,
-    map: rustc_hash::FxHashMap<String, bool>,
+    map: HashMap<String, bool>,
 }
 
 impl Resolver<'_> {
@@ -81,11 +81,10 @@ impl Resolver<'_> {
     /// — the compiled map has both. The declared case is only for finding the
     /// class, and for its parents, which reflection reports declared.
     fn has_plugins(&mut self, type_name: &str) -> bool {
-        let key = type_name.trim_start_matches('\\');
-        if let Some(&v) = self.map.get(key) {
+        let key = type_name.trim_start_matches('\\').to_owned();
+        if let Some(&v) = self.map.get(&key) {
             return v;
         }
-        let key = key.to_owned();
         // Guard against cycles before recursing.
         self.map.insert(key.clone(), false);
 
@@ -103,12 +102,12 @@ impl Resolver<'_> {
                 if record.meta.kind == magecommand_php::ClassKind::Class {
                     let relations = self.defs.relations_of(&declared);
                     let mut any = false;
-                    for relation in relations.iter() {
+                    for relation in relations {
                         let relation = self
                             .defs
-                            .canonical_case(relation)
+                            .canonical_case(&relation)
                             .map(str::to_owned)
-                            .unwrap_or_else(|| relation.clone());
+                            .unwrap_or(relation);
                         if self.has_plugins(&relation) {
                             any = true;
                             break;
@@ -140,9 +139,6 @@ impl Resolver<'_> {
     }
 
     fn resolve_vtype(&self, name: &str) -> String {
-        if !self.vtypes.contains_key(name) {
-            return name.to_owned();
-        }
         let mut current = name;
         let mut seen = HashSet::new();
         while let Some(next) = self.vtypes.get(current) {

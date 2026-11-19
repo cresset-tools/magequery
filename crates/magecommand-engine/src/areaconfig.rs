@@ -587,9 +587,9 @@ fn resolve_preferences_in_args(
             }
         }
     }
-    use rayon::prelude::*;
-    let values: Vec<&mut PhpValue> = arguments.values_mut().collect();
-    values.into_par_iter().for_each(|value| walk(value, preferences));
+    for value in arguments.values_mut() {
+        walk(value, preferences);
+    }
 }
 
 impl AreaFile {

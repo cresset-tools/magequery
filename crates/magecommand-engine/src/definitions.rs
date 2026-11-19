@@ -55,66 +55,6 @@ pub struct Definitions {
     pub generated_classes: HashSet<String>,
     /// lowercase fqcn -> declared fqcn (PHP names are case-insensitive).
     canonical: HashMap<String, String>,
-    /// [`Definitions::relations_of`] per name asked. A pure function of the
-    /// records, asked for the same classes by every plugin-inheritance walk
-    /// and every area's argument merge; emptied by whatever adds records.
-    relations: NameCache,
-    /// [`Definitions::public_methods`], the same way: every plugin class is
-    /// asked for its methods once per type it applies to, per scope, per walk.
-    public_methods: NameCache,
-}
-
-/// A sharded read-mostly map: the walks that fill it run on every core at once.
-struct NameCache {
-    shards: [std::sync::RwLock<rustc_hash::FxHashMap<String, std::sync::Arc<[String]>>>; 64],
-}
-
-impl Default for NameCache {
-    fn default() -> Self {
-        NameCache { shards: std::array::from_fn(|_| Default::default()) }
-    }
-}
-
-/// A copy of the definitions starts with nothing cached.
-impl Clone for NameCache {
-    fn clone(&self) -> Self {
-        NameCache::default()
-    }
-}
-
-impl NameCache {
-    fn shard(
-        &self,
-        name: &str,
-    ) -> &std::sync::RwLock<rustc_hash::FxHashMap<String, std::sync::Arc<[String]>>> {
-        // Class names share long namespace prefixes; the tail tells them apart.
-        let h = name.bytes().rev().take(12).fold(name.len(), |h, b| h.wrapping_mul(31) ^ b as usize);
-        &self.shards[h % self.shards.len()]
-    }
-
-    fn get_or_compute(
-        &self,
-        name: &str,
-        compute: impl FnOnce() -> Vec<String>,
-    ) -> std::sync::Arc<[String]> {
-        let shard = self.shard(name);
-        if let Some(hit) = shard.read().unwrap_or_else(|e| e.into_inner()).get(name) {
-            return hit.clone();
-        }
-        let computed: std::sync::Arc<[String]> = compute().into();
-        shard
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(name.to_owned())
-            .or_insert(computed)
-            .clone()
-    }
-
-    fn clear(&mut self) {
-        for shard in &mut self.shards {
-            shard.get_mut().unwrap_or_else(|e| e.into_inner()).clear();
-        }
-    }
 }
 
 /// PHP's own type names, in the spelling the engine reports.
@@ -255,8 +195,6 @@ impl Definitions {
             from_scan: HashSet::new(),
             generated_classes: HashSet::new(),
             canonical,
-            relations: NameCache::default(),
-            public_methods: NameCache::default(),
         }
     }
 
@@ -384,16 +322,7 @@ impl Definitions {
             }
         }
         let canonical = canonical_map(&classes);
-        Definitions {
-            classes,
-            scanned,
-            setup_classes,
-            from_scan,
-            generated_classes,
-            canonical,
-            relations: NameCache::default(),
-            public_methods: NameCache::default(),
-        }
+        Definitions { classes, scanned, setup_classes, from_scan, generated_classes, canonical }
     }
 
     /// The DECLARED spelling of a case-insensitively known class name —
@@ -496,8 +425,6 @@ impl Definitions {
         root: &Path,
         extra: impl IntoIterator<Item = String>,
     ) -> Vec<String> {
-        self.relations.clear();
-        self.public_methods.clear();
         // Classmap-autoloaded packages (colinmollenhour/*, phpunit, …) have
         // no PSR prefix; composer's dumped classmap is the truth for those.
         let classmap: HashMap<String, PathBuf> = {
@@ -612,19 +539,11 @@ impl Definitions {
     /// `generated/code` is a no-op here (that path stays byte-identical, no
     /// second area build). Returns the number of declarations added.
     pub fn add_generated_code(&mut self, files: &[(String, String)], root: &Path) -> usize {
-        self.relations.clear();
-        self.public_methods.clear();
         let code_root = root.join("generated/code");
         let mut added = 0;
-        // Parsing is the cost and independent per file; the bookkeeping below
-        // stays in file order, so the result is what a serial loop gave.
-        let parsed: Vec<Vec<ClassMeta>> = files
-            .par_iter()
-            .map(|(_, content)| magecommand_php::parse_file(content.as_bytes()).declarations)
-            .collect();
-        for ((rel, _), declarations) in files.iter().zip(parsed) {
+        for (rel, content) in files {
             let file = code_root.join(rel);
-            for decl in declarations {
+            for decl in magecommand_php::parse_file(content.as_bytes()).declarations {
                 if self.classes.contains_key(&decl.fqcn) {
                     continue;
                 }
@@ -725,11 +644,7 @@ impl Definitions {
     /// Magento's `ClassReader::getParents` (the Relations source): the parent
     /// class plus the class's OWN interfaces (all_interfaces minus the
     /// parent's). `None` entries are already dropped.
-    pub fn relations_of(&self, fqcn: &str) -> std::sync::Arc<[String]> {
-        self.relations.get_or_compute(fqcn, || self.compute_relations(fqcn))
-    }
-
-    fn compute_relations(&self, fqcn: &str) -> Vec<String> {
+    pub fn relations_of(&self, fqcn: &str) -> Vec<String> {
         let Some(record) = self.get(fqcn) else {
             return Vec::new();
         };
@@ -762,11 +677,7 @@ impl Definitions {
     /// Flattened PUBLIC method names of a class as `get_class_methods` sees
     /// them: own + trait-imported (aliases included, `as protected` hides)
     /// + inherited, nearest definition wins, declared case preserved.
-    pub fn public_methods(&self, fqcn: &str) -> std::sync::Arc<[String]> {
-        self.public_methods.get_or_compute(fqcn, || self.compute_public_methods(fqcn))
-    }
-
-    fn compute_public_methods(&self, fqcn: &str) -> Vec<String> {
+    pub fn public_methods(&self, fqcn: &str) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut current = self.get(fqcn);
@@ -1224,8 +1135,6 @@ mod tests {
             from_scan: HashSet::new(),
             generated_classes: HashSet::new(),
             canonical: HashMap::new(),
-            relations: NameCache::default(),
-            public_methods: NameCache::default(),
         }
     }
 

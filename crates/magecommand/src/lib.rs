@@ -1462,7 +1462,6 @@ fn static_files(
         less_profile: sdf::detect_less_profile(&root).0,
         sri_cache: sdf::SriCache::default(),
         less_cache: sdf::LessCache::default(),
-        source_cache: sdf::SourceCache::default(),
         dir_links: sdf::DirLinks::default(),
     };
     let sri = sdf::sri_layout(&magento);

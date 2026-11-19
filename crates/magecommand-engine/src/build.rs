@@ -100,18 +100,6 @@ pub fn compute_outputs_opts(
     // every plugin declared on that class's interfaces. Unseeded, the target
     // had no record, so no parents — on one store an Amasty router plugged by
     // an enabled module lost the Csp plugin it inherits from RouterInterface.
-    // Each area's merged DI export is built on first use; everything below
-    // uses all of them, so build them side by side instead of one at a time.
-    // The global one first and alone: it also builds the index they all share,
-    // behind one lock, and a pool thread waiting inside that build must not be
-    // handed another area that then waits on the same lock.
-    {
-        use rayon::prelude::*;
-        magento.di_export_ref(magequery_core::Area::Global);
-        AREA_CODES.par_iter().for_each(|(area, _)| {
-            magento.di_export_ref(*area);
-        });
-    }
     let mut resolve_keys: Vec<String> = Vec::new();
     for (area, _) in AREA_CODES {
         let export = magento.di_export_ref(area);
@@ -214,14 +202,6 @@ pub fn compute_outputs_opts(
         // each file is what the full round would emit over these definitions,
         // and the full round still decides whether the universe is closed
         // (anything only the area sweep asks for sends the loop round again).
-        // This round rebuilds both, and what the last one built is folded in
-        // already: let it go now, so the rebuild below reuses its memory
-        // instead of asking for as much again while it is still held.
-        drop_off_thread(std::mem::take(&mut area_files));
-        drop_off_thread(std::mem::replace(
-            &mut code,
-            codegen::GeneratedCode { files: Vec::new(), findings: Vec::new() },
-        ));
         interception = interception::interception_map(magento, defs);
         let new = codegen::generate_new_without_areas(
             magento,
@@ -248,11 +228,10 @@ pub fn compute_outputs_opts(
     }
 
     let mut lost_arguments: std::collections::BTreeSet<(String, String)> = Default::default();
-    for ca in area_files {
+    for ca in &area_files {
         findings.extend(ca.file.findings.iter().cloned());
         lost_arguments.extend(ca.file.lost_arguments.iter().cloned());
-        files.push((format!("metadata/{}.php", ca.code), ca.rendered));
-        drop_off_thread(ca.file);
+        files.push((format!("metadata/{}.php", ca.code), ca.rendered.clone()));
     }
     files.push(("metadata/interception.php".to_owned(), interception::render(&interception)));
 
@@ -281,12 +260,4 @@ pub fn compute_outputs_opts(
 
     let lost_arguments = lost_arguments.into_iter().collect();
     CompileOutputs { files, findings, unresolved, lost_arguments }
-}
-
-/// Free a large value without making the caller wait for it. The area files
-/// and the per-scope chains are hundreds of thousands of small allocations
-/// each; freeing them between rounds was a quarter second of the compile spent
-/// on the one thread everything else waits for.
-pub(crate) fn drop_off_thread<T: Send + 'static>(value: T) {
-    rayon::spawn(move || drop(value));
 }
