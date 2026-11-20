@@ -81,10 +81,11 @@ impl Resolver<'_> {
     /// — the compiled map has both. The declared case is only for finding the
     /// class, and for its parents, which reflection reports declared.
     fn has_plugins(&mut self, type_name: &str) -> bool {
-        let key = type_name.trim_start_matches('\\').to_owned();
-        if let Some(&v) = self.map.get(&key) {
+        let key = type_name.trim_start_matches('\\');
+        if let Some(&v) = self.map.get(key) {
             return v;
         }
+        let key = key.to_owned();
         // Guard against cycles before recursing.
         self.map.insert(key.clone(), false);
 
@@ -139,6 +140,9 @@ impl Resolver<'_> {
     }
 
     fn resolve_vtype(&self, name: &str) -> String {
+        if !self.vtypes.contains_key(name) {
+            return name.to_owned();
+        }
         let mut current = name;
         let mut seen = HashSet::new();
         while let Some(next) = self.vtypes.get(current) {
