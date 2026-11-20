@@ -1,5 +1,10 @@
 mod style;
 
+// The released Linux binaries include a static musl build, and musl's allocator
+// is slow under threads, which is what a compile or a static deploy is made of.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};

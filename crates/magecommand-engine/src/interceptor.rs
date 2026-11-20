@@ -36,15 +36,15 @@ pub fn plan(
 ) -> InterceptionPlan {
     // Seeds = getInterceptedClasses: scanned (app+lib+generated) classes that
     // pass has-plugins + concrete + interceptable.
-    let mut seeds: HashSet<String> = HashSet::new();
-    for class in &defs.scanned {
-        if defs.setup_classes.contains(class) {
-            continue;
-        }
-        if is_intercepted_class(defs, has_plugins, class) {
-            seeds.insert(class.clone());
-        }
-    }
+    use rayon::prelude::*;
+    let seeds: HashSet<String> = defs
+        .scanned
+        .par_iter()
+        .filter(|class| {
+            !defs.setup_classes.contains(*class) && is_intercepted_class(defs, has_plugins, class)
+        })
+        .cloned()
+        .collect();
 
     // The plugin-config keyset the seeds populate (seeds + their concrete
     // ancestors carrying plugins), each with its applying plugin instances.

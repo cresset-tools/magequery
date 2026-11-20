@@ -109,9 +109,11 @@ pub fn area_file_to_php(
         }
     }
 
-    // ~64 bytes/entry is a rough capacity hint (a re-alloc if wrong, never a
-    // correctness issue); the argument section dominates.
-    let mut out = String::with_capacity(64 * arguments.len() + 4096);
+    // A capacity hint (a re-alloc if wrong, never a correctness issue); the
+    // argument section dominates. Measured on a 1,087-module store: 21 MB for
+    // 39,570 rows, 530 bytes a row. At the 64 this used to assume, the buffer
+    // was grown, and copied, four times on its way there.
+    let mut out = String::with_capacity(576 * arguments.len() + 4096);
     out.push_str("<?php return array (\n");
 
     open(&mut out, "arguments");
