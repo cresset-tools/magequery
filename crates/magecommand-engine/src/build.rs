@@ -100,6 +100,18 @@ pub fn compute_outputs_opts(
     // every plugin declared on that class's interfaces. Unseeded, the target
     // had no record, so no parents — on one store an Amasty router plugged by
     // an enabled module lost the Csp plugin it inherits from RouterInterface.
+    // Each area's merged DI export is built on first use; everything below
+    // uses all of them, so build them side by side instead of one at a time.
+    // The global one first and alone: it also builds the index they all share,
+    // behind one lock, and a pool thread waiting inside that build must not be
+    // handed another area that then waits on the same lock.
+    {
+        use rayon::prelude::*;
+        magento.di_export_ref(magequery_core::Area::Global);
+        AREA_CODES.par_iter().for_each(|(area, _)| {
+            magento.di_export_ref(*area);
+        });
+    }
     let mut resolve_keys: Vec<String> = Vec::new();
     for (area, _) in AREA_CODES {
         let export = magento.di_export_ref(area);
@@ -202,6 +214,14 @@ pub fn compute_outputs_opts(
         // each file is what the full round would emit over these definitions,
         // and the full round still decides whether the universe is closed
         // (anything only the area sweep asks for sends the loop round again).
+        // This round rebuilds both, and what the last one built is folded in
+        // already: let it go now, so the rebuild below reuses its memory
+        // instead of asking for as much again while it is still held.
+        drop_off_thread(std::mem::take(&mut area_files));
+        drop_off_thread(std::mem::replace(
+            &mut code,
+            codegen::GeneratedCode { files: Vec::new(), findings: Vec::new() },
+        ));
         interception = interception::interception_map(magento, defs);
         let new = codegen::generate_new_without_areas(
             magento,
@@ -214,12 +234,8 @@ pub fn compute_outputs_opts(
             interception = interception::interception_map(magento, defs);
         }
         ilap!(_it, "area-free round");
-        drop_off_thread(std::mem::replace(
-            &mut area_files,
-            areaconfig::build_all_area_files(magento, defs, root),
-        ));
+        area_files = areaconfig::build_all_area_files(magento, defs, root);
         ilap!(_it, "area files");
-        let previous = code;
         code = codegen::generate_code(
             magento,
             defs,
@@ -228,7 +244,6 @@ pub fn compute_outputs_opts(
             &interception,
             fused,
         );
-        drop_off_thread(previous);
         ilap!(_it, "code (fold round)");
     }
 
