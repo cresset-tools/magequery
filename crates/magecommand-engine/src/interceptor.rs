@@ -36,15 +36,15 @@ pub fn plan(
 ) -> InterceptionPlan {
     // Seeds = getInterceptedClasses: scanned (app+lib+generated) classes that
     // pass has-plugins + concrete + interceptable.
-    use rayon::prelude::*;
-    let seeds: HashSet<String> = defs
-        .scanned
-        .par_iter()
-        .filter(|class| {
-            !defs.setup_classes.contains(*class) && is_intercepted_class(defs, has_plugins, class)
-        })
-        .cloned()
-        .collect();
+    let mut seeds: HashSet<String> = HashSet::new();
+    for class in &defs.scanned {
+        if defs.setup_classes.contains(class) {
+            continue;
+        }
+        if is_intercepted_class(defs, has_plugins, class) {
+            seeds.insert(class.clone());
+        }
+    }
 
     // The plugin-config keyset the seeds populate (seeds + their concrete
     // ancestors carrying plugins), each with its applying plugin instances.
@@ -131,7 +131,7 @@ fn is_intercepted_class(
 /// stripped name). Deduped, order-insensitive (used as a set).
 fn plugin_targets(defs: &Definitions, plugin_type: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for method in defs.public_methods(plugin_type).iter() {
+    for method in defs.public_methods(plugin_type) {
         let prefix = &method[..method.len().min(5)];
         let (cut, _) = match prefix {
             "befor" => (6, 1),
