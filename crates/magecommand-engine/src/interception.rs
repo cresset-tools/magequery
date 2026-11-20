@@ -28,7 +28,7 @@ pub fn interception_map(magento: &Magento, defs: &Definitions) -> BTreeMap<Strin
     let mut resolver = Resolver {
         defs,
         vtypes: global_vtypes,
-        map: HashMap::new(),
+        map: Default::default(),
     };
 
     // 1. Every type carrying plugin declarations in ANY scope (disabled
@@ -63,7 +63,7 @@ pub fn interception_map(magento: &Magento, defs: &Definitions) -> BTreeMap<Strin
 struct Resolver<'a> {
     defs: &'a Definitions,
     vtypes: HashMap<&'a str, &'a str>,
-    map: HashMap<String, bool>,
+    map: rustc_hash::FxHashMap<String, bool>,
 }
 
 impl Resolver<'_> {
@@ -102,12 +102,12 @@ impl Resolver<'_> {
                 if record.meta.kind == magecommand_php::ClassKind::Class {
                     let relations = self.defs.relations_of(&declared);
                     let mut any = false;
-                    for relation in relations {
+                    for relation in relations.iter() {
                         let relation = self
                             .defs
-                            .canonical_case(&relation)
+                            .canonical_case(relation)
                             .map(str::to_owned)
-                            .unwrap_or(relation);
+                            .unwrap_or_else(|| relation.clone());
                         if self.has_plugins(&relation) {
                             any = true;
                             break;

@@ -131,7 +131,7 @@ fn is_intercepted_class(
 /// stripped name). Deduped, order-insensitive (used as a set).
 fn plugin_targets(defs: &Definitions, plugin_type: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for method in defs.public_methods(plugin_type) {
+    for method in defs.public_methods(plugin_type).iter() {
         let prefix = &method[..method.len().min(5)];
         let (cut, _) = match prefix {
             "befor" => (6, 1),

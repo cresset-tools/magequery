@@ -214,8 +214,12 @@ pub fn compute_outputs_opts(
             interception = interception::interception_map(magento, defs);
         }
         ilap!(_it, "area-free round");
-        area_files = areaconfig::build_all_area_files(magento, defs, root);
+        drop_off_thread(std::mem::replace(
+            &mut area_files,
+            areaconfig::build_all_area_files(magento, defs, root),
+        ));
         ilap!(_it, "area files");
+        let previous = code;
         code = codegen::generate_code(
             magento,
             defs,
@@ -224,14 +228,16 @@ pub fn compute_outputs_opts(
             &interception,
             fused,
         );
+        drop_off_thread(previous);
         ilap!(_it, "code (fold round)");
     }
 
     let mut lost_arguments: std::collections::BTreeSet<(String, String)> = Default::default();
-    for ca in &area_files {
+    for ca in area_files {
         findings.extend(ca.file.findings.iter().cloned());
         lost_arguments.extend(ca.file.lost_arguments.iter().cloned());
-        files.push((format!("metadata/{}.php", ca.code), ca.rendered.clone()));
+        files.push((format!("metadata/{}.php", ca.code), ca.rendered));
+        drop_off_thread(ca.file);
     }
     files.push(("metadata/interception.php".to_owned(), interception::render(&interception)));
 
@@ -260,4 +266,12 @@ pub fn compute_outputs_opts(
 
     let lost_arguments = lost_arguments.into_iter().collect();
     CompileOutputs { files, findings, unresolved, lost_arguments }
+}
+
+/// Free a large value without making the caller wait for it. The area files
+/// and the per-scope chains are hundreds of thousands of small allocations
+/// each; freeing them between rounds was a quarter second of the compile spent
+/// on the one thread everything else waits for.
+pub(crate) fn drop_off_thread<T: Send + 'static>(value: T) {
+    rayon::spawn(move || drop(value));
 }

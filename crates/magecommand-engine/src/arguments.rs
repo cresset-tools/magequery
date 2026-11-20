@@ -87,11 +87,14 @@ pub(crate) struct ArgsCtx<'a> {
     /// append autoloader is what aliases legacy `Zend\…` names to `Laminas\…`
     /// classes. Mage-OS 3.1.0 does NOT ship it; 2.4.5-era stores do.
     zend_bridge: bool,
-    merged_cache: std::cell::RefCell<HashMap<String, Vec<(CfgKey, Cfg)>>>,
-    findings: std::cell::RefCell<Vec<String>>,
+    // Shared by the threads `build_arguments` resolves the scanned classes on:
+    // a memo of a pure function, and two collections whose order nothing reads
+    // (the scan set they are filled from has none either).
+    merged_cache: std::sync::RwLock<HashMap<String, Vec<(CfgKey, Cfg)>>>,
+    findings: std::sync::Mutex<Vec<String>>,
     /// Instance names whose `arguments` key must be left OUT of the area file —
     /// see [`ArgsCtx::omit`] — each with the reason: see [`Omission`].
-    omitted: std::cell::RefCell<BTreeMap<String, Omission>>,
+    omitted: std::sync::Mutex<BTreeMap<String, Omission>>,
 }
 
 impl<'a> ArgsCtx<'a> {
@@ -154,7 +157,7 @@ impl<'a> ArgsCtx<'a> {
     }
 
     fn finding(&self, msg: String) {
-        self.findings.borrow_mut().push(msg);
+        self.findings.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
     }
 
     /// The constructor of a class this compile itself GENERATES (`X\Proxy`,
@@ -198,7 +201,7 @@ impl<'a> ArgsCtx<'a> {
     }
 
     pub fn take_findings(&self) -> Vec<String> {
-        std::mem::take(&mut self.findings.borrow_mut())
+        std::mem::take(&mut self.findings.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Mark `name`'s constructor arguments as unknowable here, so the area file
@@ -218,11 +221,11 @@ impl<'a> ArgsCtx<'a> {
     /// key still counts as a nonLazyTypes candidate, as the reference's row
     /// does); `build_area_file` drops it at the end.
     fn omit(&self, name: &str, why: Omission) {
-        self.omitted.borrow_mut().insert(name.to_owned(), why);
+        self.omitted.lock().unwrap_or_else(|e| e.into_inner()).insert(name.to_owned(), why);
     }
 
     pub fn take_omitted(&self) -> BTreeMap<String, Omission> {
-        std::mem::take(&mut self.omitted.borrow_mut())
+        std::mem::take(&mut self.omitted.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Whether di.xml configures any constructor argument for `name`, its
@@ -265,7 +268,7 @@ impl<'a> ArgsCtx<'a> {
     }
 
     fn merged_config(&self, name: &str) -> Vec<(CfgKey, Cfg)> {
-        if let Some(cached) = self.merged_cache.borrow().get(name) {
+        if let Some(cached) = self.merged_cache.read().unwrap_or_else(|e| e.into_inner()).get(name) {
             return cached.clone();
         }
         // ObjectManager\Config\Config::_collectConfiguration re-runs
@@ -288,8 +291,8 @@ impl<'a> ArgsCtx<'a> {
             arguments = self.merged_config(base);
             sort_items(&mut arguments);
         } else if self.defs.contains(name) {
-            for relation in self.defs.relations_of(name) {
-                let relation_args = self.merged_config(&relation);
+            for relation in self.defs.relations_of(name).iter() {
+                let relation_args = self.merged_config(relation);
                 if !relation_args.is_empty() {
                     array_replace(&mut arguments, relation_args);
                     sort_items(&mut arguments);
@@ -305,7 +308,8 @@ impl<'a> ArgsCtx<'a> {
             }
         }
         self.merged_cache
-            .borrow_mut()
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(name.to_owned(), arguments.clone());
         arguments
     }
@@ -1141,24 +1145,30 @@ impl ConstLookup for DefsLookup<'_> {
 /// NULL rows for concrete preference keys outside the scan set.
 pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<String, PhpValue> {
     let _ = magento;
-    let mut out: BTreeMap<String, PhpValue> = BTreeMap::new();
-    for name in ctx.scanned {
-        if !ctx.defs.is_concrete(name) {
-            continue;
-        }
-        let value = match ctx.defs.constructor_of(name) {
-            Ok(Some(ctor)) => {
-                ctx.resolve_instance(name, ctor.definer_fqcn, ctor.definer_uses, ctor.params)
-            }
-            Ok(None) => PhpValue::Null,
-            Err(missing) => {
-                ctx.finding(format!("{name}: constructor chain leaves known set at {missing}"));
-                ctx.omit(name, Omission::UnknownConstructor);
-                PhpValue::Null
-            }
-        };
-        out.insert(name.clone(), value);
-    }
+    // One row per scanned class, each resolved from the read-only definitions
+    // and the area's config: independent, and most of an area's build time.
+    use rayon::prelude::*;
+    let mut out: BTreeMap<String, PhpValue> = ctx
+        .scanned
+        .par_iter()
+        .filter(|name| ctx.defs.is_concrete(name))
+        .map(|name| {
+            let value = match ctx.defs.constructor_of(name) {
+                Ok(Some(ctor)) => {
+                    ctx.resolve_instance(name, ctor.definer_fqcn, ctor.definer_uses, ctor.params)
+                }
+                Ok(None) => PhpValue::Null,
+                Err(missing) => {
+                    ctx.finding(format!(
+                        "{name}: constructor chain leaves known set at {missing}"
+                    ));
+                    ctx.omit(name, Omission::UnknownConstructor);
+                    PhpValue::Null
+                }
+            };
+            (name.clone(), value)
+        })
+        .collect();
     // fillThirdPartyInterfaces: preference keys enter the collection with an
     // empty constructor — concrete ones become NULL rows.
     for key in &ctx.pref_keys {
@@ -1183,7 +1193,7 @@ pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<Stri
         };
         // A vtype named like a scanned class replaces that class's row, so an
         // omission recorded for the class applies only while that row stands.
-        let class_omitted = ctx.omitted.borrow_mut().remove(vtype);
+        let class_omitted = ctx.omitted.lock().unwrap_or_else(|e| e.into_inner()).remove(vtype);
         let keep_class_row = || {
             if let Some(why) = &class_omitted {
                 ctx.omit(vtype, why.clone());

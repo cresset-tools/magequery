@@ -1064,18 +1064,28 @@ fn generate(
     // OM does know). Verified on the oracle: `mg-install-310` declares 36
     // `…Factory` virtualTypes, and the archive holds a file for exactly the 2
     // declared in an `etc/adminhtml/di.xml` — none of the 34 global ones.
+    //
+    // Nearly every name here is an ordinary class, in every area's file alike,
+    // and `ensure` can only do something for a name the generator registry
+    // recognizes (anything else it looks up, finds nothing to generate, and
+    // remembers as failed). So each name is asked once, and only if it is
+    // generatable at all: the same `emitted`, without a million lookups.
+    let mut swept: rustc_hash::FxHashSet<&str> = Default::default();
     for ca in area_files.unwrap_or_default() {
         let file = &ca.file;
-        let names: Vec<String> = file
+        let names = file
             .arguments
             .keys()
-            .cloned()
             // An omitted key was still a Reader key for Magento.
-            .chain(file.omitted.iter().cloned())
-            .chain(file.instance_types.iter().map(|(_, v)| v.clone()))
-            .filter(|n| !n.ends_with("\\Proxy") && !n.ends_with("\\Interceptor"))
-            .collect();
-        cg.ensure_all(names.iter().map(String::as_str));
+            .chain(file.omitted.iter())
+            .chain(file.instance_types.iter().map(|(_, v)| v))
+            .map(String::as_str)
+            .filter(|n| !n.ends_with("\\Proxy") && !n.ends_with("\\Interceptor"));
+        for name in names {
+            if swept.insert(name) && classify(name.trim_start_matches('\\')).is_some() {
+                cg.ensure(name);
+            }
+        }
     }
     ilap!(_it, "area+custom sweep");
 
@@ -1167,6 +1177,7 @@ fn generate(
         }
     }
 
+    crate::build::drop_off_thread(fused_chains);
     ilap!(_it, "interceptor bytes");
     files.sort_by(|a, b| a.0.cmp(&b.0));
     ilap!(_it, "sort");

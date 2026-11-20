@@ -1404,6 +1404,7 @@ dependencies = [
  "magequery-core",
  "quick-xml",
  "rayon",
+ "rustc-hash",
  "serde",
  "serde_json",
  "tempfile",
