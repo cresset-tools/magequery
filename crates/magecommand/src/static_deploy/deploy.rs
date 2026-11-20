@@ -257,6 +257,7 @@ pub fn deploy_to_disk(root: &Path, req: &DeployRequest) -> anyhow::Result<Deploy
         less_profile,
         sri_cache: files::SriCache::default(),
         less_cache: files::LessCache::default(),
+        source_cache: files::SourceCache::default(),
         dir_links: files::DirLinks::default(),
     };
 
@@ -711,7 +712,7 @@ fn write_and_post_process(
         let in_memory: Vec<(String, Option<PathBuf>, &[u8])> = pkg
             .files
             .iter()
-            .map(|f| (f.path.clone(), f.source.clone(), f.content.as_slice()))
+            .map(|f| (f.path.clone(), f.source.clone(), &*f.content))
             .collect();
         let rewritten: std::collections::HashMap<String, String> =
             super::cssurls::rewrite_package_css_in_memory(
@@ -1083,7 +1084,7 @@ fn content_of<'a>(
     f: &'a files::PlacedFile,
     rewritten: &'a std::collections::HashMap<String, String>,
 ) -> &'a [u8] {
-    rewritten.get(&f.path).map_or(f.content.as_slice(), |css| css.as_bytes())
+    rewritten.get(&f.path).map_or(&*f.content, |css| css.as_bytes())
 }
 
 /// Like [`replace_existing`] for a directory entry: on `AlreadyExists` remove
@@ -1344,7 +1345,7 @@ mod tests {
     }
 
     fn placed(path: &str, content: &[u8], kind: files::PlacedKind, source: Option<PathBuf>) -> files::PlacedFile {
-        files::PlacedFile { path: path.into(), content: content.to_vec(), kind, source }
+        files::PlacedFile { path: path.into(), content: content.into(), kind, source }
     }
 
     fn pkg_with(files: Vec<files::PlacedFile>) -> ThemePackage {

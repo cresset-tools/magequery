@@ -841,9 +841,9 @@ pub struct BundleFile {
 /// overflowing closes the just-opened file with an empty `{}` map), file
 /// numbering continuous across pools, [`INIT_JS`] appended to the last file
 /// created. Empty pools create no file.
-pub fn flush(
-    jsbuild: &[(String, String)],
-    text: &[(String, String)],
+pub fn flush<S: AsRef<str>>(
+    jsbuild: &[(String, S)],
+    text: &[(String, S)],
     max_kb: f64,
 ) -> Vec<BundleFile> {
     let mut out: Vec<BundleFile> = Vec::new();
@@ -858,6 +858,7 @@ pub fn flush(
         index += 1;
         let mut free = max_kb;
         for (path, content) in files {
+            let content = content.as_ref();
             let size = content.chars().count() as f64 / 1024.0;
             if free > size {
                 free -= size;
@@ -945,7 +946,7 @@ pub fn build_theme(
         exclude_prefixes,
     )?;
     let kept = plan.select(min_cache);
-    plan.render(&kept, generated)
+    plan.render(&kept, generated, &super::files::SourceCache::default())
 }
 
 /// One bundle candidate: a js/html path of the virtual deployed tree, in the
@@ -1067,17 +1068,18 @@ impl BundlePlan {
         self,
         kept: &[usize],
         generated: &[(String, String)],
+        sources: &super::files::SourceCache,
     ) -> Result<ThemeBundles, BundleError> {
-        let mut jsbuild: Vec<(String, String)> = Vec::new();
-        let mut text: Vec<(String, String)> = Vec::new();
+        let mut jsbuild: Vec<(String, std::sync::Arc<str>)> = Vec::new();
+        let mut text: Vec<(String, std::sync::Arc<str>)> = Vec::new();
         for &i in kept {
             let c = &self.candidates[i];
-            let content = match &c.source {
-                Some(src) => read_utf8(src)?,
+            let content: std::sync::Arc<str> = match &c.source {
+                Some(src) => read_utf8(src, sources)?,
                 None => generated
                     .iter()
                     .find(|(p, _)| *p == c.path)
-                    .map(|(_, c)| c.clone())
+                    .map(|(_, c)| c.as_str().into())
                     .expect("generated path present"),
             };
             if c.js {
@@ -1103,16 +1105,18 @@ impl BundlePlan {
 /// `mb_convert_encoding` for non-UTF-8 content; no such file exists in the
 /// validated corpus, so invalid UTF-8 is replaced lossily and flagged only by
 /// the bytes differing — never a hard error.)
-fn read_utf8(path: &Path) -> Result<String, BundleError> {
-    let bytes = std::fs::read(path).map_err(|e| BundleError {
+///
+/// Read through the run's [`SourceCache`](super::files::SourceCache): every
+/// theme and locale bundles mostly the same files.
+fn read_utf8(
+    path: &Path,
+    sources: &super::files::SourceCache,
+) -> Result<std::sync::Arc<str>, BundleError> {
+    sources.read_text(path).map_err(|e| BundleError {
         entry: None,
         module: None,
         file: Some(path.to_path_buf()),
         message: format!("read failed: {e}"),
-    })?;
-    Ok(match String::from_utf8(bytes) {
-        Ok(s) => s,
-        Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
     })
 }
 

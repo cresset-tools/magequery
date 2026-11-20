@@ -807,6 +807,69 @@ impl SriCache {
     }
 }
 
+/// Run-scoped memo of source file bytes, keyed by path. A source file deploys
+/// once per locale and per inheriting theme, so a store with thirty themes and
+/// two locales would otherwise read (and allocate for) each file sixty times:
+/// on the bench shop that was 576,000 reads, 7.6 GB, of 12,500 distinct files
+/// holding 165 MB. Every package shares the one `Arc` instead. Cloned handles
+/// share one map; build a fresh one per run (sources may change between runs
+/// of a long-lived process).
+#[derive(Debug, Clone, Default)]
+pub struct SourceCache(std::sync::Arc<SourceShards>);
+
+/// Sharded so a deploy on every core does not queue on one lock.
+#[derive(Debug)]
+struct SourceShards {
+    bytes: [std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<[u8]>>>; SOURCE_SHARDS],
+    text: [std::sync::Mutex<HashMap<PathBuf, std::sync::Arc<str>>>; SOURCE_SHARDS],
+}
+
+const SOURCE_SHARDS: usize = 64;
+
+impl Default for SourceShards {
+    fn default() -> Self {
+        SourceShards {
+            bytes: std::array::from_fn(|_| Default::default()),
+            text: std::array::from_fn(|_| Default::default()),
+        }
+    }
+}
+
+impl SourceCache {
+    fn shard(path: &Path) -> usize {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        path.hash(&mut h);
+        h.finish() as usize % SOURCE_SHARDS
+    }
+
+    /// `std::fs::read(path)`, once per run. Two threads that miss together
+    /// both read; the first to store wins and the other's copy is dropped.
+    pub fn read(&self, path: &Path) -> std::io::Result<std::sync::Arc<[u8]>> {
+        let shard = &self.0.bytes[Self::shard(path)];
+        let lock = || shard.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = lock().get(path) {
+            return Ok(hit.clone());
+        }
+        let bytes: std::sync::Arc<[u8]> = std::fs::read(path)?.into();
+        Ok(lock().entry(path.to_path_buf()).or_insert(bytes).clone())
+    }
+
+    /// [`Self::read`] as text, invalid UTF-8 replaced lossily — what the
+    /// bundler embeds. Kept apart from the bytes: a lossy conversion is not
+    /// the file's content.
+    pub fn read_text(&self, path: &Path) -> std::io::Result<std::sync::Arc<str>> {
+        let shard = &self.0.text[Self::shard(path)];
+        let lock = || shard.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = lock().get(path) {
+            return Ok(hit.clone());
+        }
+        let bytes = self.read(path)?;
+        let text: std::sync::Arc<str> = String::from_utf8_lossy(&bytes).into();
+        Ok(lock().entry(path.to_path_buf()).or_insert(text).clone())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Placement
 // ---------------------------------------------------------------------------
@@ -835,7 +898,7 @@ pub enum PlacedKind {
 pub struct PlacedFile {
     /// Package-relative path (`css/styles-m.css`, `js/bundle/bundle0.js`).
     pub path: String,
-    pub content: Vec<u8>,
+    pub content: std::sync::Arc<[u8]>,
     pub kind: PlacedKind,
     /// The winning physical source file, set ONLY for [`PlacedKind::Copy`] —
     /// the one kind whose deployed bytes equal a single source file verbatim.
@@ -1008,6 +1071,8 @@ pub struct PlacementOptions {
     pub sri_cache: SriCache,
     /// Shared LESS compile memo for this run (see [`LessCache`]).
     pub less_cache: LessCache,
+    /// Shared source file memo for this run (see [`SourceCache`]).
+    pub source_cache: SourceCache,
     /// The [`Symlink::IdenticalDirs`] registry for this run.
     pub dir_links: DirLinks,
 }
@@ -1024,6 +1089,7 @@ impl Default for PlacementOptions {
             less_profile: super::less::LessProfile::default(),
             sri_cache: SriCache::default(),
             less_cache: LessCache::default(),
+            source_cache: SourceCache::default(),
             dir_links: DirLinks::default(),
         }
     }
@@ -1031,7 +1097,7 @@ impl Default for PlacementOptions {
 
 /// A rendered entry: its content and how it was produced (`None` = the entry
 /// deploys no file), plus LESS warnings (`(logical path, message)`).
-type RenderedEntry = (Option<(Vec<u8>, PlacedKind)>, Vec<(String, String)>);
+type RenderedEntry = (Option<(std::sync::Arc<[u8]>, PlacedKind)>, Vec<(String, String)>);
 
 /// Render ONE package entry to bytes — a pure per-file function (fan-out
 /// friendly): LESS entries compile through `orchestrator` (which applies the
@@ -1042,6 +1108,7 @@ fn render_entry(
     orchestrator: &LessOrchestrator,
     less_opts: &LessDeployOptions,
     less_cache: &LessCache,
+    source_cache: &SourceCache,
     area: &str,
     theme_path: &str,
 ) -> Result<RenderedEntry, FilesError> {
@@ -1051,7 +1118,7 @@ fn render_entry(
             compile_less_entry(entry, orchestrator, less_opts)
         }));
     }
-    let bytes = std::fs::read(&entry.source).map_err(|e| FilesError {
+    let bytes = source_cache.read(&entry.source).map_err(|e| FilesError {
         entry: Some(entry.logical.clone()),
         module: None,
         file: Some(entry.source.clone()),
@@ -1064,8 +1131,8 @@ fn render_entry(
         if let Ok(css) = std::str::from_utf8(&bytes) {
             let processed = cssnotation::variable_notation(css, area, theme_path);
             let processed = cssnotation::module_notation(&processed, &entry.deployed);
-            if processed.as_bytes() != bytes.as_slice() {
-                return Ok((Some((processed.into_bytes(), PlacedKind::CssProcessed)), Vec::new()));
+            if processed.as_bytes() != &*bytes {
+                return Ok((Some((processed.into_bytes().into(), PlacedKind::CssProcessed)), Vec::new()));
             }
         }
     }
@@ -1092,7 +1159,7 @@ fn compile_less_entry(
     };
     let css = cssnotation::module_notation(&compiled.css, &entry.deployed);
     let warnings = compiled.warnings.into_iter().map(|w| (entry.logical.clone(), w)).collect();
-    (Some((css.into_bytes(), PlacedKind::LessCompiled)), warnings)
+    (Some((css.into_bytes().into(), PlacedKind::LessCompiled)), warnings)
 }
 
 /// Place one theme's full package. `modules` is the enabled set in
@@ -1188,7 +1255,8 @@ fn build_theme_prebundle(
                 return Ok((None, Vec::new()));
             }
             let (rendered, warns) = render_entry(
-                entry, &orchestrator, &less_opts, &opts.less_cache, area, &theme_path,
+                entry, &orchestrator, &less_opts, &opts.less_cache, &opts.source_cache, area,
+                &theme_path,
             )?;
             let placed = rendered.map(|(content, kind)| PlacedFile {
                 path: entry.deployed.clone(),
@@ -1240,13 +1308,13 @@ fn build_theme_prebundle(
     let rjs = requirejs::build(root, area, theme_id, themes, modules)?;
     files.push(PlacedFile {
         path: requirejs::CONFIG_FILE_NAME.to_string(),
-        content: rjs.js.into_bytes(),
+        content: rjs.js.into_bytes().into(),
         kind: PlacedKind::RequireJs,
         source: None,
     });
     files.push(PlacedFile {
         path: requirejs::MIN_RESOLVER_FILE_NAME.to_string(),
-        content: min_resolver.as_bytes().to_vec(),
+        content: min_resolver.as_bytes().into(),
         kind: PlacedKind::RequireJs,
         source: None,
     });
@@ -1256,7 +1324,7 @@ fn build_theme_prebundle(
     // (theme-independent) and passed in; the constant `[]` on en_US.
     files.push(PlacedFile {
         path: DICTIONARY_FILE_NAME.to_string(),
-        content: js_translation.as_bytes().to_vec(),
+        content: js_translation.as_bytes().into(),
         kind: PlacedKind::Translation,
         source: None,
     });
@@ -1323,6 +1391,7 @@ fn finalize_theme(
     locale: &str,
     kept: &[usize],
     sri_cache: &SriCache,
+    source_cache: &SourceCache,
 ) -> Result<ThemePackage, FilesError> {
     let PrebuiltPackage {
         theme_id,
@@ -1337,11 +1406,11 @@ fn finalize_theme(
     // js/bundle/bundle<N>.js: read the survivors and flush them into bundle
     // files. With no Bundle files the sri-hashes step below emits none.
     if let Some(plan) = bundle_plan {
-        let bundles = plan.render(kept, &generated)?;
+        let bundles = plan.render(kept, &generated, source_cache)?;
         for b in bundles.files {
             files.push(PlacedFile {
                 path: format!("{}/{}", bundle::BUNDLE_JS_DIR, b.name),
-                content: b.content.into_bytes(),
+                content: b.content.into_bytes().into(),
                 kind: PlacedKind::Bundle,
                 source: None,
             });
@@ -1434,7 +1503,7 @@ fn build_theme(
         root, area, theme_id, locale, themes, modules, reg_modules, min_resolver, js_translation, opts,
     )?;
     let kept = select_bundle_files(&pre, min_cache);
-    finalize_theme(pre, area, locale, &kept, &opts.sri_cache)
+    finalize_theme(pre, area, locale, &kept, &opts.sri_cache, &opts.source_cache)
 }
 
 /// The run-scoped, area/locale-INDEPENDENT inputs a deploy needs, computed
@@ -2099,7 +2168,7 @@ where
                         s.spawn(move |_| {
                             if !failed.load(Ordering::Relaxed) {
                                 if let Err(e) =
-                                    finalize_theme(pre, area, locale, &kept, &opts.sri_cache)
+                                    finalize_theme(pre, area, locale, &kept, &opts.sri_cache, &opts.source_cache)
                                         .and_then(|pkg| sink(idx, pkg))
                                 {
                                     fail(e);
@@ -2443,7 +2512,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("no file {p}"))
         };
         // Plain copy.
-        assert_eq!(by_path("spacer.gif").content, b"GIF-THEME");
+        assert_eq!(&*by_path("spacer.gif").content, b"GIF-THEME");
         assert_eq!(by_path("spacer.gif").kind, PlacedKind::Copy);
         // The VariableNotation pass on a plain css.
         assert_eq!(
@@ -2452,8 +2521,8 @@ mod tests {
         );
         assert_eq!(by_path("css/mail.css").kind, PlacedKind::CssProcessed);
         // Generated artifacts present.
-        assert_eq!(by_path(DICTIONARY_FILE_NAME).content, b"[]");
-        assert_eq!(by_path("requirejs-min-resolver.js").content, b"RESOLVER");
+        assert_eq!(&*by_path(DICTIONARY_FILE_NAME).content, b"[]");
+        assert_eq!(&*by_path("requirejs-min-resolver.js").content, b"RESOLVER");
         assert!(by_path("requirejs-config.js").kind == PlacedKind::RequireJs);
         // sri rides on `pkg.sri`, never as a file inside the package: WHERE it
         // is written depends on the store's Csp, so the placement is the
@@ -2577,7 +2646,7 @@ mod tests {
             pkg.files
                 .iter()
                 .filter(|f| f.kind == PlacedKind::LessCompiled)
-                .map(|f| (f.path.clone(), f.content.clone()))
+                .map(|f| (f.path.clone(), f.content.to_vec()))
                 .collect()
         };
 
@@ -2703,10 +2772,30 @@ mod tests {
     }
 
     #[test]
+    fn source_cache_reads_a_file_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.js");
+        std::fs::write(&path, b"ONE\xff").unwrap();
+        let cache = SourceCache::default();
+        let first = cache.read(&path).unwrap();
+        assert_eq!(&*first, b"ONE\xff");
+        // Clones share the map, and a later read is the same allocation, not
+        // a second look at the disk.
+        std::fs::write(&path, b"TWO").unwrap();
+        let again = cache.clone().read(&path).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+        // The text form replaces invalid UTF-8 and leaves the bytes alone.
+        assert_eq!(&*cache.read_text(&path).unwrap(), "ONE\u{fffd}");
+        assert_eq!(&*cache.read(&path).unwrap(), b"ONE\xff");
+        assert!(cache.read(&dir.path().join("missing.js")).is_err());
+        assert_eq!(&*SourceCache::default().read(&path).unwrap(), b"TWO");
+    }
+
+    #[test]
     fn sri_cache_reuses_copies_only() {
         let file = |content: &[u8], kind, source: Option<&str>| PlacedFile {
             path: "js/x.js".into(),
-            content: content.to_vec(),
+            content: content.into(),
             kind,
             source: source.map(PathBuf::from),
         };
