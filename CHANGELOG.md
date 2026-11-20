@@ -51,6 +51,13 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.27.4](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.3...magequery-v0.27.4) (2026-11-20)
+
+
+### Performance Improvements
+
+* **magecommand:** read each static source file once per deploy ([5c58c0f](https://github.com/cresset-tools/magequery/commit/5c58c0ffa3af4e530ae2034ee8a323d7385cbf47))
+
 ## [0.27.3](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.2...magequery-v0.27.3) (2026-11-20)
 
 
