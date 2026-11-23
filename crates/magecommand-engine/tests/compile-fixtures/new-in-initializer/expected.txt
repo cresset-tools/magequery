@@ -71,6 +71,10 @@
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -158,6 +162,10 @@
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -241,6 +249,10 @@
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -323,6 +335,10 @@
   ),
   'instanceTypes' => 
   array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
   ),
 );
 
@@ -446,6 +462,10 @@
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -535,6 +555,10 @@
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
+  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -604,6 +628,10 @@
   ),
   'instanceTypes' => 
   array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\NewDefault\\Model\\Value\\HasProperty' => true,
   ),
 );
 

@@ -77,7 +77,7 @@ fn push_php_str(out: &mut String, s: &str) {
 
 /// Serialize a compiled **area file** (`global.php`, `frontend.php`, …) directly
 /// from its four borrowed sections — byte-identical to building a
-/// `PhpValue::Array` of `arguments`/`preferences`/`instanceTypes` and the lazy section
+/// `PhpValue::Array` of `arguments`/`preferences`/`instanceTypes`/`nonLazyTypes`
 /// and calling [`to_php_file`], but WITHOUT deep-cloning the (large) argument
 /// tree only to serialize and drop it. Each argument value is written in place by
 /// reference. Locked byte-for-byte against the old path by `render_matches_clone`
@@ -86,7 +86,7 @@ pub fn area_file_to_php(
     arguments: &std::collections::BTreeMap<String, PhpValue>,
     preferences: &[(String, String)],
     instance_types: &[(String, String)],
-    lazy: Option<(&str, &[String])>,
+    non_lazy: &[String],
 ) -> String {
     // Each section renders as `  '<name>' => \n  array (\n <entries@indent 4> \n
     // ),\n` — the enclosing PhpValue::Array places its four (array) values each on
@@ -138,17 +138,13 @@ pub fn area_file_to_php(
     str_entries(&mut out, instance_types);
     close(&mut out);
 
-    // `lazyTypes` / `nonLazyTypes`: absent when the pass did not run (no pass
-    // in the checkout, or a PHP < 8.4 target).
-    if let Some((name, types)) = lazy {
-        open(&mut out, name);
-        for k in types {
-            out.push_str("    ");
-            push_php_str(&mut out, k);
-            out.push_str(" => true,\n");
-        }
-        close(&mut out);
+    open(&mut out, "nonLazyTypes");
+    for k in non_lazy {
+        out.push_str("    ");
+        push_php_str(&mut out, k);
+        out.push_str(" => true,\n");
     }
+    close(&mut out);
 
     out.push_str(");");
     out
@@ -489,7 +485,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            area_file_to_php(&arguments, &preferences, &instance_types, Some(("nonLazyTypes", &non_lazy))),
+            area_file_to_php(&arguments, &preferences, &instance_types, &non_lazy),
             to_php_file(&wrapper)
         );
     }

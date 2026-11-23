@@ -88,7 +88,7 @@ impl Frame {
             RawLayoutOpKind::Update | RawLayoutOpKind::Move => return None,
         };
         let own = (op.kind == RawLayoutOpKind::Block)
-            .then(|| config_flag(attr(e, b"ifconfig")))
+            .then(|| config_flag(attr(e, "ifconfig")))
             .flatten();
         Some(Frame {
             name: op.name.clone(),
@@ -205,14 +205,14 @@ pub(crate) fn layout_xml(xml: &str) -> RawLayout {
                 depth_in_block += 1;
                 match local_name(&e).as_str() {
                     "action" if direct => {
-                        let set_template = attr(&e, b"method")
+                        let set_template = attr(&e, "method")
                             .is_some_and(|m| m.eq_ignore_ascii_case("setTemplate"));
                         action = stack
                             .last()
                             .filter(|f| set_template && f.takes_template())
                             .map(|frame| OpenSetTemplate {
                                 frame: frame.clone(),
-                                ifconfig: config_flag(attr(&e, b"ifconfig")),
+                                ifconfig: config_flag(attr(&e, "ifconfig")),
                                 seen_argument: false,
                             });
                     }
@@ -238,7 +238,7 @@ pub(crate) fn layout_xml(xml: &str) -> RawLayout {
                             // Only an argument directly inside `<arguments>`.
                             if depth_in_block == 2
                                 && string
-                                && attr(&e, b"name").as_deref() == Some("template")
+                                && attr(&e, "name").as_deref() == Some("template")
                             {
                                 pending = Some(PendingTemplateArg {
                                     frame: frame.clone(),
@@ -270,20 +270,20 @@ pub(crate) fn layout_xml(xml: &str) -> RawLayout {
             }
             Ok(Event::Text(t)) => {
                 if let Some(p) = pending.as_mut() {
-                    p.text.push_str(&t.unescape().unwrap_or_default());
+                    p.text.push_str(text(&t));
                 }
             }
             Ok(Event::CData(t)) => {
                 if let Some(p) = pending.as_mut() {
-                    p.text.push_str(&String::from_utf8_lossy(&t));
+                    p.text.push_str(&t);
                 }
             }
             Ok(Event::End(e)) => {
                 let name = e.name();
                 let raw = name.as_ref();
-                let local = raw.rsplit(|&b| b == b':').next().unwrap_or(raw);
+                let local = raw.rsplit(':').next().unwrap_or(raw);
                 match local {
-                    b"block" | b"container" | b"referenceBlock" | b"referenceContainer"
+                    "block" | "container" | "referenceBlock" | "referenceContainer"
                         if depth_in_block == 0 =>
                     {
                         arguments_seen.retain(|&d| d != stack.len());
@@ -296,9 +296,9 @@ pub(crate) fn layout_xml(xml: &str) -> RawLayout {
                 }
                 depth_in_block = depth_in_block.saturating_sub(1);
                 match local {
-                    b"action" if depth_in_block == 0 => action = None,
-                    b"arguments" if depth_in_block == 0 => arguments_of = None,
-                    b"argument" => {
+                    "action" if depth_in_block == 0 => action = None,
+                    "arguments" if depth_in_block == 0 => arguments_of = None,
+                    "argument" => {
                         if let Some(p) = pending.take() {
                             let template = trim_xml(&p.text);
                             if !template.is_empty() {
@@ -331,7 +331,7 @@ fn layout_op(e: &BytesStart, line: u32, stack: &[Frame]) -> Option<RawLayoutOp> 
         "update" => {
             return Some(RawLayoutOp {
                 kind: RawLayoutOpKind::Update,
-                name: attr(e, b"handle").unwrap_or_default(),
+                name: attr(e, "handle").unwrap_or_default(),
                 class: None,
                 template: None,
                 parent,
@@ -342,10 +342,10 @@ fn layout_op(e: &BytesStart, line: u32, stack: &[Frame]) -> Option<RawLayoutOp> 
         "move" => {
             return Some(RawLayoutOp {
                 kind: RawLayoutOpKind::Move,
-                name: attr(e, b"element").unwrap_or_default(),
+                name: attr(e, "element").unwrap_or_default(),
                 class: None,
                 template: None,
-                parent: attr(e, b"destination"),
+                parent: attr(e, "destination"),
                 remove: false,
                 line,
             })
@@ -354,11 +354,11 @@ fn layout_op(e: &BytesStart, line: u32, stack: &[Frame]) -> Option<RawLayoutOp> 
     };
     Some(RawLayoutOp {
         kind,
-        name: attr(e, b"name").unwrap_or_default(),
-        class: attr(e, b"class").map(ClassName::new),
-        template: attr(e, b"template"),
+        name: attr(e, "name").unwrap_or_default(),
+        class: attr(e, "class").map(ClassName::new),
+        template: attr(e, "template"),
         parent,
-        remove: php_true(attr(e, b"remove").as_deref()),
+        remove: php_true(attr(e, "remove").as_deref()),
         line,
     })
 }
@@ -581,16 +581,16 @@ pub(crate) fn ui_component_xml(xml: &str) -> RawUiComponent {
         if stack.iter().any(|(n, _)| n == "settings") && element != "button" {
             return None;
         }
-        let name = attr(e, b"name")?;
+        let name = attr(e, "name")?;
         let captured_ancestors: Vec<usize> =
             stack.iter().filter_map(|(_, idx)| *idx).collect();
         Some(RawUiOp {
             element,
             name,
-            class: attr(e, b"class").map(ClassName::new),
-            component: attr(e, b"component"),
-            form_element: attr(e, b"formElement"),
-            sort_order: attr(e, b"sortOrder"),
+            class: attr(e, "class").map(ClassName::new),
+            component: attr(e, "component"),
+            form_element: attr(e, "formElement"),
+            sort_order: attr(e, "sortOrder"),
             label: None,
             disabled: false,
             visible: None,
@@ -637,7 +637,7 @@ pub(crate) fn ui_component_xml(xml: &str) -> RawUiComponent {
                     [.., (_, Some(idx)), (s, None)] if s == "settings" => *idx,
                     _ => continue,
                 };
-                let text = t.unescape().unwrap_or_default().trim().to_string();
+                let text = text(&t).trim().to_string();
                 match leaf.as_str() {
                     "label" => ops[target].label = Some(text),
                     "disabled" => ops[target].disabled = text == "true",

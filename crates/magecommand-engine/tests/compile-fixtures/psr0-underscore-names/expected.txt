@@ -84,6 +84,9 @@ class Acme_Legacy_Model_ThingFactory
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -139,6 +142,9 @@ class Acme_Legacy_Model_ThingFactory
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -190,6 +196,9 @@ class Acme_Legacy_Model_ThingFactory
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -239,6 +248,9 @@ class Acme_Legacy_Model_ThingFactory
   array (
   ),
   'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
   array (
   ),
 );
@@ -331,6 +343,9 @@ class Acme_Legacy_Model_ThingFactory
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -376,6 +391,9 @@ class Acme_Legacy_Model_ThingFactory
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -412,6 +430,9 @@ class Acme_Legacy_Model_ThingFactory
   array (
   ),
   'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
   array (
   ),
 );

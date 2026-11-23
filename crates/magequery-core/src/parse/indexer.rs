@@ -47,7 +47,7 @@ pub(crate) fn indexer_xml(xml: &str) -> Vec<RawIndexer> {
             }
             Ok(Event::Text(e)) => {
                 if let (Some(i), Some(field)) = (cur, text_into) {
-                    let t = e.unescape().unwrap_or_default().trim().to_string();
+                    let t = text(&e).trim().to_string();
                     if !t.is_empty() {
                         match field {
                             "title" => out[i].title = t,
@@ -57,9 +57,9 @@ pub(crate) fn indexer_xml(xml: &str) -> Vec<RawIndexer> {
                 }
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
-                b"indexer" if !in_dependencies => cur = None,
-                b"dependencies" => in_dependencies = false,
-                b"title" | b"description" => text_into = None,
+                "indexer" if !in_dependencies => cur = None,
+                "dependencies" => in_dependencies = false,
+                "title" | "description" => text_into = None,
                 _ => {}
             },
             _ => {}
@@ -83,15 +83,15 @@ fn indexer_element(
     match local_name(e).as_str() {
         "indexer" => {
             if in_dependencies {
-                if let (Some(i), Some(id)) = (*cur, attr(e, b"id")) {
+                if let (Some(i), Some(id)) = (*cur, attr(e, "id")) {
                     out[i].dependencies.push(id);
                 }
             } else {
                 out.push(RawIndexer {
-                    id: attr(e, b"id").unwrap_or_default(),
-                    view_id: attr(e, b"view_id"),
-                    class: attr(e, b"class").map(ClassName::new),
-                    shared_index: attr(e, b"shared_index"),
+                    id: attr(e, "id").unwrap_or_default(),
+                    view_id: attr(e, "view_id"),
+                    class: attr(e, "class").map(ClassName::new),
+                    shared_index: attr(e, "shared_index"),
                     title: String::new(),
                     description: None,
                     dependencies: Vec::new(),
@@ -135,23 +135,23 @@ pub(crate) fn mview_xml(xml: &str) -> Vec<RawMview> {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
                 "view" => {
                     out.push(RawMview {
-                        id: attr(&e, b"id").unwrap_or_default(),
+                        id: attr(&e, "id").unwrap_or_default(),
                         subscriptions: Vec::new(),
                     });
                     cur = Some(out.len() - 1);
                 }
                 "table" => {
-                    if let (Some(i), Some(name)) = (cur, attr(&e, b"name")) {
+                    if let (Some(i), Some(name)) = (cur, attr(&e, "name")) {
                         out[i].subscriptions.push(RawSubscription {
                             table: name,
-                            entity_column: attr(&e, b"entity_column"),
+                            entity_column: attr(&e, "entity_column"),
                             line,
                         });
                     }
                 }
                 _ => {}
             },
-            Ok(Event::End(e)) if e.name().as_ref() == b"view" => cur = None,
+            Ok(Event::End(e)) if e.name().as_ref() == "view" => cur = None,
             _ => {}
         }
         buf.clear();

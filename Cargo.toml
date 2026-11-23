@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.27.6" # x-release-please-version
+version = "0.27.4" # x-release-please-version
 edition = "2024"
 license = "EUPL-1.2"
 repository = "https://github.com/cresset-tools/magequery"
@@ -19,7 +19,7 @@ repository = "https://github.com/cresset-tools/magequery"
 [workspace.dependencies]
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
-quick-xml = "0.36"
+quick-xml = "0.42"
 
 [profile.release]
 lto = "thin"

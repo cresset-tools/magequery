@@ -4,9 +4,7 @@
 //! on the codebase). The grammar is `magecommand <group> <subcommand>` (two
 //! tokens; see `docs/command-surface.md`). Built today: the `di` group —
 //! `di compile` (generate generated/code + metadata), `di verify` (the archive
-//! oracle every milestone is accepted against), `di watch`, `di digest`; the
-//! `static` group; and the upgrade gates `db status`, `config status`, `theme
-//! status`, `queue status` (see `status.rs`).
+//! oracle every milestone is accepted against), `di watch`, `di digest`.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -15,7 +13,6 @@ use anyhow::Context;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 pub mod static_deploy;
-mod status;
 mod style;
 mod watch;
 
@@ -47,7 +44,7 @@ struct Cli {
 /// Top-level groups. The grammar is `magecommand <group> <subcommand>` — two
 /// tokens, mirroring magequery's nouns (magequery reads a noun, magecommand
 /// writes it). Bare `magecommand` and bare `magecommand <group>` print help
-/// (`arg_required_else_help`). The `di`, `static` and status groups are built; the planned
+/// (`arg_required_else_help`). Only the `di` group is built today; the planned
 /// groups (`static`, `i18n`, `make`, `module`/`mode`/…, `product`/…) are
 /// documented in `docs/command-surface.md` but not yet wired.
 #[derive(Subcommand)]
@@ -64,30 +61,6 @@ enum Command {
         #[command(subcommand)]
         command: StaticCommand,
     },
-    /// Database — does `setup:upgrade` have schema or patches to apply?
-    #[command(arg_required_else_help = true)]
-    Db {
-        #[command(subcommand)]
-        command: DbCommand,
-    },
-    /// Deployment config — does `app:config:import` have work to do?
-    #[command(arg_required_else_help = true)]
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
-    /// Themes — does `setup:upgrade` have a theme to register?
-    #[command(arg_required_else_help = true)]
-    Theme {
-        #[command(subcommand)]
-        command: ThemeCommand,
-    },
-    /// Message queues — does `setup:upgrade` have a database queue to add?
-    #[command(arg_required_else_help = true)]
-    Queue {
-        #[command(subcommand)]
-        command: QueueCommand,
-    },
 
     // Tooling meta-command: it describes the CLI itself rather than acting on a
     // Magento codebase, so it sits outside the groups and is hidden from help
@@ -95,36 +68,6 @@ enum Command {
     /// Print the agent skill (SKILL.md) to stdout, for `.claude/skills/`.
     #[command(hide = true)]
     Skill,
-}
-
-#[derive(Subcommand)]
-enum DbCommand {
-    /// Whether the database needs `setup:upgrade`: a native `bin/magento
-    /// setup:db:status`. Exits 0 when up to date, 2 when an upgrade is
-    /// required, 1 on error.
-    Status,
-}
-
-#[derive(Subcommand)]
-enum ConfigCommand {
-    /// Whether `app:config:import` has work to do, as `bin/magento
-    /// app:config:status` decides it. Exits 2 when an import is needed.
-    Status,
-}
-
-#[derive(Subcommand)]
-enum ThemeCommand {
-    /// Whether a theme is not registered yet: a native Mage-OS
-    /// `theme:registration:status`. Exits 2 when one is missing.
-    Status,
-}
-
-#[derive(Subcommand)]
-enum QueueCommand {
-    /// Whether a database queue is missing: the MysqlMq part of Mage-OS's
-    /// `queue:config:status`, plus the AMQP topology fingerprint. Exits 2 when
-    /// a queue is missing.
-    Status,
 }
 
 /// `--symlink` strategies.
@@ -344,11 +287,9 @@ enum StaticCommand {
         out: Option<PathBuf>,
         /// Bundle ordering. `probe` = deployed-tree readdir order, byte-
         /// faithful on hash-ordered filesystems. `sorted` = portable
-        /// lexicographic, each `.min` file before its plain sibling — the same
-        /// on every machine, and a library shipped with its minified twin is
-        /// bundled once, minified. The `.min`-sibling exclusion depends on
-        /// readdir order, so it matches a real deploy only where that deploy
-        /// also listed the `.min` files first. Default: `probe`.
+        /// lexicographic — a determinism aid only: it changes which files are
+        /// bundled (`.min`-sibling exclusion is readdir-order-dependent), so it
+        /// is faithful to no real deploy. Default: `probe`.
         #[arg(long, value_name = "probe|sorted", default_value = "probe")]
         order: String,
         /// Do NOT auto-deploy a `--theme`'s parent theme(s) (Magento's
@@ -496,25 +437,6 @@ enum DiCommand {
         /// only for now; multi-area classes still emit stock interceptors.
         #[arg(long)]
         fused: bool,
-        /// The PHP version the store runs (`8.4`, `8.3.12`). Mage-OS's
-        /// lazy-ghost pass writes its `lazyTypes` section only on PHP 8.4+, so
-        /// the output depends on the PHP `setup:di:compile` would run on.
-        /// Defaults to composer.json's `config.platform.php`, else 8.4+.
-        #[arg(long, value_name = "VERSION")]
-        target_php: Option<String>,
-        /// The platform the store runs, instead of reading it off the
-        /// checkout's `setup/`. One name per lazy-ghost pass, not an exact
-        /// version: `magento-2.4.9` (no pass), `mageos-3.0` (3.0–3.2, the
-        /// `nonLazyTypes` deny-list), `mageos-3.3` (3.3–3.x, the `lazyTypes`
-        /// allow-list), `mageos-4.0` (4.0+). For now it selects only that pass.
-        #[arg(
-            long,
-            value_name = "PLATFORM",
-            value_parser = clap::builder::TypedValueParser::map(clap::builder::PossibleValuesParser::new(
-                magecommand_engine::lazytypes::Platform::names()
-            ), |s| s.parse::<magecommand_engine::lazytypes::Platform>().expect("a listed name")),
-        )]
-        target_platform: Option<magecommand_engine::lazytypes::Platform>,
         #[command(flatten)]
         modules: ModuleArgs,
     },
@@ -670,32 +592,10 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
 
     match cli.command {
         Command::Skill => unreachable!("handled above"),
-        Command::Db { command: DbCommand::Status } => status::db(cli.root, cli.json),
-        Command::Config { command: ConfigCommand::Status } => status::config(cli.root, cli.json),
-        Command::Theme { command: ThemeCommand::Status } => status::theme(cli.root, cli.json),
-        Command::Queue { command: QueueCommand::Status } => status::queue(cli.root, cli.json),
         Command::Di { command } => match command {
-            DiCommand::Compile {
-                dry_run,
-                force,
-                incremental,
-                fused,
-                target_php,
-                target_platform,
-                modules,
-            } => compile(
-                cli.root,
-                cli.json,
-                dry_run,
-                force,
-                incremental,
-                fused,
-                magecommand_engine::lazytypes::Target {
-                    php: target_php.as_deref(),
-                    platform: target_platform,
-                },
-                &modules,
-            ),
+            DiCommand::Compile { dry_run, force, incremental, fused, modules } => {
+                compile(cli.root, cli.json, dry_run, force, incremental, fused, &modules)
+            }
             DiCommand::Digest { stat, modules } => digest(cli.root, stat, &modules),
             DiCommand::Watch { once } => watch::watch(cli.root, cli.json, once),
             DiCommand::Verify {
@@ -1930,7 +1830,7 @@ fn static_cssdiff(
 
 // The final `lap!` resets `t` without a subsequent read — expected for a
 // timing macro whose last call closes the sequence.
-#[allow(unused_assignments, clippy::too_many_arguments)]
+#[allow(unused_assignments)]
 fn compile(
     root: Option<PathBuf>,
     json: bool,
@@ -1938,7 +1838,6 @@ fn compile(
     force: bool,
     incremental: bool,
     fused: bool,
-    target: magecommand_engine::lazytypes::Target,
     modules: &ModuleArgs,
 ) -> anyhow::Result<ExitCode> {
     use magequery_core::Area;
@@ -2134,8 +2033,7 @@ fn compile(
         // interception → plugin-lists → generated/code), as one in-memory output
         // set. This is the exact path `watch` runs, so the two emit identical
         // bytes. Per-phase timings print under MAGECOMMAND_PROFILE from inside.
-        let out =
-            magecommand_engine::build::compute_outputs_with(&magento, &mut defs, &root, fused, &target);
+        let out = magecommand_engine::build::compute_outputs_opts(&magento, &mut defs, &root, fused);
         lap!("compute outputs (in memory)");
         // Write the whole tree (the compute cleared it first). Direct parallel
         // write, no reconcile — on APFS reusing unchanged files costs more than
@@ -2540,27 +2438,6 @@ fn compare(
             }
             if classified.lost_arguments.len() > sample {
                 println!("    … {} more", classified.lost_arguments.len() - sample);
-            }
-        }
-        // Lazy where the reference is eager: the constructor would run late or never.
-        if !classified.unsafe_lazy_types.is_empty() {
-            println!(
-                "\n  {}",
-                style::fail(&format!(
-                    "{} class(es) in the output's lazyTypes that the reference keeps eager: \
-                     built as lazy ghosts, their constructors run late or never",
-                    classified.unsafe_lazy_types.len()
-                ))
-            );
-            for r in classified.unsafe_lazy_types.iter().take(sample) {
-                println!(
-                    "    {}  {}",
-                    style::class(&r.class),
-                    style::dim(&format!("lazy in {} file(s)", r.files.len()))
-                );
-            }
-            if classified.unsafe_lazy_types.len() > sample {
-                println!("    … {} more", classified.unsafe_lazy_types.len() - sample);
             }
         }
         // The first real divergence between two versions of one file.

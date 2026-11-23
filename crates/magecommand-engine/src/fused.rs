@@ -47,31 +47,24 @@ struct Node {
 
 #[derive(Clone, PartialEq)]
 struct PluginRef {
-    /// The di.xml plugin name, for the accessor docblock.
-    name: String,
-    /// The property/accessor suffix: the cleaned di.xml name, plus `2`, `3`, …
-    /// for the second and later classes an area binds to the same name.
+    /// The property/accessor suffix (cleaned di.xml name).
     clean: String,
     /// Plugin class FQCN (no leading backslash).
     instance: String,
 }
 
 /// Build the listener-chain tree for `(type, method)` starting at `prev`,
-/// resolving each plugin name through `refs`, THIS scope's name → accessor map
-/// (an area may bind a name to a different class than global). An `around`
-/// whose next node is absent yields a synthetic parent-calling leaf.
-fn build(chains: &GlobalChains, ty: &str, method: &str, prev: &str, refs: &[PluginRef]) -> Option<Node> {
+/// resolving each plugin name to its instance class. An `around` whose next
+/// node is absent yields a synthetic parent-calling leaf.
+fn build(chains: &GlobalChains, ty: &str, method: &str, prev: &str, insts: &[(String, String)]) -> Option<Node> {
     let key = format!("{ty}_{method}_{prev}");
     let (before, around, after) = chains.nodes.get(&key)?;
-    let resolve = |name: &str| {
-        refs.iter().find(|r| r.name == name).cloned().unwrap_or_else(|| PluginRef {
-            name: name.to_owned(),
-            clean: clean(name),
-            instance: String::new(),
-        })
+    let resolve = |name: &str| PluginRef {
+        clean: clean(name),
+        instance: insts.iter().find(|(n, _)| n == name).map(|(_, i)| i.clone()).unwrap_or_default(),
     };
     let child = around.as_ref().map(|a| {
-        Box::new(build(chains, ty, method, a, refs).unwrap_or(Node {
+        Box::new(build(chains, ty, method, a, insts).unwrap_or(Node {
             before: Vec::new(),
             around: None,
             after: Vec::new(),
@@ -284,31 +277,18 @@ pub fn fused_interceptor_bytes(
     let scope_names: Vec<&str> = scope_list.iter().map(|(n, _)| *n).collect();
     let default_idx = 1;
 
-    // Per scope, plugin name -> accessor. A plugin NAME is not scope-independent:
-    // an area's di.xml can redeclare it with another `type` (GraphQlCache's
-    // `core-app-area-design-exception-plugin`), and that area must call its own
-    // class. Accessors are keyed by (name, class) like creatuity's: the first
-    // class seen for a name, in scope order, keeps the plain suffix and later
-    // ones get `2`, `3`, … — https://github.com/cresset-tools/magequery/issues/218
-    let mut accessors: Vec<PluginRef> = Vec::new();
-    let scope_refs: Vec<Vec<PluginRef>> = scope_list
-        .iter()
-        .map(|(_, ch)| {
-            let list = ch.instances.get(&source_fqcn).map(Vec::as_slice).unwrap_or(&[]);
-            list.iter()
-                .map(|(n, i)| {
-                    if let Some(r) = accessors.iter().find(|r| &r.name == n && &r.instance == i) {
-                        return r.clone();
-                    }
-                    let k = accessors.iter().filter(|r| &r.name == n).count();
-                    let suffix = if k == 0 { clean(n) } else { format!("{}{}", clean(n), k + 1) };
-                    let r = PluginRef { name: n.clone(), clean: suffix, instance: i.clone() };
-                    accessors.push(r.clone());
-                    r
-                })
-                .collect()
-        })
-        .collect();
+    // name -> instance, unioned across scopes (a plugin class is scope-independent).
+    let mut insts: Vec<(String, String)> = Vec::new();
+    let mut inst_seen: HashSet<String> = HashSet::new();
+    for (_, ch) in &scope_list {
+        if let Some(list) = ch.instances.get(&source_fqcn) {
+            for (n, i) in list {
+                if inst_seen.insert(n.clone()) {
+                    insts.push((n.clone(), i.clone()));
+                }
+            }
+        }
+    }
 
     // Intercepted methods, reflection order: per-scope chains → a flat or switched
     // body, plus the plugins each uses (first-appearance order across scopes).
@@ -330,8 +310,7 @@ pub fn fused_interceptor_bytes(
         }
         let per_scope: Vec<Option<Node>> = scope_list
             .iter()
-            .zip(&scope_refs)
-            .map(|((_, ch), refs)| build(ch, &source_fqcn, &rm.name, "__self", refs))
+            .map(|(_, ch)| build(ch, &source_fqcn, &rm.name, "__self", &insts))
             .collect();
         if per_scope.iter().all(Option::is_none) {
             continue;
@@ -400,7 +379,8 @@ pub fn fused_interceptor_bytes(
 
     // plugin accessors
     for p in &plugins {
-        let name = &p.name;
+        // di.xml name for the docblock `plugin "<name>"`: recover from insts.
+        let name = insts.iter().find(|(n, _)| clean(n) == p.clean).map(|(n, _)| n.clone()).unwrap_or_else(|| p.clean.clone());
         let body = format!(
             "        if ($this->____plugin_{c} === null) {{\n        \t$this->____plugin_{c} = $this->____om()->get(\\{i}::class);\n        }}\n        return $this->____plugin_{c};",
             c = p.clean,
@@ -452,7 +432,7 @@ mod tests {
     use super::*;
 
     fn pref(clean: &str) -> PluginRef {
-        PluginRef { name: clean.into(), clean: clean.into(), instance: "X".into() }
+        PluginRef { clean: clean.into(), instance: "X".into() }
     }
 
     /// The nested around case (low so=10 outer, high so=20 inner, both

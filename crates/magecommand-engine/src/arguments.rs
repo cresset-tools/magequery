@@ -496,10 +496,8 @@ impl<'a> ArgsCtx<'a> {
     /// a single named non-builtin type (nullable ok); unions, intersections,
     /// and DNF yield None; self/parent/static resolve against the definer.
     fn param_class(&self, param: &ParamMeta, definer: &str) -> Option<String> {
-        // `T|null` reflects as `?T`, so it is a class type too:
-        // https://github.com/cresset-tools/magequery/issues/212
-        let ty = crate::reflect::normalize_nullable(param.ty.as_deref()?);
-        let ty = ty.strip_prefix('?').unwrap_or(&ty);
+        let ty = param.ty.as_deref()?;
+        let ty = ty.strip_prefix('?').unwrap_or(ty);
         if ty.contains('|') || ty.contains('&') || ty.contains('(') {
             return None;
         }
@@ -1256,20 +1254,15 @@ pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<Stri
 pub(crate) fn setup_overrides(
     magento: &Magento,
     root: &std::path::Path,
-    lazy: crate::lazytypes::LazyPass,
 ) -> Vec<(String, String, Cfg)> {
     let chain = "Magento\\Setup\\Module\\Di\\Compiler\\Config\\Chain";
-    let mut mods = vec![
+    let mods = [
         ("BackslashTrim", format!("{chain}\\BackslashTrim")),
         ("PreferencesResolving", format!("{chain}\\PreferencesResolving")),
         ("InterceptorSubstitution", format!("{chain}\\InterceptorSubstitution")),
         ("InterceptionPreferencesResolving", format!("{chain}\\PreferencesResolving")),
+        ("NonLazyTypes", format!("{chain}\\NonLazyTypes")),
     ];
-    // The checkout's own lazy pass, whatever the target PHP: the command
-    // configures it unconditionally and the pass itself returns early.
-    if let Some((key, class)) = lazy.chain_step() {
-        mods.push((key, class.to_owned()));
-    }
     let mut overrides: Vec<(String, String, Cfg)> = vec![
         (
             "Magento\\Setup\\Module\\Di\\Compiler\\Config\\ModificationChain".to_owned(),

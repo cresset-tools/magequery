@@ -51,22 +51,6 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
-## [0.27.6](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.5...magequery-v0.27.6) (2026-11-24)
-
-
-### Bug Fixes
-
-* **magequery:** resolve fused plugin classes per scope ([c26cabd](https://github.com/cresset-tools/magequery/commit/c26cabdcebe79ae3738142b102354f54051bd1c2))
-
-## [0.27.5](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.4...magequery-v0.27.5) (2026-11-24)
-
-
-### Bug Fixes
-
-* **magecommand:** bundle a .min file's plain twin once in sorted order ([#224](https://github.com/cresset-tools/magequery/issues/224)) ([e512152](https://github.com/cresset-tools/magequery/commit/e51215236a94f1c60d320626a197a37d97de228a))
-* **magequery:** bump url to 2.5.9 for RUSTSEC-2026-0592 ([eae99ee](https://github.com/cresset-tools/magequery/commit/eae99eed55b49ef7ce2ba5da7d8159f6a7bec0b8))
-* **magequery:** treat Type|null constructor params as class types in di compile ([eb64956](https://github.com/cresset-tools/magequery/commit/eb649567bb302418346a3890c0caa26e101dc90d))
-
 ## [0.27.4](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.3...magequery-v0.27.4) (2026-11-20)
 
 

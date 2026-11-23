@@ -42,6 +42,9 @@
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -100,6 +103,9 @@
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -154,6 +160,9 @@
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -206,6 +215,9 @@
   array (
   ),
   'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
   array (
   ),
 );
@@ -301,6 +313,9 @@
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -349,6 +364,9 @@
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -388,6 +406,9 @@
   array (
   ),
   'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
   array (
   ),
 );

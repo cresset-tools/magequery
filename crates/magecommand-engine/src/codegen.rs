@@ -208,15 +208,17 @@ fn merge_extension_attributes(
 ) {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_str(text);
+    // A bare `&` in character data is text, not a reason to stop reading.
+    reader.config_mut().allow_dangling_amp = true;
     let mut buf = Vec::new();
     let mut current_for: Option<String> = None;
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 match e.local_name().as_ref() {
-                    b"extension_attributes" => {
+                    "extension_attributes" => {
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"for" {
+                            if attr.key.as_ref() == "for" {
                                 // VERBATIM, backslash and all. `Config\\Converter`
                                 // stores `$output[$typeName]` with the raw `for`
                                 // value while `ExtensionAttributesGenerator`
@@ -226,21 +228,21 @@ fn merge_extension_attributes(
                                 // here would merge the two spellings and generate
                                 // accessors the real compile does not have.
                                 current_for =
-                                    Some(String::from_utf8_lossy(&attr.value).into_owned());
+                                    Some(attr.value.to_string());
                             }
                         }
                     }
-                    b"attribute" => {
+                    "attribute" => {
                         if let Some(for_type) = &current_for {
                             let mut code = None;
                             let mut ty = None;
                             for attr in e.attributes().flatten() {
                                 match attr.key.as_ref() {
-                                    b"code" => {
-                                        code = Some(String::from_utf8_lossy(&attr.value).into_owned())
+                                    "code" => {
+                                        code = Some(attr.value.to_string())
                                     }
-                                    b"type" => {
-                                        ty = Some(String::from_utf8_lossy(&attr.value).into_owned())
+                                    "type" => {
+                                        ty = Some(attr.value.to_string())
                                     }
                                     _ => {}
                                 }
@@ -258,7 +260,7 @@ fn merge_extension_attributes(
                 }
             }
             Ok(Event::End(e)) => {
-                if e.local_name().as_ref() == b"extension_attributes" {
+                if e.local_name().as_ref() == "extension_attributes" {
                     current_for = None;
                 }
             }
@@ -1265,6 +1267,8 @@ fn is_di_xml(path: &std::path::Path) -> bool {
 fn scan_di_xml(text: &str, out: &mut DiFileScan) {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_str(text);
+    // A bare `&` in character data is text, not a reason to stop reading.
+    reader.config_mut().allow_dangling_amp = true;
     reader.config_mut().expand_empty_elements = false;
     let mut buf = Vec::new();
     // Depth of the currently capturing <argument>/<item xsi:type=object>,
@@ -1291,13 +1295,32 @@ fn scan_di_xml(text: &str, out: &mut DiFileScan) {
                 depth = depth.saturating_sub(1);
             }
             Ok(Event::Text(t)) => {
-                if let (Some((_, value)), Ok(text)) = (&mut capture, t.unescape()) {
-                    value.push_str(&text);
+                // A `&` left in a text event is a dangling one; such text
+                // is skipped, as text that fails to decode always was.
+                if let Some((_, value)) = &mut capture {
+                    if !t.contains('&') {
+                        value.push_str(&t);
+                    }
+                }
+            }
+            // An entity reference inside the text (`&amp;`, `&#92;`) is its
+            // own event; one that does not resolve contributes nothing.
+            Ok(Event::GeneralRef(r)) => {
+                if let Some((_, value)) = &mut capture {
+                    match r.resolve_char_ref() {
+                        Ok(Some(ch)) => value.push(ch),
+                        Ok(None) => {
+                            if let Some(resolved) = quick_xml::escape::resolve_predefined_entity(&r) {
+                                value.push_str(resolved);
+                            }
+                        }
+                        Err(_) => {}
+                    }
                 }
             }
             Ok(Event::CData(c)) => {
                 if let Some((_, value)) = &mut capture {
-                    value.push_str(&String::from_utf8_lossy(&c));
+                    value.push_str(&c);
                 }
             }
             Ok(Event::Eof) => break,
@@ -1325,17 +1348,17 @@ fn open_di_element(
     let mut for_attr: Option<String> = None;
     for attr in e.attributes().flatten() {
         let key = attr.key.as_ref();
-        let value = String::from_utf8_lossy(&attr.value).into_owned();
+        let value = attr.value.to_string();
         match key {
-            b"xsi:type" if value == "object" => xsi_object = true,
-            b"name" if name == b"virtualType" => vt_name = Some(value),
-            b"type" => type_attr = Some(value),
-            b"for" => for_attr = Some(value),
+            "xsi:type" if value == "object" => xsi_object = true,
+            "name" if name == "virtualType" => vt_name = Some(value),
+            "type" => type_attr = Some(value),
+            "for" => for_attr = Some(value),
             _ => {}
         }
     }
     match name {
-        b"virtualType" => {
+        "virtualType" => {
             if let Some(n) = vt_name {
                 out.vtype_names.push(n.trim_start_matches('\\').to_owned());
             }
@@ -1343,7 +1366,7 @@ fn open_di_element(
                 out.type_attrs.push(t);
             }
         }
-        b"preference" => {
+        "preference" => {
             if let Some(t) = &type_attr {
                 out.type_attrs.push(t.clone());
             }
@@ -1354,7 +1377,7 @@ fn open_di_element(
                 });
             }
         }
-        b"argument" | b"item" => {
+        "argument" | "item" => {
             if xsi_object {
                 if let Some(depth) = capture_depth {
                     *capture = Some((depth, String::new()));
@@ -1369,14 +1392,16 @@ fn open_di_element(
 fn collect_extension_for_types(text: &str, out: &mut Vec<String>) {
     use quick_xml::events::Event;
     let mut reader = quick_xml::Reader::from_str(text);
+    // A bare `&` in character data is text, not a reason to stop reading.
+    reader.config_mut().allow_dangling_amp = true;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                if e.local_name().as_ref() == b"extension_attributes" {
+                if e.local_name().as_ref() == "extension_attributes" {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"for" {
-                            out.push(String::from_utf8_lossy(&attr.value).into_owned());
+                        if attr.key.as_ref() == "for" {
+                            out.push(attr.value.to_string());
                         }
                     }
                 }

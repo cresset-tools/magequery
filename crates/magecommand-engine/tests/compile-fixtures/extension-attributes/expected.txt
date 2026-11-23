@@ -92,6 +92,10 @@ interface OrderExtensionInterface extends \Magento\Framework\Api\ExtensionAttrib
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Api\\Api\\Data\\OrderExtension' => true,
+  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -122,6 +126,10 @@ interface OrderExtensionInterface extends \Magento\Framework\Api\ExtensionAttrib
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Api\\Api\\Data\\OrderExtension' => true,
+  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -148,6 +156,10 @@ interface OrderExtensionInterface extends \Magento\Framework\Api\ExtensionAttrib
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Api\\Api\\Data\\OrderExtension' => true,
+  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -173,6 +185,10 @@ interface OrderExtensionInterface extends \Magento\Framework\Api\ExtensionAttrib
   ),
   'instanceTypes' => 
   array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Api\\Api\\Data\\OrderExtension' => true,
   ),
 );
 
@@ -239,6 +255,10 @@ interface OrderExtensionInterface extends \Magento\Framework\Api\ExtensionAttrib
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Api\\Api\\Data\\OrderExtension' => true,
+  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -260,6 +280,10 @@ interface OrderExtensionInterface extends \Magento\Framework\Api\ExtensionAttrib
   'instanceTypes' => 
   array (
   ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Api\\Api\\Data\\OrderExtension' => true,
+  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -272,6 +296,10 @@ interface OrderExtensionInterface extends \Magento\Framework\Api\ExtensionAttrib
   ),
   'instanceTypes' => 
   array (
+  ),
+  'nonLazyTypes' => 
+  array (
+    'Acme\\Api\\Api\\Data\\OrderExtension' => true,
   ),
 );
 

@@ -56,10 +56,10 @@
     'AcmeVirtBase' => 'Acme\\Virt\\Model\\Engine',
     'AcmeVirtDerived' => 'Acme\\Virt\\Model\\Engine',
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
-    'Acme\\Virt\\Model\\Consumer' => true,
-    'Acme\\Virt\\Model\\Engine' => true,
+    'AcmeVirtBase' => true,
+    'AcmeVirtDerived' => true,
   ),
 );
 
@@ -133,10 +133,10 @@
     'AcmeVirtBase' => 'Acme\\Virt\\Model\\Engine',
     'AcmeVirtDerived' => 'Acme\\Virt\\Model\\Engine',
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
-    'Acme\\Virt\\Model\\Consumer' => true,
-    'Acme\\Virt\\Model\\Engine' => true,
+    'AcmeVirtBase' => true,
+    'AcmeVirtDerived' => true,
   ),
 );
 
@@ -206,10 +206,10 @@
     'AcmeVirtBase' => 'Acme\\Virt\\Model\\Engine',
     'AcmeVirtDerived' => 'Acme\\Virt\\Model\\Engine',
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
-    'Acme\\Virt\\Model\\Consumer' => true,
-    'Acme\\Virt\\Model\\Engine' => true,
+    'AcmeVirtBase' => true,
+    'AcmeVirtDerived' => true,
   ),
 );
 
@@ -279,10 +279,10 @@
     'AcmeVirtBase' => 'Acme\\Virt\\Model\\Engine',
     'AcmeVirtDerived' => 'Acme\\Virt\\Model\\Engine',
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
-    'Acme\\Virt\\Model\\Consumer' => true,
-    'Acme\\Virt\\Model\\Engine' => true,
+    'AcmeVirtBase' => true,
+    'AcmeVirtDerived' => true,
   ),
 );
 
@@ -394,10 +394,10 @@
     'AcmeVirtBase' => 'Acme\\Virt\\Model\\Engine',
     'AcmeVirtDerived' => 'Acme\\Virt\\Model\\Engine',
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
-    'Acme\\Virt\\Model\\Consumer' => true,
-    'Acme\\Virt\\Model\\Engine' => true,
+    'AcmeVirtBase' => true,
+    'AcmeVirtDerived' => true,
   ),
 );
 
@@ -462,10 +462,10 @@
     'AcmeVirtBase' => 'Acme\\Virt\\Model\\Engine',
     'AcmeVirtDerived' => 'Acme\\Virt\\Model\\Engine',
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
-    'Acme\\Virt\\Model\\Consumer' => true,
-    'Acme\\Virt\\Model\\Engine' => true,
+    'AcmeVirtBase' => true,
+    'AcmeVirtDerived' => true,
   ),
 );
 
@@ -522,10 +522,10 @@
     'AcmeVirtBase' => 'Acme\\Virt\\Model\\Engine',
     'AcmeVirtDerived' => 'Acme\\Virt\\Model\\Engine',
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
-    'Acme\\Virt\\Model\\Consumer' => true,
-    'Acme\\Virt\\Model\\Engine' => true,
+    'AcmeVirtBase' => true,
+    'AcmeVirtDerived' => true,
   ),
 );
 

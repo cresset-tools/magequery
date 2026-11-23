@@ -60,7 +60,7 @@ pub(crate) fn di_xml(xml: &str) -> Result<DiFile, String> {
             Err(e) => return Err(e.to_string()),
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
-                if e.name().as_ref() == b"arguments" {
+                if e.name().as_ref() == "arguments" {
                     // Consume the whole <arguments>…</arguments> subtree.
                     if let Some((target, _)) = current_type.clone() {
                         let args = parse_arguments(&mut reader, &lines, &mut arg_buf);
@@ -74,7 +74,7 @@ pub(crate) fn di_xml(xml: &str) -> Result<DiFile, String> {
             }
             Ok(Event::Empty(e)) => di_open(&e, false, line, &mut out, &mut current_type),
             Ok(Event::End(e)) => {
-                if matches!(e.name().as_ref(), b"type" | b"virtualType") {
+                if matches!(e.name().as_ref(), "type" | "virtualType") {
                     current_type = None;
                 }
             }
@@ -132,7 +132,7 @@ struct ArgFrame {
 /// Parse an `<arguments>` subtree (reader positioned just after the opening tag), returning
 /// the top-level `(name, value, line)` triples. Reads until the matching `</arguments>`.
 fn parse_arguments(
-    reader: &mut Reader<&[u8]>,
+    reader: &mut Reader,
     lines: &LineMap,
     buf: &mut Vec<u8>,
 ) -> Vec<RawItem> {
@@ -156,8 +156,8 @@ fn parse_arguments(
     let mut leaf: Option<Leaf> = None;
     let obj_attrs = |e: &BytesStart| {
         (
-            attr(e, b"shared").map(|s| matches!(s.trim(), "true" | "1")),
-            attr(e, b"sortOrder").and_then(|s| s.trim().parse().ok()),
+            attr(e, "shared").map(|s| matches!(s.trim(), "true" | "1")),
+            attr(e, "sortOrder").and_then(|s| s.trim().parse().ok()),
         )
     };
 
@@ -167,9 +167,9 @@ fn parse_arguments(
         let line = lines.line(reader.buffer_position() as usize);
         match ev {
             Err(_) | Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) if matches!(e.name().as_ref(), b"argument" | b"item") => {
-                let key = attr(&e, b"name").unwrap_or_default();
-                let xsi = attr(&e, b"xsi:type").unwrap_or_default();
+            Ok(Event::Start(e)) if matches!(e.name().as_ref(), "argument" | "item") => {
+                let key = attr(&e, "name").unwrap_or_default();
+                let xsi = attr(&e, "xsi:type").unwrap_or_default();
                 let (shared, sort_order) = obj_attrs(&e);
                 // An explicit array OR an untyped element opens a frame: an untyped
                 // element with `<item>` children is an array (Magento infers this from
@@ -188,9 +188,9 @@ fn parse_arguments(
                     leaf = Some(Leaf { key, xsi, line, text: String::new(), shared, sort_order });
                 }
             }
-            Ok(Event::Empty(e)) if matches!(e.name().as_ref(), b"argument" | b"item") => {
-                let key = attr(&e, b"name").unwrap_or_default();
-                let xsi = attr(&e, b"xsi:type").unwrap_or_default();
+            Ok(Event::Empty(e)) if matches!(e.name().as_ref(), "argument" | "item") => {
+                let key = attr(&e, "name").unwrap_or_default();
+                let xsi = attr(&e, "xsi:type").unwrap_or_default();
                 let (shared, sort_order) = obj_attrs(&e);
                 let value = if xsi == "array" {
                     RawArg::Array(Vec::new())
@@ -200,7 +200,7 @@ fn parse_arguments(
                 push_item(&mut stack, key, value, line, sort_order);
             }
             Ok(Event::Text(e)) => {
-                let t = e.unescape().unwrap_or_default();
+                let t = text(&e);
                 // Into the active scalar leaf, else the open frame's text buffer
                 // (used only if that frame closes without item children).
                 if let Some(l) = &mut leaf {
@@ -212,7 +212,7 @@ fn parse_arguments(
             Ok(Event::CData(e)) => {
                 // <![CDATA[...]]> carries the value verbatim (the primary
                 // di.xml's regex arguments are written this way).
-                let t = String::from_utf8_lossy(&e);
+                let t: &str = &e;
                 if let Some(l) = &mut leaf {
                     l.text.push_str(&t);
                 } else if let Some(frame) = stack.last_mut() {
@@ -220,8 +220,8 @@ fn parse_arguments(
                 }
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
-                b"arguments" => break,
-                b"argument" | b"item" => {
+                "arguments" => break,
+                "argument" | "item" => {
                     if let Some(l) = leaf.take() {
                         let sort_order = l.sort_order;
                         push_item(
@@ -286,19 +286,19 @@ fn di_open(
     current_type: &mut Option<(ClassName, bool)>,
 ) {
     match e.name().as_ref() {
-        b"preference" => {
-            if let (Some(f), Some(t)) = (attr(e, b"for"), attr(e, b"type")) {
+        "preference" => {
+            if let (Some(f), Some(t)) = (attr(e, "for"), attr(e, "type")) {
                 out.preferences.push((ClassName::new(f), ClassName::new(t), line));
             }
         }
-        b"virtualType" => {
-            if let Some(name) = attr(e, b"name") {
+        "virtualType" => {
+            if let Some(name) = attr(e, "name") {
                 out.virtual_type_mentions.push(ClassName::new(name.clone()));
-                if let Some(t) = attr(e, b"type") {
+                if let Some(t) = attr(e, "type") {
                     out.virtual_types
                         .push((ClassName::new(name.clone()), ClassName::new(t), line));
                 }
-                if let Some(s) = attr(e, b"shared") {
+                if let Some(s) = attr(e, "shared") {
                     out.shared.push((
                         ClassName::new(name.clone()),
                         matches!(s.trim(), "true" | "1"),
@@ -310,10 +310,10 @@ fn di_open(
                 }
             }
         }
-        b"type" => {
-            if let Some(name) = attr(e, b"name") {
+        "type" => {
+            if let Some(name) = attr(e, "name") {
                 out.type_mentions.push(name.clone());
-                if let Some(s) = attr(e, b"shared") {
+                if let Some(s) = attr(e, "shared") {
                     out.shared.push((
                         ClassName::new(name.clone()),
                         matches!(s.trim(), "true" | "1"),
@@ -326,21 +326,21 @@ fn di_open(
                 }
             }
         }
-        b"plugin" => {
+        "plugin" => {
             if let (Some((target, target_backslash)), Some(pname)) =
-                (current_type.clone(), attr(e, b"name"))
+                (current_type.clone(), attr(e, "name"))
             {
                 out.plugins.push((
                     target,
                     RawPlugin {
                         name: pname,
                         target_backslash,
-                        class_had_backslash: attr(e, b"type")
+                        class_had_backslash: attr(e, "type")
                             .map(|t| t.starts_with('\\'))
                             .unwrap_or(false),
-                        class: attr(e, b"type").map(ClassName::new),
-                        sort_order: attr(e, b"sortOrder").and_then(|s| s.trim().parse().ok()),
-                        disabled: attr(e, b"disabled").map(|s| matches!(s.trim(), "true" | "1")),
+                        class: attr(e, "type").map(ClassName::new),
+                        sort_order: attr(e, "sortOrder").and_then(|s| s.trim().parse().ok()),
+                        disabled: attr(e, "disabled").map(|s| matches!(s.trim(), "true" | "1")),
                         line,
                     },
                 ));

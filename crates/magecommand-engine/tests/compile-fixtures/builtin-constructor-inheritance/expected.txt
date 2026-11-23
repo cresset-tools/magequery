@@ -25,8 +25,10 @@
   'instanceTypes' => 
   array (
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
   ),
 );
 
@@ -69,8 +71,10 @@
   'instanceTypes' => 
   array (
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
   ),
 );
 
@@ -109,8 +113,10 @@
   'instanceTypes' => 
   array (
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
   ),
 );
 
@@ -149,8 +155,10 @@
   'instanceTypes' => 
   array (
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
   ),
 );
 
@@ -228,8 +236,10 @@
   'instanceTypes' => 
   array (
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
   ),
 );
 
@@ -266,8 +276,10 @@
   'instanceTypes' => 
   array (
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
   ),
 );
 
@@ -293,8 +305,10 @@
   'instanceTypes' => 
   array (
   ),
-  'lazyTypes' => 
+  'nonLazyTypes' => 
   array (
+    'Acme\\Time\\Model\\Doc' => true,
+    'Acme\\Time\\Model\\Stamp' => true,
   ),
 );
 

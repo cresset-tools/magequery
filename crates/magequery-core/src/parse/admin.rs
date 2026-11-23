@@ -76,15 +76,15 @@ pub(crate) fn system_xml(xml: &str) -> RawSystem {
         match ev {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
-                "tab" if attr(&e, b"id").is_some() => {
-                    tabs.push(RawSysTab { id: attr(&e, b"id").unwrap_or_default(), label: String::new() });
+                "tab" if attr(&e, "id").is_some() => {
+                    tabs.push(RawSysTab { id: attr(&e, "id").unwrap_or_default(), label: String::new() });
                     cur_tab = Some(tabs.len() - 1);
                 }
                 // A `<tab>` with no id, inside a section, is the section's tab *reference*.
                 "tab" => target = Some(SysText::SecTab),
                 "section" => {
                     sections.push(RawSysSection {
-                        id: attr(&e, b"id").unwrap_or_default(),
+                        id: attr(&e, "id").unwrap_or_default(),
                         label: String::new(),
                         tab: None,
                         resource: None,
@@ -98,7 +98,7 @@ pub(crate) fn system_xml(xml: &str) -> RawSystem {
                 "group" => {
                     if let Some(s) = cur_section {
                         sections[s].groups.push(RawSysGroup {
-                            id: attr(&e, b"id").unwrap_or_default(),
+                            id: attr(&e, "id").unwrap_or_default(),
                             label: String::new(),
                             fields: Vec::new(),
                         });
@@ -109,15 +109,15 @@ pub(crate) fn system_xml(xml: &str) -> RawSystem {
                 "field" => {
                     if let (Some(s), Some(g)) = (cur_section, cur_group) {
                         sections[s].groups[g].fields.push(RawSysField {
-                            id: attr(&e, b"id").unwrap_or_default(),
+                            id: attr(&e, "id").unwrap_or_default(),
                             label: String::new(),
-                            field_type: attr(&e, b"type").unwrap_or_default(),
+                            field_type: attr(&e, "type").unwrap_or_default(),
                             config_path: None,
                             source_model: None,
                             backend_model: None,
-                            show_default: attr(&e, b"showInDefault").as_deref() == Some("1"),
-                            show_website: attr(&e, b"showInWebsite").as_deref() == Some("1"),
-                            show_store: attr(&e, b"showInStore").as_deref() == Some("1"),
+                            show_default: attr(&e, "showInDefault").as_deref() == Some("1"),
+                            show_website: attr(&e, "showInWebsite").as_deref() == Some("1"),
+                            show_store: attr(&e, "showInStore").as_deref() == Some("1"),
                             line,
                         });
                         cur_field = Some(sections[s].groups[g].fields.len() - 1);
@@ -143,7 +143,7 @@ pub(crate) fn system_xml(xml: &str) -> RawSystem {
             },
             Ok(Event::Text(e)) => {
                 let Some(t) = &target else { continue };
-                let text = e.unescape().unwrap_or_default().trim().to_string();
+                let text = text(&e).trim().to_string();
                 if text.is_empty() {
                     continue;
                 }
@@ -151,11 +151,11 @@ pub(crate) fn system_xml(xml: &str) -> RawSystem {
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
                 // Closing a leaf element ends its text capture.
-                b"label" | b"tab" | b"resource" | b"source_model" | b"backend_model"
-                | b"config_path" => target = None,
-                b"field" => cur_field = None,
-                b"group" => cur_group = None,
-                b"section" => {
+                "label" | "tab" | "resource" | "source_model" | "backend_model"
+                | "config_path" => target = None,
+                "field" => cur_field = None,
+                "group" => cur_group = None,
+                "section" => {
                     cur_section = None;
                     cur_group = None;
                     cur_field = None;
@@ -252,16 +252,16 @@ pub(crate) fn acl_xml(xml: &str) -> Vec<RawAclResource> {
         match ev {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) if local_name(&e) == "resource" => {
-                let id = attr(&e, b"id").unwrap_or_default();
+                let id = attr(&e, "id").unwrap_or_default();
                 out.push(raw_acl(&e, id.clone(), stack.last().cloned(), line));
                 // Only a non-self-closing element can hold children.
                 stack.push(id);
             }
             Ok(Event::Empty(e)) if local_name(&e) == "resource" => {
-                let id = attr(&e, b"id").unwrap_or_default();
+                let id = attr(&e, "id").unwrap_or_default();
                 out.push(raw_acl(&e, id, stack.last().cloned(), line));
             }
-            Ok(Event::End(e)) if e.name().as_ref() == b"resource" => {
+            Ok(Event::End(e)) if e.name().as_ref() == "resource" => {
                 stack.pop();
             }
             _ => {}
@@ -274,10 +274,10 @@ pub(crate) fn acl_xml(xml: &str) -> Vec<RawAclResource> {
 fn raw_acl(e: &BytesStart, id: String, parent: Option<String>, line: u32) -> RawAclResource {
     RawAclResource {
         id,
-        title: attr(e, b"title").unwrap_or_default(),
+        title: attr(e, "title").unwrap_or_default(),
         parent,
-        sort_order: attr(e, b"sortOrder").and_then(|s| s.parse().ok()),
-        disabled: attr_true(e, b"disabled"),
+        sort_order: attr(e, "sortOrder").and_then(|s| s.parse().ok()),
+        disabled: attr_true(e, "disabled"),
         line,
     }
 }
