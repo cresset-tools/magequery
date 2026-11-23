@@ -77,8 +77,8 @@ pub(crate) fn db_schema_xml(xml: &str) -> Vec<RawTable> {
             Ok(Event::End(e)) => match e.name().as_ref() {
                 // A self-closing (`Empty`) constraint/index never opened a context, so only
                 // the matching `End` of a real `Start` clears it.
-                b"constraint" => in_constraint = None,
-                b"index" => in_index = None,
+                "constraint" => in_constraint = None,
+                "index" => in_index = None,
                 _ => {}
             },
             _ => {}
@@ -100,11 +100,11 @@ fn schema_element(
 ) {
     match local_name(e).as_str() {
         "table" => tables.push(RawTable {
-            name: attr(e, b"name").unwrap_or_default(),
-            engine: attr(e, b"engine"),
-            resource: attr(e, b"resource"),
-            comment: attr(e, b"comment"),
-            disabled: attr_true(e, b"disabled"),
+            name: attr(e, "name").unwrap_or_default(),
+            engine: attr(e, "engine"),
+            resource: attr(e, "resource"),
+            comment: attr(e, "comment"),
+            disabled: attr_true(e, "disabled"),
             columns: Vec::new(),
             constraints: Vec::new(),
             indexes: Vec::new(),
@@ -113,26 +113,26 @@ fn schema_element(
         "column" => {
             let Some(t) = tables.last_mut() else { return };
             if let Some(ci) = *in_index {
-                if let Some(name) = attr(e, b"name") {
+                if let Some(name) = attr(e, "name") {
                     t.indexes[ci].columns.push(name);
                 }
             } else if let Some(ci) = *in_constraint {
-                if let Some(name) = attr(e, b"name") {
+                if let Some(name) = attr(e, "name") {
                     t.constraints[ci].columns.push(name);
                 }
             } else {
                 t.columns.push(RawColumn {
-                    name: attr(e, b"name").unwrap_or_default(),
+                    name: attr(e, "name").unwrap_or_default(),
                     col_type: xsi_type(e).unwrap_or_default(),
-                    nullable: attr_true(e, b"nullable"),
-                    unsigned: attr_true(e, b"unsigned"),
-                    length: attr(e, b"length"),
-                    precision: attr(e, b"precision"),
-                    scale: attr(e, b"scale"),
-                    default: attr(e, b"default"),
-                    identity: attr_true(e, b"identity"),
-                    comment: attr(e, b"comment"),
-                    disabled: attr_true(e, b"disabled"),
+                    nullable: attr_true(e, "nullable"),
+                    unsigned: attr_true(e, "unsigned"),
+                    length: attr(e, "length"),
+                    precision: attr(e, "precision"),
+                    scale: attr(e, "scale"),
+                    default: attr(e, "default"),
+                    identity: attr_true(e, "identity"),
+                    comment: attr(e, "comment"),
+                    disabled: attr_true(e, "disabled"),
                     line,
                 });
             }
@@ -140,15 +140,15 @@ fn schema_element(
         "constraint" => {
             let Some(t) = tables.last_mut() else { return };
             // Foreign keys reference a single local column via the `column` attr.
-            let columns = attr(e, b"column").into_iter().collect();
+            let columns = attr(e, "column").into_iter().collect();
             t.constraints.push(RawConstraint {
-                id: attr(e, b"referenceId").unwrap_or_default(),
+                id: attr(e, "referenceId").unwrap_or_default(),
                 kind: xsi_type(e).unwrap_or_default(),
                 columns,
-                reference_table: attr(e, b"referenceTable"),
-                reference_column: attr(e, b"referenceColumn"),
-                on_delete: attr(e, b"onDelete"),
-                disabled: attr_true(e, b"disabled"),
+                reference_table: attr(e, "referenceTable"),
+                reference_column: attr(e, "referenceColumn"),
+                on_delete: attr(e, "onDelete"),
+                disabled: attr_true(e, "disabled"),
                 line,
             });
             if !is_empty {
@@ -158,10 +158,10 @@ fn schema_element(
         "index" => {
             let Some(t) = tables.last_mut() else { return };
             t.indexes.push(RawIndex {
-                id: attr(e, b"referenceId").unwrap_or_default(),
-                index_type: attr(e, b"indexType").unwrap_or_else(|| "btree".into()),
+                id: attr(e, "referenceId").unwrap_or_default(),
+                index_type: attr(e, "indexType").unwrap_or_else(|| "btree".into()),
                 columns: Vec::new(),
-                disabled: attr_true(e, b"disabled"),
+                disabled: attr_true(e, "disabled"),
                 line,
             });
             if !is_empty {

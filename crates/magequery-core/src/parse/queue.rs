@@ -40,10 +40,10 @@ pub(crate) fn communication_xml(xml: &str) -> Vec<RawMqTopic> {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
                 "topic" => {
                     out.push(RawMqTopic {
-                        name: attr(&e, b"name").unwrap_or_default(),
-                        request: attr(&e, b"request"),
-                        response: attr(&e, b"response"),
-                        schema: attr(&e, b"schema"),
+                        name: attr(&e, "name").unwrap_or_default(),
+                        request: attr(&e, "request"),
+                        response: attr(&e, "response"),
+                        schema: attr(&e, "schema"),
                         handlers: Vec::new(),
                         line,
                     });
@@ -52,17 +52,17 @@ pub(crate) fn communication_xml(xml: &str) -> Vec<RawMqTopic> {
                 "handler" => {
                     if let Some(i) = cur {
                         out[i].handlers.push(RawMqHandler {
-                            name: attr(&e, b"name").unwrap_or_default(),
-                            class: ClassName::new(attr(&e, b"type").unwrap_or_default()),
-                            method: attr(&e, b"method").unwrap_or_default(),
-                            disabled: attr(&e, b"disabled").map(|s| matches!(s.trim(), "true" | "1")),
+                            name: attr(&e, "name").unwrap_or_default(),
+                            class: ClassName::new(attr(&e, "type").unwrap_or_default()),
+                            method: attr(&e, "method").unwrap_or_default(),
+                            disabled: attr(&e, "disabled").map(|s| matches!(s.trim(), "true" | "1")),
                             line,
                         });
                     }
                 }
                 _ => {}
             },
-            Ok(Event::End(e)) if e.name().as_ref() == b"topic" => cur = None,
+            Ok(Event::End(e)) if e.name().as_ref() == "topic" => cur = None,
             _ => {}
         }
         buf.clear();
@@ -95,12 +95,12 @@ pub(crate) fn queue_consumer_xml(xml: &str) -> Vec<RawMqConsumer> {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) if local_name(&e) == "consumer" => {
                 out.push(RawMqConsumer {
-                    name: attr(&e, b"name").unwrap_or_default(),
-                    queue: attr(&e, b"queue").unwrap_or_default(),
-                    connection: attr(&e, b"connection"),
-                    consumer_instance: attr(&e, b"consumerInstance").map(ClassName::new),
-                    handler: attr(&e, b"handler"),
-                    max_messages: attr(&e, b"maxMessages"),
+                    name: attr(&e, "name").unwrap_or_default(),
+                    queue: attr(&e, "queue").unwrap_or_default(),
+                    connection: attr(&e, "connection"),
+                    consumer_instance: attr(&e, "consumerInstance").map(ClassName::new),
+                    handler: attr(&e, "handler"),
+                    max_messages: attr(&e, "maxMessages"),
                     line,
                 });
             }
@@ -144,8 +144,8 @@ pub(crate) fn queue_topology_xml(xml: &str) -> Vec<RawMqExchange> {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
                 "exchange" => {
                     out.push(RawMqExchange {
-                        name: attr(&e, b"name").unwrap_or_default(),
-                        connection: attr(&e, b"connection"),
+                        name: attr(&e, "name").unwrap_or_default(),
+                        connection: attr(&e, "connection"),
                         bindings: Vec::new(),
                     });
                     cur = Some(out.len() - 1);
@@ -153,17 +153,17 @@ pub(crate) fn queue_topology_xml(xml: &str) -> Vec<RawMqExchange> {
                 "binding" => {
                     if let Some(i) = cur {
                         out[i].bindings.push(RawMqBinding {
-                            id: attr(&e, b"id").unwrap_or_default(),
-                            topic: attr(&e, b"topic").unwrap_or_default(),
-                            destination: attr(&e, b"destination").unwrap_or_default(),
-                            disabled: attr_true(&e, b"disabled"),
+                            id: attr(&e, "id").unwrap_or_default(),
+                            topic: attr(&e, "topic").unwrap_or_default(),
+                            destination: attr(&e, "destination").unwrap_or_default(),
+                            disabled: attr_true(&e, "disabled"),
                             line,
                         });
                     }
                 }
                 _ => {}
             },
-            Ok(Event::End(e)) if e.name().as_ref() == b"exchange" => cur = None,
+            Ok(Event::End(e)) if e.name().as_ref() == "exchange" => cur = None,
             _ => {}
         }
         buf.clear();
@@ -204,9 +204,9 @@ pub(crate) fn queue_publisher_xml(xml: &str) -> Vec<RawMqPublisher> {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
                 "publisher" => {
                     out.push(RawMqPublisher {
-                        topic: attr(&e, b"topic").unwrap_or_default(),
-                        queue: attr(&e, b"queue"),
-                        disabled: attr(&e, b"disabled").map(|s| matches!(s.trim(), "true" | "1")),
+                        topic: attr(&e, "topic").unwrap_or_default(),
+                        queue: attr(&e, "queue"),
+                        disabled: attr(&e, "disabled").map(|s| matches!(s.trim(), "true" | "1")),
                         connections: Vec::new(),
                         line,
                     });
@@ -215,15 +215,15 @@ pub(crate) fn queue_publisher_xml(xml: &str) -> Vec<RawMqPublisher> {
                 "connection" => {
                     if let Some(i) = cur {
                         out[i].connections.push(RawMqPubConnection {
-                            name: attr(&e, b"name").unwrap_or_default(),
-                            exchange: attr(&e, b"exchange"),
-                            disabled: attr(&e, b"disabled").map(|s| matches!(s.trim(), "true" | "1")),
+                            name: attr(&e, "name").unwrap_or_default(),
+                            exchange: attr(&e, "exchange"),
+                            disabled: attr(&e, "disabled").map(|s| matches!(s.trim(), "true" | "1")),
                         });
                     }
                 }
                 _ => {}
             },
-            Ok(Event::End(e)) if e.name().as_ref() == b"publisher" => cur = None,
+            Ok(Event::End(e)) if e.name().as_ref() == "publisher" => cur = None,
             _ => {}
         }
         buf.clear();

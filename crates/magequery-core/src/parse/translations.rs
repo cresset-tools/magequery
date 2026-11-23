@@ -74,7 +74,7 @@ pub(crate) fn language_xml(xml: &str) -> (Option<String>, Option<i32>) {
                 _ => {}
             },
             Ok(Event::Text(e)) => {
-                let t = e.unescape().unwrap_or_default().trim().to_string();
+                let t = text(&e).trim().to_string();
                 if !t.is_empty() {
                     match into {
                         Some("code") => code = Some(t),
@@ -133,9 +133,9 @@ pub(crate) fn catalog_attributes_xml(xml: &str) -> Vec<RawCatalogAttr> {
         match ev {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
-                "group" => group = attr(&e, b"name").unwrap_or_default(),
+                "group" => group = attr(&e, "name").unwrap_or_default(),
                 "attribute" => {
-                    if let Some(name) = attr(&e, b"name") {
+                    if let Some(name) = attr(&e, "name") {
                         if !group.is_empty() {
                             out.push(RawCatalogAttr { group: group.clone(), attribute: name, line });
                         }
@@ -143,7 +143,7 @@ pub(crate) fn catalog_attributes_xml(xml: &str) -> Vec<RawCatalogAttr> {
                 }
                 _ => {}
             },
-            Ok(Event::End(e)) if e.name().as_ref() == b"group" => group.clear(),
+            Ok(Event::End(e)) if e.name().as_ref() == "group" => group.clear(),
             _ => {}
         }
         buf.clear();
@@ -180,12 +180,12 @@ pub(crate) fn email_templates_xml(xml: &str) -> Vec<RawEmailTemplate> {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) if local_name(&e) == "template" => {
                 out.push(RawEmailTemplate {
-                    id: attr(&e, b"id").unwrap_or_default(),
-                    label: attr(&e, b"label").unwrap_or_default(),
-                    file: attr(&e, b"file").unwrap_or_default(),
-                    kind: attr(&e, b"type").unwrap_or_default(),
-                    module: attr(&e, b"module").unwrap_or_default(),
-                    area: attr(&e, b"area").unwrap_or_else(|| "frontend".to_string()),
+                    id: attr(&e, "id").unwrap_or_default(),
+                    label: attr(&e, "label").unwrap_or_default(),
+                    file: attr(&e, "file").unwrap_or_default(),
+                    kind: attr(&e, "type").unwrap_or_default(),
+                    module: attr(&e, "module").unwrap_or_default(),
+                    area: attr(&e, "area").unwrap_or_else(|| "frontend".to_string()),
                     line,
                 });
             }
@@ -252,7 +252,7 @@ pub(crate) fn widget_xml(xml: &str) -> Vec<RawWidget> {
             ),
             Ok(Event::Text(e)) => {
                 let (Some(field), Some(i)) = (text_into, cur) else { continue };
-                let t = e.unescape().unwrap_or_default().trim().to_string();
+                let t = text(&e).trim().to_string();
                 if t.is_empty() {
                     continue;
                 }
@@ -265,14 +265,14 @@ pub(crate) fn widget_xml(xml: &str) -> Vec<RawWidget> {
                 }
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
-                b"widget" => {
+                "widget" => {
                     cur = None;
                     cur_param = None;
                 }
-                b"parameter" if !in_depends => cur_param = None,
-                b"depends" => in_depends = false,
-                b"options" => in_options = false,
-                b"label" | b"description" | b"value" => text_into = None,
+                "parameter" if !in_depends => cur_param = None,
+                "depends" => in_depends = false,
+                "options" => in_options = false,
+                "label" | "description" | "value" => text_into = None,
                 _ => {}
             },
             _ => {}
@@ -296,8 +296,8 @@ fn widget_element(
     match local_name(e).as_str() {
         "widget" => {
             out.push(RawWidget {
-                id: attr(e, b"id").unwrap_or_default(),
-                class: attr(e, b"class").map(ClassName::new),
+                id: attr(e, "id").unwrap_or_default(),
+                class: attr(e, "class").map(ClassName::new),
                 label: String::new(),
                 description: None,
                 parameters: Vec::new(),
@@ -309,18 +309,18 @@ fn widget_element(
         "parameter" if !in_depends => {
             if let Some(i) = *cur {
                 out[i].parameters.push(RawWidgetParam {
-                    name: attr(e, b"name").unwrap_or_default(),
+                    name: attr(e, "name").unwrap_or_default(),
                     param_type: xsi_type(e).unwrap_or_default(),
-                    required: attr_true(e, b"required"),
+                    required: attr_true(e, "required"),
                     label: String::new(),
-                    source_model: attr(e, b"source_model").map(ClassName::new),
+                    source_model: attr(e, "source_model").map(ClassName::new),
                     default: None,
                 });
                 *cur_param = Some(out[i].parameters.len() - 1);
             }
         }
         "container" => {
-            if let (Some(i), Some(name)) = (*cur, attr(e, b"name")) {
+            if let (Some(i), Some(name)) = (*cur, attr(e, "name")) {
                 if !out[i].containers.contains(&name) {
                     out[i].containers.push(name);
                 }
@@ -421,10 +421,10 @@ pub(crate) fn fieldset_xml(xml: &str) -> Vec<RawFieldsetField> {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
                 match local_name(&e).as_str() {
-                    "scope" => scope = attr(&e, b"id").unwrap_or_default(),
-                    "fieldset" => fieldset = attr(&e, b"id").unwrap_or_default(),
+                    "scope" => scope = attr(&e, "id").unwrap_or_default(),
+                    "fieldset" => fieldset = attr(&e, "id").unwrap_or_default(),
                     "field" => {
-                        if let Some(name) = attr(&e, b"name") {
+                        if let Some(name) = attr(&e, "name") {
                             if !fieldset.is_empty() {
                                 out.push(RawFieldsetField {
                                     scope: scope.clone(),
@@ -438,10 +438,10 @@ pub(crate) fn fieldset_xml(xml: &str) -> Vec<RawFieldsetField> {
                         }
                     }
                     "aspect" => {
-                        if let (Some(name), Some(i)) = (attr(&e, b"name"), current) {
+                        if let (Some(name), Some(i)) = (attr(&e, "name"), current) {
                             out[i].aspects.push(RawFieldsetAspect {
                                 name,
-                                target_field: attr(&e, b"targetField"),
+                                target_field: attr(&e, "targetField"),
                                 line,
                             });
                         }
@@ -450,12 +450,12 @@ pub(crate) fn fieldset_xml(xml: &str) -> Vec<RawFieldsetField> {
                 }
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
-                b"field" => current = None,
-                b"fieldset" => {
+                "field" => current = None,
+                "fieldset" => {
                     fieldset.clear();
                     current = None;
                 }
-                b"scope" => scope.clear(),
+                "scope" => scope.clear(),
                 _ => {}
             },
             _ => {}
