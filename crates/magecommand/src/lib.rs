@@ -287,9 +287,11 @@ enum StaticCommand {
         out: Option<PathBuf>,
         /// Bundle ordering. `probe` = deployed-tree readdir order, byte-
         /// faithful on hash-ordered filesystems. `sorted` = portable
-        /// lexicographic — a determinism aid only: it changes which files are
-        /// bundled (`.min`-sibling exclusion is readdir-order-dependent), so it
-        /// is faithful to no real deploy. Default: `probe`.
+        /// lexicographic, each `.min` file before its plain sibling — the same
+        /// on every machine, and a library shipped with its minified twin is
+        /// bundled once, minified. The `.min`-sibling exclusion depends on
+        /// readdir order, so it matches a real deploy only where that deploy
+        /// also listed the `.min` files first. Default: `probe`.
         #[arg(long, value_name = "probe|sorted", default_value = "probe")]
         order: String,
         /// Do NOT auto-deploy a `--theme`'s parent theme(s) (Magento's

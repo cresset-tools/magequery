@@ -59,7 +59,9 @@
 //! independent of creation order and file-vs-dir type). On creation-ordered
 //! filesystems (tmpfs) the probe degrades to its own creation order (sorted —
 //! deterministic, but not what a historical PHP deploy produced there).
-//! [`OrderMode::Sorted`] is the portable, filesystem-independent alternative.
+//! [`OrderMode::Sorted`] is the portable, filesystem-independent alternative
+//! (byte order, but each `.min` file first, so a library shipped with its
+//! minified twin is bundled once).
 //!
 //! ## The `.min` sibling cache — shared across themes
 //!
@@ -453,8 +455,11 @@ fn is_js_html(name: &str) -> bool {
 /// recursive glob.
 #[derive(Debug, Clone)]
 pub enum OrderMode {
-    /// Lexicographic (byte) order — portable and filesystem-independent, but
-    /// NOT what a PHP deploy produces on hash-ordered filesystems.
+    /// Lexicographic (byte) order with each `.min` file just before its plain
+    /// sibling — portable and filesystem-independent, but NOT what a PHP
+    /// deploy produces on hash-ordered filesystems. Min-first means a library
+    /// shipped as `x.js` + `x.min.js` is bundled once, minified (see
+    /// [`min_first`]).
     Sorted,
     /// Reproduce the target filesystem's readdir order by creating each
     /// directory's names in a scratch dir under the given root and reading
@@ -572,12 +577,37 @@ impl Orderer {
 
     /// Order `names` (a sorted set) as a directory listing.
     fn order(&mut self, names: &BTreeSet<String>) -> Result<Vec<String>, BundleError> {
-        let key: Vec<String> = names.iter().cloned().collect();
         match &self.mode {
-            OrderMode::Sorted => Ok(key),
-            OrderMode::Probe(probe) => probe.order(key),
+            OrderMode::Sorted => Ok(min_first(names)),
+            OrderMode::Probe(probe) => probe.order(names.iter().cloned().collect()),
         }
     }
+}
+
+/// Sorted order, except that each `.min` file comes right before its plain
+/// sibling (`x.min.js`, then `x.js`). `hasMinVersion` drops a plain file only
+/// when its `.min` sibling was iterated first, so in plain byte order
+/// (`x.js` < `x.min.js`) BOTH would be bundled: the library twice, once
+/// minified. Min-first bundles only the minified copy, as a real deploy does
+/// whenever the filesystem happens to list the `.min` file first.
+fn min_first(names: &BTreeSet<String>) -> Vec<String> {
+    let mut out: Vec<String> = names.iter().cloned().collect();
+    out.sort_by_cached_key(|n| match min_sibling_of(n) {
+        Some(plain) => (plain, false, n.clone()),
+        None => (n.clone(), true, n.clone()),
+    });
+    out
+}
+
+/// The plain name a `.min` file stands in for, by `hasMinVersion`'s own rule
+/// (`.min.<ext>` → `.<ext>`); `None` for any other name.
+fn min_sibling_of(name: &str) -> Option<String> {
+    if !name.contains(".min.") {
+        return None;
+    }
+    let ext = name.rsplit_once('.').map(|(_, e)| e)?;
+    let plain = name.replace(&format!(".min.{ext}"), &format!(".{ext}"));
+    (plain != name).then_some(plain)
 }
 
 /// Simulate `Files::getFiles([$packageDir], '*.*')` over the virtual tree:
@@ -1643,6 +1673,26 @@ mod tests {
 
     /// glob-order structure: all files of a directory precede its subtrees,
     /// recursively (sorted mode makes the expectation explicit).
+    /// Sorted mode lists a `.min` file right before its plain sibling, so the
+    /// `.min`-sibling cache drops the plain copy instead of bundling both.
+    #[test]
+    fn sorted_order_puts_min_files_first_and_bundles_them_once() {
+        let set: BTreeSet<String> =
+            ["lib/a.js", "lib/a.min.js", "lib/b.js", "lib/index.js", "lib/x.min.html"]
+                .iter()
+                .map(|p| p.to_string())
+                .collect();
+        let mut orderer = Orderer::new(OrderMode::Sorted);
+        let got = glob_order(&set, &mut orderer).unwrap();
+        assert_eq!(
+            got,
+            vec![s("lib/a.min.js"), s("lib/a.js"), s("lib/b.js"), s("lib/index.js"), s("lib/x.min.html")]
+        );
+        let mut cache = MinSiblingCache::new();
+        let kept: Vec<&String> = got.iter().filter(|p| !cache.has_min_version(p)).collect();
+        assert_eq!(kept, vec!["lib/a.min.js", "lib/b.js", "lib/index.js", "lib/x.min.html"]);
+    }
+
     #[test]
     fn glob_order_files_before_subdirs() {
         let set: BTreeSet<String> = ["z.js", "a/inner.js", "a/deep/x.js", "b.js", "a/b.js"]
