@@ -181,9 +181,11 @@ library paths, `setup/src`). A missing framework or module entry therefore still
 
 *DI config.* The output equals the archive once these specific additions are set aside:
 
-- the `nonLazyTypes` section and its `NonLazyTypes` step in `ModificationChain`, from the
-  lazy-proxy compiler pass of 2.4.9 / PHP 8.4. This only applies when the archive has no
-  such section; an archive that ran the pass must match it exactly.
+- a Mage-OS lazy-ghost section (`lazyTypes`, or `nonLazyTypes` on 3.0–3.2) the archive
+  doesn't have, or its `LazyTypes`/`NonLazyTypes` step in `ModificationChain`. The pass
+  writes nothing when the compile runs on PHP < 8.4, and `di compile` assumes 8.4 unless
+  `--target-php` or `composer.json`'s `config.platform.php` says otherwise. An archive that has the
+  section is compared with it instead: see [fewer lazy types](#fewer-lazy-types).
 - `interception.php` rows that say `false` (no plugins) for a type the archive has no row
   for. Without a row, Magento works that out at runtime. If `false` were wrong, the type's
   interceptor and plugin-list entries would be missing too, and those stay flagged.
@@ -300,6 +302,23 @@ inherits configuration from, and (for a virtual type) its base chain:
 `--strict-fallback` allows no fallback at all: every class left to runtime reflection is
 unexplained, including the ones whose di.xml configures nothing. Use it to require that
 the output caches every constructor row the reference does.
+
+## Fewer lazy types
+
+*DI config. A warning; the other direction is unexplained.* Both trees have Mage-OS's
+`lazyTypes` allow-list (Mage-OS 3.3+, compiled on PHP 8.4+), and the archive's holds every
+class the output's does, plus these. Mage-OS's compiled factory builds a class as a PHP 8.4
+lazy ghost only when it's on the list, so these classes are constructed eagerly instead.
+That's always correct, just slower. The same classes in a different order land here too.
+
+The other direction is never explained. A class in the output's list that the archive's
+leaves out would be built lazily where the reference builds it eagerly, so its constructor
+runs late or never. Mage-OS 4.0 keeps a class off the list when it can't prove the
+constructor free of side effects. The report names these classes, and their files fail.
+
+Until magecommand ports Mage-OS 4.0's `ConstructorSideEffectScanner`, `di compile` writes
+an empty `lazyTypes` on a 4.0 checkout. Every class is eager, and verify lists the
+reference's whole set here.
 
 ## Ordering only
 

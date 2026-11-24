@@ -11,6 +11,7 @@ use magequery_core::{Area, Magento};
 
 use crate::arguments::{build_arguments, ArgsCtx, Omission};
 use crate::definitions::Definitions;
+use crate::lazytypes::{LazyKind, LazyPass};
 use crate::phpexport::{PhpKey, PhpValue};
 
 /// The seven compiled areas, in Magento's generation order (global first),
@@ -168,9 +169,11 @@ pub struct AreaFile {
     pub arguments: BTreeMap<String, PhpValue>,
     pub preferences: Vec<(String, String)>,
     pub instance_types: Vec<(String, String)>,
-    /// `class => true`, in Magento's candidate order (NOT sorted — the one
-    /// section Area::doOperation never ksorts).
-    pub non_lazy: Vec<String>,
+    /// The lazy-ghost section, when the pass writes one: its name
+    /// (`lazyTypes` / `nonLazyTypes`) and its `class => true` entries, in
+    /// Magento's candidate order (NOT sorted — the one section
+    /// Area::doOperation never ksorts). See [`crate::lazytypes`].
+    pub lazy: Option<(&'static str, Vec<String>)>,
     pub findings: Vec<String>,
     /// Instance names whose constructor arguments could not be resolved
     /// statically, so the file carries no `arguments` key for them and the
@@ -191,7 +194,8 @@ pub fn build_area_file(
     area: Area,
     root: &std::path::Path,
 ) -> AreaFile {
-    build_area_file_from_export(magento, defs, magento.di_export_ref(area), root)
+    let lazy = LazyPass::detect(root, &crate::lazytypes::Target::default());
+    build_area_file_from_export(magento, defs, magento.di_export_ref(area), root, lazy)
 }
 
 /// Like [`build_area_file`] but driven by a caller-supplied [`DiExport`] — used
@@ -204,8 +208,9 @@ pub fn build_area_file_from_export(
     defs: &Definitions,
     export: &magequery_core::DiExport,
     root: &std::path::Path,
+    lazy: LazyPass,
 ) -> AreaFile {
-    let overrides = crate::arguments::setup_overrides(magento, root);
+    let overrides = crate::arguments::setup_overrides(magento, root, lazy);
     let ctx = ArgsCtx::new(defs, &defs.scanned, export, overrides, Some(magento), Some(root));
 
     // Reader.
@@ -265,18 +270,28 @@ pub fn build_area_file_from_export(
     // runtime: the Compiled factory keys ctor args off the ORIGINAL type, which
     // has no row, and built the interceptor with no args.)
 
-    // NonLazyTypes: candidates = chain-time arguments keys, then
+    // The lazy pass: candidates = chain-time arguments keys, then
     // instanceTypes values, then preferences values — each in Magento's
-    // insertion order (reconstructed below), deduped first-wins, filtered to
-    // the lazy-INeligible.
-    let non_lazy = non_lazy_types(
-        defs,
-        export,
-        &arguments,
-        &instance_types,
-        &preferences,
-        &interceptors,
-    );
+    // insertion order (reconstructed below), deduped first-wins — filtered to
+    // the lazy-INeligible (deny-list) or the eligible (allow-list).
+    let lazy = lazy.section_name().map(|name| {
+        let candidates =
+            lazy_candidates(defs, export, &arguments, &instance_types, &preferences, &interceptors);
+        let types = match lazy.kind {
+            LazyKind::DenyList => {
+                candidates.into_iter().filter(|c| !is_lazy_eligible(defs, c)).collect()
+            }
+            LazyKind::AllowList => {
+                candidates.into_iter().filter(|c| is_lazy_eligible(defs, c)).collect()
+            }
+            // 4.0 also requires a side-effect-free constructor, which needs
+            // ConstructorSideEffectScanner. Until that is ported, nothing is
+            // proven safe: an empty allow-list keeps every class eager, where
+            // the 3.6 rule alone would make side-effecting constructors lazy.
+            LazyKind::AllowListScanned | LazyKind::None => Vec::new(),
+        };
+        (name, types)
+    });
 
     // Only now, with the chain done, do the omitted keys leave the file.
     let omissions = ctx.take_omitted();
@@ -298,7 +313,7 @@ pub fn build_area_file_from_export(
         arguments,
         preferences: preferences.into_iter().collect(),
         instance_types: instance_types.into_iter().collect(),
-        non_lazy,
+        lazy,
         findings: ctx.take_findings(),
         omitted,
         lost_arguments,
@@ -327,6 +342,7 @@ pub fn build_all_area_files(
     magento: &Magento,
     defs: &Definitions,
     root: &std::path::Path,
+    lazy: LazyPass,
 ) -> Vec<CompiledArea> {
     use rayon::prelude::*;
     // Fixed and custom areas in ONE parallel batch. Building the custom ones
@@ -345,11 +361,12 @@ pub fn build_all_area_files(
         .map(|which| {
             let (code, file) = match which {
                 Which::Fixed(area, code) => {
-                    ((*code).to_owned(), build_area_file(magento, defs, *area, root))
+                    let export = magento.di_export_ref(*area);
+                    ((*code).to_owned(), build_area_file_from_export(magento, defs, export, root, lazy))
                 }
                 Which::Custom(code) => {
                     let export = magento.di_export_custom_area(code);
-                    (code.clone(), build_area_file_from_export(magento, defs, &export, root))
+                    (code.clone(), build_area_file_from_export(magento, defs, &export, root, lazy))
                 }
             };
             let rendered = file.render();
@@ -358,10 +375,10 @@ pub fn build_all_area_files(
         .collect()
 }
 
-/// Chain\NonLazyTypes (PHP >= 8.4, active on the oracle): which candidate
-/// classes cannot be lazy-proxied. Order is the candidate insertion order —
-/// this section is written pre-ksort and never sorted.
-fn non_lazy_types(
+/// The lazy pass's candidates (`Chain\NonLazyTypes` / `Chain\LazyTypes`, which
+/// collect them identically), in candidate insertion order — the section is
+/// written pre-ksort and never sorted.
+fn lazy_candidates(
     defs: &Definitions,
     export: &magequery_core::DiExport,
     arguments: &BTreeMap<String, PhpValue>,
@@ -452,12 +469,10 @@ fn non_lazy_types(
     }
 
     candidates
-        .into_iter()
-        .filter(|name| !is_lazy_eligible(defs, name))
-        .collect()
 }
 
-/// Chain\NonLazyTypes::isLazyEligible, statically. Ineligible (=> nonLazy):
+/// `isLazyEligible` of `Chain\NonLazyTypes` and 3.3–3.6's `Chain\LazyTypes`
+/// (the same test), statically. Ineligible (=> nonLazy):
 /// `\Proxy`-suffixed, unknown to the class universe (class_exists false —
 /// virtual types land here), interface/trait/enum/abstract/final/readonly,
 /// any internal PHP ancestor, or the #[NonLazy] attribute.
@@ -604,7 +619,7 @@ impl AreaFile {
             &self.arguments,
             &self.preferences,
             &self.instance_types,
-            &self.non_lazy,
+            self.lazy.as_ref().map(|(name, types)| (*name, types.as_slice())),
         )
     }
 }

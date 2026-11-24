@@ -61,10 +61,6 @@
   array (
     'AcmeVmergeVirtualLogger' => 'Acme\\Vmerge\\Model\\Logger',
   ),
-  'nonLazyTypes' => 
-  array (
-    'AcmeVmergeVirtualLogger' => true,
-  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -142,10 +138,6 @@
   array (
     'AcmeVmergeVirtualLogger' => 'Acme\\Vmerge\\Model\\Logger',
   ),
-  'nonLazyTypes' => 
-  array (
-    'AcmeVmergeVirtualLogger' => true,
-  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -219,10 +211,6 @@
   array (
     'AcmeVmergeVirtualLogger' => 'Acme\\Vmerge\\Model\\Logger',
   ),
-  'nonLazyTypes' => 
-  array (
-    'AcmeVmergeVirtualLogger' => true,
-  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -295,10 +283,6 @@
   'instanceTypes' => 
   array (
     'AcmeVmergeVirtualLogger' => 'Acme\\Vmerge\\Model\\Logger',
-  ),
-  'nonLazyTypes' => 
-  array (
-    'AcmeVmergeVirtualLogger' => true,
   ),
 );
 
@@ -414,10 +398,6 @@
   array (
     'AcmeVmergeVirtualLogger' => 'Acme\\Vmerge\\Model\\Logger',
   ),
-  'nonLazyTypes' => 
-  array (
-    'AcmeVmergeVirtualLogger' => true,
-  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -488,10 +468,6 @@
   array (
     'AcmeVmergeVirtualLogger' => 'Acme\\Vmerge\\Model\\Logger',
   ),
-  'nonLazyTypes' => 
-  array (
-    'AcmeVmergeVirtualLogger' => true,
-  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -551,10 +527,6 @@
   'instanceTypes' => 
   array (
     'AcmeVmergeVirtualLogger' => 'Acme\\Vmerge\\Model\\Logger',
-  ),
-  'nonLazyTypes' => 
-  array (
-    'AcmeVmergeVirtualLogger' => true,
   ),
 );
 

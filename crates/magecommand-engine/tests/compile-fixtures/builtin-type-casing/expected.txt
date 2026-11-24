@@ -43,9 +43,6 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -105,9 +102,6 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -163,9 +157,6 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -219,9 +210,6 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
     'Acme\\Builtin\\Model\\Bag' => 'Acme\\Builtin\\Model\\Bag\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );
@@ -396,9 +384,6 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -422,9 +407,6 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -439,9 +421,6 @@ class Interceptor extends \Acme\Builtin\Model\Bag implements \Magento\Framework\
     'Acme\\Builtin\\Model\\Bag' => 'Acme\\Builtin\\Model\\Bag\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );

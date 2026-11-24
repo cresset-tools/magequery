@@ -35,9 +35,8 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
   ),
 );
 
@@ -90,9 +89,8 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
   ),
 );
 
@@ -141,9 +139,8 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
   ),
 );
 
@@ -192,9 +189,8 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
   ),
 );
 
@@ -287,9 +283,8 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
   ),
 );
 
@@ -336,9 +331,8 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
   ),
 );
 
@@ -374,9 +368,8 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
   ),
 );
 

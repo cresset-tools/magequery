@@ -79,6 +79,20 @@ pub fn compute_outputs_opts(
     root: &Path,
     fused: bool,
 ) -> CompileOutputs {
+    compute_outputs_with(magento, defs, root, fused, &crate::lazytypes::Target::default())
+}
+
+/// Like [`compute_outputs_opts`], for the store `target` describes: its PHP
+/// version and platform release, where they differ from what the checkout says
+/// — see [`crate::lazytypes`].
+pub fn compute_outputs_with(
+    magento: &Magento,
+    defs: &mut Definitions,
+    root: &Path,
+    fused: bool,
+    target: &crate::lazytypes::Target,
+) -> CompileOutputs {
+    let lazy = crate::lazytypes::LazyPass::detect(root, target);
     let _prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
     macro_rules! ilap {
         ($t:expr, $label:expr) => {
@@ -193,7 +207,7 @@ pub fn compute_outputs_opts(
     // stays byte-identical with zero extra work.
     let mut interception = interception::interception_map(magento, defs);
     ilap!(_it, "interception map");
-    let mut area_files = areaconfig::build_all_area_files(magento, defs, root);
+    let mut area_files = areaconfig::build_all_area_files(magento, defs, root, lazy);
     ilap!(_it, "area files");
     let mut code =
         codegen::generate_code(magento, defs, root.to_path_buf(), &area_files, &interception, fused);
@@ -234,7 +248,7 @@ pub fn compute_outputs_opts(
             interception = interception::interception_map(magento, defs);
         }
         ilap!(_it, "area-free round");
-        area_files = areaconfig::build_all_area_files(magento, defs, root);
+        area_files = areaconfig::build_all_area_files(magento, defs, root, lazy);
         ilap!(_it, "area files");
         code = codegen::generate_code(
             magento,

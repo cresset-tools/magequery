@@ -46,9 +46,6 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -129,9 +126,6 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
     'Acme\\Web\\Model\\Renderer' => 'Acme\\Web\\Model\\Renderer\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );
@@ -215,9 +209,6 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
     'Acme\\Web\\Model\\Renderer' => 'Acme\\Web\\Model\\Renderer\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );
@@ -315,9 +306,6 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
     'Acme\\Web\\Model\\Renderer' => 'Acme\\Web\\Model\\Renderer\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );
@@ -595,9 +583,6 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -627,9 +612,6 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -647,9 +629,6 @@ class Interceptor extends \Acme\Web\Model\Renderer implements \Magento\Framework
     'Acme\\Web\\Model\\Renderer' => 'Acme\\Web\\Model\\Renderer\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );

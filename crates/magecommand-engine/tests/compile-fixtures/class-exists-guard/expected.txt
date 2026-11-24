@@ -92,9 +92,6 @@ class DepFactory
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -156,9 +153,6 @@ class DepFactory
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -216,9 +210,6 @@ class DepFactory
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -274,9 +265,6 @@ class DepFactory
   array (
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );
@@ -375,9 +363,6 @@ class DepFactory
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -431,9 +416,6 @@ class DepFactory
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -476,9 +458,6 @@ class DepFactory
   array (
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );

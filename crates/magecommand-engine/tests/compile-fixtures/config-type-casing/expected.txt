@@ -80,9 +80,6 @@ class Interceptor extends \Acme\Casing\Model\Kingdebtor implements \Magento\Fram
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -149,9 +146,6 @@ class Interceptor extends \Acme\Casing\Model\Kingdebtor implements \Magento\Fram
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -214,9 +208,6 @@ class Interceptor extends \Acme\Casing\Model\Kingdebtor implements \Magento\Fram
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -277,9 +268,6 @@ class Interceptor extends \Acme\Casing\Model\Kingdebtor implements \Magento\Fram
     'Acme\\Casing\\Model\\Kingdebtor' => 'Acme\\Casing\\Model\\Kingdebtor\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );
@@ -452,9 +440,6 @@ class Interceptor extends \Acme\Casing\Model\Kingdebtor implements \Magento\Fram
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -491,9 +476,6 @@ class Interceptor extends \Acme\Casing\Model\Kingdebtor implements \Magento\Fram
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -518,9 +500,6 @@ class Interceptor extends \Acme\Casing\Model\Kingdebtor implements \Magento\Fram
     'Acme\\Casing\\Model\\Kingdebtor' => 'Acme\\Casing\\Model\\Kingdebtor\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );
