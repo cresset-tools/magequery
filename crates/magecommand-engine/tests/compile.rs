@@ -216,6 +216,50 @@ fn fused_interceptors_implement_interceptor_interface() {
     );
 }
 
+/// An area that redeclares a plugin NAME with another `type` calls its own
+/// class, not global's: the fused interceptor gets one accessor per
+/// (name, class), the later class suffixed `2` as creatuity's is, and the
+/// area's `case` calls that one.
+/// https://github.com/cresset-tools/magequery/issues/218
+#[test]
+fn fused_area_rebinding_a_plugin_name_calls_the_areas_class() {
+    let case_in = fixtures_dir().join("plugin-area-rebind/in");
+    let magento = Magento::open(&case_in).unwrap();
+    let mut defs = Definitions::scan(&magento, &case_in, &case_in.join("generated/code"));
+    let out = compute_outputs_opts(&magento, &mut defs, &case_in, true);
+    let (_, body) = out
+        .files
+        .iter()
+        .find(|(n, _)| n.ends_with("Acme/Ident/Model/Identifier/Interceptor.php"))
+        .expect("no Identifier interceptor");
+
+    let accessor = |suffix: &str, class: &str| {
+        format!(
+            "     * @return \\{class}\n     */\n    private function ____plugin_{suffix}()"
+        )
+    };
+    assert!(
+        body.contains(&accessor("acme_identifier", "Acme\\Ident\\Plugin\\Storefront")),
+        "global's class keeps the plain accessor:\n{body}"
+    );
+    assert!(
+        body.contains(&accessor("acme_identifier2", "Acme\\Ident\\Plugin\\Graph")),
+        "the area's class gets its own `2` accessor:\n{body}"
+    );
+
+    let graphql = body.find("\tcase 'graphql':").unwrap_or_else(|| panic!("no graphql case:\n{body}"));
+    let default = body.find("\tdefault:").unwrap_or_else(|| panic!("no default:\n{body}"));
+    assert!(graphql < default, "graphql case must precede default:\n{body}");
+    assert!(
+        body[graphql..default].contains("$this->____plugin_acme_identifier2()->afterGetValue("),
+        "graphql must call Graph:\n{body}"
+    );
+    assert!(
+        body[default..].contains("$this->____plugin_acme_identifier()->afterGetValue("),
+        "every other scope must call Storefront:\n{body}"
+    );
+}
+
 /// The first differing region, with a little context. A whole-document diff of
 /// a 20-file compile is unreadable in a test failure; the first difference is
 /// almost always the whole story.
