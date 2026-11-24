@@ -1,0 +1,438 @@
+# magecommand-engine compile fixture — the expected output of compute_outputs()
+# over `in/`, byte for byte. Everything below is generated; edit `in/` instead.
+# Re-bless: MAGECOMMAND_COMPILE_BLESS=1 cargo test -p magecommand-engine --test compile
+# files: 17  findings: 0  unresolved: 0
+
+===== file: code/Acme/Ident/Model/Identifier/Interceptor.php =====
+<?php
+namespace Acme\Ident\Model\Identifier;
+
+/**
+ * Interceptor class for @see \Acme\Ident\Model\Identifier
+ */
+class Interceptor extends \Acme\Ident\Model\Identifier implements \Magento\Framework\Interception\InterceptorInterface
+{
+    use \Magento\Framework\Interception\Interceptor;
+
+    public function __construct()
+    {
+        $this->___init();
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    public function getValue(): string
+    {
+        $pluginInfo = $this->pluginList->getNext($this->subjectType, 'getValue');
+        return $pluginInfo ? $this->___callPlugins('getValue', func_get_args(), $pluginInfo) : parent::getValue();
+    }
+}
+
+===== file: metadata/adminhtml.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => NULL,
+    'Acme\\Ident\\Plugin\\Graph' => NULL,
+    'Acme\\Ident\\Plugin\\Storefront' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 'Acme\\Ident\\Model\\Identifier\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/adminhtml|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier_getValue___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_identifier',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/app_action_list.php =====
+<?php return array (
+);
+
+===== file: metadata/crontab.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => NULL,
+    'Acme\\Ident\\Plugin\\Graph' => NULL,
+    'Acme\\Ident\\Plugin\\Storefront' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 'Acme\\Ident\\Model\\Identifier\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/crontab|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier_getValue___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_identifier',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/frontend.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => NULL,
+    'Acme\\Ident\\Plugin\\Graph' => NULL,
+    'Acme\\Ident\\Plugin\\Storefront' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 'Acme\\Ident\\Model\\Identifier\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/frontend|global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier_getValue___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_identifier',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => NULL,
+    'Acme\\Ident\\Plugin\\Graph' => NULL,
+    'Acme\\Ident\\Plugin\\Storefront' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 'Acme\\Ident\\Model\\Identifier\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/global|graphql|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Graph',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Graph',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier_getValue___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_identifier',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier_getValue___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_identifier',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|webapi_rest|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier_getValue___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_identifier',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/global|primary|webapi_soap|plugin-list.php =====
+<?php return array (
+  0 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  1 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 
+    array (
+      'acme_identifier' => 
+      array (
+        'sortOrder' => 0,
+        'instance' => 'Acme\\Ident\\Plugin\\Storefront',
+      ),
+    ),
+  ),
+  2 => 
+  array (
+    'Acme\\Ident\\Model\\Identifier_getValue___self' => 
+    array (
+      4 => 
+      array (
+        0 => 'acme_identifier',
+      ),
+    ),
+  ),
+);
+
+===== file: metadata/graphql.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => NULL,
+    'Acme\\Ident\\Plugin\\Graph' => NULL,
+    'Acme\\Ident\\Plugin\\Storefront' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 'Acme\\Ident\\Model\\Identifier\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/interception.php =====
+<?php return array (
+  'Acme\\Ident\\Model\\Identifier' => true,
+  'Acme\\Ident\\Model\\Identifier\\Interceptor' => false,
+  'Acme\\Ident\\Plugin\\Graph' => false,
+  'Acme\\Ident\\Plugin\\Storefront' => false,
+);
+
+===== file: metadata/webapi_rest.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => NULL,
+    'Acme\\Ident\\Plugin\\Graph' => NULL,
+    'Acme\\Ident\\Plugin\\Storefront' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 'Acme\\Ident\\Model\\Identifier\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== file: metadata/webapi_soap.php =====
+<?php return array (
+  'arguments' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => NULL,
+    'Acme\\Ident\\Plugin\\Graph' => NULL,
+    'Acme\\Ident\\Plugin\\Storefront' => NULL,
+  ),
+  'preferences' => 
+  array (
+    'Acme\\Ident\\Model\\Identifier' => 'Acme\\Ident\\Model\\Identifier\\Interceptor',
+  ),
+  'instanceTypes' => 
+  array (
+  ),
+  'nonLazyTypes' => 
+  array (
+  ),
+);
+
+===== findings =====
+
+===== unresolved =====
