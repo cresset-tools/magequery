@@ -52,9 +52,6 @@ class Interceptor extends \Acme\Pay\Model\Api implements \Magento\Framework\Inte
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -119,9 +116,6 @@ class Interceptor extends \Acme\Pay\Model\Api implements \Magento\Framework\Inte
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -182,9 +176,6 @@ class Interceptor extends \Acme\Pay\Model\Api implements \Magento\Framework\Inte
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -243,9 +234,6 @@ class Interceptor extends \Acme\Pay\Model\Api implements \Magento\Framework\Inte
     'Acme\\Pay\\Model\\Api' => 'Acme\\Pay\\Model\\Api\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );
@@ -440,9 +428,6 @@ class Interceptor extends \Acme\Pay\Model\Api implements \Magento\Framework\Inte
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -466,9 +451,6 @@ class Interceptor extends \Acme\Pay\Model\Api implements \Magento\Framework\Inte
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -483,9 +465,6 @@ class Interceptor extends \Acme\Pay\Model\Api implements \Magento\Framework\Inte
     'Acme\\Pay\\Model\\Api' => 'Acme\\Pay\\Model\\Api\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );

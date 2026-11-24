@@ -1256,15 +1256,20 @@ pub(crate) fn build_arguments(ctx: &ArgsCtx, magento: &Magento) -> BTreeMap<Stri
 pub(crate) fn setup_overrides(
     magento: &Magento,
     root: &std::path::Path,
+    lazy: crate::lazytypes::LazyPass,
 ) -> Vec<(String, String, Cfg)> {
     let chain = "Magento\\Setup\\Module\\Di\\Compiler\\Config\\Chain";
-    let mods = [
+    let mut mods = vec![
         ("BackslashTrim", format!("{chain}\\BackslashTrim")),
         ("PreferencesResolving", format!("{chain}\\PreferencesResolving")),
         ("InterceptorSubstitution", format!("{chain}\\InterceptorSubstitution")),
         ("InterceptionPreferencesResolving", format!("{chain}\\PreferencesResolving")),
-        ("NonLazyTypes", format!("{chain}\\NonLazyTypes")),
     ];
+    // The checkout's own lazy pass, whatever the target PHP: the command
+    // configures it unconditionally and the pass itself returns early.
+    if let Some((key, class)) = lazy.chain_step() {
+        mods.push((key, class.to_owned()));
+    }
     let mut overrides: Vec<(String, String, Cfg)> = vec![
         (
             "Magento\\Setup\\Module\\Di\\Compiler\\Config\\ModificationChain".to_owned(),

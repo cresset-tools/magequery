@@ -81,9 +81,10 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
   array (
     'AcmeShopStrictCheckout' => 'Acme\\Shop\\Model\\Checkout\\Interceptor',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmeShopStrictCheckout' => true,
+    'Acme\\Shop\\Plugin\\Audit' => true,
+    'Acme\\Shop\\Model\\Checkout\\Interceptor' => true,
   ),
 );
 
@@ -183,9 +184,10 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
   array (
     'AcmeShopStrictCheckout' => 'Acme\\Shop\\Model\\Checkout\\Interceptor',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmeShopStrictCheckout' => true,
+    'Acme\\Shop\\Plugin\\Audit' => true,
+    'Acme\\Shop\\Model\\Checkout\\Interceptor' => true,
   ),
 );
 
@@ -281,9 +283,10 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
   array (
     'AcmeShopStrictCheckout' => 'Acme\\Shop\\Model\\Checkout\\Interceptor',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmeShopStrictCheckout' => true,
+    'Acme\\Shop\\Plugin\\Audit' => true,
+    'Acme\\Shop\\Model\\Checkout\\Interceptor' => true,
   ),
 );
 
@@ -379,9 +382,10 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
   array (
     'AcmeShopStrictCheckout' => 'Acme\\Shop\\Model\\Checkout\\Interceptor',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmeShopStrictCheckout' => true,
+    'Acme\\Shop\\Plugin\\Audit' => true,
+    'Acme\\Shop\\Model\\Checkout\\Interceptor' => true,
   ),
 );
 
@@ -619,9 +623,10 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
   array (
     'AcmeShopStrictCheckout' => 'Acme\\Shop\\Model\\Checkout\\Interceptor',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmeShopStrictCheckout' => true,
+    'Acme\\Shop\\Plugin\\Audit' => true,
+    'Acme\\Shop\\Model\\Checkout\\Interceptor' => true,
   ),
 );
 
@@ -684,9 +689,10 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
   array (
     'AcmeShopStrictCheckout' => 'Acme\\Shop\\Model\\Checkout\\Interceptor',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmeShopStrictCheckout' => true,
+    'Acme\\Shop\\Plugin\\Audit' => true,
+    'Acme\\Shop\\Model\\Checkout\\Interceptor' => true,
   ),
 );
 
@@ -741,9 +747,10 @@ class Interceptor extends \Acme\Shop\Model\Checkout implements \Magento\Framewor
   array (
     'AcmeShopStrictCheckout' => 'Acme\\Shop\\Model\\Checkout\\Interceptor',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmeShopStrictCheckout' => true,
+    'Acme\\Shop\\Plugin\\Audit' => true,
+    'Acme\\Shop\\Model\\Checkout\\Interceptor' => true,
   ),
 );
 
