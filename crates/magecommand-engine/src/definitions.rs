@@ -547,8 +547,8 @@ impl Definitions {
                     .filter(|m| m.name.eq_ignore_ascii_case("__construct"))
                     .flat_map(|m| m.params.iter())
                     .filter_map(|param| {
-                        let ty = param.ty.as_deref()?;
-                        let ty = ty.strip_prefix('?').unwrap_or(ty);
+                        let ty = crate::reflect::normalize_nullable(param.ty.as_deref()?);
+                        let ty = ty.strip_prefix('?').unwrap_or(&ty);
                         if ty.contains('|') || ty.contains('&') || ty.contains('(') || !ty.contains('\\') {
                             return None;
                         }

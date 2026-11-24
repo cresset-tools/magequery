@@ -205,7 +205,7 @@ fn resolve_return_type(defs: &Definitions, declaring: &str, rt: Option<&str>) ->
 /// into a nullable named type: `T|null` (or `null|T`) reflects as `?T`
 /// (`getType()` returns a `ReflectionNamedType` with `allowsNull()`, not a
 /// `ReflectionUnionType`). Genuine multi-type unions keep `null` as a member.
-fn normalize_nullable(ty: &str) -> String {
+pub(crate) fn normalize_nullable(ty: &str) -> String {
     if ty.starts_with('?') || !ty.contains('|') {
         return ty.to_owned();
     }
