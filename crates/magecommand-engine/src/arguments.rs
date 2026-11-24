@@ -496,8 +496,10 @@ impl<'a> ArgsCtx<'a> {
     /// a single named non-builtin type (nullable ok); unions, intersections,
     /// and DNF yield None; self/parent/static resolve against the definer.
     fn param_class(&self, param: &ParamMeta, definer: &str) -> Option<String> {
-        let ty = param.ty.as_deref()?;
-        let ty = ty.strip_prefix('?').unwrap_or(ty);
+        // `T|null` reflects as `?T`, so it is a class type too:
+        // https://github.com/cresset-tools/magequery/issues/212
+        let ty = crate::reflect::normalize_nullable(param.ty.as_deref()?);
+        let ty = ty.strip_prefix('?').unwrap_or(&ty);
         if ty.contains('|') || ty.contains('&') || ty.contains('(') {
             return None;
         }
