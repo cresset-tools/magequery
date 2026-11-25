@@ -487,13 +487,34 @@ enum DiCommand {
         #[arg(long)]
         force: bool,
         /// Skip the compile entirely when no compile input changed since the
-        /// last run (a stat-fingerprint of the input tree), and neither did the
-        /// settings (`--fused`, `--target-*`, `--area-config`, as resolved). On
-        /// any change, does a normal full compile. The fast path for a tight edit-compile loop.
+        /// last run (a stat-fingerprint of the input tree). On any change, does a
+        /// normal full compile. The fast path for a tight edit-compile loop.
         #[arg(long)]
         incremental: bool,
-        #[command(flatten)]
-        settings: CompileSettings,
+        /// Emit fused interceptors (inlined plugin chains) instead of stock
+        /// runtime-dispatch ones — creatuity's technique. Global-only classes
+        /// only for now; multi-area classes still emit stock interceptors.
+        #[arg(long)]
+        fused: bool,
+        /// The PHP version the store runs (`8.4`, `8.3.12`). Mage-OS's
+        /// lazy-ghost pass writes its `lazyTypes` section only on PHP 8.4+, so
+        /// the output depends on the PHP `setup:di:compile` would run on.
+        /// Defaults to composer.json's `config.platform.php`, else 8.4+.
+        #[arg(long, value_name = "VERSION")]
+        target_php: Option<String>,
+        /// The platform the store runs, instead of reading it off the
+        /// checkout's `setup/`. One name per lazy-ghost pass, not an exact
+        /// version: `magento-2.4.9` (no pass), `mageos-3.0` (3.0–3.2, the
+        /// `nonLazyTypes` deny-list), `mageos-3.3` (3.3–3.x, the `lazyTypes`
+        /// allow-list), `mageos-4.0` (4.0+). For now it selects only that pass.
+        #[arg(
+            long,
+            value_name = "PLATFORM",
+            value_parser = clap::builder::TypedValueParser::map(clap::builder::PossibleValuesParser::new(
+                magecommand_engine::lazytypes::Platform::names()
+            ), |s| s.parse::<magecommand_engine::lazytypes::Platform>().expect("a listed name")),
+        )]
+        target_platform: Option<magecommand_engine::lazytypes::Platform>,
         #[command(flatten)]
         modules: ModuleArgs,
     },
@@ -543,90 +564,19 @@ enum DiCommand {
         #[arg(long, value_name = "FILE")]
         show_residual: Option<PathBuf>,
     },
-    /// Print a digest of the compile inputs and settings — a content-addressed
-    /// key for the generated output. Since the compile is a pure function of the
-    /// source tree and its settings, an unchanged digest means the last compile
-    /// is still valid: use it as a CI cache key for `generated/` (see
-    /// docs/incremental-compile.md). Pass the settings flags `di compile` gets.
+    /// Print a digest of the compile inputs — a content-addressed key for the
+    /// generated output. Since the compile is a pure function of the source
+    /// tree, an unchanged digest means the last compile is still valid: use it
+    /// as a CI cache key for `generated/` (see docs/incremental-compile.md).
     Digest {
         /// Fingerprint by mtime+size instead of file contents — fast, but mtime
         /// is unreliable after a fresh `git checkout`, so this matches the local
         /// `--incremental` short-circuit and is NOT a portable CI key.
         #[arg(long)]
         stat: bool,
-        /// The settings the compile runs with: the same output needs the same.
-        #[command(flatten)]
-        settings: CompileSettings,
         #[command(flatten)]
         modules: ModuleArgs,
     },
-}
-
-/// What the output depends on besides the input tree: `di compile` builds
-/// with these, and `di digest` folds them into its key.
-#[derive(clap::Args, Clone, Default)]
-struct CompileSettings {
-    /// Emit fused interceptors (inlined plugin chains) instead of stock
-    /// runtime-dispatch ones — creatuity's technique. Global-only classes
-    /// only for now; multi-area classes still emit stock interceptors.
-    #[arg(long)]
-    pub fused: bool,
-    /// The PHP version the store runs (`8.4`, `8.3.12`). Mage-OS's
-    /// lazy-ghost pass writes its `lazyTypes` section only on PHP 8.4+, so
-    /// the output depends on the PHP `setup:di:compile` would run on.
-    /// Defaults to composer.json's `config.platform.php`, else 8.4+.
-    #[arg(long, value_name = "VERSION")]
-    pub target_php: Option<String>,
-    /// The platform the store runs, instead of reading it off the
-    /// checkout's `setup/`. One name per lazy-ghost pass, not an exact
-    /// version: `magento-2.4.9` (no pass), `mageos-3.0` (3.0–3.2, the
-    /// `nonLazyTypes` deny-list), `mageos-3.3` (3.3–3.x, the `lazyTypes`
-    /// allow-list), `mageos-4.0` (4.0+). It selects that pass and the
-    /// default `--area-config`.
-    #[arg(
-        long,
-        value_name = "PLATFORM",
-        value_parser = clap::builder::TypedValueParser::map(clap::builder::PossibleValuesParser::new(
-            magecommand_engine::lazytypes::Platform::names()
-        ), |s| s.parse::<magecommand_engine::lazytypes::Platform>().expect("a listed name")),
-    )]
-    pub target_platform: Option<magecommand_engine::lazytypes::Platform>,
-    /// How the area files are laid out: `full` writes every area whole;
-    /// `diff` writes `global` whole and every other area as what differs
-    /// from it, which a Mage-OS 4.0+ runtime merges back (less OPcache
-    /// memory and disk, a little more work per request). Defaults to what
-    /// the platform's own compiler writes: `diff` on 4.0+, else `full`.
-    /// `diff` is refused for a platform whose runtime cannot read it.
-    #[arg(
-        long,
-        value_name = "LAYOUT",
-        value_parser = clap::builder::TypedValueParser::map(clap::builder::PossibleValuesParser::new(
-            magecommand_engine::arealayout::AreaLayout::names()
-        ), |s| s.parse::<magecommand_engine::arealayout::AreaLayout>().expect("a listed name")),
-    )]
-    pub area_config: Option<magecommand_engine::arealayout::AreaLayout>,
-}
-
-impl CompileSettings {
-    fn target(&self) -> magecommand_engine::lazytypes::Target<'_> {
-        magecommand_engine::lazytypes::Target {
-            php: self.target_php.as_deref(),
-            platform: self.target_platform,
-            area_layout: self.area_config,
-        }
-    }
-}
-
-/// Refuse `--area-config diff` for a platform whose runtime cannot read it.
-fn check_area_layout(root: &std::path::Path, target: &magecommand_engine::lazytypes::Target) -> anyhow::Result<()> {
-    if magecommand_engine::arealayout::AreaLayout::resolve(root, target).is_none() {
-        anyhow::bail!(
-            "--area-config diff: this platform's runtime cannot read area files written as \
-differences from global (Mage-OS 4.0+ only; it would drop global's configuration). \
-Pass --target-platform mageos-4.0 if the store runs 4.0, or drop the flag."
-        );
-    }
-    Ok(())
 }
 
 /// Which modules a compile sees, for a root that was never installed.
@@ -729,19 +679,24 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 dry_run,
                 force,
                 incremental,
-                ref settings,
-                ref modules,
+                fused,
+                target_php,
+                target_platform,
+                modules,
             } => compile(
                 cli.root,
                 cli.json,
                 dry_run,
                 force,
                 incremental,
-                settings.fused,
-                settings.target(),
-                modules,
+                fused,
+                magecommand_engine::lazytypes::Target {
+                    php: target_php.as_deref(),
+                    platform: target_platform,
+                },
+                &modules,
             ),
-            DiCommand::Digest { stat, ref settings, ref modules } => digest(cli.root, stat, settings, modules),
+            DiCommand::Digest { stat, modules } => digest(cli.root, stat, &modules),
             DiCommand::Watch { once } => watch::watch(cli.root, cli.json, once),
             DiCommand::Verify {
                 ref archive,
@@ -1998,8 +1953,6 @@ fn compile(
     let root = root.unwrap_or_else(|| PathBuf::from("."));
     let root = std::path::absolute(&root).unwrap_or(root);
 
-    check_area_layout(&root, &target)?;
-
     // Phase timing (stderr) when MAGECOMMAND_PROFILE is set — `lap!("label")`
     // prints the time since the previous lap and resets the clock.
     let prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
@@ -2032,7 +1985,6 @@ fn compile(
     // the input tree is never fingerprinted twice. `--force` bypasses; a dry-run
     // always reports.
     let bp = root.to_string_lossy().to_string();
-    let settings = magecommand_engine::manifest::compile_settings(&root, fused, &target);
     let code_dir = root.join("generated/code");
     let prev_manifest = if incremental && !force && dir_has_files(&code_dir) {
         magecommand_engine::manifest::Manifest::load(&root, &bp)
@@ -2049,8 +2001,7 @@ fn compile(
                 magecommand_engine::manifest::FingerprintMode::Stat,
             );
             lap!("input digest (short-circuit check)");
-            // The same inputs under other settings are a different output.
-            if current == prev.inputs_digest && prev.settings == settings {
+            if current == prev.inputs_digest {
                 // The tree on disk is current, so it must survive the next
                 // `bin/magento` boot just like a fresh write (see below).
                 consume_regenerate_flag(&root)?;
@@ -2060,7 +2011,7 @@ fn compile(
                     println!(
                         "{} {}",
                         style::pass("up to date"),
-                        style::dim("— no compile input or setting changed (use --force to rebuild)")
+                        style::dim("— no compile input changed (use --force to rebuild)")
                     );
                 }
                 return Ok(ExitCode::SUCCESS);
@@ -2204,7 +2155,7 @@ fn compile(
                 magecommand_engine::manifest::FingerprintMode::Stat,
             ),
         };
-        magecommand_engine::manifest::Manifest::new(&bp, digest, settings).save(&root)?;
+        magecommand_engine::manifest::Manifest::new(&bp, digest).save(&root)?;
         lap!("write manifest + input digest");
         consume_regenerate_flag(&root)?;
         println!("{} {written} generated/ file(s)", style::pass("wrote"));
@@ -2313,26 +2264,17 @@ fn warn_case_collapse(root: &std::path::Path, files: &[(String, String)]) {
     }
 }
 
-/// `magecommand di digest [--stat]` — print the digest of the compile's inputs
-/// and settings, and exit.
-fn digest(
-    root: Option<PathBuf>,
-    stat: bool,
-    settings: &CompileSettings,
-    modules: &ModuleArgs,
-) -> anyhow::Result<ExitCode> {
+/// `magecommand di digest [--stat]` — print the compile-input digest and exit.
+fn digest(root: Option<PathBuf>, stat: bool, modules: &ModuleArgs) -> anyhow::Result<ExitCode> {
     let root = root.unwrap_or_else(|| PathBuf::from("."));
     let root = std::path::absolute(&root).unwrap_or(root);
-    let target = settings.target();
-    check_area_layout(&root, &target)?;
     let magento = modules.open(&root)?;
     let mode = if stat {
         magecommand_engine::manifest::FingerprintMode::Stat
     } else {
         magecommand_engine::manifest::FingerprintMode::Content
     };
-    let settings = magecommand_engine::manifest::compile_settings(&root, settings.fused, &target);
-    println!("{}", magecommand_engine::manifest::output_digest(&magento, &root, mode, &settings));
+    println!("{}", magecommand_engine::manifest::input_digest(&magento, &root, mode));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -2354,22 +2296,6 @@ fn compare(
     strict_fallback: bool,
     show_residual: Option<&std::path::Path>,
 ) -> anyhow::Result<ExitCode> {
-    // Area files written as diffs from global (Mage-OS 4.0) compare by the
-    // configuration they hold, whichever layout each tree used.
-    let trees = magecommand_engine::arealayout::CompareTrees::new(archive, output)
-        .context("preparing the area files for comparison")?;
-    let (archive, output) = (&trees.archive, &trees.output);
-    if trees.archive_diffs != trees.output_diffs && !json {
-        let side = |diffs| if diffs { "differences from global" } else { "whole files" };
-        eprintln!(
-            "{}",
-            style::stderr::dim(&format!(
-                "note: the archive's area files are {}, the output's {}; compared by the configuration they hold",
-                side(trees.archive_diffs),
-                side(trees.output_diffs)
-            ))
-        );
-    }
     let report = magecommand_engine::compare_dirs(archive, output, strict_ordering)?;
 
     // The disabled-module explanations need the checkout (and the nulled-row

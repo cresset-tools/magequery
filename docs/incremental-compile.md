@@ -66,9 +66,9 @@ input), so the tree is never fingerprinted twice. The input set is
 `definitions::compile_input_files` (the `.php` the scan reads + the DI `.xml` +
 config/composer files, under the scan's own exclusion rules — sound by
 construction: over-covering only recompiles unnecessarily, under-covering would
-serve stale). `magecommand di digest` prints that digest folded with the compile
-settings as a **CI cache key** (content-hashed by default = checkout-independent;
-`--stat` = the fast local variant); it takes the same settings flags as `di compile`. Verified on the oracle: full compile byte-exact (4106 code + 16
+serve stale). `magecommand di digest` prints the same digest as a **CI cache key**
+(content-hashed by default = checkout-independent; `--stat` = the fast local
+variant). Verified on the oracle: full compile byte-exact (4106 code + 16
 metadata); no-op short-circuits; touching an input triggers a full recompile that
 stays byte-exact; live mode (archive hidden) incremental-on-change is
 byte-identical to a full compile. Caveat: the short-circuit walks the module +
@@ -300,10 +300,7 @@ generated/.mqcache/
    clear→compute→write a full compile runs. No partial reconcile, so there is no
    divergence surface. Verified live-mode byte-identical on the oracle.
 2. The input-digest short-circuit is **sound**: cover the complete input set
-   (derive it from the compile's own discovery code, over-cover on doubt). The
-   same inputs compile differently under other settings (`--fused`, `--target-php`,
-   `--target-platform`, `--area-config`), so the manifest also records the settings
-   as resolved, and a change there is a miss too.
+   (derive it from the compile's own discovery code, over-cover on doubt).
 3. `--force` bypasses the short-circuit (full clear + full write) — the
    always-safe fallback and the current default in CI examples until trust is
    established.
