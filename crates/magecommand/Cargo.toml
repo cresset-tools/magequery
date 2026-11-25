@@ -9,8 +9,7 @@ repository.workspace = true
 [dependencies]
 magecommand-engine = { path = "../magecommand-engine" }
 magecommand-less = { path = "../magecommand-less" }
-# `db` for the status gates (`db status` and friends read the live database).
-magequery-core = { path = "../magequery-core", features = ["db"] }
+magequery-core = { path = "../magequery-core" }
 clap = { version = "4", features = ["derive"] }
 # Report colors (`style` module) — already in the tree via clap.
 anstyle = "1"

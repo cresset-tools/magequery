@@ -325,12 +325,12 @@ pub fn build_area_file_from_export(
     }
 }
 
-/// One compiled area: its metadata-file stem (`global`, `frontend`, …), the
-/// full [`AreaFile`], and its already-rendered `<code>.php` body.
+/// One compiled area: its metadata-file stem (`global`, `frontend`, …) and the
+/// full [`AreaFile`]. Rendered once the compile is done, in the layout it
+/// writes (see [`crate::arealayout`]).
 pub struct CompiledArea {
     pub code: String,
     pub file: AreaFile,
-    pub rendered: String,
 }
 
 /// Every compiled area — the seven fixed areas in generation order, then
@@ -340,7 +340,7 @@ pub struct CompiledArea {
 /// full Reader + modification chain), and it was previously done *twice*: once
 /// to write the `<code>.php` metadata and again for codegen's incidental
 /// `class_exists` sweep. Build it once here and share both consumers. The areas
-/// are independent, so they build — and render — in parallel; `collect` into an
+/// are independent, so they build in parallel; `collect` into an
 /// indexed `Vec` preserves the fixed-then-custom (sorted) order the sweep and
 /// metadata write rely on.
 pub fn build_all_area_files(
@@ -374,8 +374,7 @@ pub fn build_all_area_files(
                     (code.clone(), build_area_file_from_export(magento, defs, &export, root, lazy))
                 }
             };
-            let rendered = file.render();
-            CompiledArea { code, file, rendered }
+            CompiledArea { code, file }
         })
         .collect()
 }
@@ -621,7 +620,8 @@ impl AreaFile {
         // clone (and drop) of the whole argument tree that a `PhpValue::Array`
         // wrapper + `to_php_file` would incur (~40 ms/area on a real install).
         crate::phpexport::area_file_to_php(
-            &self.arguments,
+            None,
+            self.arguments.iter(),
             &self.preferences,
             &self.instance_types,
             self.lazy.as_ref().map(|(name, types)| (*name, types.as_slice())),

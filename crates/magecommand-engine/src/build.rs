@@ -93,6 +93,10 @@ pub fn compute_outputs_with(
     target: &crate::lazytypes::Target,
 ) -> CompileOutputs {
     let lazy = crate::lazytypes::LazyPass::detect(root, target);
+    // A caller that asked for a layout the platform cannot read was refused
+    // before this; anything else gets the platform's own.
+    let layout = crate::arealayout::AreaLayout::resolve(root, target)
+        .unwrap_or(crate::arealayout::AreaLayout::Full);
     let _prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
     macro_rules! ilap {
         ($t:expr, $label:expr) => {
@@ -261,11 +265,26 @@ pub fn compute_outputs_with(
         ilap!(_it, "code (fold round)");
     }
 
+    // Rendered only now, once: the rounds above rebuild the areas, and a
+    // diff needs global's final file.
+    let rendered: Vec<String> = {
+        use rayon::prelude::*;
+        let global = area_files.iter().find(|ca| ca.code == "global").map(|ca| &ca.file);
+        area_files
+            .par_iter()
+            .map(|ca| match (layout, global) {
+                (crate::arealayout::AreaLayout::Diff, Some(global)) if ca.code != "global" => {
+                    crate::arealayout::render_diff(&ca.file, global)
+                }
+                _ => ca.file.render(),
+            })
+            .collect()
+    };
     let mut lost_arguments: std::collections::BTreeSet<(String, String)> = Default::default();
-    for ca in area_files {
+    for (ca, rendered) in area_files.into_iter().zip(rendered) {
         findings.extend(ca.file.findings.iter().cloned());
         lost_arguments.extend(ca.file.lost_arguments.iter().cloned());
-        files.push((format!("metadata/{}.php", ca.code), ca.rendered));
+        files.push((format!("metadata/{}.php", ca.code), rendered));
         drop_off_thread(ca.file);
     }
     files.push(("metadata/interception.php".to_owned(), interception::render(&interception)));

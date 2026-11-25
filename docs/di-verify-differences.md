@@ -317,10 +317,21 @@ runs late or never. Mage-OS 4.0 keeps a class off the list when it can't prove t
 constructor free of side effects. The report names these classes, and their files fail.
 
 On a 4.0 checkout `di compile` runs its own port of that check (Mage-OS's
-`ConstructorSideEffectScanner`). It reads constructor bodies with a simplified tokenizer:
-a string that interpolates `{$this->method()}` is one opaque token, so a trusted
-constructor's call written there is not seen. A difference caused by that would land in
-this section or the unexplained one, never silently.
+`ConstructorSideEffectScanner`). Its tokenizer matches PHP's `token_get_all`, including
+the tokens inside interpolated strings and heredocs, and the port gives the same answer as
+Mage-OS 4.0.0 for every class in a full Adobe Commerce checkout. One case it doesn't model
+is a property hook on a promoted constructor parameter; a difference caused by that would
+land in this section or the unexplained one, never silently.
+
+## Area file layout
+
+*Not a difference.* Mage-OS 4.0 writes `global.php` whole and every other area as
+`'_extends' => 'global'` plus the entries that differ from global; its runtime merges
+the two back. `di compile` does the same on 4.0, or writes every area whole with
+`--area-config full`. When either tree holds such a file, verify brings both trees'
+area files to one form before comparing (each area's differences from its own tree's
+global, merged back onto it), so a whole file and a diff holding the same
+configuration are identical. A note on stderr says when the two layouts differed.
 
 ## Ordering only
 

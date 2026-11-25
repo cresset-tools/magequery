@@ -11,6 +11,7 @@
 use std::path::PathBuf;
 
 pub mod areaconfig;
+pub mod arealayout;
 pub mod arguments;
 pub mod build;
 pub mod classify;

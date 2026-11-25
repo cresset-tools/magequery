@@ -4,9 +4,8 @@
 //! The `config.php` reader here only extracts the `modules` block — a full PHP
 //! array-literal parser (for `env.php`/`config.php` `system`/`scopes`) is phase 2.
 
-use std::borrow::Cow;
-
-use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
 
 use crate::ids::{ClassName, EventName, ModuleName};
 

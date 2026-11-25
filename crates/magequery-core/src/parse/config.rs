@@ -45,7 +45,7 @@ pub(crate) fn config_xml_defaults(xml: &str) -> Vec<(String, String, String, u32
             }
             Ok(Event::Text(e)) => {
                 if let Some(top) = stack.last_mut() {
-                    top.text.push_str(text(&e));
+                    top.text.push_str(&e.unescape().unwrap_or_default());
                 }
             }
             Ok(Event::End(_)) => {

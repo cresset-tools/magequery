@@ -110,20 +110,20 @@ pub(crate) fn module_xml(xml: &str) -> Result<ParsedModuleXml, String> {
                 let empty = matches!(event, Ok(Event::Empty(_)));
                 let at = depth + 1;
                 match (e.name().as_ref(), at) {
-                    ("module", 2) if name.is_none() => {
-                        name = attr(e, "name").map(ModuleName::new);
-                        setup_version = attr(e, "setup_version");
+                    (b"module", 2) if name.is_none() => {
+                        name = attr(e, b"name").map(ModuleName::new);
+                        setup_version = attr(e, b"setup_version");
                         in_target = !empty;
                     }
-                    ("sequence", 3) if in_target => {
+                    (b"sequence", 3) if in_target => {
                         if empty {
                             sequence = Vec::new();
                         } else {
                             pending = Some(Vec::new());
                         }
                     }
-                    ("module", 4) => {
-                        if let (Some(seq), Some(n)) = (pending.as_mut(), attr(e, "name")) {
+                    (b"module", 4) => {
+                        if let (Some(seq), Some(n)) = (pending.as_mut(), attr(e, b"name")) {
                             seq.push(ModuleName::new(n));
                         }
                     }
@@ -135,12 +135,12 @@ pub(crate) fn module_xml(xml: &str) -> Result<ParsedModuleXml, String> {
             }
             Ok(Event::End(ref e)) => {
                 match (e.name().as_ref(), depth) {
-                    ("sequence", 3) => {
+                    (b"sequence", 3) => {
                         if let Some(seq) = pending.take() {
                             sequence = seq;
                         }
                     }
-                    ("module", 2) => in_target = false,
+                    (b"module", 2) => in_target = false,
                     _ => {}
                 }
                 depth = depth.saturating_sub(1);

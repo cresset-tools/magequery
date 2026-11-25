@@ -16,6 +16,4 @@ rayon = "1"
 quick-xml.workspace = true
 blake3 = "1"
 rustc-hash = "2"
-
-[dev-dependencies]
 tempfile = "3"

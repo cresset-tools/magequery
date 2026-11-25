@@ -42,14 +42,14 @@ pub(crate) fn extension_attributes_xml(xml: &str) -> Vec<RawExtAttr> {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
                 "extension_attributes" => {
-                    for_type = attr(&e, "for").map(ClassName::new);
+                    for_type = attr(&e, b"for").map(ClassName::new);
                 }
                 "attribute" => {
                     if let Some(ft) = &for_type {
                         out.push(RawExtAttr {
                             for_type: ft.clone(),
-                            code: attr(&e, "code").unwrap_or_default(),
-                            ty: attr(&e, "type").unwrap_or_default(),
+                            code: attr(&e, b"code").unwrap_or_default(),
+                            ty: attr(&e, b"type").unwrap_or_default(),
                             resources: Vec::new(),
                             join: None,
                             line,
@@ -58,16 +58,16 @@ pub(crate) fn extension_attributes_xml(xml: &str) -> Vec<RawExtAttr> {
                     }
                 }
                 "resource" => {
-                    if let (Some(i), Some(r)) = (cur, attr(&e, "ref")) {
+                    if let (Some(i), Some(r)) = (cur, attr(&e, b"ref")) {
                         out[i].resources.push(r);
                     }
                 }
                 "join" => {
                     if let Some(i) = cur {
                         out[i].join = Some(RawExtJoin {
-                            reference_table: attr(&e, "reference_table").unwrap_or_default(),
-                            reference_field: attr(&e, "reference_field"),
-                            join_on_field: attr(&e, "join_on_field"),
+                            reference_table: attr(&e, b"reference_table").unwrap_or_default(),
+                            reference_field: attr(&e, b"reference_field"),
+                            join_on_field: attr(&e, b"join_on_field"),
                             fields: Vec::new(),
                         });
                     }
@@ -78,7 +78,7 @@ pub(crate) fn extension_attributes_xml(xml: &str) -> Vec<RawExtAttr> {
             Ok(Event::Text(e)) => {
                 if in_field {
                     if let Some(join) = cur.and_then(|i| out[i].join.as_mut()) {
-                        let t = text(&e).trim().to_string();
+                        let t = e.unescape().unwrap_or_default().trim().to_string();
                         if !t.is_empty() {
                             join.fields.push(t);
                         }
@@ -86,9 +86,9 @@ pub(crate) fn extension_attributes_xml(xml: &str) -> Vec<RawExtAttr> {
                 }
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
-                "attribute" => cur = None,
-                "extension_attributes" => for_type = None,
-                "field" => in_field = false,
+                b"attribute" => cur = None,
+                b"extension_attributes" => for_type = None,
+                b"field" => in_field = false,
                 _ => {}
             },
             _ => {}
@@ -171,18 +171,18 @@ pub(crate) fn menu_xml(xml: &str) -> Vec<RawMenuOp> {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match local_name(&e).as_str() {
                 "add" | "update" => out.push(RawMenuOp::Upsert(RawMenuItem {
-                    id: attr(&e, "id").unwrap_or_default(),
-                    title: attr(&e, "title"),
-                    parent: attr(&e, "parent"),
-                    action: attr(&e, "action"),
-                    resource: attr(&e, "resource"),
-                    sort_order: attr(&e, "sortOrder").and_then(|s| s.trim().parse().ok()),
-                    depends_on_module: attr(&e, "dependsOnModule"),
-                    depends_on_config: attr(&e, "dependsOnConfig"),
+                    id: attr(&e, b"id").unwrap_or_default(),
+                    title: attr(&e, b"title"),
+                    parent: attr(&e, b"parent"),
+                    action: attr(&e, b"action"),
+                    resource: attr(&e, b"resource"),
+                    sort_order: attr(&e, b"sortOrder").and_then(|s| s.trim().parse().ok()),
+                    depends_on_module: attr(&e, b"dependsOnModule"),
+                    depends_on_config: attr(&e, b"dependsOnConfig"),
                     line,
                 })),
                 "remove" => {
-                    if let Some(id) = attr(&e, "id") {
+                    if let Some(id) = attr(&e, b"id") {
                         out.push(RawMenuOp::Remove { id });
                     }
                 }
