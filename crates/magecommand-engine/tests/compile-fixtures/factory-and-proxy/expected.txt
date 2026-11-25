@@ -231,10 +231,6 @@ class RowFactory
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Catalog\\Model\\Reader\\Proxy' => true,
-  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -318,10 +314,6 @@ class RowFactory
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Catalog\\Model\\Reader\\Proxy' => true,
-  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -401,10 +393,6 @@ class RowFactory
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Catalog\\Model\\Reader\\Proxy' => true,
-  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -483,10 +471,6 @@ class RowFactory
   ),
   'instanceTypes' => 
   array (
-  ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Catalog\\Model\\Reader\\Proxy' => true,
   ),
 );
 
@@ -606,10 +590,6 @@ class RowFactory
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Catalog\\Model\\Reader\\Proxy' => true,
-  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -686,10 +666,6 @@ class RowFactory
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Catalog\\Model\\Reader\\Proxy' => true,
-  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -755,10 +731,6 @@ class RowFactory
   ),
   'instanceTypes' => 
   array (
-  ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Catalog\\Model\\Reader\\Proxy' => true,
   ),
 );
 

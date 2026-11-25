@@ -439,6 +439,25 @@ enum DiCommand {
         /// only for now; multi-area classes still emit stock interceptors.
         #[arg(long)]
         fused: bool,
+        /// The PHP version the store runs (`8.4`, `8.3.12`). Mage-OS's
+        /// lazy-ghost pass writes its `lazyTypes` section only on PHP 8.4+, so
+        /// the output depends on the PHP `setup:di:compile` would run on.
+        /// Defaults to composer.json's `config.platform.php`, else 8.4+.
+        #[arg(long, value_name = "VERSION")]
+        target_php: Option<String>,
+        /// The platform the store runs, instead of reading it off the
+        /// checkout's `setup/`. One name per lazy-ghost pass, not an exact
+        /// version: `magento-2.4.9` (no pass), `mageos-3.0` (3.0–3.2, the
+        /// `nonLazyTypes` deny-list), `mageos-3.3` (3.3–3.x, the `lazyTypes`
+        /// allow-list), `mageos-4.0` (4.0+). For now it selects only that pass.
+        #[arg(
+            long,
+            value_name = "PLATFORM",
+            value_parser = clap::builder::TypedValueParser::map(clap::builder::PossibleValuesParser::new(
+                magecommand_engine::lazytypes::Platform::names()
+            ), |s| s.parse::<magecommand_engine::lazytypes::Platform>().expect("a listed name")),
+        )]
+        target_platform: Option<magecommand_engine::lazytypes::Platform>,
         #[command(flatten)]
         modules: ModuleArgs,
     },
@@ -595,9 +614,27 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
     match cli.command {
         Command::Skill => unreachable!("handled above"),
         Command::Di { command } => match command {
-            DiCommand::Compile { dry_run, force, incremental, fused, modules } => {
-                compile(cli.root, cli.json, dry_run, force, incremental, fused, &modules)
-            }
+            DiCommand::Compile {
+                dry_run,
+                force,
+                incremental,
+                fused,
+                target_php,
+                target_platform,
+                modules,
+            } => compile(
+                cli.root,
+                cli.json,
+                dry_run,
+                force,
+                incremental,
+                fused,
+                magecommand_engine::lazytypes::Target {
+                    php: target_php.as_deref(),
+                    platform: target_platform,
+                },
+                &modules,
+            ),
             DiCommand::Digest { stat, modules } => digest(cli.root, stat, &modules),
             DiCommand::Watch { once } => watch::watch(cli.root, cli.json, once),
             DiCommand::Verify {
@@ -1832,7 +1869,7 @@ fn static_cssdiff(
 
 // The final `lap!` resets `t` without a subsequent read — expected for a
 // timing macro whose last call closes the sequence.
-#[allow(unused_assignments)]
+#[allow(unused_assignments, clippy::too_many_arguments)]
 fn compile(
     root: Option<PathBuf>,
     json: bool,
@@ -1840,6 +1877,7 @@ fn compile(
     force: bool,
     incremental: bool,
     fused: bool,
+    target: magecommand_engine::lazytypes::Target,
     modules: &ModuleArgs,
 ) -> anyhow::Result<ExitCode> {
     use magequery_core::Area;
@@ -2035,7 +2073,8 @@ fn compile(
         // interception → plugin-lists → generated/code), as one in-memory output
         // set. This is the exact path `watch` runs, so the two emit identical
         // bytes. Per-phase timings print under MAGECOMMAND_PROFILE from inside.
-        let out = magecommand_engine::build::compute_outputs_opts(&magento, &mut defs, &root, fused);
+        let out =
+            magecommand_engine::build::compute_outputs_with(&magento, &mut defs, &root, fused, &target);
         lap!("compute outputs (in memory)");
         // Write the whole tree (the compute cleared it first). Direct parallel
         // write, no reconcile — on APFS reusing unchanged files costs more than
@@ -2440,6 +2479,27 @@ fn compare(
             }
             if classified.lost_arguments.len() > sample {
                 println!("    … {} more", classified.lost_arguments.len() - sample);
+            }
+        }
+        // Lazy where the reference is eager: the constructor would run late or never.
+        if !classified.unsafe_lazy_types.is_empty() {
+            println!(
+                "\n  {}",
+                style::fail(&format!(
+                    "{} class(es) in the output's lazyTypes that the reference keeps eager: \
+                     built as lazy ghosts, their constructors run late or never",
+                    classified.unsafe_lazy_types.len()
+                ))
+            );
+            for r in classified.unsafe_lazy_types.iter().take(sample) {
+                println!(
+                    "    {}  {}",
+                    style::class(&r.class),
+                    style::dim(&format!("lazy in {} file(s)", r.files.len()))
+                );
+            }
+            if classified.unsafe_lazy_types.len() > sample {
+                println!("    … {} more", classified.unsafe_lazy_types.len() - sample);
             }
         }
         // The first real divergence between two versions of one file.

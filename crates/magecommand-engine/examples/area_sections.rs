@@ -1,6 +1,6 @@
 //! Bring-up harness: compare per-area `arguments`/`preferences`/
 //! `instanceTypes` sections against the archived area files, before whole
-//! files can be byte-compared (`nonLazyTypes` still pending).
+//! files can be byte-compared.
 //!
 //! ```sh
 //! cargo run --release -p magecommand-engine --example area_sections [-- <root> [area]]
@@ -74,14 +74,15 @@ fn main() {
             format!("{body}\n")
         };
 
+        let (lazy_key, lazy_types) = file.lazy.clone().unwrap_or(("lazyTypes", Vec::new()));
         let non_lazy_rendered = {
             let section = PhpValue::Array(
-                file.non_lazy
+                lazy_types
                     .iter()
                     .map(|k| (PhpKey::str(k.clone()), PhpValue::Bool(true)))
                     .collect(),
             );
-            let wrapper = PhpValue::Array(vec![(PhpKey::str("nonLazyTypes"), section)]);
+            let wrapper = PhpValue::Array(vec![(PhpKey::str(lazy_key), section)]);
             let full = magecommand_engine::phpexport::to_php_file(&wrapper);
             let body = full
                 .strip_prefix("<?php return array (\n")
@@ -96,7 +97,7 @@ fn main() {
                 "instanceTypes",
                 render_section("instanceTypes", &file.instance_types),
             ),
-            ("nonLazyTypes", non_lazy_rendered),
+            (lazy_key, non_lazy_rendered),
         ] {
             match extract_section(&archive, key) {
                 None => {

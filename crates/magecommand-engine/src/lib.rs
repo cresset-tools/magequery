@@ -22,6 +22,8 @@ mod genequiv;
 pub mod interception;
 pub mod interceptor;
 pub mod laminas;
+pub mod lazytypes;
+pub mod sideeffect;
 pub mod manifest;
 pub mod metadata;
 pub mod proxy;

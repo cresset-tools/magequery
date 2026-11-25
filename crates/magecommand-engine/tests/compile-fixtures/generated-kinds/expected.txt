@@ -264,11 +264,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => true,
-    'Acme\\Gen\\Model\\Heavy\\Proxy' => true,
-  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -344,11 +339,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => true,
-    'Acme\\Gen\\Model\\Heavy\\Proxy' => true,
-  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -420,11 +410,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => true,
-    'Acme\\Gen\\Model\\Heavy\\Proxy' => true,
-  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -495,11 +480,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   ),
   'instanceTypes' => 
   array (
-  ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => true,
-    'Acme\\Gen\\Model\\Heavy\\Proxy' => true,
   ),
 );
 
@@ -611,11 +591,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => true,
-    'Acme\\Gen\\Model\\Heavy\\Proxy' => true,
-  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -689,11 +664,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => true,
-    'Acme\\Gen\\Model\\Heavy\\Proxy' => true,
-  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -751,11 +721,6 @@ class Proxy extends \Acme\Gen\Model\Heavy implements \Magento\Framework\ObjectMa
   ),
   'instanceTypes' => 
   array (
-  ),
-  'nonLazyTypes' => 
-  array (
-    'Acme\\Gen\\Api\\Data\\ItemExtension' => true,
-    'Acme\\Gen\\Model\\Heavy\\Proxy' => true,
   ),
 );
 

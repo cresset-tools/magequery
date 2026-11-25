@@ -66,9 +66,6 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/adminhtml|global|primary|plugin-list.php =====
@@ -148,9 +145,6 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/crontab|global|primary|plugin-list.php =====
@@ -226,9 +220,6 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/frontend|global|primary|plugin-list.php =====
@@ -302,9 +293,6 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
     'Acme\\First\\Model\\ThingA' => 'Acme\\First\\Model\\ThingA\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );
@@ -493,9 +481,6 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/interception.php =====
@@ -543,9 +528,6 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
   'instanceTypes' => 
   array (
   ),
-  'nonLazyTypes' => 
-  array (
-  ),
 );
 
 ===== file: metadata/webapi_soap.php =====
@@ -582,9 +564,6 @@ class Interceptor extends \Acme\First\Model\ThingA implements \Magento\Framework
     'Acme\\First\\Model\\ThingA' => 'Acme\\First\\Model\\ThingA\\Interceptor',
   ),
   'instanceTypes' => 
-  array (
-  ),
-  'nonLazyTypes' => 
   array (
   ),
 );

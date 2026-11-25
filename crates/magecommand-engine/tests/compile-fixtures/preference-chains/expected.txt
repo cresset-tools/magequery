@@ -35,9 +35,11 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -90,9 +92,11 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -141,9 +145,11 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -192,9 +198,11 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -287,9 +295,11 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -336,9 +346,11 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -374,9 +386,11 @@
   array (
     'AcmePrefVirtual' => 'Acme\\Pref\\Model\\C',
   ),
-  'nonLazyTypes' => 
+  'lazyTypes' => 
   array (
-    'AcmePrefVirtual' => true,
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 

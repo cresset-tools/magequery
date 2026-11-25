@@ -48,8 +48,9 @@ pub enum KnownKind {
     /// twin of [`KnownKind::DisabledModuleReachableType`].
     DisabledModuleReachableArtifact,
     /// A metadata DI-config file the output only extends with the allowlisted
-    /// 2.4.9 additions (the `nonLazyTypes` section and its compiler-chain step,
-    /// and `interception.php` rows asserting `false`) — see
+    /// additions (a lazy-ghost section the archive's compile did not write, the
+    /// archive lacking that compiler-chain step, and `interception.php` rows
+    /// asserting `false`) — see
     /// `drop_allowed_additions`. Any other addition keeps the file flagged.
     ExtraMetadata,
     /// A metadata DI-config file whose only substantive difference (once
@@ -75,6 +76,11 @@ pub enum KnownKind {
     /// `setup:di:compile` does not scan `setup/src` for the area config — the
     /// pre-2.4.8 behavior (magento/magento2#33161 added it).
     SetupAreaConfig,
+    /// Mage-OS's `lazyTypes` allow-list, where every class the output lets be
+    /// lazy the reference does too, but the reference has more. A warning: a
+    /// class missing from the list is built eagerly, which is always safe and
+    /// only loses the lazy-ghost speed-up.
+    FewerLazyTypes,
 }
 
 /// The document that explains every [`KnownKind`], one section per kind. The
@@ -89,7 +95,7 @@ pub const ORDERING_ONLY_SLUG: &str = "ordering-only";
 
 impl KnownKind {
     /// Every kind, for exhaustive checks (e.g. that each has a doc section).
-    pub const ALL: [KnownKind; 12] = [
+    pub const ALL: [KnownKind; 13] = [
         KnownKind::PluginListScopeOrder,
         KnownKind::DisabledModuleInterceptor,
         KnownKind::DisabledModuleMetadata,
@@ -102,6 +108,7 @@ impl KnownKind {
         KnownKind::GeneratorVersionFormatting,
         KnownKind::RuntimeResolvedArguments,
         KnownKind::SetupAreaConfig,
+        KnownKind::FewerLazyTypes,
     ];
 
     /// Stable anchor of this kind's section in [`DIFFERENCES_DOC_URL`]. Each is
@@ -121,6 +128,7 @@ impl KnownKind {
             KnownKind::GeneratorVersionFormatting => "generator-version-formatting",
             KnownKind::RuntimeResolvedArguments => "runtime-resolved-arguments",
             KnownKind::SetupAreaConfig => "setup-area-config",
+            KnownKind::FewerLazyTypes => "fewer-lazy-types",
         }
     }
 
@@ -148,7 +156,7 @@ impl KnownKind {
                 "Generated artifacts only disabled modules asked for"
             }
             KnownKind::ExtraMetadata => {
-                "Extra DI-config metadata (output superset — nonLazyTypes, Magento 2.4.9)"
+                "Extra DI-config metadata (output superset — the lazy-ghost pass on PHP 8.4)"
             }
             KnownKind::ClassScannerExcludeRegex => {
                 "ClassesScanner directory-exclusion regex (enabled-module set differs)"
@@ -162,6 +170,9 @@ impl KnownKind {
             }
             KnownKind::SetupAreaConfig => {
                 "Setup application classes in DI config (Magento 2.4.8 behavior)"
+            }
+            KnownKind::FewerLazyTypes => {
+                "Classes the reference lets be lazy and the output builds eagerly"
             }
         }
     }
@@ -211,6 +222,11 @@ pub struct Classified {
     /// two spellings cannot be told apart, and
     /// [`KnownKind::RuntimeResolvedArguments`].
     pub warnings: Vec<KnownGroup>,
+    /// Classes the output's `lazyTypes` lets be lazy where the archive's keeps
+    /// them eager: a lazy ghost postpones the constructor to first use, so a
+    /// constructor with side effects the reference's compiler would not trust
+    /// runs late or never. Never explained: their files stay in `changed`.
+    pub unsafe_lazy_types: Vec<RuntimeArguments>,
 }
 
 /// A class whose `arguments` entry is `NULL` in the output but a non-empty row
@@ -373,6 +389,8 @@ impl ClassifyCtx<'_> {
             .map(RuntimeArguments::key)
             .chain(self.setup_area_config.iter().cloned())
             .collect();
+        let (archive, output) = set_aside_lazy_subset(archive, output);
+        let (archive, output) = (archive.as_ref(), output.as_ref());
         if runtime.is_empty() {
             return (strip(archive), strip(output));
         }
@@ -540,6 +558,14 @@ payment module. Verified against the disabled modules' own source, one PHP heade
         known.push(group);
     }
 
+    // 5c'. Fewer lazy types: an archive `lazyTypes` allow-list that holds every
+    //    class the output's does, and more. Set aside inside every metadata rule
+    //    (see `set_aside_lazy_subset`); here the files whose only difference it
+    //    is, and the warning naming the classes either way.
+    if let Some(group) = fewer_lazy_types(&mut changed, ctx) {
+        warnings.push(group);
+    }
+
     // 6. Extra metadata: a changed metadata file that equals the archive once
     //    the allowlisted 2.4.9 additions are set aside (chiefly the `nonLazyTypes`
     //    section) — magecommand's target being ahead of the older archive.
@@ -586,7 +612,117 @@ payment module. Verified against the disabled modules' own source, one PHP heade
         null_arguments: ctx.null_arguments.to_vec(),
         lost_arguments,
         warnings,
+        unsafe_lazy_types: unsafe_lazy_types(&report.changed, ctx),
     }
+}
+
+/// The `lazyTypes` section of a metadata file: the byte range of the whole
+/// section (header to closing `  ),\n`) and its keys as written (escaped).
+fn lazy_types_section(text: &str) -> Option<(std::ops::Range<usize>, Vec<&str>)> {
+    const HEADER: &str = "\n  'lazyTypes' => \n  array (\n";
+    const CLOSE: &str = "  ),\n";
+    let start = text.find(HEADER)? + 1;
+    let body = start + HEADER.len() - 1;
+    let rest = &text[body..];
+    let close = if rest.starts_with(CLOSE) { 0 } else { rest.find(&format!("\n{CLOSE}"))? + 1 };
+    let keys = rest[..close]
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('\'')?.strip_suffix("' => true,"))
+        .collect();
+    Some((start..body + close + CLOSE.len(), keys))
+}
+
+/// The two sides' `lazyTypes` keys, when both have the section and they differ
+/// (as a set or in order).
+fn lazy_types_pair<'a>(archive: &'a str, output: &'a str) -> Option<(Vec<&'a str>, Vec<&'a str>)> {
+    let (_, a) = lazy_types_section(archive)?;
+    let (_, b) = lazy_types_section(output)?;
+    (a != b).then_some((a, b))
+}
+
+/// Both sides with their `lazyTypes` section removed, when the output's
+/// allow-list is a subset of the archive's: every class the output may build
+/// as a lazy ghost the reference may too, so what is left is only classes the
+/// output builds eagerly — always safe. Anything else is left in place.
+fn set_aside_lazy_subset<'a>(
+    archive: &'a str,
+    output: &'a str,
+) -> (std::borrow::Cow<'a, str>, std::borrow::Cow<'a, str>) {
+    use std::borrow::Cow;
+    let subset = lazy_types_pair(archive, output).is_some_and(|(a, b)| {
+        let a: HashSet<&str> = a.into_iter().collect();
+        b.iter().all(|k| a.contains(k))
+    });
+    if !subset {
+        return (Cow::Borrowed(archive), Cow::Borrowed(output));
+    }
+    let without = |text: &'a str| -> Cow<'a, str> {
+        let (range, _) = lazy_types_section(text).expect("checked above");
+        Cow::Owned(format!("{}{}", &text[..range.start], &text[range.end..]))
+    };
+    (without(archive), without(output))
+}
+
+/// Rule 5c': the archive's `lazyTypes` lists every class the output's does,
+/// plus some. A warning, not a failure: a class absent from the allow-list is
+/// constructed eagerly, which is how every class was built before the pass.
+fn fewer_lazy_types(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownGroup> {
+    let mut files: HashSet<String> = HashSet::new();
+    let mut classes: std::collections::BTreeSet<String> = Default::default();
+    for c in changed.iter().filter(|c| c.starts_with("metadata/")) {
+        let (Ok(a), Ok(b)) =
+            (fs::read_to_string(ctx.archive.join(c)), fs::read_to_string(ctx.output.join(c)))
+        else {
+            continue;
+        };
+        let Some((ka, kb)) = lazy_types_pair(&a, &b) else { continue };
+        let kb: HashSet<&str> = kb.into_iter().collect();
+        let ka_set: HashSet<&str> = ka.iter().copied().collect();
+        if !kb.iter().all(|k| ka_set.contains(k)) {
+            continue;
+        }
+        files.insert(c.clone());
+        classes.extend(ka.iter().filter(|k| !kb.contains(*k)).map(|k| k.replace("\\\\", "\\")));
+    }
+    if files.is_empty() {
+        return None;
+    }
+    let files_ref: HashSet<&str> = files.iter().map(String::as_str).collect();
+    claim_stripped(changed, ctx, Some(&files_ref));
+    Some(KnownGroup {
+        kind: KnownKind::FewerLazyTypes,
+        title: KnownKind::FewerLazyTypes.title().to_owned(),
+        explanation: "The reference's `lazyTypes` allow-list holds every class the output's \
+does, and these as well (or the same classes in another order). Mage-OS's compiled factory builds \
+a class as a PHP 8.4 lazy ghost only when it is on the list, so these are constructed eagerly \
+instead: always correct, only slower."
+            .to_owned(),
+        items: classes.into_iter().collect(),
+        verified: true,
+    })
+}
+
+/// Classes the output's `lazyTypes` has and the archive's lacks, with the files
+/// where. The reference keeps them eager, typically because its compiler could
+/// not prove the constructor free of side effects.
+fn unsafe_lazy_types(changed: &[String], ctx: &ClassifyCtx) -> Vec<RuntimeArguments> {
+    let mut by_class: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for c in changed.iter().filter(|c| c.starts_with("metadata/")) {
+        let (Ok(a), Ok(b)) =
+            (fs::read_to_string(ctx.archive.join(c)), fs::read_to_string(ctx.output.join(c)))
+        else {
+            continue;
+        };
+        let Some((ka, kb)) = lazy_types_pair(&a, &b) else { continue };
+        let ka: HashSet<&str> = ka.into_iter().collect();
+        for k in kb.into_iter().filter(|k| !ka.contains(k)) {
+            by_class.entry(k.replace("\\\\", "\\")).or_default().push(c.clone());
+        }
+    }
+    by_class
+        .into_iter()
+        .map(|(class, files)| RuntimeArguments { class, files, configured: None })
+        .collect()
 }
 
 /// Claim each changed file that is equal once `keys` are stripped (with the
@@ -1939,8 +2075,16 @@ fn entry_value(line: &str) -> &str {
 ///   asserts "no plugins"; were that wrong, the type's interceptor and its
 ///   plugin-list entries would be missing too, and those stay flagged.
 fn drop_allowed_additions(archive: &str, output: &str) -> String {
-    let archive_has_pass = archive.contains("\n  'nonLazyTypes' => ")
-        || archive.contains("Compiler\\\\Config\\\\Chain\\\\NonLazyTypes'");
+    // Per name: whether the archive has that lazy-ghost section, and that step.
+    let has_section = |name: &str| archive.contains(&format!("\n  '{name}' => "));
+    let has_step =
+        |name: &str| archive.contains(&format!("Compiler\\\\Config\\\\Chain\\\\{name}'"));
+    let sections: Vec<String> = ["lazyTypes", "nonLazyTypes"]
+        .into_iter()
+        .filter(|n| !has_section(n))
+        .map(|n| format!("  '{n}' => "))
+        .collect();
+    let steps: Vec<&str> = ["LazyTypes", "NonLazyTypes"].into_iter().filter(|n| !has_step(n)).collect();
     // `interception.php` is the one flat class => bool map; the area files open
     // with a section header and the plugin lists with `  0 => `.
     let is_interception = archive
@@ -1951,10 +2095,10 @@ fn drop_allowed_additions(archive: &str, output: &str) -> String {
 
     let mut out = String::with_capacity(output.len());
     let mut lines = output.lines().peekable();
-    while let Some(line) = lines.next() {
-        if !archive_has_pass {
-            // `  'nonLazyTypes' => ` … `  ),`
-            if line == "  'nonLazyTypes' => " {
+    'lines: while let Some(line) = lines.next() {
+        {
+            // `  'lazyTypes' => ` … `  ),`
+            if sections.iter().any(|s| s == line) {
                 for inner in lines.by_ref() {
                     if inner == "  )," {
                         break;
@@ -1962,19 +2106,24 @@ fn drop_allowed_additions(archive: &str, output: &str) -> String {
                 }
                 continue;
             }
-            // `<indent>'NonLazyTypes' => ` / `array (` / `'_i_' => '…\NonLazyTypes',` / `),`
-            if line.trim() == "'NonLazyTypes' =>" || line.trim_end().ends_with("'NonLazyTypes' =>") {
+        }
+        for step in &steps {
+            // `<indent>'LazyTypes' => ` / `array (` / `'_i_' => '…\LazyTypes',` / `),`
+            let key = format!("'{step}' =>");
+            if line.trim() == key || line.trim_end().ends_with(&key) {
                 let indent = line.len() - line.trim_start().len();
                 let block: Vec<&str> = lines.clone().take(3).collect();
                 let pad = " ".repeat(indent);
                 if block.len() == 3
                     && block[0] == format!("{pad}array (")
                     && block[1].trim()
-                        == "'_i_' => 'Magento\\\\Setup\\\\Module\\\\Di\\\\Compiler\\\\Config\\\\Chain\\\\NonLazyTypes',"
+                        == format!(
+                            "'_i_' => 'Magento\\\\Setup\\\\Module\\\\Di\\\\Compiler\\\\Config\\\\Chain\\\\{step}',"
+                        )
                     && block[2] == format!("{pad}),")
                 {
                     lines.nth(2);
-                    continue;
+                    continue 'lines;
                 }
             }
         }
@@ -2025,11 +2174,12 @@ fn extra_metadata(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<KnownG
         title: KnownKind::ExtraMetadata.title().to_owned(),
         explanation:
             "In these files the output equals the archive once two specific additions are set \
-aside: the `nonLazyTypes` section with its `NonLazyTypes` step in `ModificationChain` (the \
-`Chain\\NonLazyTypes` compiler pass that magecommand's 2.4.9 / Mage-OS 3.1.0 (PHP 8.4) target \
-runs and the older archive predates), and `interception.php` rows asserting `false` (no plugins) \
-for types the archive left to runtime. Any other addition — a plugin, a preference, an arguments \
-row or a single argument — keeps the file flagged."
+aside: a Mage-OS lazy-ghost section (`lazyTypes` or `nonLazyTypes`) or its `ModificationChain` \
+step that the archive lacks — its compile ran on PHP < 8.4, where the pass writes nothing, or \
+predates the pass, while magecommand assumes 8.4 unless told otherwise (`di compile --target-php`) — \
+and `interception.php` rows asserting `false` (no plugins) for types the archive left to \
+runtime. Any other addition — a plugin, a preference, an arguments row or a single argument — \
+keeps the file flagged."
                 .to_owned(),
         items,
         verified: true,
@@ -2741,6 +2891,69 @@ mod tests {
                 // The disabled row is stripped, the added section is allowlisted.
                 (KnownKind::ExtraMetadata, &["nonlazy_only.php".to_string()][..]),
             ]
+        );
+    }
+
+    /// Lazy-ghost sections: one the archive lacks is an allowed addition; with
+    /// both present, an output allow-list that is a subset of the archive's is
+    /// a warning, and any class only the output lets be lazy stays unexplained.
+    /// https://github.com/cresset-tools/magequery/issues/219
+    #[test]
+    fn compares_lazy_types_by_direction() {
+        let archive = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let write = |root: &Path, rel: &str, c: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, c).unwrap();
+        };
+        let args = "<?php return array (\n  'arguments' => \n  array (\n  ),\n";
+        let lazy = |keys: &[&str]| {
+            let rows: String = keys.iter().map(|k| format!("    'Good\\\\Mod\\\\{k}' => true,\n")).collect();
+            format!("{args}  'lazyTypes' => \n  array (\n{rows}  ),\n);\n")
+        };
+        let none = format!("{args});\n");
+
+        // The archive's compile wrote no section (PHP < 8.4): allowed.
+        write(archive.path(), "metadata/added.php", &none);
+        write(output.path(), "metadata/added.php", &lazy(&["A"]));
+        // Fewer lazy classes: safe, a warning.
+        write(archive.path(), "metadata/fewer.php", &lazy(&["A", "B"]));
+        write(output.path(), "metadata/fewer.php", &lazy(&["A"]));
+        // An empty allow-list (4.0 before the scanner port): every class eager.
+        write(archive.path(), "metadata/empty.php", &lazy(&["A", "C"]));
+        write(output.path(), "metadata/empty.php", &lazy(&[]));
+        // Same set, other order.
+        write(archive.path(), "metadata/reordered.php", &lazy(&["A", "B"]));
+        write(output.path(), "metadata/reordered.php", &lazy(&["B", "A"]));
+        // Lazy where the reference is eager: unsafe, unexplained.
+        write(archive.path(), "metadata/more.php", &lazy(&["A"]));
+        write(output.path(), "metadata/more.php", &lazy(&["A", "D"]));
+
+        let disabled = HashSet::new();
+        let mut ctx = ctx(&disabled, archive.path());
+        ctx.output = output.path();
+        let c = classify(
+            &report(&[], &[], &["metadata/added.php", "metadata/empty.php", "metadata/fewer.php", "metadata/more.php", "metadata/reordered.php"]),
+            &ctx,
+        );
+
+        assert_eq!(c.changed, vec!["metadata/more.php"]);
+        let unsafe_lazy: Vec<(&str, &[String])> =
+            c.unsafe_lazy_types.iter().map(|r| (r.class.as_str(), r.files.as_slice())).collect();
+        assert_eq!(unsafe_lazy, vec![("Good\\Mod\\D", &["metadata/more.php".to_string()][..])]);
+
+        let known: Vec<(KnownKind, &[String])> =
+            c.known.iter().map(|g| (g.kind, g.items.as_slice())).collect();
+        assert_eq!(known, vec![(KnownKind::ExtraMetadata, &["metadata/added.php".to_string()][..])]);
+        let warnings: Vec<(KnownKind, Vec<&str>)> = c
+            .warnings
+            .iter()
+            .map(|g| (g.kind, g.items.iter().map(String::as_str).collect()))
+            .collect();
+        assert_eq!(
+            warnings,
+            vec![(KnownKind::FewerLazyTypes, vec!["Good\\Mod\\A", "Good\\Mod\\B", "Good\\Mod\\C"])]
         );
     }
 

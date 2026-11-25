@@ -19,6 +19,7 @@ pub mod constexpr;
 mod model;
 mod parse;
 mod scan;
+pub mod token;
 
 pub use model::*;
 pub use parse::{parse_file, parse_file_with};
