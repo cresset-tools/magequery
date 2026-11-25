@@ -63,7 +63,9 @@ $ magecommand static deploy en_US nl_NL    # pub/static
 
 The output matches a real `bin/magento` run; `di verify` and `static verify` diff it against
 one. `di digest` gives a CI cache key for `generated/`, and `di watch` keeps it compiled while
-you edit. `magecommand skill` prints its agent skill.
+you edit. `magecommand db status`, `config status`, `theme status` and `queue status` tell a
+deploy whether `setup:upgrade` or `app:config:import` has work to do, with `bin/magento`'s exit
+codes (2 = work to do) and no PHP bootstrap. `magecommand skill` prints its agent skill.
 
 In a PHP project, `composer require --dev cresset/magecommand` gives you
 `vendor/bin/magecommand` (`cresset/magequery` ships both tools).
