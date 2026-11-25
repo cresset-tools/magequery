@@ -323,6 +323,16 @@ Mage-OS 4.0.0 for every class in a full Adobe Commerce checkout. One case it doe
 is a property hook on a promoted constructor parameter; a difference caused by that would
 land in this section or the unexplained one, never silently.
 
+## Area file layout
+
+*Not a difference.* Mage-OS 4.0 writes `global.php` whole and every other area as
+`'_extends' => 'global'` plus the entries that differ from global; its runtime merges
+the two back. `di compile` does the same on 4.0, or writes every area whole with
+`--area-config full`. When either tree holds such a file, verify brings both trees'
+area files to one form before comparing (each area's differences from its own tree's
+global, merged back onto it), so a whole file and a diff holding the same
+configuration are identical. A note on stderr says when the two layouts differed.
+
 ## Ordering only
 
 *Both trees.* Same content in a different order. This is never counted as unexplained;

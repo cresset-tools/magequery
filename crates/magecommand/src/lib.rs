@@ -506,7 +506,8 @@ enum DiCommand {
         /// checkout's `setup/`. One name per lazy-ghost pass, not an exact
         /// version: `magento-2.4.9` (no pass), `mageos-3.0` (3.0–3.2, the
         /// `nonLazyTypes` deny-list), `mageos-3.3` (3.3–3.x, the `lazyTypes`
-        /// allow-list), `mageos-4.0` (4.0+). For now it selects only that pass.
+        /// allow-list), `mageos-4.0` (4.0+). It selects that pass and the
+        /// default `--area-config`.
         #[arg(
             long,
             value_name = "PLATFORM",
@@ -515,6 +516,20 @@ enum DiCommand {
             ), |s| s.parse::<magecommand_engine::lazytypes::Platform>().expect("a listed name")),
         )]
         target_platform: Option<magecommand_engine::lazytypes::Platform>,
+        /// How the area files are laid out: `full` writes every area whole;
+        /// `diff` writes `global` whole and every other area as what differs
+        /// from it, which a Mage-OS 4.0+ runtime merges back (less OPcache
+        /// memory and disk, a little more work per request). Defaults to what
+        /// the platform's own compiler writes: `diff` on 4.0+, else `full`.
+        /// `diff` is refused for a platform whose runtime cannot read it.
+        #[arg(
+            long,
+            value_name = "LAYOUT",
+            value_parser = clap::builder::TypedValueParser::map(clap::builder::PossibleValuesParser::new(
+                magecommand_engine::arealayout::AreaLayout::names()
+            ), |s| s.parse::<magecommand_engine::arealayout::AreaLayout>().expect("a listed name")),
+        )]
+        area_config: Option<magecommand_engine::arealayout::AreaLayout>,
         #[command(flatten)]
         modules: ModuleArgs,
     },
@@ -682,6 +697,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 fused,
                 target_php,
                 target_platform,
+                area_config,
                 modules,
             } => compile(
                 cli.root,
@@ -693,6 +709,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 magecommand_engine::lazytypes::Target {
                     php: target_php.as_deref(),
                     platform: target_platform,
+                    area_layout: area_config,
                 },
                 &modules,
             ),
@@ -1953,6 +1970,14 @@ fn compile(
     let root = root.unwrap_or_else(|| PathBuf::from("."));
     let root = std::path::absolute(&root).unwrap_or(root);
 
+    if magecommand_engine::arealayout::AreaLayout::resolve(&root, &target).is_none() {
+        anyhow::bail!(
+            "--area-config diff: this platform's runtime cannot read area files written as \
+differences from global (Mage-OS 4.0+ only; it would drop global's configuration). \
+Pass --target-platform mageos-4.0 if the store runs 4.0, or drop the flag."
+        );
+    }
+
     // Phase timing (stderr) when MAGECOMMAND_PROFILE is set — `lap!("label")`
     // prints the time since the previous lap and resets the clock.
     let prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
@@ -2296,6 +2321,22 @@ fn compare(
     strict_fallback: bool,
     show_residual: Option<&std::path::Path>,
 ) -> anyhow::Result<ExitCode> {
+    // Area files written as diffs from global (Mage-OS 4.0) compare by the
+    // configuration they hold, whichever layout each tree used.
+    let trees = magecommand_engine::arealayout::CompareTrees::new(archive, output)
+        .context("preparing the area files for comparison")?;
+    let (archive, output) = (&trees.archive, &trees.output);
+    if trees.archive_diffs != trees.output_diffs && !json {
+        let side = |diffs| if diffs { "differences from global" } else { "whole files" };
+        eprintln!(
+            "{}",
+            style::stderr::dim(&format!(
+                "note: the archive's area files are {}, the output's {}; compared by the configuration they hold",
+                side(trees.archive_diffs),
+                side(trees.output_diffs)
+            ))
+        );
+    }
     let report = magecommand_engine::compare_dirs(archive, output, strict_ordering)?;
 
     // The disabled-module explanations need the checkout (and the nulled-row

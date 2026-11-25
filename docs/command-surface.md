@@ -58,11 +58,16 @@ Global flags plus:
 
 ```
 di compile [--dry-run] [--force] [--incremental] [--fused]
+           [--target-php <V>] [--target-platform <P>] [--area-config full|diff]
            [--all-modules] [--extra-app-code <DIR>]...
     Generate the DI config + generated code. --dry-run previews the work plan;
     --force overwrites an existing generated tree; --incremental skips the whole
     compile when no input changed since the last run (stat-fingerprint short-circuit);
     --fused emits fused interceptors (see below).
+    --target-php and --target-platform describe the store when the checkout does not.
+    --area-config picks the area-file layout: `full` writes every area whole, `diff`
+    (Mage-OS 4.0+ only, its default) writes every area but global as its differences
+    from global, which the 4.0 runtime merges back: less OPcache memory and disk.
     --all-modules ignores app/etc/config.php (it need not exist) and enables every
     module on disk, ordered as Magento's installer would write them (a port of
     ModuleList\Loader::sortBySequence). --extra-app-code reads modules from a

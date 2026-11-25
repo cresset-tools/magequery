@@ -50,7 +50,9 @@ Writes `generated/code` and `generated/metadata`.
   `--dry-run` reports without writing; `--incremental` skips the whole compile
   when no input changed (stat fingerprint); `--fused` emits fused interceptors
   with inlined plugin chains instead of stock runtime-dispatch ones
-  (global-only classes for now). Like `setup:di:compile`, it removes
+  (global-only classes for now). On Mage-OS 4.0+ it writes every area but
+  global as its differences from global, as 4.0 does; `--area-config full`
+  writes them whole instead. Like `setup:di:compile`, it removes
   `var/.regenerate` (left by `composer install`), so the next `bin/magento`
   command does not wipe `generated/`. A class whose constructor it cannot
   resolve (an unreadable parent, or a default it cannot evaluate such as an
