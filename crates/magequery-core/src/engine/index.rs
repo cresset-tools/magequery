@@ -205,7 +205,7 @@ impl Index {
         let mut on_disk_not_in_config: Vec<UnregisteredModule> = discovered
             .modules
             .into_iter()
-            .map(|(name, d)| UnregisteredModule { name, source: d.source, path: d.path })
+            .map(|(name, d)| UnregisteredModule { name, source: d.source, path: d.path, sequence: d.sequence })
             .collect();
         on_disk_not_in_config.sort_by(|a, b| a.name.cmp(&b.name));
 

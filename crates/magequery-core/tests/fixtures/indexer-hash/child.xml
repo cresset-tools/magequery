@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <indexer id="acme_grid" view_id="acme_grid">
+        <title translate="true">Acme Grid (merged)</title>
+        <fieldset name="main">
+            <field name="phone" xsi:type="filterable" dataType="varchar"/>
+        </fieldset>
+        <dependencies>
+            <indexer id="acme_plain"/>
+        </dependencies>
+    </indexer>
+    <indexer id="acme_last" view_id="acme_last" class="Acme\Child\Indexer\Last" shared_index="acme">
+        <title>Last</title>
+        <dependencies>
+            <indexer id="acme_grid"/>
+        </dependencies>
+    </indexer>
+</config>

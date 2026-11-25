@@ -35,6 +35,9 @@ pub struct UnregisteredModule {
     pub name: ModuleName,
     pub source: ModuleSource,
     pub path: std::path::PathBuf,
+    /// `<sequence>` from its `module.xml`, for placing it in a rewritten `config.php`.
+    #[serde(skip)]
+    pub sequence: Vec<ModuleName>,
 }
 
 /// Result of the `modules --check` lint: the two ways a module set can be inconsistent.

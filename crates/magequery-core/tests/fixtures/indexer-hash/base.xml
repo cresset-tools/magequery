@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <indexer id="acme_grid" view_id="acme_grid" class="Acme\Base\Indexer\Grid" primary="main">
+        <title translate="true">Acme Grid</title>
+        <description>Rebuild the "Acme" grid / index</description>
+        <saveHandler class="Acme\Base\Indexer\Save"/>
+        <structure class="Acme\Base\Indexer\Structure"/>
+        <fieldset name="other" source="Acme\Other\Source">
+            <reference fieldset="extra" from="extra_id" to="id"/>
+            <field name="o" xsi:type="filterable" dataType="int"/>
+        </fieldset>
+        <fieldset name="extra" source="Acme\Extra\Source" provider="Acme\Extra\Provider">
+            <reference fieldset="main" from="main_id" to="entity_id"/>
+            <field name="city" xsi:type="searchable" dataType="varchar" handler="CityHandler">
+                <filter class="Acme\Filter\Trim"/>
+                <filter class="Acme\Filter\Lower"/>
+            </field>
+        </fieldset>
+        <fieldset name="main" source="Acme\Main\Source">
+            <field name="name" xsi:type="searchable" dataType="text" origin="full_name"/>
+            <field name="email" xsi:type="filterable" dataType="varchar"/>
+        </fieldset>
+    </indexer>
+    <indexer id="acme_plain" view_id="acme_plain" class="Acme\Base\Indexer\Plain">
+        <title>Plain é</title>
+        <description/>
+    </indexer>
+    <indexer id="acme_wide4" view_id="acme_wide4" class="W" primary="z">
+        <title>W4</title>
+        <fieldset name="y" source="S\y"><reference fieldset="x" from="a" to="b"/><field name="f" xsi:type="filterable" dataType="int"/></fieldset>
+        <fieldset name="w" source="S\w"><field name="f" xsi:type="filterable" dataType="int"/></fieldset>
+        <fieldset name="z" source="S\z"><field name="f" xsi:type="filterable" dataType="int"/></fieldset>
+        <fieldset name="x" source="S\x"><reference fieldset="z" from="a" to="b"/><field name="f" xsi:type="filterable" dataType="int"/></fieldset>
+    </indexer>
+    <indexer id="acme_wide5" view_id="acme_wide5" class="W" primary="c">
+        <title>W5</title>
+        <fieldset name="e" source="S\e"><reference fieldset="d" from="a" to="b"/><field name="f" xsi:type="filterable" dataType="int"/></fieldset>
+        <fieldset name="a" source="S\a"><field name="f" xsi:type="filterable" dataType="int"/></fieldset>
+        <fieldset name="d" source="S\d"><reference fieldset="c" from="a" to="b"/><field name="f" xsi:type="filterable" dataType="int"/></fieldset>
+        <fieldset name="b" source="S\b"><reference fieldset="e" from="a" to="b"/><field name="f" xsi:type="filterable" dataType="int"/></fieldset>
+        <fieldset name="c" source="S\c"><field name="f" xsi:type="filterable" dataType="int"/></fieldset>
+    </indexer>
+</config>
