@@ -48,7 +48,7 @@ Writes `generated/code` and `generated/metadata`.
 
 - Compile once → `di compile`. `--force` overwrites existing generated files;
   `--dry-run` reports without writing; `--incremental` skips the whole compile
-  when no input changed (stat fingerprint); `--fused` emits fused interceptors
+  when no input or setting changed (stat fingerprint); `--fused` emits fused interceptors
   with inlined plugin chains instead of stock runtime-dispatch ones
   (global-only classes for now). On Mage-OS 4.0+ it writes every area but
   global as its differences from global, as 4.0 does; `--area-config full`
@@ -64,6 +64,8 @@ Writes `generated/code` and `generated/metadata`.
   memory, recompiles on change and writes only the delta. Long-running.
 - Cache `generated/` in CI → `di digest`. The compile is a pure function of the
   source tree, so an unchanged digest means the existing output is still valid.
+  Pass it the same settings flags as `di compile` (`--fused`, `--target-php`,
+  `--target-platform`, `--area-config`), which it folds into the key.
   Use the default content digest as the cache key; `--stat` (mtime+size) is the
   local `--incremental` short-circuit and is NOT portable across a fresh checkout.
 - Check output against a known-good tree → `di verify --archive <DIR> --output

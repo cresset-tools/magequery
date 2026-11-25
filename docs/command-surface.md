@@ -62,7 +62,7 @@ di compile [--dry-run] [--force] [--incremental] [--fused]
            [--all-modules] [--extra-app-code <DIR>]...
     Generate the DI config + generated code. --dry-run previews the work plan;
     --force overwrites an existing generated tree; --incremental skips the whole
-    compile when no input changed since the last run (stat-fingerprint short-circuit);
+    compile when no input or setting changed since the last run (stat-fingerprint short-circuit);
     --fused emits fused interceptors (see below).
     --target-php and --target-platform describe the store when the checkout does not.
     --area-config picks the area-file layout: `full` writes every area whole, `diff`
@@ -95,10 +95,11 @@ di watch [--once]
     Long-running compile server: build once, keep the parsed index in memory, and
     recompile on file change writing only the delta. The fast edit loop.
 
-di digest [--stat]
-    Print the content-addressed digest of the compile inputs — a CI cache key for
-    `generated/`. Since compile is a pure function of the source tree, an unchanged
-    digest means the last output is still valid. --stat fingerprints by mtime+size
+di digest [--stat] [--fused] [--target-php <V>] [--target-platform <P>] [--area-config <L>]
+    Print the content-addressed digest of the compile inputs and settings — a CI cache
+    key for `generated/`. Since compile is a pure function of the source tree and its
+    settings, an unchanged digest means the last output is still valid. Pass the same
+    settings flags as `di compile`. --stat fingerprints by mtime+size
     (fast, local-only; not a portable CI key). See docs/incremental-compile.md.
 ```
 

@@ -80,6 +80,19 @@ impl Fixture {
             .expect("run magecommand")
     }
 
+    /// `di compile --incremental`, which skips the compile when no input
+    /// changed. Returns stdout.
+    fn incremental(&self, extra: &[&str]) -> String {
+        let out = Command::new(env!("CARGO_BIN_EXE_magecommand"))
+            .args(["di", "compile", "--incremental", "--root"])
+            .arg(&self.0)
+            .args(extra)
+            .output()
+            .expect("run magecommand");
+        assert!(out.status.success(), "di compile failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
     fn compile(&self, extra: &[&str]) {
         let out = self.run(extra);
         assert!(out.status.success(), "di compile failed: {}", String::from_utf8_lossy(&out.stderr));
@@ -205,4 +218,48 @@ fn verify_compares_the_configuration_not_the_layout() {
     let (clean, report) = verify(&full, &diff);
     assert!(!clean, "a changed frontend preference must be reported:\n{report}");
     assert!(report.contains("frontend.php"), "{report}");
+}
+
+#[test]
+fn incremental_recompiles_when_the_settings_change() {
+    let fx = Fixture::new("mq-area-incremental", true, &[]);
+    // A generated factory, so there is a `generated/code` to keep.
+    fx.write(
+        "app/code/Acme/Repro/Model/Uses.php",
+        "<?php\nnamespace Acme\\Repro\\Model;\n\nclass Uses\n{\n    \
+         public function __construct(EverywhereFactory $factory)\n    {\n    }\n}\n",
+    );
+    fx.incremental(&[]);
+    assert!(fx.0.join("generated/code/Acme/Repro/Model/EverywhereFactory.php").is_file());
+    assert!(fx.incremental(&[]).contains("up to date"), "nothing changed, so nothing to do");
+
+    let out = fx.incremental(&["--area-config", "full"]);
+    assert!(!out.contains("up to date"), "a new layout is a new output: {out}");
+    assert!(!fx.metadata("frontend").contains("'_extends'"));
+    assert!(fx.incremental(&["--area-config", "full"]).contains("up to date"));
+
+    for settings in [&["--area-config", "full", "--target-php", "8.3"][..], &["--area-config", "full", "--fused"]] {
+        let out = fx.incremental(settings);
+        assert!(!out.contains("up to date"), "{settings:?} changes the output: {out}");
+    }
+}
+
+#[test]
+fn the_digest_covers_the_settings() {
+    let fx = Fixture::new("mq-area-digest", true, &[]);
+    let digest = |extra: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_magecommand"))
+            .args(["di", "digest", "--root"])
+            .arg(&fx.0)
+            .args(extra)
+            .output()
+            .expect("run magecommand");
+        assert!(out.status.success(), "di digest failed: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    let default = digest(&[]);
+    assert_eq!(digest(&["--area-config", "diff"]), default, "restating the default is the same output");
+    for settings in [&["--area-config", "full"][..], &["--fused"], &["--target-php", "8.3"]] {
+        assert_ne!(digest(settings), default, "{settings:?} is another output");
+    }
 }
