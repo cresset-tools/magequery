@@ -31,8 +31,8 @@ use crate::{Error, Result};
 /// Bumped when the manifest format changes — an older manifest is then ignored
 /// (treated as absent) so a format change can never be mis-read. v2 dropped the
 /// per-output-file hash map (the partial-reconcile idea, retired) — the manifest
-/// now carries only the input digest.
-const MANIFEST_VERSION: u32 = 2;
+/// now carries only the input digest. v3 added [`Manifest::settings`].
+const MANIFEST_VERSION: u32 = 3;
 
 /// The compile tool version, baked in so a magecommand upgrade (whose generation
 /// logic may differ) invalidates a stale manifest rather than trusting it.
@@ -54,6 +54,19 @@ pub struct Manifest {
     /// written ([`FingerprintMode::Stat`]). `--incremental` recomputes it and,
     /// on a match, skips the whole compile — the output is already current.
     pub inputs_digest: String,
+    /// The compile settings the output was built with ([`compile_settings`]).
+    /// The same inputs compile differently under other settings, so a change
+    /// here is a change of output.
+    pub settings: String,
+}
+
+/// What the output depends on besides the inputs [`input_digest`] covers: the
+/// interceptor renderer, and the lazy pass and area-file layout resolved for
+/// `target` (so a flag that only restates the checkout's default is no change).
+pub fn compile_settings(root: &Path, fused: bool, target: &crate::lazytypes::Target) -> String {
+    let lazy = crate::lazytypes::LazyPass::detect(root, target);
+    let layout = crate::arealayout::AreaLayout::resolve(root, target);
+    format!("fused={fused} lazy={lazy:?} layout={layout:?}")
 }
 
 /// How [`input_digest`] fingerprints each input file.
@@ -156,12 +169,13 @@ impl Manifest {
     /// Build a fresh manifest recording the input digest that produced the
     /// current output. The caller computes the digest once (it doubles as the
     /// `--incremental` change-detection walk) and hands it here.
-    pub fn new(bp: &str, inputs_digest: String) -> Manifest {
+    pub fn new(bp: &str, inputs_digest: String, settings: String) -> Manifest {
         Manifest {
             version: MANIFEST_VERSION,
             tool_version: TOOL_VERSION.to_owned(),
             bp: bp.to_owned(),
             inputs_digest,
+            settings,
         }
     }
 
@@ -189,7 +203,7 @@ mod tests {
     fn round_trip_and_guards() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let m = Manifest::new("/srv/shop", "deadbeef".to_owned());
+        let m = Manifest::new("/srv/shop", "deadbeef".to_owned(), "fused=false".to_owned());
         m.save(root).unwrap();
 
         // Same bp → loads, digest preserved.

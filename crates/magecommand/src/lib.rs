@@ -4,9 +4,7 @@
 //! on the codebase). The grammar is `magecommand <group> <subcommand>` (two
 //! tokens; see `docs/command-surface.md`). Built today: the `di` group —
 //! `di compile` (generate generated/code + metadata), `di verify` (the archive
-//! oracle every milestone is accepted against), `di watch`, `di digest`; the
-//! `static` group; and the upgrade gates `db status`, `config status`, `theme
-//! status`, `queue status` (see `status.rs`).
+//! oracle every milestone is accepted against), `di watch`, `di digest`.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -15,7 +13,6 @@ use anyhow::Context;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 pub mod static_deploy;
-mod status;
 mod style;
 mod watch;
 
@@ -47,7 +44,7 @@ struct Cli {
 /// Top-level groups. The grammar is `magecommand <group> <subcommand>` — two
 /// tokens, mirroring magequery's nouns (magequery reads a noun, magecommand
 /// writes it). Bare `magecommand` and bare `magecommand <group>` print help
-/// (`arg_required_else_help`). The `di`, `static` and status groups are built; the planned
+/// (`arg_required_else_help`). Only the `di` group is built today; the planned
 /// groups (`static`, `i18n`, `make`, `module`/`mode`/…, `product`/…) are
 /// documented in `docs/command-surface.md` but not yet wired.
 #[derive(Subcommand)]
@@ -64,30 +61,6 @@ enum Command {
         #[command(subcommand)]
         command: StaticCommand,
     },
-    /// Database — does `setup:upgrade` have schema or patches to apply?
-    #[command(arg_required_else_help = true)]
-    Db {
-        #[command(subcommand)]
-        command: DbCommand,
-    },
-    /// Deployment config — does `app:config:import` have work to do?
-    #[command(arg_required_else_help = true)]
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
-    /// Themes — does `setup:upgrade` have a theme to register?
-    #[command(arg_required_else_help = true)]
-    Theme {
-        #[command(subcommand)]
-        command: ThemeCommand,
-    },
-    /// Message queues — does `setup:upgrade` have a database queue to add?
-    #[command(arg_required_else_help = true)]
-    Queue {
-        #[command(subcommand)]
-        command: QueueCommand,
-    },
 
     // Tooling meta-command: it describes the CLI itself rather than acting on a
     // Magento codebase, so it sits outside the groups and is hidden from help
@@ -95,36 +68,6 @@ enum Command {
     /// Print the agent skill (SKILL.md) to stdout, for `.claude/skills/`.
     #[command(hide = true)]
     Skill,
-}
-
-#[derive(Subcommand)]
-enum DbCommand {
-    /// Whether the database needs `setup:upgrade`: a native `bin/magento
-    /// setup:db:status`. Exits 0 when up to date, 2 when an upgrade is
-    /// required, 1 on error.
-    Status,
-}
-
-#[derive(Subcommand)]
-enum ConfigCommand {
-    /// Whether `app:config:import` has work to do, as `bin/magento
-    /// app:config:status` decides it. Exits 2 when an import is needed.
-    Status,
-}
-
-#[derive(Subcommand)]
-enum ThemeCommand {
-    /// Whether a theme is not registered yet: a native Mage-OS
-    /// `theme:registration:status`. Exits 2 when one is missing.
-    Status,
-}
-
-#[derive(Subcommand)]
-enum QueueCommand {
-    /// Whether a database queue is missing: the MysqlMq part of Mage-OS's
-    /// `queue:config:status`, plus the AMQP topology fingerprint. Exits 2 when
-    /// a queue is missing.
-    Status,
 }
 
 /// `--symlink` strategies.
@@ -487,8 +430,9 @@ enum DiCommand {
         #[arg(long)]
         force: bool,
         /// Skip the compile entirely when no compile input changed since the
-        /// last run (a stat-fingerprint of the input tree). On any change, does a
-        /// normal full compile. The fast path for a tight edit-compile loop.
+        /// last run (a stat-fingerprint of the input tree), and neither did the
+        /// settings (`--fused`, `--target-*`, `--area-config`, as resolved). On
+        /// any change, does a normal full compile. The fast path for a tight edit-compile loop.
         #[arg(long)]
         incremental: bool,
         /// Emit fused interceptors (inlined plugin chains) instead of stock
@@ -506,7 +450,8 @@ enum DiCommand {
         /// checkout's `setup/`. One name per lazy-ghost pass, not an exact
         /// version: `magento-2.4.9` (no pass), `mageos-3.0` (3.0–3.2, the
         /// `nonLazyTypes` deny-list), `mageos-3.3` (3.3–3.x, the `lazyTypes`
-        /// allow-list), `mageos-4.0` (4.0+). For now it selects only that pass.
+        /// allow-list), `mageos-4.0` (4.0+). It selects that pass and the
+        /// default `--area-config`.
         #[arg(
             long,
             value_name = "PLATFORM",
@@ -515,6 +460,20 @@ enum DiCommand {
             ), |s| s.parse::<magecommand_engine::lazytypes::Platform>().expect("a listed name")),
         )]
         target_platform: Option<magecommand_engine::lazytypes::Platform>,
+        /// How the area files are laid out: `full` writes every area whole;
+        /// `diff` writes `global` whole and every other area as what differs
+        /// from it, which a Mage-OS 4.0+ runtime merges back (less OPcache
+        /// memory and disk, a little more work per request). Defaults to what
+        /// the platform's own compiler writes: `diff` on 4.0+, else `full`.
+        /// `diff` is refused for a platform whose runtime cannot read it.
+        #[arg(
+            long,
+            value_name = "LAYOUT",
+            value_parser = clap::builder::TypedValueParser::map(clap::builder::PossibleValuesParser::new(
+                magecommand_engine::arealayout::AreaLayout::names()
+            ), |s| s.parse::<magecommand_engine::arealayout::AreaLayout>().expect("a listed name")),
+        )]
+        area_config: Option<magecommand_engine::arealayout::AreaLayout>,
         #[command(flatten)]
         modules: ModuleArgs,
     },
@@ -670,10 +629,6 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
 
     match cli.command {
         Command::Skill => unreachable!("handled above"),
-        Command::Db { command: DbCommand::Status } => status::db(cli.root, cli.json),
-        Command::Config { command: ConfigCommand::Status } => status::config(cli.root, cli.json),
-        Command::Theme { command: ThemeCommand::Status } => status::theme(cli.root, cli.json),
-        Command::Queue { command: QueueCommand::Status } => status::queue(cli.root, cli.json),
         Command::Di { command } => match command {
             DiCommand::Compile {
                 dry_run,
@@ -682,6 +637,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 fused,
                 target_php,
                 target_platform,
+                area_config,
                 modules,
             } => compile(
                 cli.root,
@@ -693,6 +649,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 magecommand_engine::lazytypes::Target {
                     php: target_php.as_deref(),
                     platform: target_platform,
+                    area_layout: area_config,
                 },
                 &modules,
             ),
@@ -1953,6 +1910,14 @@ fn compile(
     let root = root.unwrap_or_else(|| PathBuf::from("."));
     let root = std::path::absolute(&root).unwrap_or(root);
 
+    if magecommand_engine::arealayout::AreaLayout::resolve(&root, &target).is_none() {
+        anyhow::bail!(
+            "--area-config diff: this platform's runtime cannot read area files written as \
+differences from global (Mage-OS 4.0+ only; it would drop global's configuration). \
+Pass --target-platform mageos-4.0 if the store runs 4.0, or drop the flag."
+        );
+    }
+
     // Phase timing (stderr) when MAGECOMMAND_PROFILE is set — `lap!("label")`
     // prints the time since the previous lap and resets the clock.
     let prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
@@ -1985,6 +1950,7 @@ fn compile(
     // the input tree is never fingerprinted twice. `--force` bypasses; a dry-run
     // always reports.
     let bp = root.to_string_lossy().to_string();
+    let settings = magecommand_engine::manifest::compile_settings(&root, fused, &target);
     let code_dir = root.join("generated/code");
     let prev_manifest = if incremental && !force && dir_has_files(&code_dir) {
         magecommand_engine::manifest::Manifest::load(&root, &bp)
@@ -2001,7 +1967,8 @@ fn compile(
                 magecommand_engine::manifest::FingerprintMode::Stat,
             );
             lap!("input digest (short-circuit check)");
-            if current == prev.inputs_digest {
+            // The same inputs under other settings are a different output.
+            if current == prev.inputs_digest && prev.settings == settings {
                 // The tree on disk is current, so it must survive the next
                 // `bin/magento` boot just like a fresh write (see below).
                 consume_regenerate_flag(&root)?;
@@ -2011,7 +1978,7 @@ fn compile(
                     println!(
                         "{} {}",
                         style::pass("up to date"),
-                        style::dim("— no compile input changed (use --force to rebuild)")
+                        style::dim("— no compile input or setting changed (use --force to rebuild)")
                     );
                 }
                 return Ok(ExitCode::SUCCESS);
@@ -2155,7 +2122,7 @@ fn compile(
                 magecommand_engine::manifest::FingerprintMode::Stat,
             ),
         };
-        magecommand_engine::manifest::Manifest::new(&bp, digest).save(&root)?;
+        magecommand_engine::manifest::Manifest::new(&bp, digest, settings).save(&root)?;
         lap!("write manifest + input digest");
         consume_regenerate_flag(&root)?;
         println!("{} {written} generated/ file(s)", style::pass("wrote"));
@@ -2296,6 +2263,22 @@ fn compare(
     strict_fallback: bool,
     show_residual: Option<&std::path::Path>,
 ) -> anyhow::Result<ExitCode> {
+    // Area files written as diffs from global (Mage-OS 4.0) compare by the
+    // configuration they hold, whichever layout each tree used.
+    let trees = magecommand_engine::arealayout::CompareTrees::new(archive, output)
+        .context("preparing the area files for comparison")?;
+    let (archive, output) = (&trees.archive, &trees.output);
+    if trees.archive_diffs != trees.output_diffs && !json {
+        let side = |diffs| if diffs { "differences from global" } else { "whole files" };
+        eprintln!(
+            "{}",
+            style::stderr::dim(&format!(
+                "note: the archive's area files are {}, the output's {}; compared by the configuration they hold",
+                side(trees.archive_diffs),
+                side(trees.output_diffs)
+            ))
+        );
+    }
     let report = magecommand_engine::compare_dirs(archive, output, strict_ordering)?;
 
     // The disabled-module explanations need the checkout (and the nulled-row

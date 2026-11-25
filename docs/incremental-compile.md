@@ -300,7 +300,10 @@ generated/.mqcache/
    clear→compute→write a full compile runs. No partial reconcile, so there is no
    divergence surface. Verified live-mode byte-identical on the oracle.
 2. The input-digest short-circuit is **sound**: cover the complete input set
-   (derive it from the compile's own discovery code, over-cover on doubt).
+   (derive it from the compile's own discovery code, over-cover on doubt). The
+   same inputs compile differently under other settings (`--fused`, `--target-php`,
+   `--target-platform`, `--area-config`), so the manifest also records the settings
+   as resolved, and a change there is a miss too.
 3. `--force` bypasses the short-circuit (full clear + full write) — the
    always-safe fallback and the current default in CI examples until trust is
    established.

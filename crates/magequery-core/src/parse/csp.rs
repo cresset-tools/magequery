@@ -35,14 +35,14 @@ pub(crate) fn csp_whitelist_xml(xml: &str) -> Vec<RawCspPolicy> {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => match local_name(&e).as_str() {
                 "policy" => {
-                    out.push(RawCspPolicy { id: attr(&e, "id").unwrap_or_default(), values: Vec::new() });
+                    out.push(RawCspPolicy { id: attr(&e, b"id").unwrap_or_default(), values: Vec::new() });
                     cur_policy = Some(out.len() - 1);
                 }
                 "value" if cur_policy.is_some() => {
                     cur_value = Some(RawCspValue {
-                        id: attr(&e, "id").unwrap_or_default(),
-                        kind: attr(&e, "type").unwrap_or_default(),
-                        algorithm: attr(&e, "algorithm"),
+                        id: attr(&e, b"id").unwrap_or_default(),
+                        kind: attr(&e, b"type").unwrap_or_default(),
+                        algorithm: attr(&e, b"algorithm"),
                         value: String::new(),
                         line,
                     });
@@ -52,27 +52,27 @@ pub(crate) fn csp_whitelist_xml(xml: &str) -> Vec<RawCspPolicy> {
             Ok(Event::Empty(e)) if local_name(&e) == "policy" => {
                 // `<policy id="x"/>`: Magento's converter still registers the (empty)
                 // policy, but it must not adopt later values.
-                out.push(RawCspPolicy { id: attr(&e, "id").unwrap_or_default(), values: Vec::new() });
+                out.push(RawCspPolicy { id: attr(&e, b"id").unwrap_or_default(), values: Vec::new() });
                 cur_policy = None;
             }
             Ok(Event::Text(e)) => {
                 if let Some(v) = cur_value.as_mut() {
-                    v.value.push_str(text(&e));
+                    v.value.push_str(&e.unescape().unwrap_or_default());
                 }
             }
             Ok(Event::CData(e)) => {
                 if let Some(v) = cur_value.as_mut() {
-                    v.value.push_str(&e);
+                    v.value.push_str(&String::from_utf8_lossy(&e));
                 }
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
-                "value" => {
+                b"value" => {
                     if let (Some(i), Some(mut v)) = (cur_policy, cur_value.take()) {
                         v.value = v.value.trim().to_string();
                         out[i].values.push(v);
                     }
                 }
-                "policy" => cur_policy = None,
+                b"policy" => cur_policy = None,
                 _ => {}
             },
             _ => {}

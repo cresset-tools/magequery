@@ -82,8 +82,12 @@ fn push_php_str(out: &mut String, s: &str) {
 /// tree only to serialize and drop it. Each argument value is written in place by
 /// reference. Locked byte-for-byte against the old path by `render_matches_clone`
 /// below (and, end-to-end, by `di verify`).
-pub fn area_file_to_php(
-    arguments: &std::collections::BTreeMap<String, PhpValue>,
+///
+/// `extends` writes Mage-OS 4.0's `'_extends' => '<area>'` first, for a file
+/// that holds only its differences from that area (see [`crate::arealayout`]).
+pub fn area_file_to_php<'a>(
+    extends: Option<&str>,
+    arguments: impl ExactSizeIterator<Item = (&'a String, &'a PhpValue)>,
     preferences: &[(String, String)],
     instance_types: &[(String, String)],
     lazy: Option<(&str, &[String])>,
@@ -115,6 +119,13 @@ pub fn area_file_to_php(
     // was grown, and copied, four times on its way there.
     let mut out = String::with_capacity(576 * arguments.len() + 4096);
     out.push_str("<?php return array (\n");
+    if let Some(base) = extends {
+        out.push_str("  ");
+        push_php_str(&mut out, crate::arealayout::EXTENDS_KEY);
+        out.push_str(" => ");
+        push_php_str(&mut out, base);
+        out.push_str(",\n");
+    }
 
     open(&mut out, "arguments");
     for (k, v) in arguments {
@@ -489,7 +500,7 @@ mod tests {
             ),
         ]);
         assert_eq!(
-            area_file_to_php(&arguments, &preferences, &instance_types, Some(("nonLazyTypes", &non_lazy))),
+            area_file_to_php(None, arguments.iter(), &preferences, &instance_types, Some(("nonLazyTypes", &non_lazy))),
             to_php_file(&wrapper)
         );
     }

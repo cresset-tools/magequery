@@ -19,7 +19,7 @@ repository = "https://github.com/cresset-tools/magequery"
 [workspace.dependencies]
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
-quick-xml = "0.42"
+quick-xml = "0.36"
 
 [profile.release]
 lto = "thin"
