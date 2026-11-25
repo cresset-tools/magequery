@@ -51,6 +51,27 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.28.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.6...magequery-v0.28.0) (2026-11-25)
+
+
+### Features
+
+* **magecommand:** db, config, theme and queue status ([23f7753](https://github.com/cresset-tools/magequery/commit/23f7753ea966abf7eaafe02df1dd5801888b8eee))
+* **magecommand:** dev upgrade cleans env.php and checks write permissions ([2e58626](https://github.com/cresset-tools/magequery/commit/2e586265dd9a2fdcbdd4d0697c786d573a056523))
+* **magecommand:** dev upgrade, a fast setup:upgrade for development ([9c885dc](https://github.com/cresset-tools/magequery/commit/9c885dcaf60780201937f82151e38d04ebbccc32))
+* **magequery:** decide natively whether a dev setup:upgrade needs PHP ([0f594a9](https://github.com/cresset-tools/magequery/commit/0f594a94145b6b42a0e7ad5ebfba71cfcb836b7e))
+* **magequery:** port Mage-OS 4.0's constructor side-effect scan for lazyTypes ([145b410](https://github.com/cresset-tools/magequery/commit/145b4106ca698e2d2b8ff938b42d8c34b437417c))
+* **magequery:** port setup:upgrade's env.php cleanup and MEMORY truncation ([f9873f5](https://github.com/cresset-tools/magequery/commit/f9873f5c145df62688484df6a417b69041c729a6))
+* **magequery:** write Mage-OS 4.0's area files as differences from global ([fe01bfe](https://github.com/cresset-tools/magequery/commit/fe01bfe2559b967adca33955b66140fa77a240e1))
+* **magequery:** write Mage-OS's lazyTypes allow-list in di compile ([d31770e](https://github.com/cresset-tools/magequery/commit/d31770e927a8cc377512e0c479e8b70010110c3f))
+
+
+### Bug Fixes
+
+* **magequery:** key incremental compiles and di digest on the compile settings ([380a532](https://github.com/cresset-tools/magequery/commit/380a532da7d2c9c25f9164339fe08ed589262d4b))
+* **magequery:** move to quick-xml 0.42 for RUSTSEC-2026-0194 and 0195 ([6ed2e12](https://github.com/cresset-tools/magequery/commit/6ed2e124214812c280d19463e6fb38adee8dc9b9))
+* **magequery:** recognise the short 'redis' cache backend ([09e8cd5](https://github.com/cresset-tools/magequery/commit/09e8cd52079a4a2c825ad55c57c9f3623f6f130d))
+
 ## [0.27.6](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.5...magequery-v0.27.6) (2026-11-24)
 
 
