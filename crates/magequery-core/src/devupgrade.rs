@@ -42,6 +42,16 @@ pub enum ConfigPhpUpdate {
     CannotReproduce(String),
 }
 
+/// What `DbInitStatementsCleanup` would do to `app/etc/env.php`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvPhpUpdate {
+    Unchanged,
+    /// The new file.
+    Rewrite(String),
+    /// The cleanup applies, but env.php is not laid out the way Magento writes it.
+    CannotReproduce(String),
+}
+
 /// The outcome of [`Magento::dev_upgrade_check`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DevUpgradeCheck {
@@ -105,6 +115,57 @@ const SEQUENCE_ENTITIES: &[&str] = &["order", "invoice", "creditmemo", "shipment
 const SEQUENCE_STORES: &[u32] = &[0, 1];
 
 impl Magento {
+    /// `DbInitStatementsCleanup::execute`, the first thing `setup:upgrade` does: drop
+    /// the deprecated `SET NAMES utf8` from every connection's `initStatements`
+    /// (and the key itself when nothing is left).
+    pub fn cleaned_env_php(&self) -> Result<EnvPhpUpdate> {
+        let path = self.root().join("app/etc/env.php");
+        let text = std::fs::read_to_string(&path).map_err(|source| Error::Io { file: path.clone(), source })?;
+        let mut tree = crate::phparray::parse(&text).map_err(|detail| Error::Parse { file: path.clone(), detail })?;
+        let mut modified = false;
+        if let PhpValue::Array(top) = &mut tree
+            && let Some((_, PhpValue::Array(db))) = top.iter_mut().find(|(k, _)| k.as_str() == Some("db"))
+        {
+            for (k, group) in db.iter_mut() {
+                if !matches!(k.as_str(), Some("connection" | "slave_connection")) {
+                    continue;
+                }
+                let PhpValue::Array(conns) = group else { continue };
+                for (_, conn) in conns.iter_mut() {
+                    let PhpValue::Array(items) = conn else { continue };
+                    let Some(i) = items.iter().position(|(k, _)| k.as_str() == Some("initStatements")) else {
+                        continue;
+                    };
+                    let PhpValue::Str(init) = &items[i].1 else { continue };
+                    match remove_set_names_utf8(init) {
+                        None => {
+                            items.remove(i);
+                            modified = true;
+                        }
+                        Some(cleaned) if cleaned != *init => {
+                            items[i].1 = PhpValue::Str(cleaned);
+                            modified = true;
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+        }
+        if !modified {
+            return Ok(EnvPhpUpdate::Unchanged);
+        }
+        let original = crate::phparray::parse(&text).map_err(|detail| Error::Parse { file: path.clone(), detail })?;
+        if original.to_magento_php_file().as_deref() != Some(text.as_str()) {
+            return Ok(EnvPhpUpdate::CannotReproduce(
+                "app/etc/env.php needs its SET NAMES utf8 removed and is not laid out the way Magento writes it".into(),
+            ));
+        }
+        match tree.to_magento_php_file() {
+            Some(contents) => Ok(EnvPhpUpdate::Rewrite(contents)),
+            None => Ok(EnvPhpUpdate::CannotReproduce("app/etc/env.php holds a value Magento would rewrite".into())),
+        }
+    }
+
     /// `Installer::createModulesConfig` without `--enable-modules`/`--disable-modules`:
     /// every module on disk, in the order `ModuleList\Loader` sorts them, a module
     /// that `config.php` disables staying at 0, and modules no longer on disk
@@ -187,7 +248,6 @@ impl Magento {
                 "MAGE_MODE is production: the fast setup:upgrade is for development only".into(),
             ));
         }
-        self.check_env(&env, &mut out);
 
         // The validators of setup:db:status.
         match self.db_status() {
@@ -222,23 +282,6 @@ impl Magento {
 
         self.check_recurring(&env, &mut out);
         Ok(out)
-    }
-
-    /// `DbInitStatementsCleanup` rewrites env.php when a connection still sets
-    /// `SET NAMES utf8;`, and a message broker needs its topology declared.
-    fn check_env(&self, env: &PhpValue, out: &mut DevUpgradeCheck) {
-        let db = env.get("db");
-        for group in ["connection", "slave_connection"] {
-            let Some(conns) = db.and_then(|d| d.get(group)).and_then(PhpValue::as_array) else { continue };
-            for (_, c) in conns {
-                let init = c.get("initStatements").and_then(PhpValue::as_str).unwrap_or_default();
-                let lower = init.to_ascii_lowercase();
-                if lower.contains("set names utf8") && !lower.contains("utf8mb") {
-                    out.needs_php.push("env.php: a connection still sets `SET NAMES utf8;`".into());
-                    return;
-                }
-            }
-        }
     }
 
     fn check_recurring(&self, env: &PhpValue, out: &mut DevUpgradeCheck) {
@@ -493,6 +536,19 @@ impl Magento {
         let prefix = self.db_config()?.table_prefix;
         let mut done = Vec::new();
 
+        // `Installer::cleanMemoryTables`: every MEMORY-engine table is emptied.
+        let memory: Vec<String> = db
+            .query(
+                "SELECT TABLE_NAME FROM information_schema.TABLES \
+                 WHERE TABLE_SCHEMA = DATABASE() AND ENGINE = 'MEMORY'",
+            )
+            .map_err(Error::Db)?;
+        for t in &memory {
+            db.query_drop(format!("TRUNCATE TABLE `{}`", t.replace('`', "``"))).map_err(Error::Db)?;
+        }
+        if !memory.is_empty() {
+            done.push(format!("memory tables emptied: {}", memory.join(", ")));
+        }
         if on("Magento_Cron") {
             db.exec::<u8>(
                 format!(
@@ -645,4 +701,162 @@ pub fn empty_dir(dir: &Path) -> std::io::Result<usize> {
 fn php_uniqid(prefix: &str) -> String {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     format!("{prefix}{:08x}{:05x}", now.as_secs(), now.subsec_micros())
+}
+
+/// `InitStatementsCleanup::removeSetNamesUtf8`: `None` means "remove the key".
+fn remove_set_names_utf8(init: &str) -> Option<String> {
+    // PHP's empty(): "" and "0".
+    let php_empty = |s: &str| s.is_empty() || s == "0";
+    if php_empty(php_trim(init, PHP_TRIM)) {
+        return None;
+    }
+    if !init.to_ascii_lowercase().contains("set names utf8") {
+        return Some(init.to_string());
+    }
+    let cleaned = replace_set_names(init);
+    let cleaned = php_trim(&cleaned, PHP_TRIM).to_string();
+    let cleaned = collapse_semicolons(&cleaned);
+    let cleaned = php_trim(&cleaned, ";");
+    let cleaned = collapse_ws(cleaned);
+    if php_empty(&cleaned) { None } else { Some(cleaned + ";") }
+}
+
+/// PHP trim()'s default characters.
+const PHP_TRIM: &str = " \t\n\r\0\x0B";
+
+fn php_trim<'a>(s: &'a str, chars: &str) -> &'a str {
+    s.trim_matches(|c| chars.contains(c))
+}
+
+/// PCRE `\s`: space, \t, \n, \v, \f, \r.
+fn is_pcre_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// `preg_replace('/\s*SET\s+NAMES\s+utf8(?!mb4)(?:\s*;|\s+COLLATE\s+[\w_]+\s*;?)\s*/i', '', $s)`.
+fn replace_set_names(s: &str) -> String {
+    let b = s.as_bytes();
+    let ws = |mut i: usize| {
+        while i < b.len() && is_pcre_space(b[i]) {
+            i += 1;
+        }
+        i
+    };
+    let lit = |i: usize, w: &str| -> Option<usize> {
+        let end = i + w.len();
+        (end <= b.len() && b[i..end].eq_ignore_ascii_case(w.as_bytes())).then_some(end)
+    };
+    let ws1 = |i: usize| -> Option<usize> {
+        let j = ws(i);
+        (j > i).then_some(j)
+    };
+    let attempt = |start: usize| -> Option<usize> {
+        let i = lit(ws(start), "SET")?;
+        let i = lit(ws1(i)?, "NAMES")?;
+        let i = lit(ws1(i)?, "utf8")?;
+        if lit(i, "mb4").is_some() {
+            return None;
+        }
+        // `\s*;`
+        let j = ws(i);
+        let end = if j < b.len() && b[j] == b';' {
+            j + 1
+        } else {
+            // `\s+COLLATE\s+[\w_]+\s*;?`
+            let k = lit(ws1(i)?, "COLLATE")?;
+            let mut k = ws1(k)?;
+            let w0 = k;
+            while k < b.len() && (b[k].is_ascii_alphanumeric() || b[k] == b'_') {
+                k += 1;
+            }
+            if k == w0 {
+                return None;
+            }
+            let k = ws(k);
+            if k < b.len() && b[k] == b';' { k + 1 } else { k }
+        };
+        Some(ws(end))
+    };
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match attempt(i) {
+            Some(end) => i = end,
+            None => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+/// `preg_replace('/;\s*;+/', ';', $s)`.
+fn collapse_semicolons(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b';' {
+            let mut j = i + 1;
+            while j < b.len() && is_pcre_space(b[j]) {
+                j += 1;
+            }
+            if j < b.len() && b[j] == b';' {
+                while j < b.len() && b[j] == b';' {
+                    j += 1;
+                }
+                out.push(b';');
+                i = j;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `preg_replace('/\s+/', ' ', $s)`.
+fn collapse_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_ws = false;
+    for c in s.chars() {
+        if c.is_ascii() && is_pcre_space(c as u8) {
+            if !in_ws {
+                out.push(' ');
+            }
+            in_ws = true;
+        } else {
+            out.push(c);
+            in_ws = false;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod init_statement_tests {
+    use super::remove_set_names_utf8 as clean;
+
+    /// Expected values from PHP running Magento's own `removeSetNamesUtf8`.
+    #[test]
+    fn set_names_utf8_is_removed_like_magento() {
+        let cases: &[(&str, Option<&str>)] = &[
+            ("SET NAMES utf8;", None),
+            ("  ", None),
+            ("SET NAMES utf8mb4;", Some("SET NAMES utf8mb4;")),
+            ("SET NAMES utf8; SET time_zone = '+00:00';", Some("SET time_zone = '+00:00';")),
+            ("SET sql_mode = '';\nset names UTF8 collate utf8_general_ci;  SET  a=1;;", Some("SET sql_mode = '';SET a=1;")),
+            ("SET time_zone = '+00:00';", Some("SET time_zone = '+00:00';")),
+            ("0", None),
+            ("SET NAMES utf8 ;;; ;0", Some(" ;0;")),
+            ("SET NAMES utf8mb3;", Some("SET NAMES utf8mb3;")),
+            ("SET NAMES utf8 COLLATE utf8_unicode_ci", None),
+            ("X;SET NAMES utf8;Y", Some("X;Y;")),
+        ];
+        for (input, want) in cases {
+            assert_eq!(clean(input).as_deref(), *want, "{input:?}");
+        }
+    }
 }
