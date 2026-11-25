@@ -75,7 +75,7 @@ pub(crate) fn clean_err(e: mysql::Error) -> String {
     }
 }
 
-mod query;
+pub(crate) mod query;
 pub(crate) use query::{take_warnings, Db, RowExt};
 mod config;
 pub(crate) use config::*;

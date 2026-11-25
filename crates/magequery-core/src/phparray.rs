@@ -104,6 +104,86 @@ impl PhpValue {
         }
     }
 
+    /// This value as Magento's deployment-config writer lays out a whole file:
+    /// `PhpFormatter::format` without comments, i.e. `"<?php\nreturn " .
+    /// varExportShort($data, true) . ";\n"`. Byte-exact, unlike
+    /// [`to_php_file`](Self::to_php_file): no comma after an array's last element,
+    /// lists written without keys, `[\n\n]` for an empty nested array. `None` when
+    /// the tree holds something Magento would write differently from how it reads
+    /// (a `Const`, which PHP evaluates, or a float whose `var_export` form uses an
+    /// exponent), so a caller can refuse to rewrite a file it cannot reproduce.
+    pub fn to_magento_php_file(&self) -> Option<String> {
+        let mut out = String::from("<?php\nreturn ");
+        // `format()` passes `true` as the depth, which PHP reads as 1.
+        self.export_short(&mut out, 1)?;
+        out.push_str(";\n");
+        Some(out)
+    }
+
+    /// `PhpFormatter::varExportShort`.
+    fn export_short(&self, out: &mut String, depth: usize) -> Option<()> {
+        const INDENT: &str = "    ";
+        match self {
+            PhpValue::Array(items) => {
+                let indexed = !items.is_empty()
+                    && items
+                        .iter()
+                        .enumerate()
+                        .all(|(i, (k, _))| matches!(k, PhpValue::Int(n) if *n == i as i64));
+                out.push_str("[\n");
+                for (i, (k, v)) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(",\n");
+                    }
+                    out.push_str(&INDENT.repeat(depth));
+                    if !indexed {
+                        k.export_short(out, 0)?;
+                        out.push_str(" => ");
+                    }
+                    v.export_short(out, depth + 1)?;
+                }
+                out.push('\n');
+                out.push_str(&INDENT.repeat(depth.saturating_sub(1)));
+                out.push(']');
+            }
+            PhpValue::Str(s) => {
+                // var_export: single quotes, `\` and `'` escaped, NUL spliced in
+                // as a double-quoted "\0".
+                out.push('\'');
+                for c in s.chars() {
+                    match c {
+                        '\\' | '\'' => {
+                            out.push('\\');
+                            out.push(c);
+                        }
+                        '\0' => out.push_str("' . \"\\0\" . '"),
+                        c => out.push(c),
+                    }
+                }
+                out.push('\'');
+            }
+            PhpValue::Int(i) => out.push_str(&i.to_string()),
+            PhpValue::Float(f) => {
+                // serialize_precision = -1: the shortest round-trip digits, with
+                // ".0" kept on integral values. PHP switches to exponent form
+                // outside roughly [1e-4, 1e15); those are left to Magento.
+                let a = f.abs();
+                if !f.is_finite() || (a != 0.0 && !(1e-4..1e15).contains(&a)) {
+                    return None;
+                }
+                let s = f.to_string();
+                out.push_str(&s);
+                if !s.contains('.') {
+                    out.push_str(".0");
+                }
+            }
+            PhpValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            PhpValue::Null => out.push_str("null"),
+            PhpValue::Const(_) => return None,
+        }
+        Some(())
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             PhpValue::Str(s) => Some(s),
@@ -612,5 +692,32 @@ return [
             v.to_php_file(),
             "<?php\nreturn [\n    'a' => [\n        0 => 'x',\n        1 => true,\n    ],\n    'b' => 1.0,\n];\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod magento_writer_tests {
+    use super::{parse, PhpValue};
+
+    /// A config.php exactly as `bin/magento setup:upgrade` writes it round-trips
+    /// byte for byte, including the comma-less last element, a list, and an
+    /// empty nested array.
+    #[test]
+    fn a_magento_written_config_php_round_trips() {
+        let src = "<?php\nreturn [\n    'modules' => [\n        'Magento_Store' => 1,\n        'Vendor_Off' => 0\n    ],\n    'system' => [\n        'default' => [\n            'web' => [\n                'list' => [\n                    'a',\n                    'it\\'s'\n                ],\n                'none' => [\n\n                ],\n                'f' => 1.5,\n                'g' => 2.0,\n                'n' => null,\n                'b' => true\n            ]\n        ]\n    ]\n];\n";
+        let v = parse(src).unwrap();
+        assert_eq!(v.to_magento_php_file().as_deref(), Some(src));
+    }
+
+    #[test]
+    fn a_constant_cannot_be_reproduced() {
+        let v = parse("<?php\nreturn ['a' => \\PDO::ATTR_TIMEOUT];\n").unwrap();
+        assert_eq!(v.to_magento_php_file(), None);
+    }
+
+    #[test]
+    fn exponent_floats_are_refused() {
+        let v = PhpValue::Array(vec![(PhpValue::Str("x".into()), PhpValue::Float(1e20))]);
+        assert_eq!(v.to_magento_php_file(), None);
     }
 }

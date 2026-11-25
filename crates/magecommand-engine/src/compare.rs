@@ -101,9 +101,7 @@ fn collect_files(root: &Path) -> Result<BTreeMap<String, PathBuf>> {
             let entry = entry.map_err(|e| Error::io(&dir, e))?;
             let path = entry.path();
             let file_type = entry.file_type().map_err(|e| Error::io(&path, e))?;
-            // A symlinked directory too: `di verify` compares a mirror of a
-            // tree whose area files it rewrote (`arealayout::CompareTrees`).
-            if file_type.is_dir() || (file_type.is_symlink() && path.is_dir()) {
+            if file_type.is_dir() {
                 stack.push(path);
             } else {
                 let rel = path

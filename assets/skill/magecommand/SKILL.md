@@ -48,11 +48,9 @@ Writes `generated/code` and `generated/metadata`.
 
 - Compile once → `di compile`. `--force` overwrites existing generated files;
   `--dry-run` reports without writing; `--incremental` skips the whole compile
-  when no input or setting changed (stat fingerprint); `--fused` emits fused interceptors
+  when no input changed (stat fingerprint); `--fused` emits fused interceptors
   with inlined plugin chains instead of stock runtime-dispatch ones
-  (global-only classes for now). On Mage-OS 4.0+ it writes every area but
-  global as its differences from global, as 4.0 does; `--area-config full`
-  writes them whole instead. Like `setup:di:compile`, it removes
+  (global-only classes for now). Like `setup:di:compile`, it removes
   `var/.regenerate` (left by `composer install`), so the next `bin/magento`
   command does not wipe `generated/`. A class whose constructor it cannot
   resolve (an unreadable parent, or a default it cannot evaluate such as an
@@ -64,8 +62,6 @@ Writes `generated/code` and `generated/metadata`.
   memory, recompiles on change and writes only the delta. Long-running.
 - Cache `generated/` in CI → `di digest`. The compile is a pure function of the
   source tree, so an unchanged digest means the existing output is still valid.
-  Pass it the same settings flags as `di compile` (`--fused`, `--target-php`,
-  `--target-platform`, `--area-config`), which it folds into the key.
   Use the default content digest as the cache key; `--stat` (mtime+size) is the
   local `--incremental` short-circuit and is NOT portable across a fresh checkout.
 - Check output against a known-good tree → `di verify --archive <DIR> --output
@@ -124,6 +120,17 @@ Read-only checks a deploy runs to decide whether the slow steps have work, with
   `theme:registration:status` / `queue:config:status` (database queues; prints the
   AMQP topology fingerprint for RabbitMQ).
 
+## Development `setup:upgrade` — `magecommand dev upgrade`
+
+Use it instead of `bin/magento setup:upgrade` in development. When nothing needs
+upgrading it finishes in well under a second without PHP: it writes
+`app/etc/config.php` (new or removed modules), cleans the caches, empties
+`generated/` and `pub/static` (`--keep-generated` to skip), and does the core
+recurring setup work natively. When a schema change, patch, config import, theme,
+non-core `Setup/Recurring.php` or anything else needs PHP, it says why and runs
+`php bin/magento setup:upgrade` itself (`--php "<cmd>"` for another PHP command,
+`--full` to always run it). It refuses production mode.
+
 ## Conventions
 
 - Every command accepts `--root <path>` and `--json` (machine-readable, stable).
@@ -139,8 +146,8 @@ Read-only checks a deploy runs to decide whether the slow steps have work, with
 ## Scope and limits
 
 - Target is Magento 2.4 Open Source.
-- Only `setup:di:compile`, `setup:static-content:deploy` and the status gates are
-  reproduced.
+- Only `setup:di:compile`, `setup:static-content:deploy`, the status gates and a
+  development `setup:upgrade` with nothing to do are reproduced.
 - Static deploy implements Magento's **quick** strategy.
 - `--fused` interceptors are limited to global-only classes; multi-area classes
   still get stock interceptors.
