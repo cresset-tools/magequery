@@ -316,9 +316,11 @@ leaves out would be built lazily where the reference builds it eagerly, so its c
 runs late or never. Mage-OS 4.0 keeps a class off the list when it can't prove the
 constructor free of side effects. The report names these classes, and their files fail.
 
-Until magecommand ports Mage-OS 4.0's `ConstructorSideEffectScanner`, `di compile` writes
-an empty `lazyTypes` on a 4.0 checkout. Every class is eager, and verify lists the
-reference's whole set here.
+On a 4.0 checkout `di compile` runs its own port of that check (Mage-OS's
+`ConstructorSideEffectScanner`). It reads constructor bodies with a simplified tokenizer:
+a string that interpolates `{$this->method()}` is one opaque token, so a trusted
+constructor's call written there is not seen. A difference caused by that would land in
+this section or the unexplained one, never silently.
 
 ## Ordering only
 

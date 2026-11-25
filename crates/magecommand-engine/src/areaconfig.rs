@@ -284,11 +284,16 @@ pub fn build_area_file_from_export(
             LazyKind::AllowList => {
                 candidates.into_iter().filter(|c| is_lazy_eligible(defs, c)).collect()
             }
-            // 4.0 also requires a side-effect-free constructor, which needs
-            // ConstructorSideEffectScanner. Until that is ported, nothing is
-            // proven safe: an empty allow-list keeps every class eager, where
-            // the 3.6 rule alone would make side-effecting constructors lazy.
-            LazyKind::AllowListScanned | LazyKind::None => Vec::new(),
+            // 4.0: also no inherited `#[NonLazy]`, and a constructor that is
+            // trusted or proven free of side effects.
+            LazyKind::AllowListScanned => {
+                let mut scanner = crate::sideeffect::Scanner::new(defs);
+                candidates
+                    .into_iter()
+                    .filter(|c| is_lazy_eligible(defs, c) && scanner.is_lazy_eligible(c))
+                    .collect()
+            }
+            LazyKind::None => Vec::new(),
         };
         (name, types)
     });
@@ -476,7 +481,7 @@ fn lazy_candidates(
 /// `\Proxy`-suffixed, unknown to the class universe (class_exists false —
 /// virtual types land here), interface/trait/enum/abstract/final/readonly,
 /// any internal PHP ancestor, or the #[NonLazy] attribute.
-fn is_lazy_eligible(defs: &Definitions, name: &str) -> bool {
+pub fn is_lazy_eligible(defs: &Definitions, name: &str) -> bool {
     use magecommand_php::ClassKind;
     if name.ends_with("\\Proxy") {
         return false;

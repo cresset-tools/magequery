@@ -162,7 +162,8 @@ pub struct MethodMeta {
     pub params: Vec<ParamMeta>,
     /// Resolved return type expression (`?A\B`, `X|Y`, `static`, …).
     pub return_type: Option<String>,
-    /// Byte offset of the `function` keyword.
+    /// Byte offset of the member declaration: its first modifier
+    /// (`public`, `final`, …), else the `function` keyword.
     pub offset: usize,
 }
 

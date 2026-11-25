@@ -9,7 +9,8 @@
 //! `nonLazyTypes` deny-list. Writing the deny-list made no class lazy on a
 //! Mage-OS 3.6 / 4.0 store. The pass returns early below PHP 8.4, and on 4.0 a
 //! class also needs a constructor `ConstructorSideEffectScanner` proves free of
-//! side effects — not ported yet, so nothing is listed there.
+//! side effects (or one declared in `Magento\` / `MageOS\`), and `#[NonLazy]`
+//! also excludes through an ancestor, an interface or a trait.
 //!
 //! https://github.com/cresset-tools/magequery/issues/219
 
@@ -25,6 +26,11 @@ struct Fixture(PathBuf);
 impl Fixture {
     /// A store whose compiler ships the given files under [`COMPILER`].
     fn new(name: &str, compiler_files: &[&str]) -> Self {
+        Self::with(name, compiler_files, &[])
+    }
+
+    /// [`Fixture::new`], plus `extra` `(path, content)` files.
+    fn with(name: &str, compiler_files: &[&str], extra: &[(&str, &str)]) -> Self {
         let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
         let _ = std::fs::remove_dir_all(&root);
         let write = |rel: &str, content: &str| {
@@ -65,6 +71,9 @@ impl Fixture {
         );
         for f in compiler_files {
             write(&format!("{COMPILER}/{f}"), "<?php\n");
+        }
+        for (path, content) in extra {
+            write(path, content);
         }
         Fixture(root)
     }
@@ -135,18 +144,120 @@ fn below_php_8_4_the_pass_writes_nothing() {
     assert_eq!(section(&metadata, "nonLazyTypes"), None, "{metadata}");
 }
 
+/// Classes for the 4.0 rules: `(short name, source)` under `Acme\Repro\Model`.
+const SCANNED: &[(&str, &str)] = &[
+    // Plain assignments of parameters, casts and literals.
+    (
+        "Assigns",
+        "class Assigns\n{\n    private Dependency $dep;\n    private string $label;\n    \
+         public function __construct(Dependency $dep, string $label = 'x')\n    {\n        \
+         $this->dep = $dep;\n        $this->label = (string)$label;\n    }\n}\n",
+    ),
+    // Promotion, an array parameter's key, `??`.
+    (
+        "Promoted",
+        "class Promoted\n{\n    private array $items;\n    \
+         public function __construct(private readonly Dependency $dep, array $data = [])\n    {\n        \
+         $this->items = $data['items'] ?? [];\n    }\n}\n",
+    ),
+    // The BC ObjectManager fallback, through a use import.
+    (
+        "Fallback",
+        "use Magento\\Framework\\App\\ObjectManager;\n\nclass Fallback\n{\n    private Dependency $dep;\n    \
+         public function __construct(?Dependency $dep = null)\n    {\n        \
+         $this->dep = $dep ?? ObjectManager::getInstance()->get(Dependency::class);\n    }\n}\n",
+    ),
+    // A method call: not provably free of side effects.
+    (
+        "CallsMethod",
+        "class CallsMethod\n{\n    public function __construct(Dependency $dep)\n    {\n        \
+         $this->init();\n    }\n\n    private function init(): void\n    {\n    }\n}\n",
+    ),
+    // `new` in a default runs on construction.
+    (
+        "NewDefault",
+        "class NewDefault\n{\n    public function __construct(?Dependency $dep = new Dependency())\n    {\n    }\n}\n",
+    ),
+    // A write to an undeclared property.
+    (
+        "Undeclared",
+        "class Undeclared\n{\n    public function __construct($x)\n    {\n        $this->undeclared = $x;\n    }\n}\n",
+    ),
+    // `#[NonLazy]` reaches it through its interface (4.0; 3.6 read only the class).
+    ("MarkedChild", "class MarkedChild implements Marked\n{\n    public function __construct(Dependency $dep)\n    {\n    }\n}\n"),
+    (
+        "Marked",
+        "use Magento\\Framework\\ObjectManager\\Attribute\\NonLazy;\n\n#[NonLazy]\ninterface Marked\n{\n}\n",
+    ),
+    // The same, with the call inside an interpolated string: PHP's tokenizer
+    // still sees it.
+    (
+        "OverridesInString",
+        "class OverridesInString extends \\Magento\\Trusted\\Model\\Labelled\n{\n    \
+         protected function describe(): string\n    {\n        echo 'side effect';\n        return '';\n    }\n}\n",
+    ),
+    // A trusted constructor that calls a method this class overrides.
+    (
+        "Overrides",
+        "class Overrides extends \\Magento\\Trusted\\Model\\Thing\n{\n    \
+         protected function setup(): void\n    {\n        echo 'side effect';\n    }\n}\n",
+    ),
+];
+
+/// A `Magento\` class: trusted without scanning, though its constructor calls a method.
+const TRUSTED: &str = "<?php\nnamespace Magento\\Trusted\\Model;\n\nclass Thing\n{\n    \
+     public function __construct(\\Acme\\Repro\\Model\\Dependency $dep)\n    {\n        \
+     $this->setup();\n    }\n\n    protected function setup(): void\n    {\n    }\n}\n";
+
+/// A `Magento\` class whose constructor calls a method inside a string.
+const TRUSTED_IN_STRING: &str = "<?php\nnamespace Magento\\Trusted\\Model;\n\nclass Labelled\n{\n    \
+     private string $label;\n    \
+     public function __construct(\\Acme\\Repro\\Model\\Dependency $dep)\n    {\n        \
+     $this->label = \"label: {$this->describe()}\";\n    }\n\n    \
+     protected function describe(): string\n    {\n        return 'x';\n    }\n}\n";
+
 #[test]
-fn mageos_4_0_lists_nothing_until_the_side_effect_scanner_is_ported() {
-    let fx = Fixture::new(
+fn mageos_4_0_lists_the_classes_it_proves_free_of_side_effects() {
+    let sources: Vec<(String, String)> = SCANNED
+        .iter()
+        .map(|(name, body)| {
+            (
+                format!("app/code/Acme/Repro/Model/{name}.php"),
+                format!("<?php\nnamespace Acme\\Repro\\Model;\n\n{body}"),
+            )
+        })
+        .collect();
+    let mut extra: Vec<(&str, &str)> =
+        sources.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+    extra.extend([
+        ("app/etc/config.php", "<?php\nreturn ['modules' => ['Magento_Trusted' => 1, 'Acme_Repro' => 1]];\n"),
+        (
+            "app/code/Magento/Trusted/etc/module.xml",
+            "<?xml version=\"1.0\"?>\n<config><module name=\"Magento_Trusted\"/></config>\n",
+        ),
+        ("app/code/Magento/Trusted/Model/Thing.php", TRUSTED),
+        ("app/code/Magento/Trusted/Model/Labelled.php", TRUSTED_IN_STRING),
+    ]);
+    let fx = Fixture::with(
         "mq-lazy-4-0",
         &["Config/Chain/LazyTypes.php", "ConstructorSideEffectScanner.php"],
+        &extra,
     );
     let metadata = fx.compile(&[]);
-    assert_eq!(
-        section(&metadata, "lazyTypes"),
-        Some(Vec::new()),
-        "without the scanner no constructor is proven side-effect free:\n{metadata}"
-    );
+    let lazy = section(&metadata, "lazyTypes").unwrap_or_else(|| panic!("{metadata}"));
+
+    let model = |n: &str| format!("Acme\\Repro\\Model\\{n}");
+    for lazy_class in ["Consumer", "Assigns", "Promoted", "Fallback"].map(model)
+        .into_iter()
+        .chain(["Magento\\Trusted\\Model\\Thing", "Magento\\Trusted\\Model\\Labelled"].map(str::to_owned))
+    {
+        assert!(lazy.contains(&lazy_class), "`{lazy_class}` is provably safe: {lazy:?}");
+    }
+    for eager in ["Sealed", "CallsMethod", "NewDefault", "Undeclared", "MarkedChild", "Overrides", "OverridesInString"]
+        .map(model)
+    {
+        assert!(!lazy.contains(&eager), "`{eager}` must stay eager: {lazy:?}");
+    }
 }
 
 #[test]

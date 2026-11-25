@@ -43,8 +43,9 @@ pub enum LazyKind {
     /// Mage-OS 3.3 – 3.6: `Chain\LazyTypes`, a `lazyTypes` allow-list of the
     /// candidates that may.
     AllowList,
-    /// Mage-OS 4.0: the allow-list, where a constructor must also be proven
-    /// side-effect free by `Compiler\ConstructorSideEffectScanner`.
+    /// Mage-OS 4.0: the allow-list, where a constructor must also be trusted
+    /// or proven side-effect free by `Compiler\ConstructorSideEffectScanner`
+    /// (ported in [`crate::sideeffect`]).
     AllowListScanned,
 }
 

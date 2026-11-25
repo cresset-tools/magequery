@@ -695,8 +695,7 @@ fn fewer_lazy_types(changed: &mut Vec<String>, ctx: &ClassifyCtx) -> Option<Know
         explanation: "The reference's `lazyTypes` allow-list holds every class the output's \
 does, and these as well (or the same classes in another order). Mage-OS's compiled factory builds \
 a class as a PHP 8.4 lazy ghost only when it is on the list, so these are constructed eagerly \
-instead: always correct, only slower. Mage-OS 4.0's list depends on its \
-ConstructorSideEffectScanner, which magecommand has not ported yet."
+instead: always correct, only slower."
             .to_owned(),
         items: classes.into_iter().collect(),
         verified: true,

@@ -37,6 +37,9 @@
   ),
   'lazyTypes' => 
   array (
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -91,6 +94,9 @@
   ),
   'lazyTypes' => 
   array (
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -141,6 +147,9 @@
   ),
   'lazyTypes' => 
   array (
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -191,6 +200,9 @@
   ),
   'lazyTypes' => 
   array (
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -285,6 +297,9 @@
   ),
   'lazyTypes' => 
   array (
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -333,6 +348,9 @@
   ),
   'lazyTypes' => 
   array (
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
@@ -370,6 +388,9 @@
   ),
   'lazyTypes' => 
   array (
+    'Acme\\Pref\\Model\\Concrete' => true,
+    'Acme\\Pref\\Model\\C' => true,
+    'Acme\\Pref\\Model\\Replacement' => true,
   ),
 );
 
