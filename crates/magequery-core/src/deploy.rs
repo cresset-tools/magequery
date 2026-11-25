@@ -205,7 +205,9 @@ fn non_empty(s: String) -> Option<String> {
 }
 
 fn redis_from_cache(id: String, fe: &PhpValue) -> Option<RedisInstance> {
-    let is_redis = |b: &Option<String>| b.as_deref().is_some_and(|s| s.contains("Redis"));
+    // Class names (`Cm_Cache_Backend_Redis`, `…\\Backend\\Redis`) or the short
+    // `redis` that `setup:config:set --cache-backend=redis` writes.
+    let is_redis = |b: &Option<String>| b.as_deref().is_some_and(|s| s.to_ascii_lowercase().contains("redis"));
     let backend = fe.get("backend").and_then(PhpValue::scalar_string);
     let remote = fe.get("remote_backend").and_then(PhpValue::scalar_string);
 
