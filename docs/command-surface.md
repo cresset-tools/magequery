@@ -12,7 +12,7 @@ surface; it is a curated, grep-able set. Bare `magecommand` and bare `magecomman
 <group>` print that level's help (clap `arg_required_else_help`), never a default
 action. Global flags (`--root <path>`, `--json`) apply to every command.
 
-**The `di` group, the `static` group's LESS + requirejs + bundle + minify + files + deploy + verify pipelines, and the upgrade gates are built today.** Everything
+**The `di` group and the `static` group's LESS + requirejs + bundle + minify + files + deploy + verify pipelines are built today.** Everything
 else is the planned surface — documented here so the grammar is fixed before scripts
 and muscle memory depend on it, but not yet wired in `main.rs`. New commands MUST slot
 into a group under this grammar, never appear as a bare top-level verb.
@@ -24,12 +24,6 @@ GENERATE   (static, byte-exact reproducible — a real `bin/magento` run is the 
            deploy | verify                        # SCD artifacts + full package (BUILT)
            watch                                  # deploy-in-place orchestration (planned)
   i18n     collect                                # i18n:collect-phrases          (planned)
-
-GATES      (read-only: does `setup:upgrade` / `app:config:import` have work? exit 2 = yes)
-  db       status                                 # setup:db:status               (BUILT)
-  config   status                                 # app:config:status             (BUILT)
-  theme    status                                 # theme:registration:status     (BUILT)
-  queue    status                                 # queue:config:status (MysqlMq) (BUILT)
 
 SCAFFOLD   (Laravel make: — template codegen, no Magento bootstrap, no DB)         (planned)
   make     module | controller | block | model | plugin | observer | command

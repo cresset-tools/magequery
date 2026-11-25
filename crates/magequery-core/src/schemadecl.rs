@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use quick_xml::events::{BytesStart, Event};
-use crate::parse::Reader;
+use quick_xml::Reader;
 
 use crate::parse::{local_name, LineMap};
 use crate::Magento;
@@ -180,10 +180,10 @@ pub(crate) fn node_attrs(e: &BytesStart, line: u32) -> XNode {
     let mut n = XNode { line, ..XNode::default() };
     for a in e.attributes().flatten() {
         let key = a.key.as_ref();
-        let name = if key == "xsi:type" || key.ends_with(":type") {
+        let name = if key == b"xsi:type" || key.ends_with(b":type") {
             "type".to_string()
         } else {
-            key.to_string()
+            String::from_utf8_lossy(key).into_owned()
         };
         n.set(&name, attr_value(&a));
     }
@@ -195,7 +195,7 @@ pub(crate) fn node_attrs(e: &BytesStart, line: u32) -> XNode {
 /// value normalization — so a comment wrapped across lines compares equal to the
 /// single-line comment Magento wrote to the database. `&#10;` stays a newline.
 pub(crate) fn attr_value(a: &quick_xml::events::attributes::Attribute) -> String {
-    let raw = a.value.replace("\r\n", "\n").replace(['\r', '\n', '\t'], " ");
+    let raw = String::from_utf8_lossy(&a.value).replace("\r\n", "\n").replace(['\r', '\n', '\t'], " ");
     quick_xml::escape::unescape(&raw).map(|v| v.into_owned()).unwrap_or(raw)
 }
 
@@ -260,7 +260,7 @@ pub(crate) fn parse_schema_file(xml: &str) -> Res<Vec<(String, XTable)>> {
             (4, "column") => {
                 if let (Some((child, key)), Some((_, t))) = (&open, tables.last_mut()) {
                     let list = if *child == Child::Index { &mut t.indexes } else { &mut t.constraints };
-                    let col = e.attributes().flatten().find(|a| a.key.as_ref() == "name").map(|a| attr_value(&a));
+                    let col = e.attributes().flatten().find(|a| a.key.as_ref() == b"name").map(|a| attr_value(&a));
                     if let (Some(col), Some((_, n))) = (col, list.iter_mut().find(|(k, _)| k == key)) {
                         if !n.columns.contains(&col) {
                             n.columns.push(col);

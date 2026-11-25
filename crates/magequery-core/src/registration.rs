@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use quick_xml::events::Event;
-use crate::parse::Reader;
+use quick_xml::Reader;
 
 use crate::configstatus::{json_encode, sha1_hex, Key, Php};
 use crate::ids::Area;
@@ -275,7 +275,7 @@ fn parse_topology(xml: &str) -> Result<Vec<((Option<String>, Option<String>), Ve
             Ok(ev @ (Event::Start(_) | Event::Empty(_))) if depth_in_binding == 0 => {
                 let empty = matches!(ev, Event::Empty(_));
                 let (Event::Start(e) | Event::Empty(e)) = ev else { unreachable!() };
-                let name = e.local_name().as_ref().to_string();
+                let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
                 let attrs = attributes(&e);
                 match name.as_str() {
                     "exchange" => {
@@ -298,7 +298,7 @@ fn parse_topology(xml: &str) -> Result<Vec<((Option<String>, Option<String>), Ve
             Ok(Event::End(e)) => {
                 if depth_in_binding > 0 {
                     depth_in_binding -= 1;
-                } else if e.local_name().as_ref() == "exchange" {
+                } else if e.local_name().as_ref() == b"exchange" {
                     in_exchange = false;
                 }
             }
@@ -364,11 +364,11 @@ fn parse_brokers(xml: &str) -> Result<Vec<(String, Vec<Attrs>)>> {
                 let empty = matches!(ev, Event::Empty(_));
                 let (Event::Start(e) | Event::Empty(e)) = ev else { unreachable!() };
                 match e.local_name().as_ref() {
-                    "broker" => {
+                    b"broker" => {
                         out.push((attributes(&e).get("topic").cloned().unwrap_or_default(), Vec::new()));
                         in_broker = !empty;
                     }
-                    "queue" if in_broker => {
+                    b"queue" if in_broker => {
                         if let Some((_, queues)) = out.last_mut() {
                             queues.push(attributes(&e));
                         }
@@ -376,7 +376,7 @@ fn parse_brokers(xml: &str) -> Result<Vec<(String, Vec<Attrs>)>> {
                     _ => {}
                 }
             }
-            Ok(Event::End(e)) if e.local_name().as_ref() == "broker" => in_broker = false,
+            Ok(Event::End(e)) if e.local_name().as_ref() == b"broker" => in_broker = false,
             _ => {}
         }
     }
@@ -391,7 +391,7 @@ fn parse_topics(xml: &str) -> Result<Vec<(String, Attrs)>> {
         match reader.read_event() {
             Err(e) => return Err(Error::Unsupported(format!("communication.xml: {e}"))),
             Ok(Event::Eof) => break,
-            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.local_name().as_ref() == "topic" => {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.local_name().as_ref() == b"topic" => {
                 let attrs = attributes(&e);
                 out.push((attrs.get("name").cloned().unwrap_or_default(), attrs));
             }
@@ -405,8 +405,8 @@ fn attributes(e: &quick_xml::events::BytesStart) -> Attrs {
     e.attributes()
         .flatten()
         .map(|a| {
-            let key = a.key.local_name().as_ref().to_string();
-            let value = quick_xml::escape::unescape(&a.value).map(|v| v.into_owned()).unwrap_or_default();
+            let key = String::from_utf8_lossy(a.key.local_name().as_ref()).into_owned();
+            let value = a.unescape_value().map(|v| v.into_owned()).unwrap_or_default();
             (key, value)
         })
         .collect()

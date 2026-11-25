@@ -7,20 +7,17 @@ description: >-
   deploy or rebuild `pub/static`, compile a theme's LESS, emit requirejs
   artifacts or `js/bundle/bundle<N>.js`, minify a css/js file, keep `generated/`
   warm during an edit loop, produce a CI cache key for `generated/`, or verify
-  generated/deployed output against a real Magento run. Also use it in a deploy
-  to decide whether `setup:upgrade` or `app:config:import` has work to do (`db
-  status`, `config status`, `theme status`, `queue status`). It needs no PHP and
-  no node. Apart from those gates magecommand WRITES build artifacts to the
-  checkout: use it only to generate them, never to inspect, explain, or debug a
-  codebase, and never for any other `bin/magento` command.
+  generated/deployed output against a real Magento run. It needs no PHP and no
+  node. magecommand WRITES build artifacts to the checkout: use it only to
+  generate them, never to inspect, explain, or debug a codebase, and never for any
+  other `bin/magento` command.
 ---
 
 # Building a Magento 2 codebase with magecommand
 
 `magecommand` reimplements Magento's two build steps in Rust. It parses the source
 tree and writes the same artifacts `bin/magento` would, without executing PHP and
-without node. Two command groups: `di` (compilation) and `static` (content deploy),
-plus the read-only upgrade gates a deploy runs before `setup:upgrade`.
+without node. Two command groups: `di` (compilation) and `static` (content deploy).
 
 ## The rule
 
@@ -28,8 +25,7 @@ plus the read-only upgrade gates a deploy runs before `setup:upgrade`.
 debug a codebase — or to report what is already on disk — this is the wrong tool.
 Reach for it only when files must actually be written.
 
-Only these two build steps and the upgrade gates below are covered. Every other
-`bin/magento` command
+Only these two build steps are covered. Every other `bin/magento` command
 (`setup:upgrade`, `cache:flush`, `indexer:reindex`, …) is out of scope — run those
 with `bin/magento`.
 
@@ -107,19 +103,6 @@ Writes the `pub/static` packages, or `--out <DIR>`.
   coverage). `static cssdiff <expected> <actual>` diffs one css file, ignoring
   non-semantic formatting.
 
-## Upgrade gates — `db`, `config`, `theme`, `queue status`
-
-Read-only checks a deploy runs to decide whether the slow steps have work, with
-`bin/magento`'s exit codes: 0 = nothing to do, 2 = work to do, 1 = error.
-
-- `magecommand db status` → `setup:db:status` (schema, patches, module versions;
-  says whether the upgrade needs maintenance mode).
-- `magecommand config status` → `app:config:status`. Exit 1 also means "can't hash
-  this config exactly" — fall back to `bin/magento app:config:status`.
-- `magecommand theme status` / `queue status` → Mage-OS's
-  `theme:registration:status` / `queue:config:status` (database queues; prints the
-  AMQP topology fingerprint for RabbitMQ).
-
 ## Conventions
 
 - Every command accepts `--root <path>` and `--json` (machine-readable, stable).
@@ -135,8 +118,7 @@ Read-only checks a deploy runs to decide whether the slow steps have work, with
 ## Scope and limits
 
 - Target is Magento 2.4 Open Source.
-- Only `setup:di:compile`, `setup:static-content:deploy` and the status gates are
-  reproduced.
+- Only `setup:di:compile` and `setup:static-content:deploy` are reproduced.
 - Static deploy implements Magento's **quick** strategy.
 - `--fused` interceptors are limited to global-only classes; multi-area classes
   still get stock interceptors.

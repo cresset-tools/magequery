@@ -25,18 +25,18 @@ pub(crate) fn events_xml(xml: &str) -> Vec<(EventName, RawObserver)> {
         match ev {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
-                "event" => current = attr(&e, "name").map(EventName::new),
-                "observer" => {
+                b"event" => current = attr(&e, b"name").map(EventName::new),
+                b"observer" => {
                     if let (Some(ev), Some(name), Some(inst)) =
-                        (&current, attr(&e, "name"), attr(&e, "instance"))
+                        (&current, attr(&e, b"name"), attr(&e, b"instance"))
                     {
                         out.push((
                             ev.clone(),
                             RawObserver {
                                 name,
                                 instance: ClassName::new(inst),
-                                disabled: attr(&e, "disabled").map(|s| matches!(s.trim(), "true" | "1")),
-                                shared: attr(&e, "shared").map(|s| matches!(s.trim(), "true" | "1")),
+                                disabled: attr(&e, b"disabled").map(|s| matches!(s.trim(), "true" | "1")),
+                                shared: attr(&e, b"shared").map(|s| matches!(s.trim(), "true" | "1")),
                                 line,
                             },
                         ));
@@ -44,7 +44,7 @@ pub(crate) fn events_xml(xml: &str) -> Vec<(EventName, RawObserver)> {
                 }
                 _ => {}
             },
-            Ok(Event::End(e)) if e.name().as_ref() == "event" => current = None,
+            Ok(Event::End(e)) if e.name().as_ref() == b"event" => current = None,
             _ => {}
         }
         buf.clear();
@@ -80,26 +80,26 @@ pub(crate) fn crontab_xml(xml: &str) -> Vec<RawJob> {
         match ev {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
-                "group" => group = attr(&e, "id").unwrap_or_default(),
-                "job" => {
+                b"group" => group = attr(&e, b"id").unwrap_or_default(),
+                b"job" => {
                     out.push(RawJob {
                         group: group.clone(),
-                        name: attr(&e, "name").unwrap_or_default(),
-                        instance: ClassName::new(attr(&e, "instance").unwrap_or_default()),
-                        method: attr(&e, "method").unwrap_or_default(),
+                        name: attr(&e, b"name").unwrap_or_default(),
+                        instance: ClassName::new(attr(&e, b"instance").unwrap_or_default()),
+                        method: attr(&e, b"method").unwrap_or_default(),
                         schedule: None,
                         config_path: None,
                         line,
                     });
                     cur_job = Some(out.len() - 1);
                 }
-                "schedule" => text_into = Some("schedule"),
-                "config_path" => text_into = Some("config_path"),
+                b"schedule" => text_into = Some("schedule"),
+                b"config_path" => text_into = Some("config_path"),
                 _ => {}
             },
             Ok(Event::Text(e)) => {
                 if let (Some(i), Some(field)) = (cur_job, text_into) {
-                    let t = text(&e).trim().to_string();
+                    let t = e.unescape().unwrap_or_default().trim().to_string();
                     if !t.is_empty() {
                         match field {
                             "schedule" => out[i].schedule = Some(t),
@@ -109,8 +109,8 @@ pub(crate) fn crontab_xml(xml: &str) -> Vec<RawJob> {
                 }
             }
             Ok(Event::End(e)) => match e.name().as_ref() {
-                "job" => cur_job = None,
-                "schedule" | "config_path" => text_into = None,
+                b"job" => cur_job = None,
+                b"schedule" | b"config_path" => text_into = None,
                 _ => {}
             },
             _ => {}
@@ -144,25 +144,25 @@ pub(crate) fn routes_xml(xml: &str) -> Vec<RawRoute> {
         match ev {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
-                "router" => router = attr(&e, "id").unwrap_or_default(),
-                "route" => {
+                b"router" => router = attr(&e, b"id").unwrap_or_default(),
+                b"route" => {
                     out.push(RawRoute {
                         router: router.clone(),
-                        id: attr(&e, "id").unwrap_or_default(),
-                        front_name: attr(&e, "frontName").unwrap_or_default(),
+                        id: attr(&e, b"id").unwrap_or_default(),
+                        front_name: attr(&e, b"frontName").unwrap_or_default(),
                         modules: Vec::new(),
                         line,
                     });
                     cur = Some(out.len() - 1);
                 }
-                "module" => {
-                    if let (Some(i), Some(name)) = (cur, attr(&e, "name")) {
+                b"module" => {
+                    if let (Some(i), Some(name)) = (cur, attr(&e, b"name")) {
                         out[i].modules.push(name);
                     }
                 }
                 _ => {}
             },
-            Ok(Event::End(e)) if e.name().as_ref() == "route" => cur = None,
+            Ok(Event::End(e)) if e.name().as_ref() == b"route" => cur = None,
             _ => {}
         }
         buf.clear();
@@ -194,10 +194,10 @@ pub(crate) fn webapi_xml(xml: &str) -> Vec<RawWebapi> {
         match ev {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
-                "route" => {
+                b"route" => {
                     out.push(RawWebapi {
-                        method: attr(&e, "method").unwrap_or_default(),
-                        url: attr(&e, "url").unwrap_or_default(),
+                        method: attr(&e, b"method").unwrap_or_default(),
+                        url: attr(&e, b"url").unwrap_or_default(),
                         service_class: ClassName::new(String::new()),
                         service_method: String::new(),
                         resources: Vec::new(),
@@ -205,24 +205,24 @@ pub(crate) fn webapi_xml(xml: &str) -> Vec<RawWebapi> {
                     });
                     cur = Some(out.len() - 1);
                 }
-                "service" => {
+                b"service" => {
                     if let Some(i) = cur {
-                        if let Some(c) = attr(&e, "class") {
+                        if let Some(c) = attr(&e, b"class") {
                             out[i].service_class = ClassName::new(c);
                         }
-                        if let Some(m) = attr(&e, "method") {
+                        if let Some(m) = attr(&e, b"method") {
                             out[i].service_method = m;
                         }
                     }
                 }
-                "resource" => {
-                    if let (Some(i), Some(r)) = (cur, attr(&e, "ref")) {
+                b"resource" => {
+                    if let (Some(i), Some(r)) = (cur, attr(&e, b"ref")) {
                         out[i].resources.push(r);
                     }
                 }
                 _ => {}
             },
-            Ok(Event::End(e)) if e.name().as_ref() == "route" => cur = None,
+            Ok(Event::End(e)) if e.name().as_ref() == b"route" => cur = None,
             _ => {}
         }
         buf.clear();

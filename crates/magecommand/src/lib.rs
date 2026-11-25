@@ -4,9 +4,7 @@
 //! on the codebase). The grammar is `magecommand <group> <subcommand>` (two
 //! tokens; see `docs/command-surface.md`). Built today: the `di` group —
 //! `di compile` (generate generated/code + metadata), `di verify` (the archive
-//! oracle every milestone is accepted against), `di watch`, `di digest`; the
-//! `static` group; and the upgrade gates `db status`, `config status`, `theme
-//! status`, `queue status` (see `status.rs`).
+//! oracle every milestone is accepted against), `di watch`, `di digest`.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -15,7 +13,6 @@ use anyhow::Context;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 pub mod static_deploy;
-mod status;
 mod style;
 mod watch;
 
@@ -47,7 +44,7 @@ struct Cli {
 /// Top-level groups. The grammar is `magecommand <group> <subcommand>` — two
 /// tokens, mirroring magequery's nouns (magequery reads a noun, magecommand
 /// writes it). Bare `magecommand` and bare `magecommand <group>` print help
-/// (`arg_required_else_help`). The `di`, `static` and status groups are built; the planned
+/// (`arg_required_else_help`). Only the `di` group is built today; the planned
 /// groups (`static`, `i18n`, `make`, `module`/`mode`/…, `product`/…) are
 /// documented in `docs/command-surface.md` but not yet wired.
 #[derive(Subcommand)]
@@ -64,30 +61,6 @@ enum Command {
         #[command(subcommand)]
         command: StaticCommand,
     },
-    /// Database — does `setup:upgrade` have schema or patches to apply?
-    #[command(arg_required_else_help = true)]
-    Db {
-        #[command(subcommand)]
-        command: DbCommand,
-    },
-    /// Deployment config — does `app:config:import` have work to do?
-    #[command(arg_required_else_help = true)]
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
-    /// Themes — does `setup:upgrade` have a theme to register?
-    #[command(arg_required_else_help = true)]
-    Theme {
-        #[command(subcommand)]
-        command: ThemeCommand,
-    },
-    /// Message queues — does `setup:upgrade` have a database queue to add?
-    #[command(arg_required_else_help = true)]
-    Queue {
-        #[command(subcommand)]
-        command: QueueCommand,
-    },
 
     // Tooling meta-command: it describes the CLI itself rather than acting on a
     // Magento codebase, so it sits outside the groups and is hidden from help
@@ -95,36 +68,6 @@ enum Command {
     /// Print the agent skill (SKILL.md) to stdout, for `.claude/skills/`.
     #[command(hide = true)]
     Skill,
-}
-
-#[derive(Subcommand)]
-enum DbCommand {
-    /// Whether the database needs `setup:upgrade`: a native `bin/magento
-    /// setup:db:status`. Exits 0 when up to date, 2 when an upgrade is
-    /// required, 1 on error.
-    Status,
-}
-
-#[derive(Subcommand)]
-enum ConfigCommand {
-    /// Whether `app:config:import` has work to do, as `bin/magento
-    /// app:config:status` decides it. Exits 2 when an import is needed.
-    Status,
-}
-
-#[derive(Subcommand)]
-enum ThemeCommand {
-    /// Whether a theme is not registered yet: a native Mage-OS
-    /// `theme:registration:status`. Exits 2 when one is missing.
-    Status,
-}
-
-#[derive(Subcommand)]
-enum QueueCommand {
-    /// Whether a database queue is missing: the MysqlMq part of Mage-OS's
-    /// `queue:config:status`, plus the AMQP topology fingerprint. Exits 2 when
-    /// a queue is missing.
-    Status,
 }
 
 /// `--symlink` strategies.
@@ -670,10 +613,6 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
 
     match cli.command {
         Command::Skill => unreachable!("handled above"),
-        Command::Db { command: DbCommand::Status } => status::db(cli.root, cli.json),
-        Command::Config { command: ConfigCommand::Status } => status::config(cli.root, cli.json),
-        Command::Theme { command: ThemeCommand::Status } => status::theme(cli.root, cli.json),
-        Command::Queue { command: QueueCommand::Status } => status::queue(cli.root, cli.json),
         Command::Di { command } => match command {
             DiCommand::Compile {
                 dry_run,

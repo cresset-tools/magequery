@@ -25,8 +25,6 @@ pub(crate) fn document_symbols(
 
     let mut reader = quick_xml::Reader::from_str(&text);
     reader.config_mut().check_end_names = false;
-    // A half-typed `&` must not end the outline.
-    reader.config_mut().allow_dangling_amp = true;
     let mut roots: Vec<DocumentSymbol> = Vec::new();
     // One frame per open element: `Some(symbol)` when it's an outline entry (children
     // collect into it), `None` when it's structural only (children pass through).
@@ -75,11 +73,12 @@ fn make_symbol(
     index: &LineIndex,
     start_offset: usize,
 ) -> Option<DocumentSymbol> {
-    let element = e.name().as_ref().to_string();
+    let element = String::from_utf8_lossy(e.name().as_ref()).into_owned();
     let mut ident = None;
     for attr in e.attributes().flatten() {
-        if ID_ATTRS.contains(&attr.key.as_ref()) {
-            ident = Some(attr.value.to_string());
+        let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
+        if ID_ATTRS.contains(&key.as_str()) {
+            ident = Some(String::from_utf8_lossy(&attr.value).into_owned());
             break;
         }
     }
