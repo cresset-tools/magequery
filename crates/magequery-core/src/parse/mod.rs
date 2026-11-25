@@ -11,7 +11,7 @@ use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 use crate::ids::{ClassName, EventName, ModuleName};
 
 
-mod xml;
+pub(crate) mod xml;
 pub(crate) use xml::*;
 mod module;
 pub(crate) use module::*;

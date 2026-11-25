@@ -63,8 +63,7 @@ pub enum Platform {
     MageOs3_0,
     /// Mage-OS 3.3 – 3.x: the `lazyTypes` allow-list.
     MageOs3_3,
-    /// Mage-OS 4.0+: the allow-list, gated on the side-effect scanner, and
-    /// area files written as differences from `global`.
+    /// Mage-OS 4.0+: the allow-list, gated on the side-effect scanner.
     MageOs4_0,
 }
 
@@ -80,15 +79,6 @@ impl Platform {
     /// The names `--target-platform` takes.
     pub fn names() -> impl Iterator<Item = &'static str> {
         Self::ALL.iter().map(|(n, _)| *n)
-    }
-
-    /// Whether this platform's compiler writes, and its runtime reads, area
-    /// files as differences from `global`; see [`crate::arealayout`].
-    pub fn reads_area_diffs(self) -> bool {
-        match self {
-            Platform::Magento2_4_9 | Platform::MageOs3_0 | Platform::MageOs3_3 => false,
-            Platform::MageOs4_0 => true,
-        }
     }
 
     /// The lazy pass this platform's `setup:di:compile` runs.
@@ -120,9 +110,6 @@ pub struct Target<'a> {
     pub php: Option<&'a str>,
     /// The platform release, instead of reading the pass off `setup/`.
     pub platform: Option<Platform>,
-    /// The area-file layout, instead of the platform's own; see
-    /// [`crate::arealayout::AreaLayout::resolve`].
-    pub area_layout: Option<crate::arealayout::AreaLayout>,
 }
 
 /// What the compile emits for the lazy pass.
@@ -266,7 +253,7 @@ mod tests {
         let allow = ["Config/Chain/LazyTypes.php"];
         let platform = |v: &str| format!(r#"{{"config": {{"platform": {{"php": "{v}"}}}}}}"#);
 
-        let php = |v| Target { php: Some(v), ..Target::default() };
+        let php = |v| Target { php: Some(v), platform: None };
         let none = Target::default();
 
         let c = checkout(&allow, None);
@@ -302,10 +289,10 @@ mod tests {
     fn a_target_platform_overrides_the_checkout() {
         // A 3.6 checkout compiled for 4.0, and a bare checkout for Mage-OS 3.3+.
         let c = checkout(&["Config/Chain/LazyTypes.php"], None);
-        let t = Target { platform: Some(Platform::MageOs4_0), ..Target::default() };
+        let t = Target { php: None, platform: Some(Platform::MageOs4_0) };
         assert_eq!(LazyPass::detect(c.path(), &t).kind, LazyKind::AllowListScanned);
         let c = checkout(&[], None);
-        let t = Target { platform: Some(Platform::MageOs3_3), ..Target::default() };
+        let t = Target { php: None, platform: Some(Platform::MageOs3_3) };
         assert_eq!(LazyPass::detect(c.path(), &t).section_name(), Some("lazyTypes"));
     }
 }

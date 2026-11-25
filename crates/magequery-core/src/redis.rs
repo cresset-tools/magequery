@@ -103,6 +103,51 @@ fn talk<S: Read + Write>(mut s: S, inst: &RedisInstance) -> Result<Option<String
     Ok(version)
 }
 
+/// `FLUSHDB` on the instance's database: what cleaning every tag of a Redis cache
+/// backend amounts to.
+pub(crate) fn flushdb(inst: &RedisInstance) -> Result<(), String> {
+    fn run<S: Read + Write>(mut s: S, inst: &RedisInstance) -> Result<(), String> {
+        if !inst.password.is_empty() {
+            write_cmd(&mut s, &["AUTH", &inst.password])?;
+            if let Reply::Error(e) = read_reply(&mut s)? {
+                return Err(format!("AUTH failed: {e}"));
+            }
+        }
+        if let Some(db) = &inst.database {
+            write_cmd(&mut s, &["SELECT", db])?;
+            if let Reply::Error(e) = read_reply(&mut s)? {
+                return Err(format!("SELECT {db} failed: {e}"));
+            }
+        }
+        write_cmd(&mut s, &["FLUSHDB"])?;
+        match read_reply(&mut s)? {
+            Reply::Status(_) => Ok(()),
+            Reply::Error(e) => Err(e),
+            other => Err(format!("unexpected FLUSHDB reply: {other:?}")),
+        }
+    }
+    if inst.host.starts_with('/') {
+        #[cfg(unix)]
+        {
+            let s = UnixStream::connect(&inst.host)
+                .map_err(|e| format!("cannot connect to socket {}: {e}", inst.host))?;
+            s.set_read_timeout(Some(TIMEOUT)).ok();
+            return run(s, inst);
+        }
+        #[cfg(not(unix))]
+        return Err(format!("unix sockets are not supported here: {}", inst.host));
+    }
+    let addr = format!("{}:{}", inst.host, inst.port.unwrap_or(6379));
+    let sock = addr
+        .to_socket_addrs()
+        .map_err(|e| format!("cannot resolve {addr}: {e}"))?
+        .next()
+        .ok_or_else(|| format!("no address for {addr}"))?;
+    let s = TcpStream::connect_timeout(&sock, TIMEOUT).map_err(|e| format!("cannot reach {addr}: {e}"))?;
+    s.set_read_timeout(Some(TIMEOUT)).ok();
+    run(s, inst)
+}
+
 #[derive(Debug)]
 enum Reply {
     Status(String),
