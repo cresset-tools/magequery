@@ -15,6 +15,7 @@ use anyhow::Context;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 pub mod static_deploy;
+mod dev;
 mod status;
 mod style;
 mod watch;
@@ -88,6 +89,12 @@ enum Command {
         #[command(subcommand)]
         command: QueueCommand,
     },
+    /// Development shortcuts — a fast `setup:upgrade`.
+    #[command(arg_required_else_help = true)]
+    Dev {
+        #[command(subcommand)]
+        command: DevCommand,
+    },
 
     // Tooling meta-command: it describes the CLI itself rather than acting on a
     // Magento codebase, so it sits outside the groups and is hidden from help
@@ -117,6 +124,26 @@ enum ThemeCommand {
     /// Whether a theme is not registered yet: a native Mage-OS
     /// `theme:registration:status`. Exits 2 when one is missing.
     Status,
+}
+
+#[derive(Subcommand)]
+enum DevCommand {
+    /// `bin/magento setup:upgrade` for development, without PHP when nothing needs
+    /// upgrading: writes app/etc/config.php, cleans caches and generated files, and
+    /// does the core recurring setup work natively. Runs the real command whenever
+    /// a schema change, patch, config import, unknown recurring script or anything
+    /// else needs PHP. Refuses production mode.
+    Upgrade {
+        /// Leave generated/ and pub/static alone, as `setup:upgrade --keep-generated`.
+        #[arg(long)]
+        keep_generated: bool,
+        /// The PHP command to run bin/magento with, split on whitespace.
+        #[arg(long, default_value = "php", value_name = "CMD")]
+        php: String,
+        /// Always run the PHP command.
+        #[arg(long)]
+        full: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -724,6 +751,9 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
         Command::Config { command: ConfigCommand::Status } => status::config(cli.root, cli.json),
         Command::Theme { command: ThemeCommand::Status } => status::theme(cli.root, cli.json),
         Command::Queue { command: QueueCommand::Status } => status::queue(cli.root, cli.json),
+        Command::Dev { command: DevCommand::Upgrade { keep_generated, php, full } } => {
+            dev::upgrade(cli.root, cli.json, &dev::Options { keep_generated, php, full })
+        }
         Command::Di { command } => match command {
             DiCommand::Compile {
                 dry_run,

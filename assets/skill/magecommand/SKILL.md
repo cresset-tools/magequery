@@ -124,6 +124,17 @@ Read-only checks a deploy runs to decide whether the slow steps have work, with
   `theme:registration:status` / `queue:config:status` (database queues; prints the
   AMQP topology fingerprint for RabbitMQ).
 
+## Development `setup:upgrade` — `magecommand dev upgrade`
+
+Use it instead of `bin/magento setup:upgrade` in development. When nothing needs
+upgrading it finishes in well under a second without PHP: it writes
+`app/etc/config.php` (new or removed modules), cleans the caches, empties
+`generated/` and `pub/static` (`--keep-generated` to skip), and does the core
+recurring setup work natively. When a schema change, patch, config import, theme,
+non-core `Setup/Recurring.php` or anything else needs PHP, it says why and runs
+`php bin/magento setup:upgrade` itself (`--php "<cmd>"` for another PHP command,
+`--full` to always run it). It refuses production mode.
+
 ## Conventions
 
 - Every command accepts `--root <path>` and `--json` (machine-readable, stable).
@@ -139,8 +150,8 @@ Read-only checks a deploy runs to decide whether the slow steps have work, with
 ## Scope and limits
 
 - Target is Magento 2.4 Open Source.
-- Only `setup:di:compile`, `setup:static-content:deploy` and the status gates are
-  reproduced.
+- Only `setup:di:compile`, `setup:static-content:deploy`, the status gates and a
+  development `setup:upgrade` with nothing to do are reproduced.
 - Static deploy implements Magento's **quick** strategy.
 - `--fused` interceptors are limited to global-only classes; multi-area classes
   still get stock interceptors.

@@ -31,6 +31,9 @@ GATES      (read-only: does `setup:upgrade` / `app:config:import` have work? exi
   theme    status                                 # theme:registration:status     (BUILT)
   queue    status                                 # queue:config:status (MysqlMq) (BUILT)
 
+DEV        (development shortcuts; refuse production mode)
+  dev      upgrade                                # setup:upgrade, PHP only when needed (BUILT)
+
 SCAFFOLD   (Laravel make: — template codegen, no Magento bootstrap, no DB)         (planned)
   make     module | controller | block | model | plugin | observer | command
            | cron | graphql-resolver | ui-component | …
