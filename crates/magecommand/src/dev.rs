@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use magequery_core::Magento;
-use magequery_core::devupgrade::{ConfigPhpUpdate, DevUpgradeCheck, empty_dir};
+use magequery_core::devupgrade::{ConfigPhpUpdate, DevUpgradeCheck, EnvPhpUpdate, empty_dir};
 
 use crate::style;
 
@@ -37,7 +37,23 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
         needs_php.push("--full".into());
     }
 
-    // 1. config.php, before anything reads the module list (as Installer does).
+    // `checkFilePermissionsForDbUpgrade`: Magento fails the upgrade on this, so
+    // fail before touching anything.
+    check_writable(mage.root())?;
+
+    // 1. env.php: `DbInitStatementsCleanup`.
+    match mage.cleaned_env_php().map_err(|e| anyhow!(e))? {
+        EnvPhpUpdate::Unchanged => {}
+        EnvPhpUpdate::Rewrite(contents) => {
+            let path = mage.root().join("app/etc/env.php");
+            std::fs::write(&path, contents).with_context(|| format!("writing {}", path.display()))?;
+            done.push("env.php: removed the deprecated SET NAMES utf8".into());
+            mage = Magento::open(&root).map_err(|e| anyhow!(e))?;
+        }
+        EnvPhpUpdate::CannotReproduce(why) => needs_php.push(why),
+    }
+
+    // 2. config.php, before anything reads the module list (as Installer does).
     match mage.upgraded_config_php().map_err(|e| anyhow!(e))? {
         ConfigPhpUpdate::Unchanged => {}
         ConfigPhpUpdate::Rewrite { contents, added, removed, reordered } => {
@@ -59,7 +75,7 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
         ConfigPhpUpdate::CannotReproduce(why) => needs_php.push(why),
     }
 
-    // 2. Everything that would need PHP.
+    // 3. Everything that would need PHP.
     let check = if needs_php.is_empty() {
         mage.dev_upgrade_check().map_err(|e| anyhow!(e))?
     } else {
@@ -67,7 +83,7 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
     };
     needs_php.extend(check.needs_php.iter().cloned());
 
-    // 3. The fast path: caches, generated files, the recurring writes.
+    // 4. The fast path: caches, generated files, the recurring writes.
     if needs_php.is_empty() {
         match mage.clean_caches() {
             Ok(lines) => done.extend(lines),
@@ -159,4 +175,73 @@ fn fall_back(
         Some(c) => ExitCode::from(u8::try_from(c).unwrap_or(1)),
         None => ExitCode::FAILURE,
     })
+}
+
+/// `FilePermissions::getMissingWritableDirectoriesForDbUpgrade`: app/etc and var
+/// must be writable. Only when one is not does Magento look inside it, two levels
+/// deep (var/session excluded, symlinks ignored), and only report it when something
+/// there is not writable either.
+fn check_writable(root: &Path) -> Result<()> {
+    let mut missing = Vec::new();
+    for dir in ["app/etc", "var"] {
+        let path = root.join(dir);
+        if is_writable_dir(&path) {
+            continue;
+        }
+        if !children_writable(&path, &root.join("var/session"), 0) {
+            missing.push(path.display().to_string());
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        bail!("Missing write permissions to the following paths:\n{}", missing.join("\n"))
+    }
+}
+
+fn is_writable_dir(path: &Path) -> bool {
+    path.is_dir() && access(path, libc_flags::R_OK) && access(path, libc_flags::W_OK)
+}
+
+fn children_writable(dir: &Path, excluded: &Path, depth: usize) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else { return false };
+    let mut ok = true;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.starts_with(excluded) {
+            continue;
+        }
+        let is_link = entry.file_type().is_ok_and(|t| t.is_symlink());
+        if !is_link && !access(&path, libc_flags::W_OK) {
+            ok = false;
+        }
+        if depth < 1 && !is_link && path.is_dir() && !children_writable(&path, excluded, depth + 1) {
+            ok = false;
+        }
+    }
+    ok
+}
+
+#[cfg(unix)]
+mod libc_flags {
+    pub const R_OK: i32 = libc::R_OK;
+    pub const W_OK: i32 = libc::W_OK;
+}
+#[cfg(not(unix))]
+mod libc_flags {
+    pub const R_OK: i32 = 4;
+    pub const W_OK: i32 = 2;
+}
+
+/// PHP's is_writable()/is_readable(): access(2).
+#[cfg(unix)]
+fn access(path: &Path, mode: i32) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    unsafe { libc::access(c.as_ptr(), mode) == 0 }
+}
+
+#[cfg(not(unix))]
+fn access(path: &Path, mode: i32) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| mode != libc_flags::W_OK || !m.permissions().readonly())
 }
