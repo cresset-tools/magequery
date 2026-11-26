@@ -498,32 +498,7 @@ impl Definitions {
     ) -> Vec<String> {
         self.relations.clear();
         self.public_methods.clear();
-        // Classmap-autoloaded packages (colinmollenhour/*, phpunit, …) have
-        // no PSR prefix; composer's dumped classmap is the truth for those.
-        let classmap: HashMap<String, PathBuf> = {
-            let path = root.join("vendor/composer/autoload_classmap.php");
-            let text = fs::read_to_string(&path).unwrap_or_default();
-            let vendor = root.join("vendor");
-            let base = root.to_path_buf();
-            text.lines()
-                .filter_map(|line| {
-                    let line = line.trim();
-                    let (name, rest) = line.strip_prefix('\'')?.split_once("' => ")?;
-                    let (dir, rel) = if let Some(r) = rest.strip_prefix("$vendorDir . '") {
-                        (&vendor, r)
-                    } else if let Some(r) = rest.strip_prefix("$baseDir . '") {
-                        (&base, r)
-                    } else {
-                        return None;
-                    };
-                    let rel = rel.strip_suffix("',")?;
-                    Some((
-                        name.replace("\\\\", "\\"),
-                        dir.join(rel.trim_start_matches('/')),
-                    ))
-                })
-                .collect()
-        };
+        let classmap = composer_classmap(root);
         let mut queue: Vec<String> = self
             .classes
             .values()
@@ -881,6 +856,34 @@ fn internal_iface_parents(name: &str) -> Option<&'static [&'static str]> {
         | "DOMParentNode" | "DOMChildNode" | "UnitEnum" | "DateTimeInterface" => &[],
         _ => return None,
     })
+}
+
+/// Composer's dumped classmap: class name -> file. Classmap-autoloaded packages
+/// (colinmollenhour/*, phpunit, …) have no PSR prefix, so this is the truth for
+/// those. Empty when the store has no dumped autoloader.
+pub(crate) fn composer_classmap(root: &Path) -> HashMap<String, PathBuf> {
+    let path = root.join("vendor/composer/autoload_classmap.php");
+    let text = fs::read_to_string(&path).unwrap_or_default();
+    let vendor = root.join("vendor");
+    let base = root.to_path_buf();
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (name, rest) = line.strip_prefix('\'')?.split_once("' => ")?;
+            let (dir, rel) = if let Some(r) = rest.strip_prefix("$vendorDir . '") {
+                (&vendor, r)
+            } else if let Some(r) = rest.strip_prefix("$baseDir . '") {
+                (&base, r)
+            } else {
+                return None;
+            };
+            let rel = rel.strip_suffix("',")?;
+            Some((
+                name.replace("\\\\", "\\"),
+                dir.join(rel.trim_start_matches('/')),
+            ))
+        })
+        .collect()
 }
 
 /// Whether the name is one of the internal PHP classes this module models —

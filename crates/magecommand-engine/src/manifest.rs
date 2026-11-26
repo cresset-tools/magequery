@@ -189,6 +189,18 @@ impl Manifest {
         }
     }
 
+    /// Forget the recorded output: it no longer describes `generated/`, as when
+    /// a compile clears the tree and may not get to write a new one. Absent is
+    /// fine; any other failure is an error, since a stale manifest would make
+    /// the next `--incremental` run trust an empty tree.
+    pub fn forget(root: &Path) -> Result<()> {
+        let path = Self::path(root);
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Error::io(&path, e)),
+            _ => Ok(()),
+        }
+    }
+
     /// Persist the manifest under `root/generated/.mqcache/`, creating the dir.
     /// Atomic (temp + rename) so a crash can't leave a half-written manifest
     /// that would later parse as garbage.

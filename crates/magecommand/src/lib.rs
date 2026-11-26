@@ -2188,6 +2188,7 @@ fn compile(
         // perturbing which factories/interceptors get emitted. Clearing first
         // (as `setup:di:compile` does) is what makes every path — full, forced,
         // or incremental-on-change — produce a byte-identical tree.
+        magecommand_engine::manifest::Manifest::forget(&root)?;
         magecommand_engine::metadata::clear_generated_dir(&root, "code")?;
         magecommand_engine::metadata::clear_generated_dir(&root, "metadata")?;
         lap!("clear generated dirs");
@@ -2216,6 +2217,10 @@ fn compile(
         let out =
             magecommand_engine::build::compute_outputs_with(&magento, &mut defs, &root, fused, &target);
         lap!("compute outputs (in memory)");
+        if !out.rejections.is_empty() {
+            report_rejections(&out.rejections, "nothing was written");
+            return Ok(ExitCode::FAILURE);
+        }
         // Write the whole tree (the compute cleared it first). Direct parallel
         // write, no reconcile — on APFS reusing unchanged files costs more than
         // rewriting them (see manifest.rs).
@@ -2250,6 +2255,19 @@ fn compile(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The di.xml `setup:di:compile` refuses, one line each, then `consequence`:
+/// what the run did about it.
+pub(crate) fn report_rejections(rejections: &[magecommand_engine::rejects::Rejection], consequence: &str) {
+    for r in rejections {
+        eprintln!("{} {r}", style::stderr::error("error:"));
+    }
+    eprintln!(
+        "{} setup:di:compile refuses this configuration too, so {consequence} ({} error(s))",
+        style::stderr::error("di compile failed:"),
+        rejections.len()
+    );
 }
 
 /// Name every type the compile left to runtime reflection although di.xml

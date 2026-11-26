@@ -79,6 +79,13 @@ di compile [--dry-run] [--force] [--incremental] [--fused]
     `--all-modules --extra-app-code dev/tests/integration/_files`. `di digest` takes
     the same two flags. Refuses when a module name is defined in two directories
     (doctor E1007), as Magento would: it doesn't boot with a module registered twice.
+    Also refuses, writing nothing and exiting 1, the di.xml `setup:di:compile`
+    refuses, in Magento's words plus the file and line at fault: a preference whose
+    type (followed through further preferences) is not a class, or is outside every
+    compiled path, and a plugin that is not disabled whose class (through a virtual
+    type) is not a class. Nothing else is refused: a preference FOR a missing class,
+    a `<type>` or virtual type of one, a preference to such a virtual type and an
+    object argument of one all compile under Magento too, and fail at runtime if at all.
 
 di verify --archive <DIR> --output <DIR> [--fail-on-diff] [--sample <N>]
           [--no-explain] [--strict-ordering] [--show-residual <FILE>]
@@ -97,6 +104,8 @@ di verify --archive <DIR> --output <DIR> [--fail-on-diff] [--sample <N>]
 di watch [--once]
     Long-running compile server: build once, keep the parsed index in memory, and
     recompile on file change writing only the delta. The fast edit loop.
+    A configuration `di compile` refuses is reported and the last tree kept until
+    an edit makes it compile.
 
 di digest [--stat] [--fused] [--target-php <V>] [--target-platform <P>] [--area-config <L>]
     Print the content-addressed digest of the compile inputs and settings — a CI cache
