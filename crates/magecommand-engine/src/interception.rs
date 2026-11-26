@@ -12,6 +12,78 @@ use crate::definitions::Definitions;
 use crate::phpexport::{PhpKey, PhpValue};
 
 pub fn interception_map(magento: &Magento, defs: &Definitions) -> BTreeMap<String, bool> {
+    build_map(magento, defs, true)
+}
+
+/// The developer-mode runtime variant: the `interception` cache entry that
+/// `Config::initializeUncompiled` saves. Runtime definitions list no classes
+/// (`Definition\Runtime::getClasses()` is `[]`), so only types the merged
+/// config names are resolved — step 3 below is skipped.
+pub fn runtime_interception_map(magento: &Magento, defs: &Definitions) -> BTreeMap<String, bool> {
+    build_map(magento, defs, false)
+}
+
+/// The class universe a developer-mode request resolves interception over:
+/// the compile scan plus everything the merged config names. At runtime
+/// `Relations\Runtime` asks the autoloader, which also finds classes outside
+/// the scan — a virtual type of an enabled module based on a class of a
+/// DISABLED one still walks that class's interfaces — so config-named types
+/// join the hierarchy extension, not just preference keys.
+pub fn runtime_definitions(magento: &Magento, root: &std::path::Path) -> Definitions {
+    // The seven exports are independent once the index is built.
+    {
+        use rayon::prelude::*;
+        AREA_CODES.par_iter().for_each(|(area, _)| {
+            magento.di_export_ref(*area);
+        });
+    }
+    let prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
+    let t = std::time::Instant::now();
+    let mut names: Vec<String> = Vec::new();
+    for (area, _) in AREA_CODES {
+        let export = magento.di_export_ref(area);
+        names.extend(export.arguments.iter().map(|a| a.type_name.as_str().to_owned()));
+        names.extend(export.virtual_types.iter().map(|v| v.name.as_str().to_owned()));
+        names.extend(export.virtual_types.iter().map(|v| v.base.as_str().to_owned()));
+        names.extend(export.shared.iter().map(|s| s.type_name.as_str().to_owned()));
+        names.extend(export.plugins.iter().map(|p| p.target.as_str().to_owned()));
+    }
+    names.sort_unstable();
+    names.dedup();
+    // Only what the walk can reach is loaded: the config's types, the source
+    // chains of the generatable ones, and their ancestors.
+    let mut defs = Definitions::empty();
+    let sources: Vec<String> = names
+        .iter()
+        .filter_map(|n| {
+            let mut chain = Vec::new();
+            let mut current = n.clone();
+            while let Some((_, source)) = crate::codegen::classify(&current) {
+                chain.push(source.clone());
+                current = source;
+            }
+            (!chain.is_empty()).then_some(chain)
+        })
+        .flatten()
+        .collect();
+    if prof { eprintln!("  · exports+names {:?}", t.elapsed()); }
+    defs.load_closure(magento, root, names.iter().cloned().chain(sources));
+    if prof { eprintln!("  · closure       {:?}", t.elapsed()); }
+    // `Relations\Runtime::has` is `class_exists`, which runs the generation
+    // autoloader: with `generated/` emptied, every generatable name the
+    // config mentions (a `Foo\Proxy` argument, a virtual type based on one)
+    // materializes — and a proxy extends its subject, so it inherits the
+    // subject's plugins.
+    let code = crate::codegen::generate_on_demand(magento, &defs, root.to_path_buf(), names.iter().map(String::as_str));
+    if prof { eprintln!("  · on-demand gen  {:?} ({} files)", t.elapsed(), code.files.len()); }
+    if defs.add_generated_code(&code.files, root) > 0 {
+        defs.load_closure(magento, root, std::iter::empty());
+    }
+    if prof { eprintln!("  · fold          {:?}", t.elapsed()); }
+    defs
+}
+
+fn build_map(magento: &Magento, defs: &Definitions, scan_all: bool) -> BTreeMap<String, bool> {
     let exports: Vec<&DiExport> = AREA_CODES
         .iter()
         .map(|(area, _)| magento.di_export_ref(*area))
@@ -51,7 +123,7 @@ pub fn interception_map(magento: &Magento, defs: &Definitions) -> BTreeMap<Strin
         resolver.has_plugins(name);
     }
     // 3. Every scanned class (app + lib + generated — NOT setup).
-    for class in &defs.scanned {
+    for class in defs.scanned.iter().filter(|_| scan_all) {
         if !defs.setup_classes.contains(class) {
             resolver.has_plugins(class);
         }

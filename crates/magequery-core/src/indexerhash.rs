@@ -370,7 +370,8 @@ fn json(v: &Val, out: &mut String) {
     }
 }
 
-fn json_str(s: &str, out: &mut String) {
+/// `json_encode` of a string with PHP's default flags (`\\/`, `\\uXXXX`).
+pub(crate) fn json_str(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
         match c {
