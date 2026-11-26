@@ -486,8 +486,8 @@ enum StaticCommand {
         fail_on_diff: bool,
         /// Require byte-exact css: count files that differ only in
         /// non-semantic formatting as `changed` rather than `equivalent`.
-        #[arg(long)]
-        strict: bool,
+        #[arg(long, alias = "strict")]
+        byte_exact_css: bool,
         /// Require FULL coverage: a package the reference has and the output
         /// does not counts as missing. Default is to verify only the packages
         /// the output actually contains, so checking a one-theme deploy
@@ -519,6 +519,19 @@ enum DiCommand {
         /// any change, does a normal full compile. The fast path for a tight edit-compile loop.
         #[arg(long)]
         incremental: bool,
+        /// Fail (exit 1) on a result Magento's own compile accepts but that
+        /// breaks the store at runtime, for a CI gate. `lost-arguments`: types
+        /// whose di.xml arguments the compiled config leaves out. The tree is
+        /// still written. Comma-separated or repeated.
+        #[arg(
+            long,
+            value_name = "KIND",
+            value_delimiter = ',',
+            value_parser = clap::builder::TypedValueParser::map(clap::builder::PossibleValuesParser::new(
+                magecommand_engine::build::FailOn::names()
+            ), |s| s.parse::<magecommand_engine::build::FailOn>().expect("a listed name")),
+        )]
+        fail_on: Vec<magecommand_engine::build::FailOn>,
         #[command(flatten)]
         settings: CompileSettings,
         #[command(flatten)]
@@ -759,6 +772,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 dry_run,
                 force,
                 incremental,
+                ref fail_on,
                 ref settings,
                 ref modules,
             } => compile(
@@ -767,6 +781,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 dry_run,
                 force,
                 incremental,
+                fail_on,
                 settings.fused,
                 settings.target(),
                 modules,
@@ -906,10 +921,10 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 ref reference,
                 ref output,
                 fail_on_diff,
-                strict,
+                byte_exact_css,
                 all,
                 sample,
-            } => static_verify(reference, output, fail_on_diff, strict, all, sample, cli.json),
+            } => static_verify(reference, output, fail_on_diff, byte_exact_css, all, sample, cli.json),
         },
     }
 }
@@ -923,14 +938,14 @@ fn static_verify(
     reference: &Path,
     output: &Path,
     fail_on_diff: bool,
-    strict: bool,
+    byte_exact_css: bool,
     all: bool,
     sample: usize,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
     use static_deploy::verify as sv;
 
-    let report = match sv::verify(reference, output, strict, all) {
+    let report = match sv::verify(reference, output, byte_exact_css, all) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{} {e}", style::stderr::error("error:"));
@@ -961,7 +976,7 @@ fn static_verify(
         let doc = serde_json::json!({
             "reference": reference.display().to_string(),
             "output": output.display().to_string(),
-            "strict": strict,
+            "byte_exact_css": byte_exact_css,
             "full_coverage": all,
             "clean": clean,
             "not_deployed": report.not_deployed.iter().map(|b| b.label()).collect::<Vec<_>>(),
@@ -1003,11 +1018,11 @@ fn static_verify(
             show(style::changed("changed"), &r.changed);
             show(style::removed("missing (reference only)"), &r.missing);
             show(style::added("extra (ours only)"), &r.extra);
-            // Never hidden, but marked as not-a-defect outside --strict.
+            // Never hidden, but marked as not-a-defect outside --byte-exact-css.
             show(style::dim("bundle re-split (.min-sibling cache scope)"), &r.resplit);
             show(
-                if strict {
-                    style::changed("equivalent (counted: --strict)")
+                if byte_exact_css {
+                    style::changed("equivalent (counted: --byte-exact-css)")
                 } else {
                     style::dim("equivalent (formatting only)")
                 },
@@ -2012,6 +2027,7 @@ fn compile(
     dry_run: bool,
     force: bool,
     incremental: bool,
+    fail_on: &[magecommand_engine::build::FailOn],
     fused: bool,
     target: magecommand_engine::lazytypes::Target,
     modules: &ModuleArgs,
@@ -2093,7 +2109,9 @@ fn compile(
                         style::dim("— no compile input or setting changed (use --force to rebuild)")
                     );
                 }
-                return Ok(ExitCode::SUCCESS);
+                // The output is the last compile's, and so are its results.
+                warn_lost_arguments(&prev.lost_arguments);
+                return Ok(gate(fail_on, &prev.lost_arguments));
             }
             input_digest = Some(current);
         }
@@ -2188,6 +2206,7 @@ fn compile(
         // perturbing which factories/interceptors get emitted. Clearing first
         // (as `setup:di:compile` does) is what makes every path — full, forced,
         // or incremental-on-change — produce a byte-identical tree.
+        magecommand_engine::manifest::Manifest::forget(&root)?;
         magecommand_engine::metadata::clear_generated_dir(&root, "code")?;
         magecommand_engine::metadata::clear_generated_dir(&root, "metadata")?;
         lap!("clear generated dirs");
@@ -2216,6 +2235,10 @@ fn compile(
         let out =
             magecommand_engine::build::compute_outputs_with(&magento, &mut defs, &root, fused, &target);
         lap!("compute outputs (in memory)");
+        if !out.rejections.is_empty() {
+            report_rejections(&out.rejections, "nothing was written");
+            return Ok(ExitCode::FAILURE);
+        }
         // Write the whole tree (the compute cleared it first). Direct parallel
         // write, no reconcile — on APFS reusing unchanged files costs more than
         // rewriting them (see manifest.rs).
@@ -2234,7 +2257,9 @@ fn compile(
                 magecommand_engine::manifest::FingerprintMode::Stat,
             ),
         };
-        magecommand_engine::manifest::Manifest::new(&bp, digest, settings).save(&root)?;
+        magecommand_engine::manifest::Manifest::new(&bp, digest, settings)
+            .with_lost_arguments(out.lost_arguments.clone())
+            .save(&root)?;
         lap!("write manifest + input digest");
         consume_regenerate_flag(&root)?;
         println!("{} {written} generated/ file(s)", style::pass("wrote"));
@@ -2248,8 +2273,42 @@ fn compile(
                 out.findings.first().map(String::as_str).unwrap_or("")
             );
         }
+        return Ok(gate(fail_on, &out.lost_arguments));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The exit code `--fail-on` gives a compile whose output has `lost`, saying
+/// which rule failed it; the results themselves are reported already.
+fn gate(fail_on: &[magecommand_engine::build::FailOn], lost: &[(String, String)]) -> ExitCode {
+    use magecommand_engine::build::FailOn;
+    let failed: Vec<FailOn> = fail_on
+        .iter()
+        .copied()
+        .filter(|kind| match kind {
+            FailOn::LostArguments => !lost.is_empty(),
+        })
+        .collect();
+    if failed.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    for kind in failed {
+        eprintln!("{} --fail-on {}", style::stderr::error("di compile failed:"), kind.name());
+    }
+    ExitCode::FAILURE
+}
+
+/// The di.xml `setup:di:compile` refuses, one line each, then `consequence`:
+/// what the run did about it.
+pub(crate) fn report_rejections(rejections: &[magecommand_engine::rejects::Rejection], consequence: &str) {
+    for r in rejections {
+        eprintln!("{} {r}", style::stderr::error("error:"));
+    }
+    eprintln!(
+        "{} setup:di:compile refuses this configuration too, so {consequence} ({} error(s))",
+        style::stderr::error("di compile failed:"),
+        rejections.len()
+    );
 }
 
 /// Name every type the compile left to runtime reflection although di.xml

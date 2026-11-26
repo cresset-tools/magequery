@@ -79,17 +79,24 @@ pub fn watch(root: Option<PathBuf>, _json: bool, once: bool) -> anyhow::Result<E
     metadata::clear_generated_dir(&root, "metadata")?;
     let mut pristine = Definitions::scan(&magento, &root, &scan_generated);
     let out = compute(&magento, &pristine, &root);
-    let written = metadata::write_generated(&root, &out.files)?;
-    // A `composer install` touches var/.regenerate; the next bin/magento boot
-    // would then wipe this tree. setup:di:compile consumes it, so do we.
-    metadata::consume_regenerate_flag(&root)?;
-    let mut prev: HashMap<String, String> = out.files.iter().cloned().collect();
-    eprintln!(
-        "{} initial build — {} files in {:.1}s",
-        style::name("watch:"),
-        written,
-        t0.elapsed().as_secs_f64()
-    );
+    // What is on disk: nothing yet, so a refused first build writes the whole
+    // tree as soon as the configuration compiles.
+    let mut prev: HashMap<String, String> = HashMap::new();
+    if out.rejections.is_empty() {
+        let written = metadata::write_generated(&root, &out.files)?;
+        // A `composer install` touches var/.regenerate; the next bin/magento boot
+        // would then wipe this tree. setup:di:compile consumes it, so do we.
+        metadata::consume_regenerate_flag(&root)?;
+        prev = out.files.iter().cloned().collect();
+        eprintln!(
+            "{} initial build — {} files in {:.1}s",
+            style::name("watch:"),
+            written,
+            t0.elapsed().as_secs_f64()
+        );
+    } else {
+        crate::report_rejections(&out.rejections, "nothing was written; watching for a fix");
+    }
     report_findings(&out);
 
     // Watcher → channel. The closure only captures the sender.
@@ -165,6 +172,13 @@ pub fn watch(root: Option<PathBuf>, _json: bool, once: bool) -> anyhow::Result<E
             pristine = Definitions::scan(&magento, &root, &scan_generated);
         }
         let out = compute(&magento, &pristine, &root);
+        if !out.rejections.is_empty() {
+            crate::report_rejections(&out.rejections, "the last tree is kept until it compiles");
+            if once {
+                break;
+            }
+            continue;
+        }
         let stats = metadata::write_generated_delta(&root, &out.files, &prev)?;
         metadata::consume_regenerate_flag(&root)?;
         prev = out.files.iter().cloned().collect();
