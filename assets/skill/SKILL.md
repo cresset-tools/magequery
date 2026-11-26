@@ -229,7 +229,7 @@ query over tables the virtual ones don't cover), and `--json` to parse results.
   Scope to your own code with `--source app`, or narrower with `--in app/code/Acme`,
   `--in Acme_Module` or `--in Acme`. Each finding prints a stable code
   (`warn[E5003]`): `magequery doctor --explain E5003` explains it (bare `--explain` lists
-  all), `--deny E5003` fails on that kind, `--strict` fails on every warning.
+  all), `--deny E5003` fails on that kind, `--fail-on-warnings` fails on every warning.
   A `magequery-baseline.json` at the root (written by `--generate-baseline`) hides the
   findings a project has accepted, so only new ones show; `--no-baseline` shows all. An
   entry that no longer matches is `error[baseline]` (cited at its line in the file);

@@ -37,7 +37,7 @@
 //! in non-semantic formatting is reported as `equivalent`, not `changed`. That
 //! mirrors `di verify`'s `reordered` bucket — a real difference in bytes, but
 //! not one that changes behavior, so it does not make the report unclean unless
-//! `--strict` says byte-exact.
+//! `--byte-exact-css` asks for identical bytes.
 //!
 //! `sri-hashes.json` is checked for presence only, never for content. Magento's
 //! own copy differs from run to run of the same tree: its parallel workers each
@@ -99,11 +99,11 @@ pub struct BucketReport {
     /// Present in both, bytes differ, and the difference is real.
     pub changed: Vec<String>,
     /// Present in both, bytes differ, but a semantic CSS diff finds nothing —
-    /// formatting only. Clean unless `strict`.
+    /// formatting only. Clean unless `byte_exact_css`.
     pub equivalent: Vec<String>,
     /// Bundle files whose only difference is WHICH bundle each module landed
     /// in — see [`bundle_scope_equivalent`]. Clean, and not affected by
-    /// `strict`: the modules and their sources are identical, so there is no
+    /// `byte_exact_css`: the modules and their sources are identical, so there is no
     /// stricter reading under which these are a defect.
     pub resplit: Vec<String>,
     /// `sri-hashes.json` files both sides have, whose content is not compared
@@ -124,11 +124,11 @@ impl BucketReport {
             + self.missing.len()
     }
 
-    fn is_clean(&self, strict: bool) -> bool {
+    fn is_clean(&self, byte_exact_css: bool) -> bool {
         self.missing.is_empty()
             && self.extra.is_empty()
             && self.changed.is_empty()
-            && (!strict || self.equivalent.is_empty())
+            && (!byte_exact_css || self.equivalent.is_empty())
     }
 }
 
@@ -141,7 +141,7 @@ pub struct VerifyReport {
     /// missing files, unless the caller asked for full coverage.
     pub not_deployed: Vec<Bucket>,
     /// Byte-exact required (`equivalent` counts as a difference).
-    pub strict: bool,
+    pub byte_exact_css: bool,
 }
 
 impl VerifyReport {
@@ -162,7 +162,7 @@ impl VerifyReport {
 
     /// Does our tree reproduce the reference?
     pub fn is_clean(&self) -> bool {
-        self.buckets.iter().all(|(_, b)| b.is_clean(self.strict))
+        self.buckets.iter().all(|(_, b)| b.is_clean(self.byte_exact_css))
     }
 }
 
@@ -348,7 +348,7 @@ fn is_bundle_file(rel: &str) -> bool {
 pub fn verify(
     reference: &Path,
     output: &Path,
-    strict: bool,
+    byte_exact_css: bool,
     require_full_coverage: bool,
 ) -> Result<VerifyReport, VerifyError> {
     if !reference.is_dir() {
@@ -421,7 +421,7 @@ pub fn verify(
     Ok(VerifyReport {
         buckets: buckets.into_iter().collect(),
         not_deployed: not_deployed.into_iter().collect(),
-        strict,
+        byte_exact_css,
     })
 }
 
@@ -572,9 +572,9 @@ mod tests {
     }
 
     /// A css file differing only in formatting is `equivalent` — clean by
-    /// default, a difference under `--strict`.
+    /// default, a difference under `--byte-exact-css`.
     #[test]
-    fn formatting_only_css_is_equivalent_until_strict() {
+    fn formatting_only_css_is_equivalent_until_byte_exact() {
         let td = tempfile::tempdir().unwrap();
         let (a, b) = (td.path().join("ref"), td.path().join("out"));
         w(&a, "frontend/Magento/blank/nl_NL/css/x.css", ".a {\n  color: #FF0000;\n}\n");
@@ -585,8 +585,8 @@ mod tests {
         assert_eq!(lenient.totals().equivalent.len(), 1);
         assert!(lenient.totals().changed.is_empty());
 
-        let strict = verify(&a, &b, true, false).unwrap();
-        assert!(!strict.is_clean(), "byte-exact mode must flag it");
+        let byte_exact_css = verify(&a, &b, true, false).unwrap();
+        assert!(!byte_exact_css.is_clean(), "byte-exact mode must flag it");
     }
 
     /// A non-css file that differs is always `changed` — the semantic escape

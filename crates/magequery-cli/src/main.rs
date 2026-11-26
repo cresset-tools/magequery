@@ -458,8 +458,8 @@ struct DoctorArgs {
     #[arg(long, value_name = "CODE", num_args = 0..=1, default_missing_value = "")]
     explain: Option<String>,
     /// Fail the run (exit 1) on warnings too, not only on errors. Infos never fail it.
-    #[arg(long)]
-    strict: bool,
+    #[arg(long, alias = "strict")]
+    fail_on_warnings: bool,
     /// Only report findings located here: a path prefix (`app/code/Acme`,
     /// `app/design/frontend/Acme`), a module (`Acme_Widget`), or a vendor (`Acme` = its
     /// modules and themes). Repeatable. The exit code follows the filtered findings.
@@ -9403,10 +9403,10 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
     }
 
     // Errors and stale baseline entries fail the run (CI-able); warnings alone don't,
-    // unless --deny'd or --strict.
+    // unless --deny'd or --fail-on-warnings.
     use std::io::Write;
     std::io::stdout().flush().ok();
-    if report.errors() > 0 || !stale.is_empty() || (args.strict && report.warnings() > 0) {
+    if report.errors() > 0 || !stale.is_empty() || (args.fail_on_warnings && report.warnings() > 0) {
         std::process::exit(1);
     }
     Ok(())
