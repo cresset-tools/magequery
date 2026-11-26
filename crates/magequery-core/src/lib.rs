@@ -38,6 +38,7 @@ pub mod devupgrade;
 mod indexerhash;
 mod configdom;
 mod diconfig;
+pub use diconfig::DiScope;
 mod schemadecl;
 mod decrypt;
 mod deploy;

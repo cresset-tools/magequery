@@ -30,6 +30,7 @@ pub struct Options {
 
 pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<ExitCode> {
     let start = Instant::now();
+    limit_threads();
     let root = root.unwrap_or_else(|| PathBuf::from("."));
     let mut mage = Magento::open(&root).map_err(|e| anyhow!(e))?;
     if mage.info().mode.as_deref() == Some("production") {
@@ -149,8 +150,8 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
 /// di.xml), as `ObjectManager\ConfigLoader` does. An entry that cannot be
 /// reproduced exactly is left for PHP to build.
 fn fill_caches(mage: &Magento) -> std::result::Result<Vec<String>, String> {
-    let defs = magecommand_engine::interception::runtime_definitions(mage, mage.root());
-    let map = magecommand_engine::interception::runtime_interception_map(mage, &defs);
+    let (defs, scopes) = magecommand_engine::interception::runtime_definitions(mage, mage.root())?;
+    let map = magecommand_engine::interception::runtime_interception_map(&defs, &scopes);
     let mut entries = vec![(
         "interception",
         magequery_core::devupgrade::php_json_bool_map(map.iter().map(|(k, v)| (k.as_str(), *v))),
@@ -163,6 +164,19 @@ fn fill_caches(mage: &Magento) -> std::result::Result<Vec<String>, String> {
     let mut lines = mage.fill_config_cache(&entries)?;
     lines.extend(notes);
     Ok(lines)
+}
+
+/// At most 8 worker threads, unless `RAYON_NUM_THREADS` says otherwise. The
+/// work here is short and allocation-bound: on a 32-core host the extra threads
+/// cost more in start-up and contention for fresh memory than they add (the
+/// whole command 266 ms → 185 ms measured, filling the caches).
+fn limit_threads() {
+    if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+        return;
+    }
+    let n = std::thread::available_parallelism().map_or(8, |n| n.get().min(8));
+    // Fails only when the pool already exists; then it keeps its size.
+    let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
 }
 
 struct Report<'a> {

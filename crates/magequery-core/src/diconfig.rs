@@ -18,7 +18,7 @@
 //! cannot evaluate, so the caller supplies them. Anything this cannot reproduce
 //! exactly is an `Err`: the caller leaves the entry for PHP to build.
 
-use crate::configdom::{merge_document, parse_dom, Element, MergeConfig, Node};
+use crate::configdom::{parse_dom, Element, MergeConfig, Merger, Node};
 use crate::phparray::PhpValue;
 use crate::{Error, Magento, Result};
 
@@ -59,14 +59,15 @@ impl Magento {
                 Some((file, parse_dom(&text)))
             })
             .collect();
-        let mut merged: Option<Element> = None;
+        let mut merger: Option<Merger> = None;
         for (file, dom) in parsed {
             let dom = dom.map_err(|detail| Error::Parse { file: file.clone(), detail })?;
-            match merged.as_mut() {
-                None => merged = Some(dom),
-                Some(base) => merge_document(&MERGE, base, dom).map_err(|detail| Error::Parse { file, detail })?,
+            match merger.as_mut() {
+                None => merger = Some(Merger::new(&MERGE, dom)),
+                Some(m) => m.merge(dom).map_err(|detail| Error::Parse { file, detail })?,
             }
         }
+        let merged = merger.map(Merger::into_root);
         let err = |detail: String| Error::Parse { file: "etc/di.xml".into(), detail };
         let config = match merged {
             Some(root) => convert(&root, constant).map_err(err)?,
@@ -76,6 +77,129 @@ impl Magento {
         serialize(&config, &mut out).map_err(err)?;
         Ok(out)
     }
+}
+
+/// One config scope as `Interception\Config\Config` reads it
+/// (`$this->_reader->read($scope)`), reduced to what interception needs.
+#[derive(Debug, Default)]
+pub struct DiScope {
+    pub scope: String,
+    /// Every type / virtualType key of the converted config, as written (a
+    /// leading backslash kept), with whether it declares plugins.
+    pub types: Vec<(String, bool)>,
+    /// virtualType name -> its `type`.
+    pub virtual_types: Vec<(String, String)>,
+}
+
+impl Magento {
+    /// The scopes `Config\Scope::getAllScopes` lists — primary, global, then
+    /// `AreaList`'s area codes — each as its merged di.xml.
+    pub fn di_scopes(&self) -> Result<Vec<DiScope>> {
+        use rayon::prelude::*;
+        let mut modules: Vec<_> = self.index.modules.iter().filter(|m| m.enabled).collect();
+        modules.sort_by_key(|m| m.load_order);
+        // App\Config\FileResolver for `primary`: `{di.xml,*/di.xml}` in app/etc.
+        let etc = self.root().join("app/etc");
+        let mut primary: Vec<std::path::PathBuf> = vec![etc.join("di.xml")];
+        let mut dirs: Vec<std::path::PathBuf> = crate::fsutil::read_dir_entries(&etc)
+            .into_iter()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        dirs.sort();
+        primary.extend(dirs.into_iter().map(|d| d.join("di.xml")));
+        primary.retain(|p| p.is_file());
+
+        let global: Vec<std::path::PathBuf> = modules.iter().map(|m| m.path.join("etc/di.xml")).collect();
+        let global_dom = self.merge_di_files(&global)?;
+        let mut areas: Vec<String> = global_dom.as_ref().map(area_codes).unwrap_or_default();
+        if areas.is_empty() {
+            areas = ["frontend", "adminhtml", "crontab", "webapi_rest", "webapi_soap", "graphql"].map(String::from).to_vec();
+        }
+        let mut jobs: Vec<(String, Vec<std::path::PathBuf>)> = vec![("primary".into(), primary)];
+        for area in &areas {
+            jobs.push((area.clone(), modules.iter().map(|m| m.path.join("etc").join(area).join("di.xml")).collect()));
+        }
+        let mut scopes: Vec<DiScope> = jobs
+            .par_iter()
+            .map(|(scope, files)| Ok(scope_types(scope, self.merge_di_files(files)?.as_ref())))
+            .collect::<Result<_>>()?;
+        scopes.insert(1, scope_types("global", global_dom.as_ref()));
+        Ok(scopes)
+    }
+
+    /// `Config\Dom` over these di.xml files (missing ones skipped), parsed in
+    /// parallel and merged in order.
+    fn merge_di_files(&self, files: &[std::path::PathBuf]) -> Result<Option<Element>> {
+        use rayon::prelude::*;
+        let parsed: Vec<(std::path::PathBuf, std::result::Result<Element, String>)> = files
+            .par_iter()
+            .filter_map(|file| {
+                let text = self.index.vfs.read_to_string(file).ok()?;
+                Some((file.clone(), parse_dom(&text)))
+            })
+            .collect();
+        let mut merger: Option<Merger> = None;
+        for (file, dom) in parsed {
+            let dom = dom.map_err(|detail| Error::Parse { file: file.clone(), detail })?;
+            match merger.as_mut() {
+                None => merger = Some(Merger::new(&MERGE, dom)),
+                Some(m) => m.merge(dom).map_err(|detail| Error::Parse { file, detail })?,
+            }
+        }
+        Ok(merger.map(Merger::into_root))
+    }
+}
+
+/// The keys of `AreaList`'s `areas` argument (`AreaList::getCodes`).
+fn area_codes(root: &Element) -> Vec<String> {
+    let mut codes = Vec::new();
+    for t in root.elements().filter(|e| e.name == "type") {
+        if t.attr("name").map(|n| n.trim_start_matches('\\')) != Some("Magento\\Framework\\App\\AreaList") {
+            continue;
+        }
+        for args in t.elements().filter(|e| e.name == "arguments") {
+            for arg in args.elements().filter(|a| a.attr("name") == Some("areas")) {
+                for item in arg.elements().filter(|i| i.name == "item") {
+                    if let Some(n) = item.attr("name")
+                        && !codes.iter().any(|c| c == n)
+                    {
+                        codes.push(n.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    codes
+}
+
+/// The converted config's type keys (`Mapper\Dom::convert`), without values.
+fn scope_types(scope: &str, root: Option<&Element>) -> DiScope {
+    let mut out = DiScope { scope: scope.to_owned(), ..DiScope::default() };
+    let Some(root) = root else { return out };
+    let mut at: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for node in root.elements() {
+        if node.name != "type" && node.name != "virtualType" {
+            continue;
+        }
+        let Some(name) = node.attr("name") else { continue };
+        let plugins = node.elements().any(|c| c.name == "plugin");
+        // `$output[$name] = $typeData`: a later node with the same key replaces it.
+        match at.get(name) {
+            Some(&i) => out.types[i].1 = plugins,
+            None => {
+                at.insert(name.to_owned(), out.types.len());
+                out.types.push((name.to_owned(), plugins));
+            }
+        }
+        if node.name == "virtualType"
+            && let Some(ty) = node.attr("type")
+        {
+            out.virtual_types.push((name.to_owned(), ty.to_owned()));
+        }
+    }
+    out
 }
 
 // ---------- PHP arrays ----------

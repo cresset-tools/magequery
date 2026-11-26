@@ -61,8 +61,8 @@ fn runtime_map_resolves_config_types_through_the_autoloader() {
         root,
         "Acme_Base",
         Some(
-            r#"<type name="Acme\Base\Api\ServiceInterface"><plugins><plugin name="p" type="Acme\Base\Plugin\P"/></plugins></type>
-               <type name="Acme\Base\Model\Plugged"><plugins><plugin name="q" type="Acme\Base\Plugin\P"/></plugins></type>"#,
+            r#"<type name="Acme\Base\Api\ServiceInterface"><plugin name="p" type="Acme\Base\Plugin\P"/></type>
+               <type name="Acme\Base\Model\Plugged"><plugin name="q" type="Acme\Base\Plugin\P"/></type>"#,
         ),
     );
     put(root, "app/code/Acme/Base/Api/ServiceInterface.php", "<?php\nnamespace Acme\\Base\\Api;\n\ninterface ServiceInterface\n{\n    public function run();\n}\n");
@@ -88,8 +88,8 @@ fn runtime_map_resolves_config_types_through_the_autoloader() {
     put(root, "app/code/Acme/Use/Model/Consumer.php", "<?php\nnamespace Acme\\Use\\Model;\n\nclass Consumer\n{\n    public function __construct(\\Acme\\Base\\Model\\Plugged $plugged)\n    {\n    }\n}\n");
 
     let magento = Magento::open(root).expect("open");
-    let defs = runtime_definitions(&magento, root);
-    let map = runtime_interception_map(&magento, &defs);
+    let (defs, scopes) = runtime_definitions(&magento, root).expect("di scopes");
+    let map = runtime_interception_map(&defs, &scopes);
     let get = |k: &str| map.get(k).copied();
 
     assert_eq!(get("Acme\\Base\\Api\\ServiceInterface"), Some(true), "declared plugins");

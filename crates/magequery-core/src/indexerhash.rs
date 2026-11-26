@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 use md5::{Digest, Md5};
 
-use crate::configdom::{merge_document, parse_dom, Element, MergeConfig, Node};
+use crate::configdom::{parse_dom, Element, MergeConfig, Merger, Node};
 
 use crate::{deploy, Error, Magento, Result};
 
@@ -453,16 +453,17 @@ impl Magento {
     pub fn indexer_config_json(&self) -> Result<Vec<(String, String)>> {
         let mut modules: Vec<_> = self.index.modules.iter().filter(|m| m.enabled).collect();
         modules.sort_by_key(|m| m.load_order);
-        let mut merged: Option<Element> = None;
+        let mut merger: Option<Merger> = None;
         for m in modules {
             let file = m.path.join("etc/indexer.xml");
             let Ok(text) = self.index.vfs.read_to_string(&file) else { continue };
             let dom = parse_dom(&text).map_err(|detail| Error::Parse { file: file.clone(), detail })?;
-            match merged.as_mut() {
-                None => merged = Some(dom),
-                Some(base) => merge_document(&MERGE, base, dom).map_err(|detail| Error::Parse { file, detail })?,
+            match merger.as_mut() {
+                None => merger = Some(Merger::new(&MERGE, dom)),
+                Some(base) => base.merge(dom).map_err(|detail| Error::Parse { file, detail })?,
             }
         }
+        let merged = merger.map(Merger::into_root);
         let Some(root) = merged else { return Ok(Vec::new()) };
 
         let err = |detail: String| Error::Parse { file: "etc/indexer.xml".into(), detail };

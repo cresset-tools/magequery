@@ -9,8 +9,8 @@ fn main() {
     let root = PathBuf::from(std::env::args().nth(1).expect("magento root"));
     let t = std::time::Instant::now();
     let magento = magequery_core::Magento::open(&root).expect("open magento");
-    let defs = magecommand_engine::interception::runtime_definitions(&magento, &root);
-    let map = magecommand_engine::interception::runtime_interception_map(&magento, &defs);
+    let (defs, scopes) = magecommand_engine::interception::runtime_definitions(&magento, &root).expect("di scopes");
+    let map = magecommand_engine::interception::runtime_interception_map(&defs, &scopes);
     eprintln!("{} entries in {:?}", map.len(), t.elapsed());
     let body: Vec<String> = map
         .iter()

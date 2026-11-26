@@ -161,73 +161,92 @@ fn step_matches(el: &Element, step: &Step) -> bool {
     el.name == step.0 && step.1.as_ref().is_none_or(|(a, v)| el.attr(a) == Some(v.as_str()))
 }
 
-/// `Dom::merge`: merge document `dom` onto `base`, both rooted at the
-/// document element.
+/// `Dom::merge` over a sequence of documents: the first is the base, each
+/// later one is merged onto it.
 ///
 /// `Dom::_mergeNode` finds a node's match with an absolute XPath from the root
 /// (more than one match is an error). Below a unique match the only candidates
 /// are that match's children, so this looks there — the same answer without
-/// re-walking the tree — and indexes the root's children, which every
-/// top-level node of every file is looked up among.
-pub(crate) fn merge_document(cfg: &MergeConfig, base: &mut Element, dom: Element) -> std::result::Result<(), String> {
-    if base.name != dom.name {
-        return Err(format!("document element <{}> does not match <{}>", dom.name, base.name));
+/// re-walking the tree — and keeps an index of the root's children, which
+/// every top-level node of every document is looked up among.
+pub(crate) struct Merger<'c> {
+    cfg: &'c MergeConfig,
+    root: Element,
+    by_name: HashMap<String, Vec<usize>>,
+    by_id: HashMap<(String, String), Vec<usize>>,
+}
+
+impl<'c> Merger<'c> {
+    pub(crate) fn new(cfg: &'c MergeConfig, root: Element) -> Merger<'c> {
+        let mut merger = Merger { cfg, root, by_name: HashMap::new(), by_id: HashMap::new() };
+        let children = std::mem::take(&mut merger.root.children);
+        for (i, c) in children.iter().enumerate() {
+            if let Node::Element(el) = c {
+                merger.index(i, el);
+            }
+        }
+        merger.root.children = children;
+        merger
     }
-    let root_name = dom.name.clone();
-    let mut names = vec![dom.name.clone()];
-    for (k, v) in &dom.attrs {
-        base.set_attr(k, v);
-    }
-    if dom.children.is_empty() {
-        return Ok(());
-    }
-    // The root's element children by name, and by name + id attribute value.
-    let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut by_id: HashMap<(String, String), Vec<usize>> = HashMap::new();
-    let index = |by_name: &mut HashMap<String, Vec<usize>>, by_id: &mut HashMap<(String, String), Vec<usize>>, i: usize, el: &Element| {
-        by_name.entry(el.name.clone()).or_default().push(i);
-        if let Some(a) = (cfg.id_attribute)(&[root_name.as_str(), el.name.as_str()])
+
+    fn index(&mut self, i: usize, el: &Element) {
+        self.by_name.entry(el.name.clone()).or_default().push(i);
+        if let Some(a) = (self.cfg.id_attribute)(&[self.root.name.as_str(), el.name.as_str()])
             && let Some(v) = el.attr(a)
         {
-            by_id.entry((el.name.clone(), v.to_owned())).or_default().push(i);
-        }
-    };
-    for (i, c) in base.children.iter().enumerate() {
-        if let Node::Element(el) = c {
-            index(&mut by_name, &mut by_id, i, el);
+            self.by_id.entry((el.name.clone(), v.to_owned())).or_default().push(i);
         }
     }
-    for node in dom.children.into_iter().filter_map(|c| match c {
-        Node::Element(e) => Some(e),
-        _ => None,
-    }) {
-        names.push(node.name.clone());
-        let step = {
-            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-            step_for(cfg, &node, &refs)
-        };
-        let candidates = match &step.1 {
-            Some((_, v)) => by_id.get(&(step.0.clone(), v.clone())),
-            None => by_name.get(&step.0),
-        };
-        let matches: Vec<usize> = candidates
-            .map(|c| c.iter().copied().filter(|&i| matches!(&base.children[i], Node::Element(e) if step_matches(e, &step))).collect())
-            .unwrap_or_default();
-        match matches.as_slice() {
-            [] => {
-                let i = base.children.len();
-                index(&mut by_name, &mut by_id, i, &node);
-                base.children.push(Node::Element(node));
-            }
-            [i] => {
-                let Node::Element(m) = &mut base.children[*i] else { unreachable!() };
-                merge_matched(cfg, m, node, &mut names)?;
-            }
-            _ => return Err("more than one node matches a merge path".into()),
+
+    pub(crate) fn merge(&mut self, dom: Element) -> std::result::Result<(), String> {
+        if self.root.name != dom.name {
+            return Err(format!("document element <{}> does not match <{}>", dom.name, self.root.name));
         }
-        names.pop();
+        for (k, v) in &dom.attrs {
+            self.root.set_attr(k, v);
+        }
+        let mut names = vec![dom.name.clone()];
+        for node in dom.children.into_iter().filter_map(|c| match c {
+            Node::Element(e) => Some(e),
+            _ => None,
+        }) {
+            names.push(node.name.clone());
+            let step = {
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                step_for(self.cfg, &node, &refs)
+            };
+            let candidates = match &step.1 {
+                Some((_, v)) => self.by_id.get(&(step.0.clone(), v.clone())),
+                None => self.by_name.get(&step.0),
+            };
+            let matches: Vec<usize> = candidates
+                .map(|c| {
+                    c.iter()
+                        .copied()
+                        .filter(|&i| matches!(&self.root.children[i], Node::Element(e) if step_matches(e, &step)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            match matches.as_slice() {
+                [] => {
+                    let i = self.root.children.len();
+                    self.index(i, &node);
+                    self.root.children.push(Node::Element(node));
+                }
+                [i] => {
+                    let Node::Element(m) = &mut self.root.children[*i] else { unreachable!() };
+                    merge_matched(self.cfg, m, node, &mut names)?;
+                }
+                _ => return Err("more than one node matches a merge path".into()),
+            }
+            names.pop();
+        }
+        Ok(())
     }
-    Ok(())
+
+    pub(crate) fn into_root(self) -> Element {
+        self.root
+    }
 }
 
 /// `Dom::_mergeNode` for a node whose match `m` was found.

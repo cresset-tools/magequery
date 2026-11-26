@@ -1020,9 +1020,18 @@ pub fn generate_on_demand<'i>(
     magento: &Magento,
     defs: &Definitions,
     root: PathBuf,
+    global_vtypes: HashSet<String>,
     names: impl IntoIterator<Item = &'i str>,
 ) -> GeneratedCode {
-    let mut cg = Codegen::new(magento, defs, root);
+    let mut cg = Codegen {
+        magento,
+        defs,
+        root,
+        global_vtypes,
+        emitted: BTreeMap::new(),
+        emitted_ci: std::collections::HashMap::new(),
+        failed: HashSet::new(),
+    };
     cg.ensure_all(names);
     let ext_cfg = ExtConfig::build(magento);
     let mut files = Vec::new();
