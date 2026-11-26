@@ -17,3 +17,6 @@ quick-xml.workspace = true
 blake3 = "1"
 rustc-hash = "2"
 tempfile = "3"
+
+[dev-dependencies]
+mimalloc = "0.1"

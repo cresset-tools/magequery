@@ -21,140 +21,10 @@
 use std::collections::HashMap;
 
 use md5::{Digest, Md5};
-use quick_xml::events::Event;
 
-use crate::parse::xml::{text as xml_text, Reader};
+use crate::configdom::{parse_dom, Element, MergeConfig, Merger, Node};
 
 use crate::{deploy, Error, Magento, Result};
-
-// ---------- a small DOM, enough for Config\Dom ----------
-
-#[derive(Debug, Clone)]
-enum Node {
-    Element(Element),
-    Text(String),
-    Cdata(String),
-    Other,
-}
-
-#[derive(Debug, Clone)]
-struct Element {
-    name: String,
-    attrs: Vec<(String, String)>,
-    children: Vec<Node>,
-}
-
-impl Element {
-    fn attr(&self, name: &str) -> Option<&str> {
-        self.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
-    }
-
-    fn set_attr(&mut self, name: &str, value: &str) {
-        match self.attrs.iter_mut().find(|(k, _)| k == name) {
-            Some((_, v)) => *v = value.to_string(),
-            None => self.attrs.push((name.to_string(), value.to_string())),
-        }
-    }
-
-    /// DOM `nodeValue` of an element: its text content.
-    fn text(&self) -> String {
-        let mut out = String::new();
-        fn walk(e: &Element, out: &mut String) {
-            for c in &e.children {
-                match c {
-                    Node::Text(t) | Node::Cdata(t) => out.push_str(t),
-                    Node::Element(e) => walk(e, out),
-                    Node::Other => {}
-                }
-            }
-        }
-        walk(self, &mut out);
-        out
-    }
-
-    fn elements(&self) -> impl Iterator<Item = &Element> {
-        self.children.iter().filter_map(|c| match c {
-            Node::Element(e) => Some(e),
-            _ => None,
-        })
-    }
-
-    /// `Dom::_isTextNode`: exactly one child, and it is a text node.
-    fn is_text_node(&self) -> bool {
-        matches!(self.children.as_slice(), [Node::Text(_)])
-    }
-
-    fn is_cdata_node(&self) -> bool {
-        self.children.iter().any(|c| matches!(c, Node::Cdata(_)))
-            && self.children.iter().all(|c| matches!(c, Node::Cdata(_) | Node::Text(_)))
-    }
-}
-
-fn parse_dom(xml: &str) -> std::result::Result<Element, String> {
-    let mut reader = Reader::from_str(xml);
-    let mut stack: Vec<Element> = Vec::new();
-    let mut root: Option<Element> = None;
-    let attrs_of = |e: &quick_xml::events::BytesStart| -> std::result::Result<Vec<(String, String)>, String> {
-        let mut out = Vec::new();
-        for a in e.attributes() {
-            let a = a.map_err(|e| e.to_string())?;
-            let key = a.key.as_ref().to_string();
-            let value = quick_xml::escape::unescape(&a.value).map_err(|e| e.to_string())?.into_owned();
-            out.push((key, value));
-        }
-        Ok(out)
-    };
-    loop {
-        match reader.read_event().map_err(|e| e.to_string())? {
-            Event::Start(e) => stack.push(Element {
-                name: e.name().as_ref().to_string(),
-                attrs: attrs_of(&e)?,
-                children: Vec::new(),
-            }),
-            Event::Empty(e) => {
-                let el = Element {
-                    name: e.name().as_ref().to_string(),
-                    attrs: attrs_of(&e)?,
-                    children: Vec::new(),
-                };
-                match stack.last_mut() {
-                    Some(p) => p.children.push(Node::Element(el)),
-                    None => root = Some(el),
-                }
-            }
-            Event::End(_) => {
-                let el = stack.pop().ok_or("unbalanced end tag")?;
-                match stack.last_mut() {
-                    Some(p) => p.children.push(Node::Element(el)),
-                    None => root = Some(el),
-                }
-            }
-            Event::Text(t) => {
-                if let Some(p) = stack.last_mut() {
-                    let s = xml_text(&t).to_string();
-                    // libxml coalesces adjacent text (entity boundaries split quick-xml's).
-                    match p.children.last_mut() {
-                        Some(Node::Text(prev)) => prev.push_str(&s),
-                        _ => p.children.push(Node::Text(s)),
-                    }
-                }
-            }
-            Event::CData(t) => {
-                if let Some(p) = stack.last_mut() {
-                    p.children.push(Node::Cdata((*t).to_string()));
-                }
-            }
-            Event::Comment(_) | Event::PI(_) => {
-                if let Some(p) = stack.last_mut() {
-                    p.children.push(Node::Other);
-                }
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-    }
-    root.ok_or_else(|| "no document element".into())
-}
 
 /// `Indexer\Config\Reader::$_idAttributes`.
 fn id_attribute(path: &[&str]) -> Option<&'static str> {
@@ -169,105 +39,7 @@ fn id_attribute(path: &[&str]) -> Option<&'static str> {
     }
 }
 
-/// One XPath step: a tag name and an optional `[@attr='value']`.
-type Step = (String, Option<(&'static str, String)>);
-
-fn step_for(el: &Element, names: &[&str]) -> Step {
-    let pred = id_attribute(names)
-        .and_then(|a| el.attr(a).filter(|v| !v.is_empty() && *v != "0").map(|v| (a, v.to_string())));
-    (el.name.clone(), pred)
-}
-
-fn step_matches(el: &Element, step: &Step) -> bool {
-    el.name == step.0 && step.1.as_ref().is_none_or(|(a, v)| el.attr(a) == Some(v.as_str()))
-}
-
-/// `Dom::_getMatchedNode`: the element at an absolute path; more than one is an error.
-fn matched<'a>(root: &'a mut Element, path: &[Step]) -> std::result::Result<Option<&'a mut Element>, String> {
-    let Some((first, rest)) = path.split_first() else { return Ok(None) };
-    if !step_matches(root, first) {
-        return Ok(None);
-    }
-    // Count first, then descend along the single match.
-    fn count(el: &Element, path: &[Step]) -> usize {
-        match path.split_first() {
-            None => 1,
-            Some((s, rest)) => el.elements().filter(|c| step_matches(c, s)).map(|c| count(c, rest)).sum(),
-        }
-    }
-    match count(root, rest) {
-        0 => return Ok(None),
-        1 => {}
-        _ => return Err("more than one node matches a merge path".into()),
-    }
-    fn descend<'a>(el: &'a mut Element, path: &[Step]) -> Option<&'a mut Element> {
-        let Some((s, rest)) = path.split_first() else { return Some(el) };
-        for c in el.children.iter_mut() {
-            if let Node::Element(c) = c
-                && step_matches(c, s)
-                && count_ok(c, rest)
-            {
-                return descend(c, rest);
-            }
-        }
-        None
-    }
-    fn count_ok(el: &Element, path: &[Step]) -> bool {
-        match path.split_first() {
-            None => true,
-            Some((s, rest)) => el.elements().any(|c| step_matches(c, s) && count_ok(c, rest)),
-        }
-    }
-    Ok(descend(root, rest))
-}
-
-/// `Dom::_mergeNode`.
-fn merge_node(
-    base: &mut Element,
-    node: &Element,
-    parent: &[Step],
-    names: &mut Vec<String>,
-) -> std::result::Result<(), String> {
-    names.push(node.name.clone());
-    let name_refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let mut path = parent.to_vec();
-    path.push(step_for(node, &name_refs));
-    let result = (|| {
-        if let Some(m) = matched(base, &path)? {
-            for (k, v) in &node.attrs {
-                m.set_attr(k, v);
-            }
-            if node.children.is_empty() {
-                return Ok(());
-            }
-            if node.is_text_node() {
-                if m.children.is_empty() || m.is_text_node() || m.is_cdata_node() {
-                    let Node::Text(t) = &node.children[0] else { unreachable!() };
-                    m.children = vec![Node::Text(t.clone())];
-                }
-            } else if node.is_cdata_node() && (m.is_text_node() || m.is_cdata_node()) {
-                let cdata = node.children.iter().find_map(|c| match c {
-                    Node::Cdata(t) => Some(t.clone()),
-                    _ => None,
-                });
-                if let Some(t) = cdata {
-                    m.children = vec![Node::Cdata(t)];
-                }
-            } else {
-                for c in node.elements() {
-                    merge_node(base, c, &path, names)?;
-                }
-            }
-            Ok(())
-        } else {
-            let p = matched(base, parent)?.ok_or("merge parent not found")?;
-            p.children.push(Node::Element(node.clone()));
-            Ok(())
-        }
-    })();
-    names.pop();
-    result
-}
+const MERGE: MergeConfig = MergeConfig { id_attribute, type_attribute: None };
 
 // ---------- PHP values as Converter builds them ----------
 
@@ -370,7 +142,8 @@ fn json(v: &Val, out: &mut String) {
     }
 }
 
-fn json_str(s: &str, out: &mut String) {
+/// `json_encode` of a string with PHP's default flags (`\\/`, `\\uXXXX`).
+pub(crate) fn json_str(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
         match c {
@@ -680,16 +453,17 @@ impl Magento {
     pub fn indexer_config_json(&self) -> Result<Vec<(String, String)>> {
         let mut modules: Vec<_> = self.index.modules.iter().filter(|m| m.enabled).collect();
         modules.sort_by_key(|m| m.load_order);
-        let mut merged: Option<Element> = None;
+        let mut merger: Option<Merger> = None;
         for m in modules {
             let file = m.path.join("etc/indexer.xml");
             let Ok(text) = self.index.vfs.read_to_string(&file) else { continue };
             let dom = parse_dom(&text).map_err(|detail| Error::Parse { file: file.clone(), detail })?;
-            match merged.as_mut() {
-                None => merged = Some(dom),
-                Some(base) => merge_node(base, &dom, &[], &mut Vec::new()).map_err(|detail| Error::Parse { file, detail })?,
+            match merger.as_mut() {
+                None => merger = Some(Merger::new(&MERGE, dom)),
+                Some(base) => base.merge(dom).map_err(|detail| Error::Parse { file, detail })?,
             }
         }
+        let merged = merger.map(Merger::into_root);
         let Some(root) = merged else { return Ok(Vec::new()) };
 
         let err = |detail: String| Error::Parse { file: "etc/indexer.xml".into(), detail };

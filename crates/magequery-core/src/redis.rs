@@ -106,25 +106,35 @@ fn talk<S: Read + Write>(mut s: S, inst: &RedisInstance) -> Result<Option<String
 /// `FLUSHDB` on the instance's database: what cleaning every tag of a Redis cache
 /// backend amounts to.
 pub(crate) fn flushdb(inst: &RedisInstance) -> Result<(), String> {
-    fn run<S: Read + Write>(mut s: S, inst: &RedisInstance) -> Result<(), String> {
+    pipeline(inst, &[vec!["FLUSHDB".to_owned()]])
+}
+
+/// Send `commands` in one round trip on the instance's database (after AUTH and
+/// SELECT) and fail on the first error reply.
+#[cfg_attr(not(feature = "db"), allow(dead_code))]
+pub(crate) fn pipeline(inst: &RedisInstance, commands: &[Vec<String>]) -> Result<(), String> {
+    fn run<S: Read + Write>(mut s: S, inst: &RedisInstance, commands: &[Vec<String>]) -> Result<(), String> {
+        let mut all: Vec<Vec<&str>> = Vec::new();
         if !inst.password.is_empty() {
-            write_cmd(&mut s, &["AUTH", &inst.password])?;
-            if let Reply::Error(e) = read_reply(&mut s)? {
-                return Err(format!("AUTH failed: {e}"));
-            }
+            all.push(vec!["AUTH", &inst.password]);
         }
         if let Some(db) = &inst.database {
-            write_cmd(&mut s, &["SELECT", db])?;
+            all.push(vec!["SELECT", db]);
+        }
+        all.extend(commands.iter().map(|c| c.iter().map(String::as_str).collect()));
+        let mut out = Vec::new();
+        for args in &all {
+            encode_cmd(&mut out, args);
+        }
+        s.write_all(&out).map_err(|e| e.to_string())?;
+        s.flush().map_err(|e| e.to_string())?;
+        let mut first_error = None;
+        for args in &all {
             if let Reply::Error(e) = read_reply(&mut s)? {
-                return Err(format!("SELECT {db} failed: {e}"));
+                first_error.get_or_insert_with(|| format!("{} failed: {e}", args[0]));
             }
         }
-        write_cmd(&mut s, &["FLUSHDB"])?;
-        match read_reply(&mut s)? {
-            Reply::Status(_) => Ok(()),
-            Reply::Error(e) => Err(e),
-            other => Err(format!("unexpected FLUSHDB reply: {other:?}")),
-        }
+        first_error.map_or(Ok(()), Err)
     }
     if inst.host.starts_with('/') {
         #[cfg(unix)]
@@ -132,7 +142,7 @@ pub(crate) fn flushdb(inst: &RedisInstance) -> Result<(), String> {
             let s = UnixStream::connect(&inst.host)
                 .map_err(|e| format!("cannot connect to socket {}: {e}", inst.host))?;
             s.set_read_timeout(Some(TIMEOUT)).ok();
-            return run(s, inst);
+            return run(s, inst, commands);
         }
         #[cfg(not(unix))]
         return Err(format!("unix sockets are not supported here: {}", inst.host));
@@ -145,7 +155,17 @@ pub(crate) fn flushdb(inst: &RedisInstance) -> Result<(), String> {
         .ok_or_else(|| format!("no address for {addr}"))?;
     let s = TcpStream::connect_timeout(&sock, TIMEOUT).map_err(|e| format!("cannot reach {addr}: {e}"))?;
     s.set_read_timeout(Some(TIMEOUT)).ok();
-    run(s, inst)
+    run(s, inst, commands)
+}
+
+#[cfg_attr(not(feature = "db"), allow(dead_code))]
+fn encode_cmd(out: &mut Vec<u8>, args: &[&str]) {
+    out.extend_from_slice(format!("*{}\r\n", args.len()).as_bytes());
+    for a in args {
+        out.extend_from_slice(format!("${}\r\n", a.len()).as_bytes());
+        out.extend_from_slice(a.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
 }
 
 #[derive(Debug)]

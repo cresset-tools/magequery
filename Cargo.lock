@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "magecommand"
-version = "0.29.0"
+version = "0.28.0"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -1406,11 +1406,12 @@ dependencies = [
 
 [[package]]
 name = "magecommand-engine"
-version = "0.29.0"
+version = "0.28.0"
 dependencies = [
  "blake3",
  "magecommand-php",
  "magequery-core",
+ "mimalloc",
  "quick-xml",
  "rayon",
  "rustc-hash",
@@ -1422,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "magecommand-less"
-version = "0.29.0"
+version = "0.28.0"
 dependencies = [
  "cssparser 0.37.0",
  "fancy-regex",
@@ -1435,7 +1436,7 @@ dependencies = [
 
 [[package]]
 name = "magecommand-php"
-version = "0.29.0"
+version = "0.28.0"
 dependencies = [
  "memchr",
  "rayon",
@@ -1445,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "magequery"
-version = "0.29.0"
+version = "0.28.0"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -1464,7 +1465,7 @@ dependencies = [
 
 [[package]]
 name = "magequery-core"
-version = "0.29.0"
+version = "0.28.0"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -1480,11 +1481,12 @@ dependencies = [
  "simple-rijndael",
  "tempfile",
  "thiserror 2.0.21",
+ "xxhash-rust",
 ]
 
 [[package]]
 name = "magequery-lsp"
-version = "0.29.0"
+version = "0.28.0"
 dependencies = [
  "crossbeam-channel",
  "lsp-server",
@@ -3275,6 +3277,12 @@ checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
 dependencies = [
  "tap",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40de123dbb523ebcc00d61ec01840ad192578afc378d859f3429caa38308fad5"
 
 [[package]]
 name = "yoke"
