@@ -61,6 +61,35 @@ pub struct DevUpgradeCheck {
     pub missing_queues: Vec<String>,
     /// Recurring scripts proven to do nothing this time, or deliberately skipped.
     pub recurring_skipped: Vec<String>,
+    /// Modules whose `Setup\Recurring` / `Setup\RecurringData` PHP has to run —
+    /// third-party ones, and core ones with work not done natively — with why, in
+    /// module load order (one entry per reason). Running just these scripts is
+    /// enough; `needs_php` is what needs the whole `setup:upgrade`.
+    pub recurring_php: Vec<RecurringNeed>,
+}
+
+/// One reason a module's recurring scripts have to run in PHP.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RecurringNeed {
+    pub module: String,
+    pub reason: String,
+}
+
+impl DevUpgradeCheck {
+    fn recurring(&mut self, module: &str, reason: impl Into<String>) {
+        self.recurring_php.push(RecurringNeed { module: module.to_owned(), reason: reason.into() });
+    }
+
+    /// The modules of [`Self::recurring_php`], each once, in load order.
+    pub fn recurring_modules(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for need in &self.recurring_php {
+            if !out.contains(&need.module.as_str()) {
+                out.push(&need.module);
+            }
+        }
+        out
+    }
 }
 
 /// The core recurring scripts this module knows, by module. Any other module with
@@ -289,7 +318,6 @@ impl Magento {
             self.index.modules.iter().filter(|m| m.enabled).map(|m| (m.name.as_str(), m.path.as_path())).collect();
 
         // `Installer::getSchemaDataHandler`: `Vendor\Module\Setup\Recurring{,Data}`.
-        let mut unknown = Vec::new();
         for m in self.index.modules.iter().filter(|m| m.enabled) {
             if KNOWN_RECURRING.contains(&m.name.as_str()) {
                 continue;
@@ -298,12 +326,9 @@ impl Magento {
             for class in ["Recurring", "RecurringData"] {
                 let class = ClassName::new(format!("{ns}\\Setup\\{class}"));
                 if self.index.resolver.file_for(&class).is_some() {
-                    unknown.push(class.as_str().to_string());
+                    out.recurring(m.name.as_str(), format!("{} is not ported", class.as_str()));
                 }
             }
-        }
-        if !unknown.is_empty() {
-            out.needs_php.push(format!("recurring setup scripts outside core: {}", unknown.join(", ")));
         }
 
         let on = |m: &str| enabled.contains_key(m);
@@ -320,7 +345,7 @@ impl Magento {
                 .and_then(PhpValue::scalar_string)
                 .is_some_and(|h| !h.is_empty());
             if configured {
-                out.needs_php.push(format!("{module}: the {key} broker topology is declared by PHP"));
+                out.recurring(module, format!("the {key} broker topology is declared by PHP"));
             } else {
                 out.recurring_skipped.push(format!("{module} (no {key} connection)"));
             }
@@ -338,7 +363,7 @@ impl Magento {
             if declaring.is_empty() {
                 out.recurring_skipped.push("Magento_Integration (no integration/config.xml)".into());
             } else {
-                out.needs_php.push(format!("Magento_Integration: integrations declared by {}", declaring.join(", ")));
+                out.recurring("Magento_Integration", format!("integrations declared by {}", declaring.join(", ")));
             }
         }
 
@@ -348,8 +373,8 @@ impl Magento {
                 Ok(missing) if missing.is_empty() => {
                     out.recurring_skipped.push("Magento_Theme (all themes registered)".into())
                 }
-                Ok(missing) => out.needs_php.push(format!("themes to register: {}", missing.join(", "))),
-                Err(e) => out.needs_php.push(format!("theme registration: {e}")),
+                Ok(missing) => out.recurring("Magento_Theme", format!("themes to register: {}", missing.join(", "))),
+                Err(e) => out.recurring("Magento_Theme", format!("theme registration: {e}")),
             }
         }
 
@@ -357,7 +382,7 @@ impl Magento {
         if on("Magento_MysqlMq") {
             match self.missing_db_queues() {
                 Ok(q) => out.missing_queues = q,
-                Err(e) => out.needs_php.push(format!("Magento_MysqlMq: {e}")),
+                Err(e) => out.recurring("Magento_MysqlMq", e.to_string()),
             }
         }
 
@@ -382,6 +407,10 @@ impl Magento {
         if on("Magento_Indexer") {
             self.check_indexers(db, prefix, out);
         }
+        // Installer runs the recurring scripts in module-list order.
+        let rank: HashMap<&str, usize> =
+            self.index.modules.iter().enumerate().map(|(i, m)| (m.name.as_str(), i)).collect();
+        out.recurring_php.sort_by_key(|n| rank.get(n.module.as_str()).copied().unwrap_or(usize::MAX));
     }
 
     fn upgrade_db(&self) -> Result<Db> {
@@ -410,11 +439,11 @@ impl Magento {
             match primary {
                 Ok(Some(_)) => {}
                 Ok(None) => {
-                    missing.push(format!("{module}: {entity}.{entity_column} is not the primary key"));
+                    missing.push((module, format!("{entity}.{entity_column} is not the primary key")));
                     continue;
                 }
                 Err(e) => {
-                    missing.push(format!("{module}: {e}"));
+                    missing.push((module, e));
                     continue;
                 }
             }
@@ -426,14 +455,16 @@ impl Magento {
             );
             match fk {
                 Ok(Some(_)) => {}
-                Ok(None) => missing.push(format!("{module}: foreign key {table}.{column} → {entity}")),
-                Err(e) => missing.push(format!("{module}: {e}")),
+                Ok(None) => missing.push((module, format!("foreign key {table}.{column} → {entity}"))),
+                Err(e) => missing.push((module, e)),
             }
         }
         if missing.is_empty() {
             out.recurring_skipped.extend(checked.into_iter().map(|m| format!("{m} (foreign keys present)")));
         } else {
-            out.needs_php.extend(missing);
+            for (module, reason) in missing {
+                out.recurring(module, reason);
+            }
         }
     }
 
@@ -454,7 +485,7 @@ impl Magento {
             .map(|m| m.name.as_str())
             .collect();
         if !extended.is_empty() {
-            out.needs_php.push(format!("Magento_SalesSequence: EntityPool extended by {}", extended.join(", ")));
+            out.recurring("Magento_SalesSequence", format!("EntityPool extended by {}", extended.join(", ")));
             return;
         }
         let rows: std::result::Result<Vec<(String, u32, String)>, String> = db.query(format!(
@@ -463,7 +494,7 @@ impl Magento {
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
-                out.needs_php.push(format!("Magento_SalesSequence: {e}"));
+                out.recurring("Magento_SalesSequence", e.to_string());
                 return;
             }
         };
@@ -480,7 +511,7 @@ impl Magento {
         if missing.is_empty() {
             out.recurring_skipped.push("Magento_SalesSequence (sequences present)".into());
         } else {
-            out.needs_php.push(format!("Magento_SalesSequence: missing {}", missing.join(", ")));
+            out.recurring("Magento_SalesSequence", format!("missing {}", missing.join(", ")));
         }
     }
 
@@ -503,18 +534,18 @@ impl Magento {
                             }
                         }
                         if !stale.is_empty() {
-                            out.needs_php.push(format!("Magento_Indexer: {}", stale.join(", ")));
+                            out.recurring("Magento_Indexer", stale.join(", "));
                             return;
                         }
                     }
                     Err(e) => {
-                        out.needs_php.push(format!("Magento_Indexer: {e}"));
+                        out.recurring("Magento_Indexer", e.to_string());
                         return;
                     }
                 }
             }
             Err(e) => {
-                out.needs_php.push(format!("Magento_Indexer: {e}"));
+                out.recurring("Magento_Indexer", e.to_string());
                 return;
             }
         }
@@ -522,8 +553,8 @@ impl Magento {
             Ok(missing) if missing.is_empty() => {
                 out.recurring_skipped.push("Magento_Indexer (config hashes and triggers current)".into())
             }
-            Ok(missing) => out.needs_php.push(format!("Magento_Indexer: missing triggers {}", missing.join(", "))),
-            Err(e) => out.needs_php.push(format!("Magento_Indexer: {e}")),
+            Ok(missing) => out.recurring("Magento_Indexer", format!("missing triggers {}", missing.join(", "))),
+            Err(e) => out.recurring("Magento_Indexer", e.to_string()),
         }
     }
 
@@ -664,9 +695,9 @@ fn check_customer_grid(db: &mut Db, prefix: &str, out: &mut DevUpgradeCheck) {
         (Ok(Some(_)), Ok(Some(s))) if s != "invalid" => {
             out.recurring_skipped.push("Magento_Customer (customer grid valid)".into())
         }
-        (Ok(None), _) => out.needs_php.push("Magento_Customer: customer_grid_flat is missing".into()),
-        (Err(e), _) | (_, Err(e)) => out.needs_php.push(format!("Magento_Customer: {e}")),
-        _ => out.needs_php.push("Magento_Customer: the customer grid needs a reindex".into()),
+        (Ok(None), _) => out.recurring("Magento_Customer", "customer_grid_flat is missing"),
+        (Err(e), _) | (_, Err(e)) => out.recurring("Magento_Customer", e.to_string()),
+        _ => out.recurring("Magento_Customer", "the customer grid needs a reindex"),
     }
 }
 
