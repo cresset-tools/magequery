@@ -21,6 +21,41 @@ use crate::metadata;
 use crate::phpexport;
 use crate::pluginlist;
 
+/// A compile result Magento accepts that breaks the store at runtime, which a
+/// CI gate can fail on (`di compile --fail-on`, magebuild's `fail_on`).
+/// What `setup:di:compile` itself refuses is refused always, not listed here
+/// ([`crate::rejects`]); missing classes elsewhere in di.xml are doctor's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FailOn {
+    /// A type whose di.xml arguments the compiled config leaves out
+    /// ([`CompileOutputs::lost_arguments`]).
+    LostArguments,
+}
+
+impl FailOn {
+    pub const ALL: [(FailOn, &'static str); 1] = [(FailOn::LostArguments, "lost-arguments")];
+
+    pub fn name(self) -> &'static str {
+        Self::ALL.iter().find(|(k, _)| *k == self).map(|(_, n)| *n).expect("every kind is named")
+    }
+
+    pub fn names() -> Vec<&'static str> {
+        Self::ALL.iter().map(|(_, n)| *n).collect()
+    }
+}
+
+impl std::str::FromStr for FailOn {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        Self::ALL
+            .iter()
+            .find(|(_, n)| *n == s)
+            .map(|(k, _)| *k)
+            .ok_or_else(|| format!("unknown kind {s:?}, expected one of: {}", Self::names().join(", ")))
+    }
+}
+
 /// Every file a compile emits under `generated/`, in memory, plus the diagnostics
 /// the run produced. `files` keys are relative to `generated/` (`metadata/global.php`,
 /// `code/Magento/…/Interceptor.php`), so a writer just prepends `root/generated/`.
@@ -36,6 +71,9 @@ pub struct CompileOutputs {
     /// `AreaFile::lost_arguments`.
     /// Each entry is `(type, why its key went)`.
     pub lost_arguments: Vec<(String, String)>,
+    /// What `setup:di:compile` would refuse to compile. Non-empty means the
+    /// real compile stops, so `files` is not a tree Magento would write.
+    pub rejections: Vec<crate::rejects::Rejection>,
 }
 
 /// Run the full compute over an already-scanned `defs` and return the complete
@@ -313,7 +351,9 @@ pub fn compute_outputs_with(
         unresolved.into_iter().filter(|name| !defs.contains(name)).collect();
 
     let lost_arguments = lost_arguments.into_iter().collect();
-    CompileOutputs { files, findings, unresolved, lost_arguments }
+    let rejections = crate::rejects::check(magento, defs, root);
+    ilap!(_it, "rejections");
+    CompileOutputs { files, findings, unresolved, lost_arguments, rejections }
 }
 
 /// Free a large value without making the caller wait for it. The area files
