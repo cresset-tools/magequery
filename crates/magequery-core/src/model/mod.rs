@@ -12,6 +12,7 @@ mod doctor_baseline;
 pub use doctor_baseline::*;
 mod doctor_check;
 pub use doctor_check::*;
+mod doctor_output;
 mod wiring;
 pub use wiring::*;
 mod runtime;

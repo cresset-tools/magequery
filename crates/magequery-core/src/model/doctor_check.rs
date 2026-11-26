@@ -40,6 +40,8 @@ pub struct DoctorCheck {
     /// The baseline read and the file it came from, when one was.
     pub baseline: Option<(DoctorBaseline, PathBuf)>,
     fail_on_warnings: bool,
+    /// The Magento root, which places findings without a file of their own.
+    pub(super) root: PathBuf,
 }
 
 impl DoctorCheck {
@@ -95,7 +97,7 @@ impl crate::Magento {
         if let Some(outcome) = report.baseline.as_mut().filter(|_| scoped) {
             outcome.unmatched.clear();
         }
-        Ok(DoctorCheck { report, baseline, fail_on_warnings: policy.fail_on_warnings })
+        Ok(DoctorCheck { report, baseline, fail_on_warnings: policy.fail_on_warnings, root: root.to_path_buf() })
     }
 }
 

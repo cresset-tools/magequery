@@ -215,7 +215,7 @@ RUNTIME       (env.php config & live connections)
 PROJECT       (the codebase itself)
   info      mode   maintenance   base-url [--secure]   admin-url   (single-fact views of info)
   modules [--check] [--enabled|--disabled] [--source app|vendor]
-  deps <module>   doctor [--source] [--in] [--fail-on-warnings] [--deny] [--explain] [--generate-baseline] [--prune-baseline]   whatis <class>   patches [--db|--pending]
+  deps <module>   doctor [--source] [--in] [--fail-on-warnings] [--deny] [--format] [--explain] [--generate-baseline] [--prune-baseline]   whatis <class>   patches [--db|--pending]
 ```
 
 **Tooling meta-commands** (`completions <shell>`, `man`, `skill`, `lsp`) sit *outside* the
@@ -1041,7 +1041,7 @@ for the preference join).
 
 ### `doctor` (cross-index lints, done)
 
-`magequery doctor [--source app|vendor] [--deny <lint>…] [--fail-on-warnings] [--in <scope>…] [--generate-baseline [file]] [--prune-baseline] [--baseline <file>|--no-baseline]` — everything the merged config
+`magequery doctor [--source app|vendor] [--deny <lint>…] [--fail-on-warnings] [--in <scope>…] [--generate-baseline [file]] [--prune-baseline] [--baseline <file>|--no-baseline] [--format auto|text|json|github|gitlab|sarif]` — everything the merged config
 references that doesn't exist, structural breakage, and probably-forgotten wiring. Pure
 projection over the existing indexes (~90–140ms); exits 1 on **errors** only, so warnings
 can't fail CI — unless a lint is passed to `--deny` (repeatable), which upgrades its findings
@@ -1067,6 +1067,20 @@ findings located in a root-relative path prefix, a module, a module vendor (`Acm
 `Acme_*`) or a theme/theme vendor; sourceless findings match on their subject (module-set
 drift carries the module). `DoctorReport::retain_in`, applied after `deny`, so the exit
 code follows the filtered set.
+
+**CI formats** (`model/doctor_output.rs`): `--format github` prints one Actions workflow
+command per finding (`::error file=…,line=…,title=E2001 preference-target-missing::…`;
+info is `::notice`), `--format gitlab` a Code Quality report (severity major/minor/info;
+a fingerprint over code, path, message and repeat index, not the line, so an edit above a
+finding doesn't make it new; sourceless findings sit on `app/etc/config.php`, as GitLab
+needs a path), `--format sarif` a SARIF 2.1.0 log with a rule (summary, explanation) per
+code it uses. The default `auto` is `github` when `GITHUB_ACTIONS=true` and `text`
+otherwise: GitLab reads its report from an uploaded file, not the log, so it gets no
+detection. They are `DoctorCheck::github_annotations` / `gitlab_code_quality` / `sarif`, so
+magebuild can write them too; all include stale baseline entries (rule `baseline`, at
+their line in the baseline file) and the chain, as indented message lines. Paths are
+relative to the working directory, not the Magento root: CI runs from the repository root,
+and the store may be a subdirectory of it. `--json` stays, as `--format json`.
 
 **Baseline** (phpstan's `--generate-baseline`): `--generate-baseline [file]` writes every
 current finding to `magequery-baseline.json` at the root (`DoctorBaseline`,

@@ -233,7 +233,12 @@ query over tables the virtual ones don't cover), and `--json` to parse results.
   A `magequery-baseline.json` at the root (written by `--generate-baseline`) hides the
   findings a project has accepted, so only new ones show; `--no-baseline` shows all. An
   entry that no longer matches is `error[baseline]` (cited at its line in the file);
-  `--prune-baseline` removes exactly those entries.
+  `--prune-baseline` removes exactly those entries. In CI, `--format github` prints
+  each finding as an Actions annotation on its file and line (the default under GitHub
+  Actions), `--format gitlab` a Code Quality report to save as
+  `artifacts:reports:codequality`, and `--format sarif` a SARIF 2.1.0 log for code
+  scanning; run them from the repository root, since paths are relative to the working
+  directory.
 - Everything about one class in a single view → `whatis '<Class>'`.
 - Which setup patches exist or are pending? → `patches [--db|--pending]` (for the
   whole "is an upgrade needed" answer, `db status`).
