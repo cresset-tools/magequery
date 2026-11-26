@@ -1,13 +1,15 @@
 //! The fast development `setup:upgrade` (`devupgrade`, `indexerhash`): config.php as
 //! `Installer::createModulesConfig` writes it, and indexer config hashes pinned against
 //! Magento's own `Config\Dom` + `Indexer\Config\Converter` (see
-//! `fixtures/indexer-hash/regenerate.php`).
+//! `fixtures/indexer-hash/regenerate.php`), and the global DI config the same way
+//! (`fixtures/di-config/regenerate.php`).
 #![cfg(feature = "db")]
 
 use std::path::Path;
 
 use magequery_core::Magento;
 use magequery_core::devupgrade::ConfigPhpUpdate;
+use magequery_core::phparray::PhpValue;
 
 fn put(root: &Path, rel: &str, body: &str) {
     let p = root.join(rel);
@@ -135,4 +137,28 @@ fn indexer_config_matches_magento() {
         hashes.iter().map(|(id, h)| (id.as_str(), h.as_str())).collect::<Vec<_>>(),
         expected.iter().map(|(id, h, _)| (id.as_str(), h.as_str())).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn global_di_config_matches_magento() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    module(root, "Acme_Base", &[]);
+    module(root, "Acme_Child", &["Acme_Base"]);
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/di-config");
+    let read = |f: &str| std::fs::read_to_string(fixtures.join(f)).expect("fixture");
+    put(root, "app/code/Acme/Base/etc/di.xml", &read("base.xml"));
+    put(root, "app/code/Acme/Child/etc/di.xml", &read("child.xml"));
+    put(root, "app/etc/config.php", &config_php(&[("Acme_Base", 1), ("Acme_Child", 1)]));
+
+    // Fixture\C as regenerate.php declares it.
+    let constant = |name: &str| match name {
+        "Fixture\\C::A" => Some(PhpValue::Str("constant a".into())),
+        "Fixture\\C::N" => Some(PhpValue::Int(5)),
+        _ => None,
+    };
+    let mage = Magento::open(root).expect("open");
+    assert_eq!(mage.global_di_config(&constant).expect("di config"), read("expected.ser"));
+    // A constant that cannot be evaluated leaves the entry to PHP.
+    assert!(mage.global_di_config(&|_| None).is_err());
 }

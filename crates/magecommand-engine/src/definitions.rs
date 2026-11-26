@@ -632,15 +632,33 @@ impl Definitions {
         root: &Path,
         names: impl IntoIterator<Item = String>,
     ) -> usize {
+        self.load_names(magento, root, names, true)
+    }
+
+    /// [`Definitions::load_closure`] for `names` alone: the ancestors of what
+    /// it adds are loaded, those of records already held are not looked at.
+    pub fn load_classes(&mut self, magento: &Magento, root: &Path, names: impl IntoIterator<Item = String>) -> usize {
+        self.load_names(magento, root, names, false)
+    }
+
+    fn load_names(
+        &mut self,
+        magento: &Magento,
+        root: &Path,
+        names: impl IntoIterator<Item = String>,
+        sweep_held: bool,
+    ) -> usize {
         self.relations.clear();
         self.public_methods.clear();
         let generated = root.join("generated/code");
         let classmap: std::sync::OnceLock<HashMap<String, PathBuf>> = std::sync::OnceLock::new();
         let mut tried: HashSet<String> = HashSet::new();
         let mut frontier: Vec<String> = names.into_iter().collect();
-        for record in self.classes.values() {
-            let m = &record.meta;
-            frontier.extend(m.extends.iter().chain(&m.implements).chain(&m.traits).cloned());
+        if sweep_held {
+            for record in self.classes.values() {
+                let m = &record.meta;
+                frontier.extend(m.extends.iter().chain(&m.implements).chain(&m.traits).cloned());
+            }
         }
         let mut added = 0;
         while !frontier.is_empty() {

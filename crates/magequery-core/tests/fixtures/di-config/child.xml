@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<!-- Fixture for tests/devupgrade.rs: the second module's etc/di.xml, merged onto base.xml. -->
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+    <type name="Fixture\Model\Foo">
+        <arguments>
+            <argument name="list" xsi:type="array">
+                <item name="a" xsi:type="string">a2</item>
+                <item name="c" xsi:type="string" sortOrder="15">c</item>
+                <item name="nested" xsi:type="array">
+                    <item name="z" xsi:type="object">Fixture\Z</item>
+                </item>
+            </argument>
+            <argument name="changes" xsi:type="array">
+                <item name="k" xsi:type="string">now an array</item>
+            </argument>
+        </arguments>
+        <plugin name="p1" sortOrder="5"/>
+        <plugin name="p3" type="Fixture\Plugin\Three"/>
+    </type>
+    <preference for="Fixture\Api\BarInterface" type="Fixture\Model\Bar"/>
+    <preference for="Fixture\Api\FooInterface" type="Fixture\Model\FooOverride"/>
+    <virtualType name="Fixture\Virtual2" type="Fixture\Virtual" shared="true"/>
+    <type name="\Fixture\Leading\Slash"/>
+</config>

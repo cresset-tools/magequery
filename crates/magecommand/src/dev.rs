@@ -145,12 +145,24 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
 
 /// The cache entries whose rebuild dominates a cold PHP boot, computed natively:
 /// `interception` (which types have plugins), as `Interception\Config\Config`
-/// saves it in developer mode.
+/// saves it in developer mode, and `global::DiConfig` (the merged global
+/// di.xml), as `ObjectManager\ConfigLoader` does. An entry that cannot be
+/// reproduced exactly is left for PHP to build.
 fn fill_caches(mage: &Magento) -> std::result::Result<Vec<String>, String> {
     let defs = magecommand_engine::interception::runtime_definitions(mage, mage.root());
     let map = magecommand_engine::interception::runtime_interception_map(mage, &defs);
-    let json = magequery_core::devupgrade::php_json_bool_map(map.iter().map(|(k, v)| (k.as_str(), *v)));
-    mage.fill_config_cache(&[("interception", json)])
+    let mut entries = vec![(
+        "interception",
+        magequery_core::devupgrade::php_json_bool_map(map.iter().map(|(k, v)| (k.as_str(), *v))),
+    )];
+    let mut notes = Vec::new();
+    match magecommand_engine::runtimecache::global_di_config(mage, defs) {
+        Ok(serialized) => entries.push(("GLOBAL__DICONFIG", serialized)),
+        Err(why) => notes.push(format!("config cache: GLOBAL__DICONFIG left for PHP to build ({why})")),
+    }
+    let mut lines = mage.fill_config_cache(&entries)?;
+    lines.extend(notes);
+    Ok(lines)
 }
 
 struct Report<'a> {

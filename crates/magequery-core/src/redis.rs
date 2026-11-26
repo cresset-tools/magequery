@@ -111,6 +111,7 @@ pub(crate) fn flushdb(inst: &RedisInstance) -> Result<(), String> {
 
 /// Send `commands` in one round trip on the instance's database (after AUTH and
 /// SELECT) and fail on the first error reply.
+#[cfg_attr(not(feature = "db"), allow(dead_code))]
 pub(crate) fn pipeline(inst: &RedisInstance, commands: &[Vec<String>]) -> Result<(), String> {
     fn run<S: Read + Write>(mut s: S, inst: &RedisInstance, commands: &[Vec<String>]) -> Result<(), String> {
         let mut all: Vec<Vec<&str>> = Vec::new();
@@ -157,6 +158,7 @@ pub(crate) fn pipeline(inst: &RedisInstance, commands: &[Vec<String>]) -> Result
     run(s, inst, commands)
 }
 
+#[cfg_attr(not(feature = "db"), allow(dead_code))]
 fn encode_cmd(out: &mut Vec<u8>, args: &[&str]) {
     out.extend_from_slice(format!("*{}\r\n", args.len()).as_bytes());
     for a in args {
