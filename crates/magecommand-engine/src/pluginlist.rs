@@ -1060,3 +1060,203 @@ mod tests {
     }
 
 }
+
+// ---- runtime plugin lists (creatuity's AreasPluginList) --------------------
+
+/// One scope's runtime `PluginList` state, as creatuity's `CompiledPluginList`
+/// leaves it after `getNext` was asked about a set of subjects: the
+/// `_processed` chains (`{type}_{method}_{prev}` → before names, around name,
+/// after names) and, per inherited type, its `_inherited` plugin map as
+/// `(name, instance)` — the instance trimmed of its leading backslash but NOT
+/// resolved through virtual types (`CompiledPluginList::getPluginType` reads
+/// `_inherited[$type][$code]['instance']` verbatim). Disabled entries are kept,
+/// as `_inherited` keeps them.
+pub struct RuntimeChains {
+    pub nodes: HashMap<String, (Vec<String>, Option<String>, Vec<String>)>,
+    pub instances: HashMap<String, Vec<(String, String)>>,
+}
+
+/// Which configuration a runtime scope reads.
+#[derive(Clone, Debug)]
+pub enum RuntimeScope {
+    /// `primary` (and its clone `global`): global module di.xml, then
+    /// app/etc/di.xml.
+    Global,
+    /// A fixed area: the global data with the area's overlay merged on top.
+    Area(Area),
+    /// A custom-registered area (an `AreaList` entry outside the fixed set).
+    Custom(String),
+}
+
+/// `PluginList::_loadScopedData` for one scope, the way creatuity's
+/// `AreasPluginList` drives it, followed by `getNext` for every subject in
+/// `subjects` order (each `getNext` inherits its type on first sight).
+///
+/// The `primary` list loads `[global, primary]` and inherits their typed
+/// virtual types. Every area list is a CLONE of that loaded list whose next
+/// `_loadScopedData` reads the area on top of the global data and RESETS
+/// `_inherited`/`_processed`, so it inherits only the area's own virtual types
+/// before the subjects. Unlike `PluginListGenerator::write`, nothing inherits
+/// every configured type: the runtime walk is lazy, so which ancestors are
+/// cached when a subject is reached depends only on the seeds and the
+/// subjects before it.
+pub fn runtime_chains(
+    magento: &Magento,
+    defs: &Definitions,
+    scope: &RuntimeScope,
+    subjects: &[String],
+) -> RuntimeChains {
+    let global_export = magento.di_export_ref(Area::Global);
+    let global_vtypes: HashMap<String, String> = global_export
+        .virtual_types
+        .iter()
+        .map(|v| (v.name.as_str().to_owned(), v.base.as_str().to_owned()))
+        .collect();
+
+    let owned_merged;
+    let owned_overlay;
+    let (export, seed_export, area_filter): (&DiExport, &DiExport, Option<Area>) = match scope {
+        RuntimeScope::Global => (global_export, global_export, None),
+        RuntimeScope::Area(area) => {
+            let e = magento.di_export_ref(*area);
+            (e, e, Some(*area))
+        }
+        RuntimeScope::Custom(code) => {
+            owned_merged = magento.di_export_custom_area(code);
+            owned_overlay = magento.di_export_custom_area_overlay(code);
+            (&owned_merged, &owned_overlay, None)
+        }
+    };
+
+    // Seeds: the typed virtual types of the newly read scopes, in each read
+    // layer's node order (as `generate` seeds them).
+    let node_pos: HashMap<&str, &magequery_core::TypeNodePosition> =
+        seed_export.node_positions.iter().map(|n| (n.name.as_str(), n)).collect();
+    let mut vtype_seeds: Vec<(u8, u32, &str)> = seed_export
+        .virtual_types
+        .iter()
+        .filter(|v| area_filter.is_none_or(|a| v.source.area == a))
+        .map(|v| {
+            let pos = node_pos.get(v.name.as_str());
+            match scope {
+                RuntimeScope::Global => {
+                    if v.source.module.as_str() == "(primary)" {
+                        (1u8, pos.and_then(|n| n.primary).unwrap_or(v.decl_order), v.name.as_str())
+                    } else {
+                        (0u8, pos.and_then(|n| n.modules).unwrap_or(v.decl_order), v.name.as_str())
+                    }
+                }
+                _ => (2u8, pos.and_then(|n| n.overlay).unwrap_or(v.decl_order), v.name.as_str()),
+            }
+        })
+        .collect();
+    vtype_seeds.sort();
+
+    let plugin_data = plugin_data_of(export);
+    let mut state = Inherit {
+        defs,
+        global_vtypes: &global_vtypes,
+        plugin_data: &plugin_data,
+        plugin_index: plugin_data.iter().enumerate().map(|(i, (t, _))| (t.as_str(), i)).collect(),
+        inherited: Vec::new(),
+        inherited_index: Default::default(),
+        processed: Vec::new(),
+        processed_index: Default::default(),
+        findings: Vec::new(),
+        inherited_only: false,
+    };
+    for (_, _, seed) in &vtype_seeds {
+        state.inherit(seed);
+    }
+    for subject in subjects {
+        state.inherit(subject.trim_start_matches('\\'));
+    }
+
+    let Inherit { processed, inherited, .. } = state;
+    let mut nodes = HashMap::with_capacity(processed.len());
+    for (key, listeners) in processed {
+        let mut before = Vec::new();
+        let mut around = None;
+        let mut after = Vec::new();
+        for (l, v) in listeners {
+            match (l, v) {
+                (LISTENER_BEFORE, ProcessedValue::List(names)) => before = names,
+                (LISTENER_AROUND, ProcessedValue::Around(name)) => around = Some(name),
+                (LISTENER_AFTER, ProcessedValue::List(names)) => after = names,
+                _ => {}
+            }
+        }
+        nodes.insert(key, (before, around, after));
+    }
+    let mut instances = HashMap::new();
+    for (t, v) in inherited {
+        if let Some(plugins) = v {
+            let list: Vec<(String, String)> = plugins
+                .into_iter()
+                .filter_map(|(n, e)| {
+                    e.instance.map(|i| (n, i.trim_start_matches('\\').to_owned()))
+                })
+                .collect();
+            instances.insert(t, list);
+        }
+    }
+    RuntimeChains { nodes, instances }
+}
+
+/// `Magento\Framework\App\AreaList::getCodes()`: the keys of the merged
+/// `areas` argument, in merge order.
+pub fn area_list_codes(magento: &Magento) -> Vec<String> {
+    use magequery_core::ArgValue;
+    let export = magento.di_export_ref(Area::Global);
+    let mut codes: Vec<String> = Vec::new();
+    for decl in &export.arguments {
+        if decl.type_name.as_str() == "Magento\\Framework\\App\\AreaList"
+            && decl.arg == "areas"
+            && let ArgValue::Array(items) = &decl.value
+        {
+            for item in items {
+                if !codes.contains(&item.key) {
+                    codes.push(item.key.clone());
+                }
+            }
+        }
+    }
+    codes
+}
+
+/// The plugin classes (instances chased through virtual types, every scope)
+/// declared on `types` — what a runtime walk over those types reads methods
+/// from, so a caller can load them into its definitions first.
+pub fn plugin_classes_on(magento: &Magento, types: &HashSet<String>) -> Vec<String> {
+    let global = magento.di_export_ref(Area::Global);
+    let mut exports: Vec<std::borrow::Cow<'_, DiExport>> = AREA_CODES
+        .iter()
+        .map(|(a, _)| std::borrow::Cow::Borrowed(magento.di_export_ref(*a)))
+        .collect();
+    for code in crate::areaconfig::custom_area_codes(magento) {
+        exports.push(std::borrow::Cow::Owned(magento.di_export_custom_area(&code)));
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let lower: HashSet<String> = types.iter().map(|t| t.to_ascii_lowercase()).collect();
+    for export in &exports {
+        let vtypes: HashMap<String, String> = global
+            .virtual_types
+            .iter()
+            .chain(export.virtual_types.iter())
+            .map(|v| (v.name.as_str().to_owned(), v.base.as_str().to_owned()))
+            .collect();
+        for decl in &export.plugins {
+            if !lower.contains(&decl.target.as_str().to_ascii_lowercase()) {
+                continue;
+            }
+            if let Some(class) = &decl.class {
+                let real = chase(&vtypes, class.as_str().trim_start_matches('\\'));
+                if seen.insert(real.clone()) {
+                    out.push(real);
+                }
+            }
+        }
+    }
+    out
+}

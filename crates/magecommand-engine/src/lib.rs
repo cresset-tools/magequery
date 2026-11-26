@@ -16,6 +16,7 @@ pub mod arguments;
 pub mod build;
 pub mod classify;
 pub mod codegen;
+pub mod compiled_interceptor;
 pub mod compare;
 pub mod definitions;
 pub mod fused;
