@@ -302,7 +302,7 @@ static cssdiff <expected.css> <actual.css> [--limit <N>]
     whitespace, hex case/shorthand, leading zeros, comments). Exit 0 when
     semantically identical — every remaining finding is a real residual.
 
-static verify --reference <DIR> --output <DIR> [--fail-on-diff] [--strict]
+static verify --reference <DIR> --output <DIR> [--fail-on-diff] [--byte-exact-css]
               [--all] [--sample <N>]
     Diff a deployed static tree against a real `setup:static-content:deploy`
     reference — what `di verify` is to the DI half, and the gate static parity is
@@ -311,7 +311,7 @@ static verify --reference <DIR> --output <DIR> [--fail-on-diff] [--strict]
     deploy's own units (the `<area>/<Vendor>/<theme>/<locale>` packages and the
     area-level artifacts), because a whole-theme divergence names its bug while a
     flat file list does not. A css file differing only in non-semantic formatting
-    is `equivalent` (clean) unless --strict; `deployed_version.txt` is skipped
+    is `equivalent` (clean) unless --byte-exact-css (formerly --strict, still accepted); `deployed_version.txt` is skipped
     (per-run timestamp). A package whose bundles hold exactly the same modules
     split across different files is `re-split` (clean): bundle boundaries depend
     on a `.min`-sibling cache Magento shares process-wide, so the same input can
