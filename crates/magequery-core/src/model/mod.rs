@@ -10,6 +10,8 @@ pub use project::*;
 mod doctor_lints;
 mod doctor_baseline;
 pub use doctor_baseline::*;
+mod doctor_check;
+pub use doctor_check::*;
 mod wiring;
 pub use wiring::*;
 mod runtime;

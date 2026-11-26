@@ -9278,9 +9278,6 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
         SourceFilter::App => ModuleSource::App,
         SourceFilter::Vendor => ModuleSource::Vendor,
     });
-    let mut report = mage.doctor(source);
-    report.deny(&args.deny);
-
     let baseline_path = |explicit: Option<&PathBuf>| match explicit {
         Some(path) if !path.as_os_str().is_empty() => path.clone(),
         _ => root.join(DoctorBaseline::FILE),
@@ -9291,6 +9288,8 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
             bail!("--generate-baseline records the whole project; drop --source and --in");
         }
         let path = baseline_path(Some(out).filter(|p| !p.as_os_str().is_empty()).or(args.baseline.as_ref()));
+        let mut report = mage.doctor(source);
+        report.deny(&args.deny);
         let baseline = DoctorBaseline::from_report(&report, root);
         std::fs::write(&path, baseline.to_json())
             .with_context(|| format!("writing {}", path.display()))?;
@@ -9304,29 +9303,32 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    report.retain_in(root, &args.in_);
-    // In a narrowed run, accepted findings outside the scope just weren't looked at.
     let scoped = source.is_some() || !args.in_.is_empty();
     if args.prune_baseline && scoped {
         bail!("--prune-baseline needs the whole project to know what is stale; drop --source and --in");
     }
-    let baseline_file = (!args.no_baseline).then(|| baseline_path(args.baseline.as_ref()));
-    let mut baseline = None;
-    if let Some(path) = &baseline_file {
-        baseline = DoctorBaseline::read(path).map_err(|e| anyhow!(e))?;
-        match &baseline {
-            Some(baseline) => report.apply_baseline(baseline, root),
-            // Only the default file is optional.
-            None if args.baseline.is_some() || args.prune_baseline => {
-                bail!("baseline {} does not exist", path.display())
-            }
-            None => {}
-        }
-    }
-    if let Some(outcome) = report.baseline.as_mut().filter(|_| scoped) {
-        outcome.unmatched.clear();
-    }
-    let stale = report.baseline.as_ref().map_or(&[][..], |b| &b.unmatched[..]);
+    let policy = magequery_core::DoctorPolicy {
+        source,
+        deny: args.deny.clone(),
+        in_scopes: args.in_.clone(),
+        baseline: match (&args.baseline, args.no_baseline) {
+            (_, true) => magequery_core::BaselineChoice::Ignore,
+            (Some(path), _) => magequery_core::BaselineChoice::File(path.clone()),
+            // Pruning needs the file it prunes.
+            (None, _) if args.prune_baseline => magequery_core::BaselineChoice::File(baseline_path(None)),
+            (None, _) => magequery_core::BaselineChoice::Default,
+        },
+        fail_on_warnings: args.fail_on_warnings,
+    };
+    let check = mage.doctor_check(&policy).map_err(|e| anyhow!(e))?;
+    let failed = check.failed();
+    let stale = check.stale().to_vec();
+    let stale = &stale[..];
+    let (baseline, baseline_file) = match check.baseline {
+        Some((baseline, path)) => (Some(baseline), Some(path)),
+        None => (None, None),
+    };
+    let report = check.report;
 
     if let (true, Some(mut baseline), Some(path)) = (args.prune_baseline, baseline, &baseline_file) {
         let shown = path.strip_prefix(root).unwrap_or(path).display();
@@ -9406,7 +9408,7 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
     // unless --deny'd or --fail-on-warnings.
     use std::io::Write;
     std::io::stdout().flush().ok();
-    if report.errors() > 0 || !stale.is_empty() || (args.fail_on_warnings && report.warnings() > 0) {
+    if failed {
         std::process::exit(1);
     }
     Ok(())
