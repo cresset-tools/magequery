@@ -1048,6 +1048,33 @@ pub fn generate_on_demand<'i>(
     GeneratedCode { files, findings }
 }
 
+/// [`generate_on_demand`] to a fixpoint, folding each round's files into
+/// `defs`: a generated class whose source is itself generated (`FooFactory\Proxy`)
+/// can only be rendered once its source is held, which is the order PHP's
+/// autoloader produces them in. Returns every file written across the rounds.
+pub fn generate_on_demand_closed<'i>(
+    magento: &Magento,
+    defs: &mut Definitions,
+    root: &std::path::Path,
+    global_vtypes: &HashSet<String>,
+    names: impl IntoIterator<Item = &'i str>,
+) -> GeneratedCode {
+    let names: Vec<&str> = names.into_iter().collect();
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut findings;
+    loop {
+        let round = generate_on_demand(magento, defs, root.to_path_buf(), global_vtypes.clone(), names.iter().copied());
+        findings = round.findings;
+        if round.files.is_empty() || defs.add_generated_code(&round.files, root) == 0 {
+            break;
+        }
+        defs.load_closure(magento, root, std::iter::empty());
+        defs.load_constant_classes(magento, root);
+        files.extend(round.files);
+    }
+    GeneratedCode { files, findings }
+}
+
 pub fn generate_code(
     magento: &Magento,
     defs: &Definitions,

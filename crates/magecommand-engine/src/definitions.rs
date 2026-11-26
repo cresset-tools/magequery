@@ -641,6 +641,49 @@ impl Definitions {
         self.load_names(magento, root, names, false)
     }
 
+    /// Load the classes that parameter defaults and constant values of the
+    /// records held refer to (`$mode = CacheConstants::CLEANING_MODE_ALL`),
+    /// and theirs in turn. The generators render a default as its VALUE —
+    /// `EntityAbstract` reads `getDefaultValue()` — so the defining class
+    /// must be known; a scan holds every class, an autoloader-driven load
+    /// only what it was asked for. Returns how many declarations were added.
+    pub fn load_constant_classes(&mut self, magento: &Magento, root: &Path) -> usize {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut added = 0;
+        loop {
+            let mut wanted: Vec<String> = Vec::new();
+            for (fqcn, record) in &self.classes {
+                if !seen.insert(fqcn.clone()) {
+                    continue;
+                }
+                let m = &record.meta;
+                let ns = fqcn.rsplit_once('\\').map(|(n, _)| n).unwrap_or("");
+                let exprs = m
+                    .methods
+                    .iter()
+                    .flat_map(|method| method.params.iter().filter_map(|p| p.default.as_deref()))
+                    .chain(m.constants.iter().map(|c| c.value.as_str()));
+                for expr in exprs {
+                    if !expr.contains("::") {
+                        continue;
+                    }
+                    let parsed = magecommand_php::constexpr::parse_const_expr(expr, ns, &m.uses);
+                    wanted.extend(parsed.classes.into_iter().filter(|c| self.get(c).is_none()));
+                }
+            }
+            if wanted.is_empty() {
+                return added;
+            }
+            wanted.sort_unstable();
+            wanted.dedup();
+            let n = self.load_classes(magento, root, wanted);
+            if n == 0 {
+                return added;
+            }
+            added += n;
+        }
+    }
+
     fn load_names(
         &mut self,
         magento: &Magento,

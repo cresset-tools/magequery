@@ -104,8 +104,12 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
         return whole_upgrade(mage.root(), php.as_deref(), opts, &needs_php, &report);
     }
 
-    // 5. The native steps: generated files, the core recurring writes.
+    // 5. The native steps: generated files, the core recurring writes. What
+    //    generated/code held is remembered first: those are the classes the
+    //    store's requests ask for, which step 6 writes back fresh.
+    let mut previous = Vec::new();
     if !opts.keep_generated {
+        previous = generated_class_names(&mage.root().join("generated/code"));
         let mut n = 0;
         for dir in GENERATED {
             let path = mage.root().join(dir);
@@ -115,12 +119,14 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
     }
     done.extend(mage.dev_upgrade_apply(&check).map_err(|e| anyhow!(e))?);
 
-    // 6. The recurring scripts only PHP can run. Its boot would rebuild the
-    //    caches just cleaned; write the costly ones it would compute first.
-    if !check.recurring_php.is_empty() && php.is_some() {
-        match fill_caches(&mage) {
+    // 6. The recurring scripts only PHP can run. Its boot would regenerate the
+    //    code and rebuild the caches just emptied, slowly; write what it would
+    //    write first. Without PHP to run, the store's next request benefits.
+    let php_boots = !check.recurring_php.is_empty() && php.is_some();
+    if php_boots || !opts.keep_generated {
+        match prepare_runtime(&mage, previous, php_boots) {
             Ok(lines) => done.extend(lines),
-            Err(why) => done.push(format!("config cache: left for PHP to build ({why})")),
+            Err(why) => done.push(format!("generated code and config cache: left for PHP to build ({why})")),
         }
     }
     let report = Report { json, done: &done, skipped: &check.recurring_skipped, start };
@@ -149,8 +155,23 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
 /// saves it in developer mode, and `global::DiConfig` (the merged global
 /// di.xml), as `ObjectManager\ConfigLoader` does. An entry that cannot be
 /// reproduced exactly is left for PHP to build.
-fn fill_caches(mage: &Magento) -> std::result::Result<Vec<String>, String> {
-    let (defs, scopes) = magecommand_engine::interception::runtime_definitions(mage, mage.root())?;
+///
+/// Before that, the generated classes: those the config names and `previous`
+/// (what `generated/code` held), as the autoloader would generate them. Only
+/// kinds rendered byte-identical to PHP's generators are written; PHP
+/// generates the rest when first asked, as it would have anyway.
+fn prepare_runtime(mage: &Magento, previous: Vec<String>, caches: bool) -> std::result::Result<Vec<String>, String> {
+    let (defs, scopes, files) =
+        magecommand_engine::interception::runtime_definitions_generating(mage, mage.root(), previous)?;
+    let mut lines = Vec::new();
+    if !files.is_empty() {
+        let base = mage.root().join("generated/code");
+        write_generated(&base, &files).map_err(|e| format!("writing {}: {e}", base.display()))?;
+        lines.push(format!("generated files: wrote {} natively", files.len()));
+    }
+    if !caches {
+        return Ok(lines);
+    }
     let map = magecommand_engine::interception::runtime_interception_map(&defs, &scopes);
     let mut entries = vec![(
         "interception",
@@ -161,9 +182,74 @@ fn fill_caches(mage: &Magento) -> std::result::Result<Vec<String>, String> {
         Ok(serialized) => entries.push(("GLOBAL__DICONFIG", serialized)),
         Err(why) => notes.push(format!("config cache: GLOBAL__DICONFIG left for PHP to build ({why})")),
     }
-    let mut lines = mage.fill_config_cache(&entries)?;
+    lines.extend(mage.fill_config_cache(&entries)?);
     lines.extend(notes);
     Ok(lines)
+}
+
+/// The classes `generated/code` holds, named by each file's own declaration
+/// (a path cannot be read back: `Io` turns `_` into a directory as well as `\`),
+/// oldest first: the order PHP generated them in.
+fn generated_class_names(dir: &Path) -> Vec<String> {
+    use rayon::prelude::*;
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => walk(&path, out),
+                Ok(_) if path.extension().is_some_and(|x| x == "php") => out.push(path),
+                _ => {}
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir, &mut files);
+    let mut named: Vec<(std::time::SystemTime, String)> = files
+        .par_iter()
+        .filter_map(|f| {
+            let modified = std::fs::metadata(f).and_then(|m| m.modified()).ok()?;
+            Some((modified, declared_class(&std::fs::read_to_string(f).ok()?)?))
+        })
+        .collect();
+    named.sort();
+    named.into_iter().map(|(_, name)| name).collect()
+}
+
+/// `Ns\Name` from a generated file's `namespace Ns;` and `class Name …` lines.
+fn declared_class(src: &str) -> Option<String> {
+    let mut namespace = None;
+    for line in src.lines() {
+        if let Some(ns) = line.strip_prefix("namespace ") {
+            namespace = Some(ns.trim_end_matches(';').trim());
+            continue;
+        }
+        let decl = line.trim_start_matches("abstract ").trim_start_matches("final ");
+        if let Some(rest) = decl.strip_prefix("class ").or_else(|| decl.strip_prefix("interface ")) {
+            let name = rest.split_whitespace().next()?;
+            return Some(match namespace {
+                Some(ns) => format!("{ns}\\{name}"),
+                None => name.to_owned(),
+            });
+        }
+    }
+    None
+}
+
+/// Write each `(path under generated/code, bytes)` the way `Code\Generator\Io`
+/// does: a temporary file renamed into place, so a concurrent request never
+/// includes half a class.
+fn write_generated(base: &Path, files: &[(String, String)]) -> std::io::Result<()> {
+    use rayon::prelude::*;
+    files.par_iter().try_for_each(|(rel, bytes)| {
+        let path = base.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension(format!("php.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &path)
+    })
 }
 
 /// At most 8 worker threads, unless `RAYON_NUM_THREADS` says otherwise. The

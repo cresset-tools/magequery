@@ -134,7 +134,10 @@ Read-only checks a deploy runs to decide whether the slow steps have work, with
 Use it instead of `bin/magento setup:upgrade` in development. It writes
 `app/etc/config.php` (new or removed modules), cleans the caches, empties
 `generated/` and `pub/static` (`--keep-generated` to skip), and does the core
-recurring setup work natively. PHP runs only for PHP code:
+recurring setup work natively. It then writes back the generated classes the
+store was using (factories, proxies, extension classes, and creatuity-style
+interceptors on Mage-OS), byte-for-byte as PHP's generators would on demand, so
+the next PHP boot does not regenerate them. PHP runs only for PHP code:
 
 - recurring setup scripts with no native port (third-party `Setup/Recurring.php`,
   or core work it does not do natively, such as registering a new theme): it runs

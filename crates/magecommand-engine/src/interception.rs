@@ -53,10 +53,28 @@ pub fn runtime_interception_map(defs: &Definitions, scopes: &[DiScope]) -> BTree
 /// asks the autoloader, which also finds classes outside the compile scan (a
 /// virtual type of an enabled module based on a class of a DISABLED one).
 pub fn runtime_definitions(magento: &Magento, root: &std::path::Path) -> Result<(Definitions, Vec<DiScope>), String> {
+    runtime_definitions_generating(magento, root, Vec::new()).map(|(defs, scopes, _)| (defs, scopes))
+}
+
+/// The definitions, the scopes, and the generated files as `(path under
+/// generated/code, bytes)`.
+pub type RuntimeGenerated = (Definitions, Vec<DiScope>, Vec<(String, String)>);
+
+/// [`runtime_definitions`], also generating `extra` (generated class names a
+/// request will ask for — what `generated/code` held before it was emptied),
+/// and returning every file generated on the way, as `(path under
+/// generated/code, bytes)`: what PHP's autoloader would write for those names.
+/// Names no generator here reproduces exactly are left out.
+pub fn runtime_definitions_generating(
+    magento: &Magento,
+    root: &std::path::Path,
+    extra: Vec<String>,
+) -> Result<RuntimeGenerated, String> {
     let prof = std::env::var_os("MAGECOMMAND_PROFILE").is_some();
     let t = std::time::Instant::now();
     let scopes = magento.di_scopes().map_err(|e| e.to_string())?;
-    let mut names: Vec<String> = Vec::new();
+    let interceptors: Vec<String> = extra.iter().filter(|n| n.ends_with("\\Interceptor")).cloned().collect();
+    let mut names: Vec<String> = extra;
     for scope in &scopes {
         names.extend(scope.types.iter().map(|(n, _)| n.trim_start_matches('\\').to_owned()));
         names.extend(scope.virtual_types.iter().map(|(_, b)| b.trim_start_matches('\\').to_owned()));
@@ -91,13 +109,60 @@ pub fn runtime_definitions(magento: &Magento, root: &std::path::Path) -> Result<
         .filter(|s| s.scope == "primary" || s.scope == "global")
         .flat_map(|s| s.virtual_types.iter().map(|(n, _)| n.trim_start_matches('\\').to_owned()))
         .collect();
-    let code = crate::codegen::generate_on_demand(magento, &defs, root.to_path_buf(), vtypes, names.iter().map(String::as_str));
+    // A default naming another class's constant renders as its value.
+    defs.load_constant_classes(magento, root);
+    let code = crate::codegen::generate_on_demand_closed(magento, &mut defs, root, &vtypes, names.iter().map(String::as_str));
     if prof { eprintln!("  · on-demand gen  {:?} ({} files)", t.elapsed(), code.files.len()); }
-    if defs.add_generated_code(&code.files, root) > 0 {
-        defs.load_closure(magento, root, std::iter::empty());
+    let mut files = code.files;
+    files.extend(compiled_interceptors_for(magento, root, &mut defs, &interceptors));
+    if prof { eprintln!("  · interceptors  {:?} ({} files)", t.elapsed(), files.len()); }
+    Ok((defs, scopes, files))
+}
+
+/// The `\Interceptor`s among `names`, when the store generates them with
+/// creatuity/magento2-interceptors (Mage-OS 4 bundles it and prefers its
+/// `CompiledInterceptor` for the runtime generator): its plugins-baked-in format,
+/// rendered by [`crate::compiled_interceptor`]. A store on Magento's classic
+/// generator gets none; PHP generates those when first asked. Subjects are taken
+/// in `names` order, which is the order PHP generated them in (see
+/// `AreasPluginList::new`).
+fn compiled_interceptors_for(
+    magento: &Magento,
+    root: &std::path::Path,
+    defs: &mut Definitions,
+    names: &[String],
+) -> Vec<(String, String)> {
+    use crate::compiled_interceptor::{compiled_interceptors, AreasPluginList};
+    let creatuity = magento.modules().iter().any(|m| m.enabled && m.name.to_string() == "Creatuity_Interception");
+    if !creatuity {
+        return Vec::new();
     }
-    if prof { eprintln!("  · fold          {:?}", t.elapsed()); }
-    Ok((defs, scopes))
+    let mut seen = HashSet::new();
+    let subjects: Vec<String> = names
+        .iter()
+        .filter_map(|n| n.strip_suffix("\\Interceptor"))
+        .filter(|s| seen.insert(s.to_owned()) && defs.get(&format!("{s}\\Interceptor")).is_none())
+        .map(str::to_owned)
+        .collect();
+    if subjects.is_empty() {
+        return Vec::new();
+    }
+    defs.load_closure(magento, root, subjects.iter().cloned());
+    loop {
+        let need = AreasPluginList::required_classes(magento, defs, &subjects);
+        if defs.load_closure(magento, root, need) == 0 {
+            break;
+        }
+    }
+    defs.load_constant_classes(magento, root);
+    let plugins = AreasPluginList::new(magento, defs, &subjects);
+    compiled_interceptors(defs, &plugins, &subjects)
+        .into_iter()
+        .filter_map(|(subject, bytes)| {
+            let bytes = bytes.ok()?;
+            Some((format!("{}/Interceptor.php", subject.replace(['\\', '_'], "/")), bytes))
+        })
+        .collect()
 }
 
 fn build_map(magento: &Magento, defs: &Definitions, scan_all: bool) -> BTreeMap<String, bool> {
