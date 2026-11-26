@@ -36,6 +36,9 @@ mod schemadiff;
 pub mod devupgrade;
 #[cfg(feature = "db")]
 mod indexerhash;
+mod configdom;
+mod diconfig;
+pub use diconfig::DiScope;
 mod schemadecl;
 mod decrypt;
 mod deploy;
