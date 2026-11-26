@@ -689,20 +689,14 @@ impl Magento {
 
     /// Write `config`-type cache entries (id, payload) the way PHP's cache would
     /// save them, so the next PHP boot reads them instead of rebuilding. Only for
-    /// the store layout this is known for — the default frontend on Mage-OS's
-    /// Symfony Redis adapter with its tag index — and only while the `config`
-    /// cache type is enabled; otherwise `Err` says why nothing was written
-    /// (never a failure: PHP rebuilds the entries itself).
+    /// the layouts this is known for — the default frontend on Mage-OS's Symfony
+    /// Redis or filesystem adapter, with its tag index — and only while the
+    /// `config` cache type is enabled; otherwise `Err` says why nothing was
+    /// written (never a failure: PHP rebuilds the entries itself).
     pub fn fill_config_cache(&self, entries: &[(&str, String)]) -> std::result::Result<Vec<String>, String> {
         let env = deploy::read_env(self.root(), &self.index.vfs).map_err(|e| e.to_string())?;
-        let frontend = env
-            .get("cache")
-            .and_then(|c| c.get("frontend"))
-            .and_then(|f| f.get("default"))
-            .ok_or("no default cache frontend in env.php")?;
-        let backend = frontend.get("backend").and_then(PhpValue::scalar_string).unwrap_or_default();
-        if self.cache_backend(&backend) != CacheBackend::Redis || !self.symfony_cache() {
-            return Err(format!("the default cache ({}) is not Symfony's Redis adapter", if backend.is_empty() { "file" } else { &backend }));
+        if !self.symfony_cache() {
+            return Err("the framework's cache is not built on Symfony adapters".into());
         }
         let enabled = env
             .get("cache_types")
@@ -715,17 +709,13 @@ impl Magento {
         if env.get("cache").and_then(|c| c.get("type")).and_then(|t| t.get("config")).is_some() {
             return Err("the config cache type has its own frontend".into());
         }
-        // The tag index layout this writes (RedisTagAdapter's key names).
-        let adapter = self
-            .framework_file("Magento\\Framework\\Cache\\Frontend\\Adapter\\SymfonyAdapters\\RedisTagAdapter")
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .unwrap_or_default();
-        let known = ["'cache:tags:'", "'cache:all_ids'", "'cache:id_tags:'", "ID_TAGS_TTL_BUFFER = 3600"];
-        if !known.iter().all(|k| adapter.contains(k)) {
-            return Err("this Redis tag adapter's layout is not known".into());
-        }
-        let redis = deploy::redis_config(&env);
-        let inst = redis.instances.iter().find(|i| i.purpose == "default").ok_or("no Redis settings in env.php")?;
+        let empty = PhpValue::Array(Vec::new());
+        let frontend = env
+            .get("cache")
+            .and_then(|c| c.get("frontend"))
+            .and_then(|f| f.get("default"))
+            .unwrap_or(&empty);
+        let backend = frontend.get("backend").and_then(PhpValue::scalar_string).unwrap_or_default();
 
         // Frontend\Factory: `id_prefix` (or `prefix`), else from the config dir path.
         let prefix = ["id_prefix", "prefix"]
@@ -733,8 +723,7 @@ impl Magento {
             .find_map(|k| frontend.get(k).and_then(PhpValue::scalar_string).filter(|p| !p.is_empty()))
             .unwrap_or_else(|| {
                 use md5::{Digest, Md5};
-                let root = std::fs::canonicalize(self.root()).unwrap_or_else(|_| self.root().to_path_buf());
-                let dir = format!("{}/app/etc/", root.display());
+                let dir = format!("{}/app/etc/", self.real_root().display());
                 let hex: String = Md5::digest(dir.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
                 format!("{}_", &hex[..3])
             });
@@ -744,34 +733,167 @@ impl Magento {
             .and_then(PhpValue::scalar_string)
             .and_then(|v| v.parse().ok())
             .unwrap_or(7200);
-
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_secs();
-        const TAGS: [&str; 2] = ["CONFIG", "MAGE"];
+        let items: Vec<(String, String)> = entries
+            .iter()
+            .map(|(id, data)| (id.to_ascii_uppercase(), cache_item(data, now, lifetime, &CONFIG_TAGS)))
+            .collect();
+
+        match self.cache_backend(&backend) {
+            CacheBackend::Redis => self.fill_redis(&env, &prefix, lifetime, &items)?,
+            CacheBackend::File => {
+                if frontend.get("backend_options").and_then(|o| o.get("cache_dir")).is_some() {
+                    return Err("the file cache has its own cache_dir".into());
+                }
+                self.fill_files(&backend, &prefix, now + lifetime, &items)?
+            }
+            CacheBackend::Other(other) => return Err(format!("the default cache backend is {other}")),
+        }
+        Ok(entries
+            .iter()
+            .map(|(id, data)| format!("config cache: wrote {} ({} KB)", id.to_ascii_uppercase(), data.len() / 1024))
+            .collect())
+    }
+
+    /// `RedisAdapter` items plus `RedisTagAdapter::onSave`'s index.
+    fn fill_redis(
+        &self,
+        env: &PhpValue,
+        prefix: &str,
+        lifetime: u64,
+        items: &[(String, String)],
+    ) -> std::result::Result<(), String> {
+        let adapter = self
+            .framework_source("Magento\\Framework\\Cache\\Frontend\\Adapter\\SymfonyAdapters\\RedisTagAdapter");
+        let known = ["'cache:tags:'", "'cache:all_ids'", "'cache:id_tags:'", "ID_TAGS_TTL_BUFFER = 3600"];
+        if !known.iter().all(|k| adapter.contains(k)) {
+            return Err("this Redis tag adapter's layout is not known".into());
+        }
+        let redis = deploy::redis_config(env);
+        let inst = redis.instances.iter().find(|i| i.purpose == "default").ok_or("no Redis settings in env.php")?;
         let mut commands: Vec<Vec<String>> = Vec::new();
-        let mut done = Vec::new();
-        for (id, data) in entries {
-            let id = id.to_ascii_uppercase();
-            let value = cache_item(data, now, lifetime, &TAGS);
-            commands.push(vec!["SET".into(), format!("{prefix}:{id}"), value, "EX".into(), lifetime.to_string()]);
-            // RedisTagAdapter::onSave.
+        for (id, value) in items {
+            commands.push(vec!["SET".into(), format!("{prefix}:{id}"), value.clone(), "EX".into(), lifetime.to_string()]);
             commands.push(vec!["SADD".into(), "cache:all_ids".into(), id.clone()]);
-            for tag in TAGS {
+            for tag in CONFIG_TAGS {
                 commands.push(vec!["SADD".into(), format!("cache:tags:{prefix}{tag}"), id.clone()]);
             }
             let reverse = format!("cache:id_tags:{prefix}{id}");
             commands.push(vec!["DEL".into(), reverse.clone()]);
             let mut sadd = vec!["SADD".into(), reverse.clone()];
-            sadd.extend(TAGS.iter().map(|t| (*t).to_owned()));
+            sadd.extend(CONFIG_TAGS.iter().map(|t| (*t).to_owned()));
             commands.push(sadd);
             commands.push(vec!["EXPIRE".into(), reverse, (lifetime + 3600).to_string()]);
-            done.push(format!("config cache: wrote {id} ({} KB)", data.len() / 1024));
         }
-        crate::redis::pipeline(inst, &commands)?;
-        Ok(done)
+        crate::redis::pipeline(inst, &commands)
     }
+
+    /// `FilesystemAdapter` files (`FilesystemTrait::doSave`) under
+    /// `var/cache/<prefix>/`, plus `FilesystemTagAdapter::onSave`'s
+    /// `var/cache/symfony/tags/<TAG>` id lists.
+    fn fill_files(
+        &self,
+        backend: &str,
+        prefix: &str,
+        expires_at: u64,
+        items: &[(String, String)],
+    ) -> std::result::Result<(), String> {
+        let save = self.framework_source("Symfony\\Component\\Cache\\Traits\\FilesystemTrait");
+        let common = self.framework_source("Symfony\\Component\\Cache\\Traits\\FilesystemCommonTrait");
+        let tags = self
+            .framework_source("Magento\\Framework\\Cache\\Frontend\\Adapter\\SymfonyAdapters\\FilesystemTagAdapter");
+        let known = save.contains("$expiresAt.\"\\n\".rawurlencode($id).\"\\n\".$value")
+            && common.contains("hash('xxh128', static::class.$id, true)")
+            && common.contains("substr($hash, 2, 20)")
+            && tags.contains("'/tags/'")
+            && tags.contains("implode(\"\\n\", $ids) . \"\\n\"");
+        if !known {
+            return Err("this file cache layout is not known".into());
+        }
+        let cache = self.real_root().join("var/cache");
+        let dir = cache.join(prefix);
+        for (id, value) in items {
+            let file = symfony_cache_file(&dir, id);
+            let parent = file.parent().ok_or("cache file without a directory")?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+            // FilesystemCommonTrait::write: a temporary file, its mtime set to
+            // the expiry, renamed into place.
+            let tmp = dir.join(format!(".magecommand-{}", std::process::id()));
+            let contents = format!("{expires_at}\n{}\n{value}", raw_url_encode(id));
+            std::fs::write(&tmp, contents).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+            let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(expires_at);
+            std::fs::File::options()
+                .write(true)
+                .open(&tmp)
+                .and_then(|f| f.set_modified(mtime))
+                .map_err(|e| format!("touching {}: {e}", tmp.display()))?;
+            std::fs::rename(&tmp, &file).map_err(|e| format!("renaming to {}: {e}", file.display()))?;
+        }
+        // The tag adapter's directory is the backend options' `cache_dir`, which
+        // Frontend\\Factory::_getBackendOptions sets (to var/cache) only when it
+        // falls back to its default backend: no backend, `file`, or anything
+        // that is not a loadable class. A backend CLASS (the Zend Redis one)
+        // gets none, and the adapter uses var/cache/symfony.
+        let name = backend.trim_start_matches('\\');
+        let is_class = !name.is_empty() && name != "Cm_Cache_Backend_File" && self.framework_file(name).is_some();
+        let tag_dir = if is_class { cache.join("symfony/tags") } else { cache.join("tags") };
+        std::fs::create_dir_all(&tag_dir).map_err(|e| format!("creating {}: {e}", tag_dir.display()))?;
+        for tag in CONFIG_TAGS {
+            let path = tag_dir.join(tag);
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            // FilesystemTagAdapter::getTagIds: up to the last newline, trimmed.
+            let body = content.rfind('\n').map_or(content.as_str(), |i| &content[..i]).trim();
+            let mut ids: Vec<&str> = if body.is_empty() { Vec::new() } else { body.split('\n').collect() };
+            let before = ids.len();
+            for (id, _) in items {
+                if !ids.contains(&id.as_str()) {
+                    ids.push(id);
+                }
+            }
+            if ids.len() != before {
+                let out = format!("{}\n", ids.join("\n"));
+                std::fs::write(&path, out).map_err(|e| format!("writing {}: {e}", path.display()))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn framework_source(&self, class: &str) -> String {
+        self.framework_file(class).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default()
+    }
+
+    /// The store root as PHP sees it (`BP` is a resolved `__DIR__`).
+    fn real_root(&self) -> PathBuf {
+        std::fs::canonicalize(self.root()).unwrap_or_else(|_| self.root().to_path_buf())
+    }
+}
+
+/// The tags the `config` cache type saves with (`Type\\Config` + the global one).
+const CONFIG_TAGS: [&str; 2] = ["CONFIG", "MAGE"];
+
+/// `FilesystemCommonTrait::getFile` for a `FilesystemAdapter` rooted at `dir`.
+fn symfony_cache_file(dir: &Path, id: &str) -> PathBuf {
+    use base64::Engine;
+    let digest = xxhash_rust::xxh3::xxh3_128(format!("Symfony\\Component\\Cache\\Adapter\\FilesystemAdapter{id}").as_bytes());
+    // PHP's raw xxh128 is the canonical (big-endian) form.
+    let hash = base64::engine::general_purpose::STANDARD.encode(digest.to_be_bytes()).replace('/', "-");
+    dir.join(hash[..1].to_ascii_uppercase()).join(hash[1..2].to_ascii_uppercase()).join(&hash[2..22])
+}
+
+/// PHP's `rawurlencode`.
+fn raw_url_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// One saved cache item: `Symfony::prepareItemWithMetadata`'s wrapper, as the
@@ -1040,6 +1162,18 @@ mod cache_fill_tests {
             "a:4:{s:4:\"data\";s:13:\"{\"A\\\\B\":true}\";s:5:\"mtime\";i:1795686969;\
              s:6:\"expire\";i:1795694169;s:4:\"tags\";a:2:{i:0;s:6:\"CONFIG\";i:1;s:4:\"MAGE\";}}"
         );
+    }
+
+    #[test]
+    fn file_names_match_symfony_filesystem_adapter() {
+        // Files Mage-OS 4.0.0 wrote under var/cache/bgc_/.
+        for (id, rel) in [
+            ("INTERCEPTION", "P/O/rbt8zBz3xd8JO6vOpu3w"),
+            ("GLOBAL__DICONFIG", "F/4/vBQImTBH4yWB1ooPtK1w"),
+            ("SYSTEM", "U/M/BxQoUkY7CRvTH6C9zcgw"),
+        ] {
+            assert_eq!(symfony_cache_file(Path::new("/c"), id), Path::new("/c").join(rel), "{id}");
+        }
     }
 
     #[test]
