@@ -620,33 +620,194 @@ impl Magento {
         let cache = deploy::cache_config(&env);
         let redis = deploy::redis_config(&env);
         let mut done = Vec::new();
+        let mut flushed: Vec<(String, Option<u16>, Option<String>)> = Vec::new();
         for (id, dir) in [("default", "var/cache"), ("page_cache", "var/page_cache")] {
-            let fe = cache.frontends.iter().find(|f| f.id == id);
-            let backend = fe.map(|f| f.backend.trim_start_matches('\\').to_string()).unwrap_or_default();
-            match backend.as_str() {
-                "" | "Cm_Cache_Backend_File" | "Magento\\Framework\\Cache\\Backend\\File" | "file" => {
+            let backend = cache.frontends.iter().find(|f| f.id == id).map(|f| f.backend.as_str()).unwrap_or_default();
+            match self.cache_backend(backend) {
+                CacheBackend::File => {
                     let path = self.root().join(dir);
                     let n = empty_dir(&path).map_err(|e| format!("{id} cache: emptying {dir}: {e}"))?;
                     done.push(format!("{id} cache: emptied {dir} ({n} entries)"));
                 }
-                "Cm_Cache_Backend_Redis" | "Magento\\Framework\\Cache\\Backend\\Redis" | "redis" => {
+                CacheBackend::Redis => {
                     let inst = redis
                         .instances
                         .iter()
                         .find(|i| i.purpose == id)
                         .ok_or_else(|| format!("{id} cache: no Redis settings in env.php"))?;
-                    crate::redis::flushdb(inst).map_err(|e| format!("{id} cache: {e}"))?;
-                    done.push(format!(
-                        "{id} cache: flushed Redis {}{}",
+                    let target = (inst.host.clone(), inst.port, inst.database.clone());
+                    let at = format!(
+                        "Redis {}{}",
                         inst.host,
                         inst.database.as_deref().map(|d| format!(" db {d}")).unwrap_or_default()
-                    ));
+                    );
+                    if flushed.contains(&target) {
+                        done.push(format!("{id} cache: {at}, flushed already"));
+                        continue;
+                    }
+                    crate::redis::flushdb(inst).map_err(|e| format!("{id} cache: {e}"))?;
+                    flushed.push(target);
+                    done.push(format!("{id} cache: flushed {at}"));
                 }
-                other => return Err(format!("{id} cache: backend {other} is cleaned by PHP")),
+                CacheBackend::Other(other) => return Err(format!("{id} cache: backend {other} is cleaned by PHP")),
             }
         }
         Ok(done)
     }
+
+    /// Where a cache frontend with this `backend` setting really keeps its
+    /// entries. Where the framework builds caches on Symfony adapters
+    /// (`SymfonyAdapterProvider`: Mage-OS 3 and later, Magento 2.4.9) it maps
+    /// the lowercased name through a fixed table, and anything else, a backend
+    /// CLASS name included, falls back to the filesystem; before that the name is
+    /// a Zend/Cm backend class.
+    fn cache_backend(&self, backend: &str) -> CacheBackend {
+        let name = backend.trim_start_matches('\\');
+        if self.symfony_cache() {
+            return match name.to_ascii_lowercase().as_str() {
+                "redis" | "valkey" => CacheBackend::Redis,
+                "memcached" | "libmemcached" | "database" | "apc" | "apcu" | "two_levels" | "twolevel" => {
+                    CacheBackend::Other(name.to_owned())
+                }
+                _ => CacheBackend::File,
+            };
+        }
+        match name {
+            "" | "Cm_Cache_Backend_File" | "Magento\\Framework\\Cache\\Backend\\File" | "file" => CacheBackend::File,
+            "Cm_Cache_Backend_Redis" | "Magento\\Framework\\Cache\\Backend\\Redis" | "redis" => CacheBackend::Redis,
+            other => CacheBackend::Other(other.to_owned()),
+        }
+    }
+
+    fn framework_file(&self, class: &str) -> Option<PathBuf> {
+        self.index.resolver.file_for(&ClassName::new(class.to_owned()))
+    }
+
+    fn symfony_cache(&self) -> bool {
+        self.framework_file("Magento\\Framework\\Cache\\Frontend\\Adapter\\SymfonyAdapterProvider").is_some()
+    }
+
+    /// Write `config`-type cache entries (id, payload) the way PHP's cache would
+    /// save them, so the next PHP boot reads them instead of rebuilding. Only for
+    /// the store layout this is known for — the default frontend on Mage-OS's
+    /// Symfony Redis adapter with its tag index — and only while the `config`
+    /// cache type is enabled; otherwise `Err` says why nothing was written
+    /// (never a failure: PHP rebuilds the entries itself).
+    pub fn fill_config_cache(&self, entries: &[(&str, String)]) -> std::result::Result<Vec<String>, String> {
+        let env = deploy::read_env(self.root(), &self.index.vfs).map_err(|e| e.to_string())?;
+        let frontend = env
+            .get("cache")
+            .and_then(|c| c.get("frontend"))
+            .and_then(|f| f.get("default"))
+            .ok_or("no default cache frontend in env.php")?;
+        let backend = frontend.get("backend").and_then(PhpValue::scalar_string).unwrap_or_default();
+        if self.cache_backend(&backend) != CacheBackend::Redis || !self.symfony_cache() {
+            return Err(format!("the default cache ({}) is not Symfony's Redis adapter", if backend.is_empty() { "file" } else { &backend }));
+        }
+        let enabled = env
+            .get("cache_types")
+            .and_then(|t| t.get("config"))
+            .and_then(PhpValue::scalar_string)
+            .is_some_and(|v| v == "1" || v == "true");
+        if !enabled {
+            return Err("the config cache type is disabled".into());
+        }
+        if env.get("cache").and_then(|c| c.get("type")).and_then(|t| t.get("config")).is_some() {
+            return Err("the config cache type has its own frontend".into());
+        }
+        // The tag index layout this writes (RedisTagAdapter's key names).
+        let adapter = self
+            .framework_file("Magento\\Framework\\Cache\\Frontend\\Adapter\\SymfonyAdapters\\RedisTagAdapter")
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default();
+        let known = ["'cache:tags:'", "'cache:all_ids'", "'cache:id_tags:'", "ID_TAGS_TTL_BUFFER = 3600"];
+        if !known.iter().all(|k| adapter.contains(k)) {
+            return Err("this Redis tag adapter's layout is not known".into());
+        }
+        let redis = deploy::redis_config(&env);
+        let inst = redis.instances.iter().find(|i| i.purpose == "default").ok_or("no Redis settings in env.php")?;
+
+        // Frontend\Factory: `id_prefix` (or `prefix`), else from the config dir path.
+        let prefix = ["id_prefix", "prefix"]
+            .iter()
+            .find_map(|k| frontend.get(k).and_then(PhpValue::scalar_string).filter(|p| !p.is_empty()))
+            .unwrap_or_else(|| {
+                use md5::{Digest, Md5};
+                let root = std::fs::canonicalize(self.root()).unwrap_or_else(|_| self.root().to_path_buf());
+                let dir = format!("{}/app/etc/", root.display());
+                let hex: String = Md5::digest(dir.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+                format!("{}_", &hex[..3])
+            });
+        let lifetime: u64 = frontend
+            .get("lifetime")
+            .or_else(|| frontend.get("frontend_options").and_then(|o| o.get("lifetime")))
+            .and_then(PhpValue::scalar_string)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(7200);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs();
+        const TAGS: [&str; 2] = ["CONFIG", "MAGE"];
+        let mut commands: Vec<Vec<String>> = Vec::new();
+        let mut done = Vec::new();
+        for (id, data) in entries {
+            let id = id.to_ascii_uppercase();
+            let value = cache_item(data, now, lifetime, &TAGS);
+            commands.push(vec!["SET".into(), format!("{prefix}:{id}"), value, "EX".into(), lifetime.to_string()]);
+            // RedisTagAdapter::onSave.
+            commands.push(vec!["SADD".into(), "cache:all_ids".into(), id.clone()]);
+            for tag in TAGS {
+                commands.push(vec!["SADD".into(), format!("cache:tags:{prefix}{tag}"), id.clone()]);
+            }
+            let reverse = format!("cache:id_tags:{prefix}{id}");
+            commands.push(vec!["DEL".into(), reverse.clone()]);
+            let mut sadd = vec!["SADD".into(), reverse.clone()];
+            sadd.extend(TAGS.iter().map(|t| (*t).to_owned()));
+            commands.push(sadd);
+            commands.push(vec!["EXPIRE".into(), reverse, (lifetime + 3600).to_string()]);
+            done.push(format!("config cache: wrote {id} ({} KB)", data.len() / 1024));
+        }
+        crate::redis::pipeline(inst, &commands)?;
+        Ok(done)
+    }
+}
+
+/// One saved cache item: `Symfony::prepareItemWithMetadata`'s wrapper, as the
+/// marshaller PHP-serializes it.
+fn cache_item(data: &str, now: u64, lifetime: u64, tags: &[&str]) -> String {
+    let list: String = tags.iter().enumerate().map(|(i, t)| format!("i:{i};s:{}:\"{t}\";", t.len())).collect();
+    format!(
+        "a:4:{{s:4:\"data\";s:{}:\"{data}\";s:5:\"mtime\";i:{now};s:6:\"expire\";i:{};s:4:\"tags\";a:{}:{{{list}}}}}",
+        data.len(),
+        now + lifetime,
+        tags.len(),
+    )
+}
+
+/// [`Magento::cache_backend`].
+#[derive(Debug, PartialEq, Eq)]
+enum CacheBackend {
+    File,
+    Redis,
+    Other(String),
+}
+
+/// `json_encode` (PHP's default flags) of a string → bool map: the payload of
+/// the `interception` cache entry.
+pub fn php_json_bool_map<'a>(entries: impl IntoIterator<Item = (&'a str, bool)>) -> String {
+    let mut out = String::from("{");
+    for (i, (key, value)) in entries.into_iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        crate::indexerhash::json_str(key, &mut out);
+        out.push(':');
+        out.push_str(if value { "true" } else { "false" });
+    }
+    out.push('}');
+    out
 }
 
 impl Magento {
@@ -864,6 +1025,28 @@ fn collapse_ws(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod cache_fill_tests {
+    use super::*;
+
+    #[test]
+    fn item_matches_what_mage_os_4_saves() {
+        // The tail of Mage-OS 4.0.0's own `interception` item (Redis, phpredis).
+        let item = cache_item("{\"A\\\\B\":true}", 1795686969, 7200, &["CONFIG", "MAGE"]);
+        assert_eq!(
+            item,
+            "a:4:{s:4:\"data\";s:13:\"{\"A\\\\B\":true}\";s:5:\"mtime\";i:1795686969;\
+             s:6:\"expire\";i:1795694169;s:4:\"tags\";a:2:{i:0;s:6:\"CONFIG\";i:1;s:4:\"MAGE\";}}"
+        );
+    }
+
+    #[test]
+    fn bool_map_is_php_json() {
+        let json = php_json_bool_map([("Magento\\Store\\Model\\Store", true), ("a/b", false)]);
+        assert_eq!(json, r#"{"Magento\\Store\\Model\\Store":true,"a\/b":false}"#);
+    }
 }
 
 #[cfg(test)]

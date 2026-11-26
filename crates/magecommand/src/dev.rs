@@ -114,7 +114,14 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
     }
     done.extend(mage.dev_upgrade_apply(&check).map_err(|e| anyhow!(e))?);
 
-    // 6. The recurring scripts only PHP can run.
+    // 6. The recurring scripts only PHP can run. Its boot would rebuild the
+    //    caches just cleaned; write the costly ones it would compute first.
+    if !check.recurring_php.is_empty() && php.is_some() {
+        match fill_caches(&mage) {
+            Ok(lines) => done.extend(lines),
+            Err(why) => done.push(format!("config cache: left for PHP to build ({why})")),
+        }
+    }
     let report = Report { json, done: &done, skipped: &check.recurring_skipped, start };
     if !check.recurring_php.is_empty() {
         return recurring_scripts(mage.root(), php.as_deref(), &check, &report);
@@ -134,6 +141,16 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
         println!("{}", style::pass(&format!("Nothing to upgrade; done natively in {ms} ms.")));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The cache entries whose rebuild dominates a cold PHP boot, computed natively:
+/// `interception` (which types have plugins), as `Interception\Config\Config`
+/// saves it in developer mode.
+fn fill_caches(mage: &Magento) -> std::result::Result<Vec<String>, String> {
+    let defs = magecommand_engine::interception::runtime_definitions(mage, mage.root());
+    let map = magecommand_engine::interception::runtime_interception_map(mage, &defs);
+    let json = magequery_core::devupgrade::php_json_bool_map(map.iter().map(|(k, v)| (k.as_str(), *v)));
+    mage.fill_config_cache(&[("interception", json)])
 }
 
 struct Report<'a> {
