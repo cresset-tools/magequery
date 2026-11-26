@@ -51,6 +51,20 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.29.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.28.0...magequery-v0.29.0) (2026-11-26)
+
+
+### Features
+
+* **magecommand:** di compile --fail-on lost-arguments ([1ef35e0](https://github.com/cresset-tools/magequery/commit/1ef35e05b3ecbea6d57f0c9ba9d9bd3b4d7062d8))
+* **magequery:** doctor --fail-on-warnings and static verify --byte-exact-css ([17b6148](https://github.com/cresset-tools/magequery/commit/17b61486a2d5c1443d4afe5d628ffb3c6db6d0dc))
+* **magequery:** Magento::doctor_check, a doctor run that decides pass or fail ([50c824c](https://github.com/cresset-tools/magequery/commit/50c824c91de075762557636a095aa0902ec31775))
+
+
+### Bug Fixes
+
+* **magecommand:** di compile refuses the di.xml setup:di:compile refuses ([2be287b](https://github.com/cresset-tools/magequery/commit/2be287b8f710671810f35498b4d15132db3b5719))
+
 ## [0.28.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.27.6...magequery-v0.28.0) (2026-11-25)
 
 
