@@ -992,6 +992,53 @@ fn generated_rel_path(class: &str) -> String {
     class.replace(['\\', '_'], "/")
 }
 
+/// The bytes the generator writes for one emitted class, or the finding that
+/// explains why it is not modeled.
+fn render_emitted(defs: &Definitions, ext_cfg: &ExtConfig, name: &str, kind: GenKind) -> Result<String, String> {
+    Ok(match kind {
+        GenKind::Factory | GenKind::ExtensionInterfaceFactory => factory_bytes(name, kind),
+        GenKind::Extension | GenKind::ExtensionInterface => extension_bytes(name, kind, ext_cfg),
+        GenKind::SearchResults => search_results_bytes(name),
+        GenKind::Proxy => crate::proxy::proxy_bytes(defs, name.trim_end_matches("\\Proxy"))
+            .ok_or_else(|| format!("proxy source unresolved: {name}"))?,
+        GenKind::ProxyDeferred => crate::proxy::proxy_deferred_bytes(defs, name.trim_end_matches("\\ProxyDeferred"))
+            .ok_or_else(|| format!("proxyDeferred source unresolved: {name}"))?,
+        // Repository/Logger/Mapper/Persistor/Convertor/Remote: the
+        // RepositoryScanner family and the never-exercised registry
+        // entries. None occur on the oracle (archive `other` = 0); a
+        // future store that hits one gets a finding, not a silent gap.
+        other => return Err(format!("unmodeled generator {other:?}: {name}")),
+    })
+}
+
+/// What a developer-mode request's autoloader generates when it
+/// `class_exists()`es each of `names`: the generatable ones `defs` does not
+/// hold yet, with their source chains, as `generated/code` files. Unlike
+/// [`generate_code`] no scanner runs — at runtime only the names asked for
+/// materialize.
+pub fn generate_on_demand<'i>(
+    magento: &Magento,
+    defs: &Definitions,
+    root: PathBuf,
+    names: impl IntoIterator<Item = &'i str>,
+) -> GeneratedCode {
+    let mut cg = Codegen::new(magento, defs, root);
+    cg.ensure_all(names);
+    let ext_cfg = ExtConfig::build(magento);
+    let mut files = Vec::new();
+    let mut findings = Vec::new();
+    for (name, kind) in &cg.emitted {
+        if defs.classes.contains_key(name.as_str()) {
+            continue;
+        }
+        match render_emitted(defs, &ext_cfg, name, *kind) {
+            Ok(bytes) => files.push((format!("{}.php", generated_rel_path(name)), bytes)),
+            Err(finding) => findings.push(finding),
+        }
+    }
+    GeneratedCode { files, findings }
+}
+
 pub fn generate_code(
     magento: &Magento,
     defs: &Definitions,
@@ -1105,34 +1152,10 @@ fn generate(
         if only_new && defs.classes.contains_key(name.as_str()) {
             continue;
         }
-        let content = match kind {
-            GenKind::Factory | GenKind::ExtensionInterfaceFactory => factory_bytes(name, *kind),
-            GenKind::Extension | GenKind::ExtensionInterface => {
-                extension_bytes(name, *kind, &ext_cfg)
-            }
-            GenKind::SearchResults => search_results_bytes(name),
-            GenKind::Proxy => match crate::proxy::proxy_bytes(defs, name.trim_end_matches("\\Proxy")) {
-                Some(bytes) => bytes,
-                None => {
-                    findings.push(format!("proxy source unresolved: {name}"));
-                    continue;
-                }
-            },
-            GenKind::ProxyDeferred => {
-                match crate::proxy::proxy_deferred_bytes(defs, name.trim_end_matches("\\ProxyDeferred")) {
-                    Some(bytes) => bytes,
-                    None => {
-                        findings.push(format!("proxyDeferred source unresolved: {name}"));
-                        continue;
-                    }
-                }
-            }
-            // Repository/Logger/Mapper/Persistor/Convertor/Remote: the
-            // RepositoryScanner family and the never-exercised registry
-            // entries. None occur on the oracle (archive `other` = 0); a
-            // future store that hits one gets a finding, not a silent gap.
-            other => {
-                findings.push(format!("unmodeled generator {other:?}: {name}"));
+        let content = match render_emitted(defs, &ext_cfg, name, *kind) {
+            Ok(bytes) => bytes,
+            Err(finding) => {
+                findings.push(finding);
                 continue;
             }
         };

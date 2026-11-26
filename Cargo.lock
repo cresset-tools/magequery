@@ -1411,6 +1411,7 @@ dependencies = [
  "blake3",
  "magecommand-php",
  "magequery-core",
+ "mimalloc",
  "quick-xml",
  "rayon",
  "rustc-hash",
