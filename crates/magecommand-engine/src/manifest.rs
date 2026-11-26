@@ -32,7 +32,7 @@ use crate::{Error, Result};
 /// (treated as absent) so a format change can never be mis-read. v2 dropped the
 /// per-output-file hash map (the partial-reconcile idea, retired) — the manifest
 /// now carries only the input digest. v3 added [`Manifest::settings`].
-const MANIFEST_VERSION: u32 = 3;
+const MANIFEST_VERSION: u32 = 4;
 
 /// The compile tool version, baked in so a magecommand upgrade (whose generation
 /// logic may differ) invalidates a stale manifest rather than trusting it.
@@ -58,6 +58,11 @@ pub struct Manifest {
     /// The same inputs compile differently under other settings, so a change
     /// here is a change of output.
     pub settings: String,
+    /// The output's lost arguments ([`crate::build::CompileOutputs::lost_arguments`]),
+    /// so a run that finds the output current can still report them, and fail
+    /// on them, without compiling.
+    #[serde(default)]
+    pub lost_arguments: Vec<(String, String)>,
 }
 
 /// What the output depends on besides the inputs [`input_digest`] covers: the
@@ -186,7 +191,14 @@ impl Manifest {
             bp: bp.to_owned(),
             inputs_digest,
             settings,
+            lost_arguments: Vec::new(),
         }
+    }
+
+    /// The same manifest, recording the output's lost arguments.
+    pub fn with_lost_arguments(mut self, lost: Vec<(String, String)>) -> Manifest {
+        self.lost_arguments = lost;
+        self
     }
 
     /// Forget the recorded output: it no longer describes `generated/`, as when

@@ -21,6 +21,41 @@ use crate::metadata;
 use crate::phpexport;
 use crate::pluginlist;
 
+/// A compile result Magento accepts that breaks the store at runtime, which a
+/// CI gate can fail on (`di compile --fail-on`, magebuild's `fail_on`).
+/// What `setup:di:compile` itself refuses is refused always, not listed here
+/// ([`crate::rejects`]); missing classes elsewhere in di.xml are doctor's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FailOn {
+    /// A type whose di.xml arguments the compiled config leaves out
+    /// ([`CompileOutputs::lost_arguments`]).
+    LostArguments,
+}
+
+impl FailOn {
+    pub const ALL: [(FailOn, &'static str); 1] = [(FailOn::LostArguments, "lost-arguments")];
+
+    pub fn name(self) -> &'static str {
+        Self::ALL.iter().find(|(k, _)| *k == self).map(|(_, n)| *n).expect("every kind is named")
+    }
+
+    pub fn names() -> Vec<&'static str> {
+        Self::ALL.iter().map(|(_, n)| *n).collect()
+    }
+}
+
+impl std::str::FromStr for FailOn {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        Self::ALL
+            .iter()
+            .find(|(_, n)| *n == s)
+            .map(|(k, _)| *k)
+            .ok_or_else(|| format!("unknown kind {s:?}, expected one of: {}", Self::names().join(", ")))
+    }
+}
+
 /// Every file a compile emits under `generated/`, in memory, plus the diagnostics
 /// the run produced. `files` keys are relative to `generated/` (`metadata/global.php`,
 /// `code/Magento/…/Interceptor.php`), so a writer just prepends `root/generated/`.

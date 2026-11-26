@@ -519,6 +519,19 @@ enum DiCommand {
         /// any change, does a normal full compile. The fast path for a tight edit-compile loop.
         #[arg(long)]
         incremental: bool,
+        /// Fail (exit 1) on a result Magento's own compile accepts but that
+        /// breaks the store at runtime, for a CI gate. `lost-arguments`: types
+        /// whose di.xml arguments the compiled config leaves out. The tree is
+        /// still written. Comma-separated or repeated.
+        #[arg(
+            long,
+            value_name = "KIND",
+            value_delimiter = ',',
+            value_parser = clap::builder::TypedValueParser::map(clap::builder::PossibleValuesParser::new(
+                magecommand_engine::build::FailOn::names()
+            ), |s| s.parse::<magecommand_engine::build::FailOn>().expect("a listed name")),
+        )]
+        fail_on: Vec<magecommand_engine::build::FailOn>,
         #[command(flatten)]
         settings: CompileSettings,
         #[command(flatten)]
@@ -759,6 +772,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 dry_run,
                 force,
                 incremental,
+                ref fail_on,
                 ref settings,
                 ref modules,
             } => compile(
@@ -767,6 +781,7 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 dry_run,
                 force,
                 incremental,
+                fail_on,
                 settings.fused,
                 settings.target(),
                 modules,
@@ -2012,6 +2027,7 @@ fn compile(
     dry_run: bool,
     force: bool,
     incremental: bool,
+    fail_on: &[magecommand_engine::build::FailOn],
     fused: bool,
     target: magecommand_engine::lazytypes::Target,
     modules: &ModuleArgs,
@@ -2093,7 +2109,9 @@ fn compile(
                         style::dim("— no compile input or setting changed (use --force to rebuild)")
                     );
                 }
-                return Ok(ExitCode::SUCCESS);
+                // The output is the last compile's, and so are its results.
+                warn_lost_arguments(&prev.lost_arguments);
+                return Ok(gate(fail_on, &prev.lost_arguments));
             }
             input_digest = Some(current);
         }
@@ -2239,7 +2257,9 @@ fn compile(
                 magecommand_engine::manifest::FingerprintMode::Stat,
             ),
         };
-        magecommand_engine::manifest::Manifest::new(&bp, digest, settings).save(&root)?;
+        magecommand_engine::manifest::Manifest::new(&bp, digest, settings)
+            .with_lost_arguments(out.lost_arguments.clone())
+            .save(&root)?;
         lap!("write manifest + input digest");
         consume_regenerate_flag(&root)?;
         println!("{} {written} generated/ file(s)", style::pass("wrote"));
@@ -2253,8 +2273,29 @@ fn compile(
                 out.findings.first().map(String::as_str).unwrap_or("")
             );
         }
+        return Ok(gate(fail_on, &out.lost_arguments));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The exit code `--fail-on` gives a compile whose output has `lost`, saying
+/// which rule failed it; the results themselves are reported already.
+fn gate(fail_on: &[magecommand_engine::build::FailOn], lost: &[(String, String)]) -> ExitCode {
+    use magecommand_engine::build::FailOn;
+    let failed: Vec<FailOn> = fail_on
+        .iter()
+        .copied()
+        .filter(|kind| match kind {
+            FailOn::LostArguments => !lost.is_empty(),
+        })
+        .collect();
+    if failed.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    for kind in failed {
+        eprintln!("{} --fail-on {}", style::stderr::error("di compile failed:"), kind.name());
+    }
+    ExitCode::FAILURE
 }
 
 /// The di.xml `setup:di:compile` refuses, one line each, then `consequence`:

@@ -60,7 +60,7 @@ Reproduces `setup:di:compile` byte-for-byte (`generated/code` + `generated/metad
 Global flags plus:
 
 ```
-di compile [--dry-run] [--force] [--incremental] [--fused]
+di compile [--dry-run] [--force] [--incremental] [--fail-on <KIND>,…] [--fused]
            [--target-php <V>] [--target-platform <P>] [--area-config full|diff]
            [--all-modules] [--extra-app-code <DIR>]...
     Generate the DI config + generated code. --dry-run previews the work plan;
@@ -86,6 +86,11 @@ di compile [--dry-run] [--force] [--incremental] [--fused]
     type) is not a class. Nothing else is refused: a preference FOR a missing class,
     a `<type>` or virtual type of one, a preference to such a virtual type and an
     object argument of one all compile under Magento too, and fail at runtime if at all.
+    --fail-on fails (exit 1, the tree still written) on a result Magento accepts but
+    that breaks the store at runtime, for a CI gate. `lost-arguments`: types whose
+    di.xml arguments the compiled config leaves out (named on stderr either way). An
+    up-to-date --incremental run reports and fails on the last compile's results.
+    Missing classes elsewhere in di.xml are `magequery doctor`'s (E2003, E2006).
 
 di verify --archive <DIR> --output <DIR> [--fail-on-diff] [--sample <N>]
           [--no-explain] [--strict-ordering] [--show-residual <FILE>]

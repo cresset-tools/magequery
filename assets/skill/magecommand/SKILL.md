@@ -54,7 +54,9 @@ Writes `generated/code` and `generated/metadata`.
   global as its differences from global, as 4.0 does; `--area-config full`
   writes them whole instead. It refuses, writing nothing, what
   `setup:di:compile` refuses: a preference to a class that doesn't exist (or
-  isn't compiled) and a missing plugin class, each with its di.xml line. Like
+  isn't compiled) and a missing plugin class, each with its di.xml line.
+  `--fail-on lost-arguments` also fails it (exit 1, tree still written) when
+  types lose their di.xml arguments, for a CI gate. Like
   `setup:di:compile`, it removes
   `var/.regenerate` (left by `composer install`), so the next `bin/magento`
   command does not wipe `generated/`. A class whose constructor it cannot
