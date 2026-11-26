@@ -486,8 +486,8 @@ enum StaticCommand {
         fail_on_diff: bool,
         /// Require byte-exact css: count files that differ only in
         /// non-semantic formatting as `changed` rather than `equivalent`.
-        #[arg(long)]
-        strict: bool,
+        #[arg(long, alias = "strict")]
+        byte_exact_css: bool,
         /// Require FULL coverage: a package the reference has and the output
         /// does not counts as missing. Default is to verify only the packages
         /// the output actually contains, so checking a one-theme deploy
@@ -906,10 +906,10 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
                 ref reference,
                 ref output,
                 fail_on_diff,
-                strict,
+                byte_exact_css,
                 all,
                 sample,
-            } => static_verify(reference, output, fail_on_diff, strict, all, sample, cli.json),
+            } => static_verify(reference, output, fail_on_diff, byte_exact_css, all, sample, cli.json),
         },
     }
 }
@@ -923,14 +923,14 @@ fn static_verify(
     reference: &Path,
     output: &Path,
     fail_on_diff: bool,
-    strict: bool,
+    byte_exact_css: bool,
     all: bool,
     sample: usize,
     json: bool,
 ) -> anyhow::Result<ExitCode> {
     use static_deploy::verify as sv;
 
-    let report = match sv::verify(reference, output, strict, all) {
+    let report = match sv::verify(reference, output, byte_exact_css, all) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{} {e}", style::stderr::error("error:"));
@@ -961,7 +961,7 @@ fn static_verify(
         let doc = serde_json::json!({
             "reference": reference.display().to_string(),
             "output": output.display().to_string(),
-            "strict": strict,
+            "byte_exact_css": byte_exact_css,
             "full_coverage": all,
             "clean": clean,
             "not_deployed": report.not_deployed.iter().map(|b| b.label()).collect::<Vec<_>>(),
@@ -1003,11 +1003,11 @@ fn static_verify(
             show(style::changed("changed"), &r.changed);
             show(style::removed("missing (reference only)"), &r.missing);
             show(style::added("extra (ours only)"), &r.extra);
-            // Never hidden, but marked as not-a-defect outside --strict.
+            // Never hidden, but marked as not-a-defect outside --byte-exact-css.
             show(style::dim("bundle re-split (.min-sibling cache scope)"), &r.resplit);
             show(
-                if strict {
-                    style::changed("equivalent (counted: --strict)")
+                if byte_exact_css {
+                    style::changed("equivalent (counted: --byte-exact-css)")
                 } else {
                     style::dim("equivalent (formatting only)")
                 },
@@ -2188,6 +2188,7 @@ fn compile(
         // perturbing which factories/interceptors get emitted. Clearing first
         // (as `setup:di:compile` does) is what makes every path — full, forced,
         // or incremental-on-change — produce a byte-identical tree.
+        magecommand_engine::manifest::Manifest::forget(&root)?;
         magecommand_engine::metadata::clear_generated_dir(&root, "code")?;
         magecommand_engine::metadata::clear_generated_dir(&root, "metadata")?;
         lap!("clear generated dirs");
@@ -2216,6 +2217,10 @@ fn compile(
         let out =
             magecommand_engine::build::compute_outputs_with(&magento, &mut defs, &root, fused, &target);
         lap!("compute outputs (in memory)");
+        if !out.rejections.is_empty() {
+            report_rejections(&out.rejections, "nothing was written");
+            return Ok(ExitCode::FAILURE);
+        }
         // Write the whole tree (the compute cleared it first). Direct parallel
         // write, no reconcile — on APFS reusing unchanged files costs more than
         // rewriting them (see manifest.rs).
@@ -2250,6 +2255,19 @@ fn compile(
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The di.xml `setup:di:compile` refuses, one line each, then `consequence`:
+/// what the run did about it.
+pub(crate) fn report_rejections(rejections: &[magecommand_engine::rejects::Rejection], consequence: &str) {
+    for r in rejections {
+        eprintln!("{} {r}", style::stderr::error("error:"));
+    }
+    eprintln!(
+        "{} setup:di:compile refuses this configuration too, so {consequence} ({} error(s))",
+        style::stderr::error("di compile failed:"),
+        rejections.len()
+    );
 }
 
 /// Name every type the compile left to runtime reflection although di.xml

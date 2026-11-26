@@ -52,7 +52,10 @@ Writes `generated/code` and `generated/metadata`.
   with inlined plugin chains instead of stock runtime-dispatch ones
   (global-only classes for now). On Mage-OS 4.0+ it writes every area but
   global as its differences from global, as 4.0 does; `--area-config full`
-  writes them whole instead. Like `setup:di:compile`, it removes
+  writes them whole instead. It refuses, writing nothing, what
+  `setup:di:compile` refuses: a preference to a class that doesn't exist (or
+  isn't compiled) and a missing plugin class, each with its di.xml line. Like
+  `setup:di:compile`, it removes
   `var/.regenerate` (left by `composer install`), so the next `bin/magento`
   command does not wipe `generated/`. A class whose constructor it cannot
   resolve (an unreadable parent, or a default it cannot evaluate such as an

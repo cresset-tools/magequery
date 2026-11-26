@@ -215,7 +215,7 @@ RUNTIME       (env.php config & live connections)
 PROJECT       (the codebase itself)
   info      mode   maintenance   base-url [--secure]   admin-url   (single-fact views of info)
   modules [--check] [--enabled|--disabled] [--source app|vendor]
-  deps <module>   doctor [--source] [--in] [--strict] [--deny] [--explain] [--generate-baseline] [--prune-baseline]   whatis <class>   patches [--db|--pending]
+  deps <module>   doctor [--source] [--in] [--fail-on-warnings] [--deny] [--explain] [--generate-baseline] [--prune-baseline]   whatis <class>   patches [--db|--pending]
 ```
 
 **Tooling meta-commands** (`completions <shell>`, `man`, `skill`, `lsp`) sit *outside* the
@@ -1041,7 +1041,7 @@ for the preference join).
 
 ### `doctor` (cross-index lints, done)
 
-`magequery doctor [--source app|vendor] [--deny <lint>…] [--strict] [--in <scope>…] [--generate-baseline [file]] [--prune-baseline] [--baseline <file>|--no-baseline]` — everything the merged config
+`magequery doctor [--source app|vendor] [--deny <lint>…] [--fail-on-warnings] [--in <scope>…] [--generate-baseline [file]] [--prune-baseline] [--baseline <file>|--no-baseline]` — everything the merged config
 references that doesn't exist, structural breakage, and probably-forgotten wiring. Pure
 projection over the existing indexes (~90–140ms); exits 1 on **errors** only, so warnings
 can't fail CI — unless a lint is passed to `--deny` (repeatable), which upgrades its findings
@@ -1057,7 +1057,7 @@ must be added to `DoctorLint::ALL` plus `summary`/`explanation` in `model/doctor
 Text output prints `<severity>[<code>]` (rustc's `error[E0308]`); `--deny` and `FromStr`
 take the code (any case) or the kebab-case name. `doctor --explain <code>` prints the
 explanation, bare `--explain` lists all codes; it is dispatched before `Magento::open`, so it
-works anywhere. `--strict` exits
+works anywhere. `--fail-on-warnings` (formerly `--strict`, still accepted) exits
 1 on warnings too (infos never fail). `--source app|vendor` keeps the findings *declared* in
 the project's own code (any file outside `vendor/`: app/code, app/design, app/etc) or in
 packages; sourceless findings go by their subject module's source (`finding_source`). It is

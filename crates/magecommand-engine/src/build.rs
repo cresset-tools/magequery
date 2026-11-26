@@ -36,6 +36,9 @@ pub struct CompileOutputs {
     /// `AreaFile::lost_arguments`.
     /// Each entry is `(type, why its key went)`.
     pub lost_arguments: Vec<(String, String)>,
+    /// What `setup:di:compile` would refuse to compile. Non-empty means the
+    /// real compile stops, so `files` is not a tree Magento would write.
+    pub rejections: Vec<crate::rejects::Rejection>,
 }
 
 /// Run the full compute over an already-scanned `defs` and return the complete
@@ -313,7 +316,9 @@ pub fn compute_outputs_with(
         unresolved.into_iter().filter(|name| !defs.contains(name)).collect();
 
     let lost_arguments = lost_arguments.into_iter().collect();
-    CompileOutputs { files, findings, unresolved, lost_arguments }
+    let rejections = crate::rejects::check(magento, defs, root);
+    ilap!(_it, "rejections");
+    CompileOutputs { files, findings, unresolved, lost_arguments, rejections }
 }
 
 /// Free a large value without making the caller wait for it. The area files

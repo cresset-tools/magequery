@@ -79,6 +79,13 @@ di compile [--dry-run] [--force] [--incremental] [--fused]
     `--all-modules --extra-app-code dev/tests/integration/_files`. `di digest` takes
     the same two flags. Refuses when a module name is defined in two directories
     (doctor E1007), as Magento would: it doesn't boot with a module registered twice.
+    Also refuses, writing nothing and exiting 1, the di.xml `setup:di:compile`
+    refuses, in Magento's words plus the file and line at fault: a preference whose
+    type (followed through further preferences) is not a class, or is outside every
+    compiled path, and a plugin that is not disabled whose class (through a virtual
+    type) is not a class. Nothing else is refused: a preference FOR a missing class,
+    a `<type>` or virtual type of one, a preference to such a virtual type and an
+    object argument of one all compile under Magento too, and fail at runtime if at all.
 
 di verify --archive <DIR> --output <DIR> [--fail-on-diff] [--sample <N>]
           [--no-explain] [--strict-ordering] [--show-residual <FILE>]
@@ -97,6 +104,8 @@ di verify --archive <DIR> --output <DIR> [--fail-on-diff] [--sample <N>]
 di watch [--once]
     Long-running compile server: build once, keep the parsed index in memory, and
     recompile on file change writing only the delta. The fast edit loop.
+    A configuration `di compile` refuses is reported and the last tree kept until
+    an edit makes it compile.
 
 di digest [--stat] [--fused] [--target-php <V>] [--target-platform <P>] [--area-config <L>]
     Print the content-addressed digest of the compile inputs and settings — a CI cache
@@ -302,7 +311,7 @@ static cssdiff <expected.css> <actual.css> [--limit <N>]
     whitespace, hex case/shorthand, leading zeros, comments). Exit 0 when
     semantically identical — every remaining finding is a real residual.
 
-static verify --reference <DIR> --output <DIR> [--fail-on-diff] [--strict]
+static verify --reference <DIR> --output <DIR> [--fail-on-diff] [--byte-exact-css]
               [--all] [--sample <N>]
     Diff a deployed static tree against a real `setup:static-content:deploy`
     reference — what `di verify` is to the DI half, and the gate static parity is
@@ -311,7 +320,7 @@ static verify --reference <DIR> --output <DIR> [--fail-on-diff] [--strict]
     deploy's own units (the `<area>/<Vendor>/<theme>/<locale>` packages and the
     area-level artifacts), because a whole-theme divergence names its bug while a
     flat file list does not. A css file differing only in non-semantic formatting
-    is `equivalent` (clean) unless --strict; `deployed_version.txt` is skipped
+    is `equivalent` (clean) unless --byte-exact-css (formerly --strict, still accepted); `deployed_version.txt` is skipped
     (per-run timestamp). A package whose bundles hold exactly the same modules
     split across different files is `re-split` (clean): bundle boundaries depend
     on a `.min`-sibling cache Magento shares process-wide, so the same input can
