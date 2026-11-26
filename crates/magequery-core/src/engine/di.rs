@@ -568,11 +568,24 @@ pub(crate) fn build(root: &Path, modules: &[Module], vfs: &Vfs, diags: &mut Vec<
     }
 
     let global = merge_area(&parsed, Area::Global, AreaConfig::default());
+    // Each area's merge (over the global base) and overlay (its own files
+    // alone) reads only `parsed` and `global`: independent, so in parallel.
+    // Run serially they were most of the index build.
+    let merged: Vec<(Area, AreaConfig, AreaConfig)> = REAL_AREAS
+        .par_iter()
+        .map(|&area| {
+            let (full, overlay) = rayon::join(
+                || merge_area(&parsed, area, global.clone()),
+                || merge_area(&parsed, area, AreaConfig::default()),
+            );
+            (area, full, overlay)
+        })
+        .collect();
     let mut areas = HashMap::new();
     let mut overlays = HashMap::new();
-    for area in REAL_AREAS {
-        areas.insert(area, merge_area(&parsed, area, global.clone()));
-        overlays.insert(area, merge_area(&parsed, area, AreaConfig::default()));
+    for (area, full, overlay) in merged {
+        areas.insert(area, full);
+        overlays.insert(area, overlay);
     }
 
     DiIndex { global, areas, overlays, duplicate_keys }

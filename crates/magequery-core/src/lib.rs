@@ -36,6 +36,8 @@ mod schemadiff;
 pub mod devupgrade;
 #[cfg(feature = "db")]
 mod indexerhash;
+mod configdom;
+mod diconfig;
 mod schemadecl;
 mod decrypt;
 mod deploy;

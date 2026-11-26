@@ -128,19 +128,22 @@ enum ThemeCommand {
 
 #[derive(Subcommand)]
 enum DevCommand {
-    /// `bin/magento setup:upgrade` for development, without PHP when nothing needs
-    /// upgrading: writes app/etc/config.php, cleans caches and generated files, and
-    /// does the core recurring setup work natively. Runs the real command whenever
-    /// a schema change, patch, config import, unknown recurring script or anything
-    /// else needs PHP. Refuses production mode.
+    /// `bin/magento setup:upgrade` for development, natively: writes app/etc
+    /// config.php, cleans caches and generated files, and does the core
+    /// recurring setup work. PHP runs only for PHP code: the recurring scripts
+    /// it cannot do natively (third-party ones), or the whole setup:upgrade for a
+    /// schema change, patch or config import. Without PHP it reports that work
+    /// and exits 2. Refuses production mode.
     Upgrade {
         /// Leave generated/ and pub/static alone, as `setup:upgrade --keep-generated`.
         #[arg(long)]
         keep_generated: bool,
-        /// The PHP command to run bin/magento with, split on whitespace.
-        #[arg(long, default_value = "php", value_name = "CMD")]
-        php: String,
-        /// Always run the PHP command.
+        /// The command that runs PHP, split on whitespace (also
+        /// MAGECOMMAND_PHP_COMMAND). Default: `bougie run -- php` in a bougie
+        /// project, else `php` from PATH.
+        #[arg(long, value_name = "CMD")]
+        php_command: Option<String>,
+        /// Always run the whole setup:upgrade in PHP.
         #[arg(long)]
         full: bool,
     },
@@ -764,8 +767,8 @@ pub fn cli_main() -> anyhow::Result<ExitCode> {
         Command::Config { command: ConfigCommand::Status } => status::config(cli.root, cli.json),
         Command::Theme { command: ThemeCommand::Status } => status::theme(cli.root, cli.json),
         Command::Queue { command: QueueCommand::Status } => status::queue(cli.root, cli.json),
-        Command::Dev { command: DevCommand::Upgrade { keep_generated, php, full } } => {
-            dev::upgrade(cli.root, cli.json, &dev::Options { keep_generated, php, full })
+        Command::Dev { command: DevCommand::Upgrade { keep_generated, php_command, full } } => {
+            dev::upgrade(cli.root, cli.json, &dev::Options { keep_generated, php_command, full })
         }
         Command::Di { command } => match command {
             DiCommand::Compile {

@@ -29,6 +29,7 @@ pub mod manifest;
 pub mod metadata;
 pub mod proxy;
 pub mod reflect;
+pub mod runtimecache;
 pub mod rejects;
 pub mod pluginlist;
 pub mod phpexport;
