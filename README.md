@@ -66,8 +66,9 @@ one. `di digest` gives a CI cache key for `generated/`, and `di watch` keeps it 
 you edit. `magecommand db status`, `config status`, `theme status` and `queue status` tell a
 deploy whether `setup:upgrade` or `app:config:import` has work to do, with `bin/magento`'s exit
 codes (2 = work to do) and no PHP bootstrap. In development, `magecommand dev upgrade` replaces
-`bin/magento setup:upgrade`: when nothing needs upgrading it is done in a fraction of a second, and
-otherwise it runs the PHP command for you. `magecommand skill` prints its agent skill.
+`bin/magento setup:upgrade`: it does the upgrade natively, and runs PHP only for PHP code (a
+third-party recurring setup script, or the whole command for a schema change or patch). Without PHP
+it tells you what is left. `magecommand skill` prints its agent skill.
 
 In a PHP project, `composer require --dev cresset/magecommand` gives you
 `vendor/bin/magecommand` (`cresset/magequery` ships both tools).

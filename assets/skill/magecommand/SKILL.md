@@ -131,14 +131,23 @@ Read-only checks a deploy runs to decide whether the slow steps have work, with
 
 ## Development `setup:upgrade` — `magecommand dev upgrade`
 
-Use it instead of `bin/magento setup:upgrade` in development. When nothing needs
-upgrading it finishes in well under a second without PHP: it writes
+Use it instead of `bin/magento setup:upgrade` in development. It writes
 `app/etc/config.php` (new or removed modules), cleans the caches, empties
 `generated/` and `pub/static` (`--keep-generated` to skip), and does the core
-recurring setup work natively. When a schema change, patch, config import, theme,
-non-core `Setup/Recurring.php` or anything else needs PHP, it says why and runs
-`php bin/magento setup:upgrade` itself (`--php "<cmd>"` for another PHP command,
-`--full` to always run it). It refuses production mode.
+recurring setup work natively. It then writes back the generated classes the
+store was using (factories, proxies, extension classes, and creatuity-style
+interceptors on Mage-OS), byte-for-byte as PHP's generators would on demand, so
+the next PHP boot does not regenerate them. PHP runs only for PHP code:
+
+- recurring setup scripts with no native port (third-party `Setup/Recurring.php`,
+  or core work it does not do natively, such as registering a new theme): it runs
+  just those scripts;
+- a schema change, patch or config import: it runs the whole
+  `bin/magento setup:upgrade` (`--full` always does).
+
+The PHP command is `--php-command "<cmd>"` (or `MAGECOMMAND_PHP_COMMAND`), else
+`bougie run -- php` in a bougie project, else `php` from PATH. With none, it does
+the native part, lists what is left and exits 2. It refuses production mode.
 
 ## Conventions
 

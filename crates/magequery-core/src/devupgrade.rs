@@ -61,6 +61,35 @@ pub struct DevUpgradeCheck {
     pub missing_queues: Vec<String>,
     /// Recurring scripts proven to do nothing this time, or deliberately skipped.
     pub recurring_skipped: Vec<String>,
+    /// Modules whose `Setup\Recurring` / `Setup\RecurringData` PHP has to run —
+    /// third-party ones, and core ones with work not done natively — with why, in
+    /// module load order (one entry per reason). Running just these scripts is
+    /// enough; `needs_php` is what needs the whole `setup:upgrade`.
+    pub recurring_php: Vec<RecurringNeed>,
+}
+
+/// One reason a module's recurring scripts have to run in PHP.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RecurringNeed {
+    pub module: String,
+    pub reason: String,
+}
+
+impl DevUpgradeCheck {
+    fn recurring(&mut self, module: &str, reason: impl Into<String>) {
+        self.recurring_php.push(RecurringNeed { module: module.to_owned(), reason: reason.into() });
+    }
+
+    /// The modules of [`Self::recurring_php`], each once, in load order.
+    pub fn recurring_modules(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for need in &self.recurring_php {
+            if !out.contains(&need.module.as_str()) {
+                out.push(&need.module);
+            }
+        }
+        out
+    }
 }
 
 /// The core recurring scripts this module knows, by module. Any other module with
@@ -289,7 +318,6 @@ impl Magento {
             self.index.modules.iter().filter(|m| m.enabled).map(|m| (m.name.as_str(), m.path.as_path())).collect();
 
         // `Installer::getSchemaDataHandler`: `Vendor\Module\Setup\Recurring{,Data}`.
-        let mut unknown = Vec::new();
         for m in self.index.modules.iter().filter(|m| m.enabled) {
             if KNOWN_RECURRING.contains(&m.name.as_str()) {
                 continue;
@@ -298,12 +326,9 @@ impl Magento {
             for class in ["Recurring", "RecurringData"] {
                 let class = ClassName::new(format!("{ns}\\Setup\\{class}"));
                 if self.index.resolver.file_for(&class).is_some() {
-                    unknown.push(class.as_str().to_string());
+                    out.recurring(m.name.as_str(), format!("{} is not ported", class.as_str()));
                 }
             }
-        }
-        if !unknown.is_empty() {
-            out.needs_php.push(format!("recurring setup scripts outside core: {}", unknown.join(", ")));
         }
 
         let on = |m: &str| enabled.contains_key(m);
@@ -320,7 +345,7 @@ impl Magento {
                 .and_then(PhpValue::scalar_string)
                 .is_some_and(|h| !h.is_empty());
             if configured {
-                out.needs_php.push(format!("{module}: the {key} broker topology is declared by PHP"));
+                out.recurring(module, format!("the {key} broker topology is declared by PHP"));
             } else {
                 out.recurring_skipped.push(format!("{module} (no {key} connection)"));
             }
@@ -338,7 +363,7 @@ impl Magento {
             if declaring.is_empty() {
                 out.recurring_skipped.push("Magento_Integration (no integration/config.xml)".into());
             } else {
-                out.needs_php.push(format!("Magento_Integration: integrations declared by {}", declaring.join(", ")));
+                out.recurring("Magento_Integration", format!("integrations declared by {}", declaring.join(", ")));
             }
         }
 
@@ -348,8 +373,8 @@ impl Magento {
                 Ok(missing) if missing.is_empty() => {
                     out.recurring_skipped.push("Magento_Theme (all themes registered)".into())
                 }
-                Ok(missing) => out.needs_php.push(format!("themes to register: {}", missing.join(", "))),
-                Err(e) => out.needs_php.push(format!("theme registration: {e}")),
+                Ok(missing) => out.recurring("Magento_Theme", format!("themes to register: {}", missing.join(", "))),
+                Err(e) => out.recurring("Magento_Theme", format!("theme registration: {e}")),
             }
         }
 
@@ -357,7 +382,7 @@ impl Magento {
         if on("Magento_MysqlMq") {
             match self.missing_db_queues() {
                 Ok(q) => out.missing_queues = q,
-                Err(e) => out.needs_php.push(format!("Magento_MysqlMq: {e}")),
+                Err(e) => out.recurring("Magento_MysqlMq", e.to_string()),
             }
         }
 
@@ -382,6 +407,10 @@ impl Magento {
         if on("Magento_Indexer") {
             self.check_indexers(db, prefix, out);
         }
+        // Installer runs the recurring scripts in module-list order.
+        let rank: HashMap<&str, usize> =
+            self.index.modules.iter().enumerate().map(|(i, m)| (m.name.as_str(), i)).collect();
+        out.recurring_php.sort_by_key(|n| rank.get(n.module.as_str()).copied().unwrap_or(usize::MAX));
     }
 
     fn upgrade_db(&self) -> Result<Db> {
@@ -410,11 +439,11 @@ impl Magento {
             match primary {
                 Ok(Some(_)) => {}
                 Ok(None) => {
-                    missing.push(format!("{module}: {entity}.{entity_column} is not the primary key"));
+                    missing.push((module, format!("{entity}.{entity_column} is not the primary key")));
                     continue;
                 }
                 Err(e) => {
-                    missing.push(format!("{module}: {e}"));
+                    missing.push((module, e));
                     continue;
                 }
             }
@@ -426,14 +455,16 @@ impl Magento {
             );
             match fk {
                 Ok(Some(_)) => {}
-                Ok(None) => missing.push(format!("{module}: foreign key {table}.{column} → {entity}")),
-                Err(e) => missing.push(format!("{module}: {e}")),
+                Ok(None) => missing.push((module, format!("foreign key {table}.{column} → {entity}"))),
+                Err(e) => missing.push((module, e)),
             }
         }
         if missing.is_empty() {
             out.recurring_skipped.extend(checked.into_iter().map(|m| format!("{m} (foreign keys present)")));
         } else {
-            out.needs_php.extend(missing);
+            for (module, reason) in missing {
+                out.recurring(module, reason);
+            }
         }
     }
 
@@ -454,7 +485,7 @@ impl Magento {
             .map(|m| m.name.as_str())
             .collect();
         if !extended.is_empty() {
-            out.needs_php.push(format!("Magento_SalesSequence: EntityPool extended by {}", extended.join(", ")));
+            out.recurring("Magento_SalesSequence", format!("EntityPool extended by {}", extended.join(", ")));
             return;
         }
         let rows: std::result::Result<Vec<(String, u32, String)>, String> = db.query(format!(
@@ -463,7 +494,7 @@ impl Magento {
         let rows = match rows {
             Ok(r) => r,
             Err(e) => {
-                out.needs_php.push(format!("Magento_SalesSequence: {e}"));
+                out.recurring("Magento_SalesSequence", e.to_string());
                 return;
             }
         };
@@ -480,7 +511,7 @@ impl Magento {
         if missing.is_empty() {
             out.recurring_skipped.push("Magento_SalesSequence (sequences present)".into());
         } else {
-            out.needs_php.push(format!("Magento_SalesSequence: missing {}", missing.join(", ")));
+            out.recurring("Magento_SalesSequence", format!("missing {}", missing.join(", ")));
         }
     }
 
@@ -503,18 +534,18 @@ impl Magento {
                             }
                         }
                         if !stale.is_empty() {
-                            out.needs_php.push(format!("Magento_Indexer: {}", stale.join(", ")));
+                            out.recurring("Magento_Indexer", stale.join(", "));
                             return;
                         }
                     }
                     Err(e) => {
-                        out.needs_php.push(format!("Magento_Indexer: {e}"));
+                        out.recurring("Magento_Indexer", e.to_string());
                         return;
                     }
                 }
             }
             Err(e) => {
-                out.needs_php.push(format!("Magento_Indexer: {e}"));
+                out.recurring("Magento_Indexer", e.to_string());
                 return;
             }
         }
@@ -522,8 +553,8 @@ impl Magento {
             Ok(missing) if missing.is_empty() => {
                 out.recurring_skipped.push("Magento_Indexer (config hashes and triggers current)".into())
             }
-            Ok(missing) => out.needs_php.push(format!("Magento_Indexer: missing triggers {}", missing.join(", "))),
-            Err(e) => out.needs_php.push(format!("Magento_Indexer: {e}")),
+            Ok(missing) => out.recurring("Magento_Indexer", format!("missing triggers {}", missing.join(", "))),
+            Err(e) => out.recurring("Magento_Indexer", e.to_string()),
         }
     }
 
@@ -589,33 +620,316 @@ impl Magento {
         let cache = deploy::cache_config(&env);
         let redis = deploy::redis_config(&env);
         let mut done = Vec::new();
+        let mut flushed: Vec<(String, Option<u16>, Option<String>)> = Vec::new();
         for (id, dir) in [("default", "var/cache"), ("page_cache", "var/page_cache")] {
-            let fe = cache.frontends.iter().find(|f| f.id == id);
-            let backend = fe.map(|f| f.backend.trim_start_matches('\\').to_string()).unwrap_or_default();
-            match backend.as_str() {
-                "" | "Cm_Cache_Backend_File" | "Magento\\Framework\\Cache\\Backend\\File" | "file" => {
+            let backend = cache.frontends.iter().find(|f| f.id == id).map(|f| f.backend.as_str()).unwrap_or_default();
+            match self.cache_backend(backend) {
+                CacheBackend::File => {
                     let path = self.root().join(dir);
                     let n = empty_dir(&path).map_err(|e| format!("{id} cache: emptying {dir}: {e}"))?;
                     done.push(format!("{id} cache: emptied {dir} ({n} entries)"));
                 }
-                "Cm_Cache_Backend_Redis" | "Magento\\Framework\\Cache\\Backend\\Redis" | "redis" => {
+                CacheBackend::Redis => {
                     let inst = redis
                         .instances
                         .iter()
                         .find(|i| i.purpose == id)
                         .ok_or_else(|| format!("{id} cache: no Redis settings in env.php"))?;
-                    crate::redis::flushdb(inst).map_err(|e| format!("{id} cache: {e}"))?;
-                    done.push(format!(
-                        "{id} cache: flushed Redis {}{}",
+                    let target = (inst.host.clone(), inst.port, inst.database.clone());
+                    let at = format!(
+                        "Redis {}{}",
                         inst.host,
                         inst.database.as_deref().map(|d| format!(" db {d}")).unwrap_or_default()
-                    ));
+                    );
+                    if flushed.contains(&target) {
+                        done.push(format!("{id} cache: {at}, flushed already"));
+                        continue;
+                    }
+                    crate::redis::flushdb(inst).map_err(|e| format!("{id} cache: {e}"))?;
+                    flushed.push(target);
+                    done.push(format!("{id} cache: flushed {at}"));
                 }
-                other => return Err(format!("{id} cache: backend {other} is cleaned by PHP")),
+                CacheBackend::Other(other) => return Err(format!("{id} cache: backend {other} is cleaned by PHP")),
             }
         }
         Ok(done)
     }
+
+    /// Where a cache frontend with this `backend` setting really keeps its
+    /// entries. Where the framework builds caches on Symfony adapters
+    /// (`SymfonyAdapterProvider`: Mage-OS 3 and later, Magento 2.4.9) it maps
+    /// the lowercased name through a fixed table, and anything else, a backend
+    /// CLASS name included, falls back to the filesystem; before that the name is
+    /// a Zend/Cm backend class.
+    fn cache_backend(&self, backend: &str) -> CacheBackend {
+        let name = backend.trim_start_matches('\\');
+        if self.symfony_cache() {
+            return match name.to_ascii_lowercase().as_str() {
+                "redis" | "valkey" => CacheBackend::Redis,
+                "memcached" | "libmemcached" | "database" | "apc" | "apcu" | "two_levels" | "twolevel" => {
+                    CacheBackend::Other(name.to_owned())
+                }
+                _ => CacheBackend::File,
+            };
+        }
+        match name {
+            "" | "Cm_Cache_Backend_File" | "Magento\\Framework\\Cache\\Backend\\File" | "file" => CacheBackend::File,
+            "Cm_Cache_Backend_Redis" | "Magento\\Framework\\Cache\\Backend\\Redis" | "redis" => CacheBackend::Redis,
+            other => CacheBackend::Other(other.to_owned()),
+        }
+    }
+
+    fn framework_file(&self, class: &str) -> Option<PathBuf> {
+        self.index.resolver.file_for(&ClassName::new(class.to_owned()))
+    }
+
+    fn symfony_cache(&self) -> bool {
+        self.framework_file("Magento\\Framework\\Cache\\Frontend\\Adapter\\SymfonyAdapterProvider").is_some()
+    }
+
+    /// Write `config`-type cache entries (id, payload) the way PHP's cache would
+    /// save them, so the next PHP boot reads them instead of rebuilding. Only for
+    /// the layouts this is known for — the default frontend on Mage-OS's Symfony
+    /// Redis or filesystem adapter, with its tag index — and only while the
+    /// `config` cache type is enabled; otherwise `Err` says why nothing was
+    /// written (never a failure: PHP rebuilds the entries itself).
+    pub fn fill_config_cache(&self, entries: &[(&str, String)]) -> std::result::Result<Vec<String>, String> {
+        let env = deploy::read_env(self.root(), &self.index.vfs).map_err(|e| e.to_string())?;
+        if !self.symfony_cache() {
+            return Err("the framework's cache is not built on Symfony adapters".into());
+        }
+        let enabled = env
+            .get("cache_types")
+            .and_then(|t| t.get("config"))
+            .and_then(PhpValue::scalar_string)
+            .is_some_and(|v| v == "1" || v == "true");
+        if !enabled {
+            return Err("the config cache type is disabled".into());
+        }
+        if env.get("cache").and_then(|c| c.get("type")).and_then(|t| t.get("config")).is_some() {
+            return Err("the config cache type has its own frontend".into());
+        }
+        let empty = PhpValue::Array(Vec::new());
+        let frontend = env
+            .get("cache")
+            .and_then(|c| c.get("frontend"))
+            .and_then(|f| f.get("default"))
+            .unwrap_or(&empty);
+        let backend = frontend.get("backend").and_then(PhpValue::scalar_string).unwrap_or_default();
+
+        // Frontend\Factory: `id_prefix` (or `prefix`), else from the config dir path.
+        let prefix = ["id_prefix", "prefix"]
+            .iter()
+            .find_map(|k| frontend.get(k).and_then(PhpValue::scalar_string).filter(|p| !p.is_empty()))
+            .unwrap_or_else(|| {
+                use md5::{Digest, Md5};
+                let dir = format!("{}/app/etc/", self.real_root().display());
+                let hex: String = Md5::digest(dir.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+                format!("{}_", &hex[..3])
+            });
+        let lifetime: u64 = frontend
+            .get("lifetime")
+            .or_else(|| frontend.get("frontend_options").and_then(|o| o.get("lifetime")))
+            .and_then(PhpValue::scalar_string)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(7200);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_secs();
+        let items: Vec<(String, String)> = entries
+            .iter()
+            .map(|(id, data)| (id.to_ascii_uppercase(), cache_item(data, now, lifetime, &CONFIG_TAGS)))
+            .collect();
+
+        match self.cache_backend(&backend) {
+            CacheBackend::Redis => self.fill_redis(&env, &prefix, lifetime, &items)?,
+            CacheBackend::File => {
+                if frontend.get("backend_options").and_then(|o| o.get("cache_dir")).is_some() {
+                    return Err("the file cache has its own cache_dir".into());
+                }
+                self.fill_files(&backend, &prefix, now + lifetime, &items)?
+            }
+            CacheBackend::Other(other) => return Err(format!("the default cache backend is {other}")),
+        }
+        Ok(entries
+            .iter()
+            .map(|(id, data)| format!("config cache: wrote {} ({} KB)", id.to_ascii_uppercase(), data.len() / 1024))
+            .collect())
+    }
+
+    /// `RedisAdapter` items plus `RedisTagAdapter::onSave`'s index.
+    fn fill_redis(
+        &self,
+        env: &PhpValue,
+        prefix: &str,
+        lifetime: u64,
+        items: &[(String, String)],
+    ) -> std::result::Result<(), String> {
+        let adapter = self
+            .framework_source("Magento\\Framework\\Cache\\Frontend\\Adapter\\SymfonyAdapters\\RedisTagAdapter");
+        let known = ["'cache:tags:'", "'cache:all_ids'", "'cache:id_tags:'", "ID_TAGS_TTL_BUFFER = 3600"];
+        if !known.iter().all(|k| adapter.contains(k)) {
+            return Err("this Redis tag adapter's layout is not known".into());
+        }
+        let redis = deploy::redis_config(env);
+        let inst = redis.instances.iter().find(|i| i.purpose == "default").ok_or("no Redis settings in env.php")?;
+        let mut commands: Vec<Vec<String>> = Vec::new();
+        for (id, value) in items {
+            commands.push(vec!["SET".into(), format!("{prefix}:{id}"), value.clone(), "EX".into(), lifetime.to_string()]);
+            commands.push(vec!["SADD".into(), "cache:all_ids".into(), id.clone()]);
+            for tag in CONFIG_TAGS {
+                commands.push(vec!["SADD".into(), format!("cache:tags:{prefix}{tag}"), id.clone()]);
+            }
+            let reverse = format!("cache:id_tags:{prefix}{id}");
+            commands.push(vec!["DEL".into(), reverse.clone()]);
+            let mut sadd = vec!["SADD".into(), reverse.clone()];
+            sadd.extend(CONFIG_TAGS.iter().map(|t| (*t).to_owned()));
+            commands.push(sadd);
+            commands.push(vec!["EXPIRE".into(), reverse, (lifetime + 3600).to_string()]);
+        }
+        crate::redis::pipeline(inst, &commands)
+    }
+
+    /// `FilesystemAdapter` files (`FilesystemTrait::doSave`) under
+    /// `var/cache/<prefix>/`, plus `FilesystemTagAdapter::onSave`'s
+    /// `var/cache/symfony/tags/<TAG>` id lists.
+    fn fill_files(
+        &self,
+        backend: &str,
+        prefix: &str,
+        expires_at: u64,
+        items: &[(String, String)],
+    ) -> std::result::Result<(), String> {
+        let save = self.framework_source("Symfony\\Component\\Cache\\Traits\\FilesystemTrait");
+        let common = self.framework_source("Symfony\\Component\\Cache\\Traits\\FilesystemCommonTrait");
+        let tags = self
+            .framework_source("Magento\\Framework\\Cache\\Frontend\\Adapter\\SymfonyAdapters\\FilesystemTagAdapter");
+        let known = save.contains("$expiresAt.\"\\n\".rawurlencode($id).\"\\n\".$value")
+            && common.contains("hash('xxh128', static::class.$id, true)")
+            && common.contains("substr($hash, 2, 20)")
+            && tags.contains("'/tags/'")
+            && tags.contains("implode(\"\\n\", $ids) . \"\\n\"");
+        if !known {
+            return Err("this file cache layout is not known".into());
+        }
+        let cache = self.real_root().join("var/cache");
+        let dir = cache.join(prefix);
+        for (id, value) in items {
+            let file = symfony_cache_file(&dir, id);
+            let parent = file.parent().ok_or("cache file without a directory")?;
+            std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
+            // FilesystemCommonTrait::write: a temporary file, its mtime set to
+            // the expiry, renamed into place.
+            let tmp = dir.join(format!(".magecommand-{}", std::process::id()));
+            let contents = format!("{expires_at}\n{}\n{value}", raw_url_encode(id));
+            std::fs::write(&tmp, contents).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+            let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(expires_at);
+            std::fs::File::options()
+                .write(true)
+                .open(&tmp)
+                .and_then(|f| f.set_modified(mtime))
+                .map_err(|e| format!("touching {}: {e}", tmp.display()))?;
+            std::fs::rename(&tmp, &file).map_err(|e| format!("renaming to {}: {e}", file.display()))?;
+        }
+        // The tag adapter's directory is the backend options' `cache_dir`, which
+        // Frontend\\Factory::_getBackendOptions sets (to var/cache) only when it
+        // falls back to its default backend: no backend, `file`, or anything
+        // that is not a loadable class. A backend CLASS (the Zend Redis one)
+        // gets none, and the adapter uses var/cache/symfony.
+        let name = backend.trim_start_matches('\\');
+        let is_class = !name.is_empty() && name != "Cm_Cache_Backend_File" && self.framework_file(name).is_some();
+        let tag_dir = if is_class { cache.join("symfony/tags") } else { cache.join("tags") };
+        std::fs::create_dir_all(&tag_dir).map_err(|e| format!("creating {}: {e}", tag_dir.display()))?;
+        for tag in CONFIG_TAGS {
+            let path = tag_dir.join(tag);
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            // FilesystemTagAdapter::getTagIds: up to the last newline, trimmed.
+            let body = content.rfind('\n').map_or(content.as_str(), |i| &content[..i]).trim();
+            let mut ids: Vec<&str> = if body.is_empty() { Vec::new() } else { body.split('\n').collect() };
+            let before = ids.len();
+            for (id, _) in items {
+                if !ids.contains(&id.as_str()) {
+                    ids.push(id);
+                }
+            }
+            if ids.len() != before {
+                let out = format!("{}\n", ids.join("\n"));
+                std::fs::write(&path, out).map_err(|e| format!("writing {}: {e}", path.display()))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn framework_source(&self, class: &str) -> String {
+        self.framework_file(class).and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default()
+    }
+
+    /// The store root as PHP sees it (`BP` is a resolved `__DIR__`).
+    fn real_root(&self) -> PathBuf {
+        std::fs::canonicalize(self.root()).unwrap_or_else(|_| self.root().to_path_buf())
+    }
+}
+
+/// The tags the `config` cache type saves with (`Type\\Config` + the global one).
+const CONFIG_TAGS: [&str; 2] = ["CONFIG", "MAGE"];
+
+/// `FilesystemCommonTrait::getFile` for a `FilesystemAdapter` rooted at `dir`.
+fn symfony_cache_file(dir: &Path, id: &str) -> PathBuf {
+    use base64::Engine;
+    let digest = xxhash_rust::xxh3::xxh3_128(format!("Symfony\\Component\\Cache\\Adapter\\FilesystemAdapter{id}").as_bytes());
+    // PHP's raw xxh128 is the canonical (big-endian) form.
+    let hash = base64::engine::general_purpose::STANDARD.encode(digest.to_be_bytes()).replace('/', "-");
+    dir.join(hash[..1].to_ascii_uppercase()).join(hash[1..2].to_ascii_uppercase()).join(&hash[2..22])
+}
+
+/// PHP's `rawurlencode`.
+fn raw_url_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// One saved cache item: `Symfony::prepareItemWithMetadata`'s wrapper, as the
+/// marshaller PHP-serializes it.
+fn cache_item(data: &str, now: u64, lifetime: u64, tags: &[&str]) -> String {
+    let list: String = tags.iter().enumerate().map(|(i, t)| format!("i:{i};s:{}:\"{t}\";", t.len())).collect();
+    format!(
+        "a:4:{{s:4:\"data\";s:{}:\"{data}\";s:5:\"mtime\";i:{now};s:6:\"expire\";i:{};s:4:\"tags\";a:{}:{{{list}}}}}",
+        data.len(),
+        now + lifetime,
+        tags.len(),
+    )
+}
+
+/// [`Magento::cache_backend`].
+#[derive(Debug, PartialEq, Eq)]
+enum CacheBackend {
+    File,
+    Redis,
+    Other(String),
+}
+
+/// `json_encode` (PHP's default flags) of a string → bool map: the payload of
+/// the `interception` cache entry.
+pub fn php_json_bool_map<'a>(entries: impl IntoIterator<Item = (&'a str, bool)>) -> String {
+    let mut out = String::from("{");
+    for (i, (key, value)) in entries.into_iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        crate::indexerhash::json_str(key, &mut out);
+        out.push(':');
+        out.push_str(if value { "true" } else { "false" });
+    }
+    out.push('}');
+    out
 }
 
 impl Magento {
@@ -664,9 +978,9 @@ fn check_customer_grid(db: &mut Db, prefix: &str, out: &mut DevUpgradeCheck) {
         (Ok(Some(_)), Ok(Some(s))) if s != "invalid" => {
             out.recurring_skipped.push("Magento_Customer (customer grid valid)".into())
         }
-        (Ok(None), _) => out.needs_php.push("Magento_Customer: customer_grid_flat is missing".into()),
-        (Err(e), _) | (_, Err(e)) => out.needs_php.push(format!("Magento_Customer: {e}")),
-        _ => out.needs_php.push("Magento_Customer: the customer grid needs a reindex".into()),
+        (Ok(None), _) => out.recurring("Magento_Customer", "customer_grid_flat is missing"),
+        (Err(e), _) | (_, Err(e)) => out.recurring("Magento_Customer", e.to_string()),
+        _ => out.recurring("Magento_Customer", "the customer grid needs a reindex"),
     }
 }
 
@@ -833,6 +1147,40 @@ fn collapse_ws(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod cache_fill_tests {
+    use super::*;
+
+    #[test]
+    fn item_matches_what_mage_os_4_saves() {
+        // The tail of Mage-OS 4.0.0's own `interception` item (Redis, phpredis).
+        let item = cache_item("{\"A\\\\B\":true}", 1795686969, 7200, &["CONFIG", "MAGE"]);
+        assert_eq!(
+            item,
+            "a:4:{s:4:\"data\";s:13:\"{\"A\\\\B\":true}\";s:5:\"mtime\";i:1795686969;\
+             s:6:\"expire\";i:1795694169;s:4:\"tags\";a:2:{i:0;s:6:\"CONFIG\";i:1;s:4:\"MAGE\";}}"
+        );
+    }
+
+    #[test]
+    fn file_names_match_symfony_filesystem_adapter() {
+        // Files Mage-OS 4.0.0 wrote under var/cache/bgc_/.
+        for (id, rel) in [
+            ("INTERCEPTION", "P/O/rbt8zBz3xd8JO6vOpu3w"),
+            ("GLOBAL__DICONFIG", "F/4/vBQImTBH4yWB1ooPtK1w"),
+            ("SYSTEM", "U/M/BxQoUkY7CRvTH6C9zcgw"),
+        ] {
+            assert_eq!(symfony_cache_file(Path::new("/c"), id), Path::new("/c").join(rel), "{id}");
+        }
+    }
+
+    #[test]
+    fn bool_map_is_php_json() {
+        let json = php_json_bool_map([("Magento\\Store\\Model\\Store", true), ("a/b", false)]);
+        assert_eq!(json, r#"{"Magento\\Store\\Model\\Store":true,"a\/b":false}"#);
+    }
 }
 
 #[cfg(test)]

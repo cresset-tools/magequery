@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<!-- Fixture for tests/devupgrade.rs: the first module's etc/di.xml. -->
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
+    <preference for="Fixture\Api\FooInterface" type="Fixture\Model\Foo"/>
+    <type name="Fixture\Model\Foo" shared="false">
+        <arguments>
+            <argument name="str" xsi:type="string">  padded &amp; escaped  </argument>
+            <argument name="empty" xsi:type="string"/>
+            <argument name="num" xsi:type="number">42</argument>
+            <argument name="flag" xsi:type="boolean">true</argument>
+            <argument name="off" xsi:type="boolean">0</argument>
+            <argument name="nothing" xsi:type="null"/>
+            <argument name="obj" xsi:type="object" shared="false">Fixture\Model\Bar</argument>
+            <argument name="c" xsi:type="const">Fixture\C::A</argument>
+            <argument name="init" xsi:type="init_parameter">Fixture\C::N</argument>
+            <argument name="list" xsi:type="array">
+                <item name="b" xsi:type="string" sortOrder="20">b</item>
+                <item name="a" xsi:type="string" sortOrder="10">a</item>
+                <item name="0" xsi:type="number">0</item>
+                <item name="nested" xsi:type="array">
+                    <item name="x" xsi:type="object" sortOrder="2">Fixture\X</item>
+                    <item name="y" xsi:type="object" sortOrder="1">Fixture\Y</item>
+                </item>
+            </argument>
+            <argument name="changes" xsi:type="string">was a string</argument>
+        </arguments>
+        <plugin name="p1" type="Fixture\Plugin\One" sortOrder="10"/>
+        <plugin name="p2" type="Fixture\Plugin\Two" disabled="true"/>
+    </type>
+    <virtualType name="Fixture\Virtual" type="Fixture\Model\Foo">
+        <arguments>
+            <argument name="cdata" xsi:type="string"><![CDATA[<b>x</b>]]></argument>
+            <argument name="multi
+line" xsi:type="string">attribute values are normalized</argument>
+        </arguments>
+    </virtualType>
+    <type name="Fixture\Groups">
+        <arguments>
+            <argument name="groups" xsi:type="array">
+                <item name="g1" xsi:type="array">
+                    <item name="one" xsi:type="string" sortOrder="30">1</item>
+                    <item name="two" xsi:type="string" sortOrder="5">2</item>
+                </item>
+                <item name="g2" xsi:type="array">
+                    <item name="three" xsi:type="string">3</item>
+                </item>
+            </argument>
+        </arguments>
+    </type>
+</config>

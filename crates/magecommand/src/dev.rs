@@ -1,35 +1,42 @@
-//! `dev upgrade`: a development `bin/magento setup:upgrade` that skips PHP when
-//! there is nothing to upgrade. The decisions live in magequery-core's
-//! `devupgrade`; this runs them in `setup:upgrade`'s order and falls back to the
-//! real command, with the terminal attached, whenever one of them says PHP is
-//! needed.
+//! `dev upgrade`: a development `bin/magento setup:upgrade` done natively. The
+//! decisions live in magequery-core's `devupgrade`; this runs them in
+//! `setup:upgrade`'s order. PHP runs only for what is PHP code: the recurring
+//! scripts with no native port (piped to PHP, see `dev_recurring.php`), or the
+//! whole `setup:upgrade` for a schema change, patch or config import. With no PHP
+//! to run, it says what is left and exits 2.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use magequery_core::Magento;
-use magequery_core::devupgrade::{ConfigPhpUpdate, DevUpgradeCheck, EnvPhpUpdate, empty_dir};
+use magequery_core::devupgrade::{ConfigPhpUpdate, DevUpgradeCheck, EnvPhpUpdate, RecurringNeed, empty_dir};
 
 use crate::style;
 
 /// What `Installer::cleanupGeneratedFiles` empties, unless `--keep-generated`.
 const GENERATED: &[&str] = &["generated/code", "generated/metadata", "pub/static", "var/view_preprocessed"];
 
+/// Runs the given modules' recurring scripts the way the Installer does.
+const RECURRING_RUNNER: &str = include_str!("dev_recurring.php");
+
 pub struct Options {
     pub keep_generated: bool,
-    pub php: String,
+    pub php_command: Option<String>,
     pub full: bool,
 }
 
 pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<ExitCode> {
     let start = Instant::now();
+    limit_threads();
     let root = root.unwrap_or_else(|| PathBuf::from("."));
     let mut mage = Magento::open(&root).map_err(|e| anyhow!(e))?;
     if mage.info().mode.as_deref() == Some("production") {
         bail!("MAGE_MODE is production: `magecommand dev upgrade` is for development; run bin/magento setup:upgrade");
     }
+    let php = php_command(mage.root(), opts.php_command.as_deref())?;
 
     let mut needs_php: Vec<String> = Vec::new();
     let mut done: Vec<String> = Vec::new();
@@ -83,7 +90,8 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
     };
     needs_php.extend(check.needs_php.iter().cloned());
 
-    // 4. The fast path: caches, generated files, the recurring writes.
+    // 4. Caches; then the whole setup:upgrade when anything outside the
+    //    recurring scripts needs PHP.
     if needs_php.is_empty() {
         match mage.clean_caches() {
             Ok(lines) => done.extend(lines),
@@ -91,9 +99,17 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
         }
     }
     if !needs_php.is_empty() {
-        return fall_back(mage.root(), json, opts, &needs_php, &done, start);
+        needs_php.extend(check.recurring_php.iter().map(|n| format!("{}: {}", n.module, n.reason)));
+        let report = Report { json, done: &done, skipped: &check.recurring_skipped, start };
+        return whole_upgrade(mage.root(), php.as_deref(), opts, &needs_php, &report);
     }
+
+    // 5. The native steps: generated files, the core recurring writes. What
+    //    generated/code held is remembered first: those are the classes the
+    //    store's requests ask for, which step 6 writes back fresh.
+    let mut previous = Vec::new();
     if !opts.keep_generated {
+        previous = generated_class_names(&mage.root().join("generated/code"));
         let mut n = 0;
         for dir in GENERATED {
             let path = mage.root().join(dir);
@@ -103,72 +119,310 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
     }
     done.extend(mage.dev_upgrade_apply(&check).map_err(|e| anyhow!(e))?);
 
+    // 6. The recurring scripts only PHP can run. Its boot would regenerate the
+    //    code and rebuild the caches just emptied, slowly; write what it would
+    //    write first. Without PHP to run, the store's next request benefits.
+    let php_boots = !check.recurring_php.is_empty() && php.is_some();
+    if php_boots || !opts.keep_generated {
+        match prepare_runtime(&mage, previous, php_boots) {
+            Ok(lines) => done.extend(lines),
+            Err(why) => done.push(format!("generated code and config cache: left for PHP to build ({why})")),
+        }
+    }
+    let report = Report { json, done: &done, skipped: &check.recurring_skipped, start };
+    if !check.recurring_php.is_empty() {
+        return recurring_scripts(mage.root(), php.as_deref(), &check, &report);
+    }
     let ms = start.elapsed().as_millis();
     if json {
         let out = serde_json::json!({
             "php": false,
+            "php_work": "none",
             "done": done,
             "recurring_skipped": check.recurring_skipped,
             "elapsed_ms": ms,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
-        for d in &done {
-            println!("{d}");
-        }
-        println!(
-            "{}",
-            style::dim(&format!(
-                "recurring scripts with nothing to do: {}",
-                check.recurring_skipped.join(", ")
-            ))
-        );
+        report.print_done();
         println!("{}", style::pass(&format!("Nothing to upgrade; done natively in {ms} ms.")));
     }
     Ok(ExitCode::SUCCESS)
 }
 
-/// Run the real `setup:upgrade`, terminal attached, after saying why.
-fn fall_back(
-    root: &Path,
-    json: bool,
-    opts: &Options,
-    needs_php: &[String],
-    done: &[String],
-    start: Instant,
-) -> Result<ExitCode> {
-    let mut words = opts.php.split_whitespace();
-    let program = words.next().context("--php is empty")?;
-    let mut cmd = Command::new(program);
-    cmd.args(words).arg("bin/magento").arg("setup:upgrade").current_dir(root);
-    if opts.keep_generated {
-        cmd.arg("--keep-generated");
+/// The cache entries whose rebuild dominates a cold PHP boot, computed natively:
+/// `interception` (which types have plugins), as `Interception\Config\Config`
+/// saves it in developer mode, and `global::DiConfig` (the merged global
+/// di.xml), as `ObjectManager\ConfigLoader` does. An entry that cannot be
+/// reproduced exactly is left for PHP to build.
+///
+/// Before that, the generated classes: those the config names and `previous`
+/// (what `generated/code` held), as the autoloader would generate them. Only
+/// kinds rendered byte-identical to PHP's generators are written; PHP
+/// generates the rest when first asked, as it would have anyway.
+fn prepare_runtime(mage: &Magento, previous: Vec<String>, caches: bool) -> std::result::Result<Vec<String>, String> {
+    let (defs, scopes, files) =
+        magecommand_engine::interception::runtime_definitions_generating(mage, mage.root(), previous)?;
+    let mut lines = Vec::new();
+    if !files.is_empty() {
+        let base = mage.root().join("generated/code");
+        write_generated(&base, &files).map_err(|e| format!("writing {}: {e}", base.display()))?;
+        lines.push(format!("generated files: wrote {} natively", files.len()));
     }
-    // Keep stdout for the JSON report; PHP's output goes to stderr then.
-    if json {
-        cmd.stdout(std::io::stderr());
-    } else {
-        for d in done {
+    if !caches {
+        return Ok(lines);
+    }
+    let map = magecommand_engine::interception::runtime_interception_map(&defs, &scopes);
+    let mut entries = vec![(
+        "interception",
+        magequery_core::devupgrade::php_json_bool_map(map.iter().map(|(k, v)| (k.as_str(), *v))),
+    )];
+    let mut notes = Vec::new();
+    match magecommand_engine::runtimecache::global_di_config(mage, defs) {
+        Ok(serialized) => entries.push(("GLOBAL__DICONFIG", serialized)),
+        Err(why) => notes.push(format!("config cache: GLOBAL__DICONFIG left for PHP to build ({why})")),
+    }
+    lines.extend(mage.fill_config_cache(&entries)?);
+    lines.extend(notes);
+    Ok(lines)
+}
+
+/// The classes `generated/code` holds, named by each file's own declaration
+/// (a path cannot be read back: `Io` turns `_` into a directory as well as `\`),
+/// oldest first: the order PHP generated them in.
+fn generated_class_names(dir: &Path) -> Vec<String> {
+    use rayon::prelude::*;
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => walk(&path, out),
+                Ok(_) if path.extension().is_some_and(|x| x == "php") => out.push(path),
+                _ => {}
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(dir, &mut files);
+    let mut named: Vec<(std::time::SystemTime, String)> = files
+        .par_iter()
+        .filter_map(|f| {
+            let modified = std::fs::metadata(f).and_then(|m| m.modified()).ok()?;
+            Some((modified, declared_class(&std::fs::read_to_string(f).ok()?)?))
+        })
+        .collect();
+    named.sort();
+    named.into_iter().map(|(_, name)| name).collect()
+}
+
+/// `Ns\Name` from a generated file's `namespace Ns;` and `class Name …` lines.
+fn declared_class(src: &str) -> Option<String> {
+    let mut namespace = None;
+    for line in src.lines() {
+        if let Some(ns) = line.strip_prefix("namespace ") {
+            namespace = Some(ns.trim_end_matches(';').trim());
+            continue;
+        }
+        let decl = line.trim_start_matches("abstract ").trim_start_matches("final ");
+        if let Some(rest) = decl.strip_prefix("class ").or_else(|| decl.strip_prefix("interface ")) {
+            let name = rest.split_whitespace().next()?;
+            return Some(match namespace {
+                Some(ns) => format!("{ns}\\{name}"),
+                None => name.to_owned(),
+            });
+        }
+    }
+    None
+}
+
+/// Write each `(path under generated/code, bytes)` the way `Code\Generator\Io`
+/// does: a temporary file renamed into place, so a concurrent request never
+/// includes half a class.
+fn write_generated(base: &Path, files: &[(String, String)]) -> std::io::Result<()> {
+    use rayon::prelude::*;
+    files.par_iter().try_for_each(|(rel, bytes)| {
+        let path = base.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension(format!("php.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, &path)
+    })
+}
+
+/// At most 8 worker threads, unless `RAYON_NUM_THREADS` says otherwise. The
+/// work here is short and allocation-bound: on a 32-core host the extra threads
+/// cost more in start-up and contention for fresh memory than they add (the
+/// whole command 266 ms → 185 ms measured, filling the caches).
+fn limit_threads() {
+    if std::env::var_os("RAYON_NUM_THREADS").is_some() {
+        return;
+    }
+    let n = std::thread::available_parallelism().map_or(8, |n| n.get().min(8));
+    // Fails only when the pool already exists; then it keeps its size.
+    let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
+}
+
+struct Report<'a> {
+    json: bool,
+    done: &'a [String],
+    skipped: &'a [String],
+    start: Instant,
+}
+
+impl Report<'_> {
+    fn print_done(&self) {
+        for d in self.done {
             println!("{d}");
         }
-        eprintln!("{}", style::warn("setup:upgrade needs PHP:"));
-        for r in needs_php {
-            eprintln!("  {r}");
+        if !self.skipped.is_empty() {
+            println!("{}", style::dim(&format!("recurring scripts with nothing to do: {}", self.skipped.join(", "))));
         }
     }
-    let status = cmd.status().with_context(|| format!("running {} bin/magento setup:upgrade", opts.php))?;
-    let ms = start.elapsed().as_millis();
-    if json {
+}
+
+/// How to run PHP, when something has to: `--php-command`, else
+/// `MAGECOMMAND_PHP_COMMAND`, else `bougie run -- php` in a bougie project,
+/// else `php` from PATH. `None` when there is none.
+fn php_command(root: &Path, explicit: Option<&str>) -> Result<Option<Vec<String>>> {
+    let explicit = explicit
+        .map(str::to_owned)
+        .or_else(|| std::env::var("MAGECOMMAND_PHP_COMMAND").ok().filter(|v| !v.trim().is_empty()));
+    if let Some(cmd) = explicit {
+        let words: Vec<String> = cmd.split_whitespace().map(str::to_owned).collect();
+        if words.is_empty() {
+            bail!("--php-command is empty");
+        }
+        return Ok(Some(words));
+    }
+    if root.join("bougie.toml").is_file() && on_path("bougie") {
+        return Ok(Some(["bougie", "run", "--", "php"].map(str::to_owned).to_vec()));
+    }
+    Ok(on_path("php").then(|| vec!["php".to_owned()]))
+}
+
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
+}
+
+/// Without PHP: say what is left, exit 2 (work to do).
+fn no_php(report: &Report, work: &str, reasons: &[String], recurring: &[RecurringNeed]) -> Result<ExitCode> {
+    let ms = report.start.elapsed().as_millis();
+    if report.json {
         let out = serde_json::json!({
-            "php": true,
-            "needs_php": needs_php,
-            "done": done,
-            "php_exit_code": status.code(),
+            "php": false,
+            "php_work": work,
+            "php_missing": true,
+            "needs_php": reasons,
+            "recurring_php": recurring,
+            "done": report.done,
+            "recurring_skipped": report.skipped,
             "elapsed_ms": ms,
         });
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
-        eprintln!("{}", style::dim(&format!("bin/magento setup:upgrade took {ms} ms")));
+        report.print_done();
+        eprintln!("{}", style::warn(&format!("PHP is needed for {work}, and none was found:")));
+        for r in reasons {
+            eprintln!("  {r}");
+        }
+        eprintln!(
+            "{}",
+            style::dim(
+                "Pass --php-command (or MAGECOMMAND_PHP_COMMAND), work in a bougie project, or put php on PATH; \
+                 or run bin/magento setup:upgrade yourself."
+            )
+        );
+    }
+    Ok(ExitCode::from(2))
+}
+
+/// Run the given modules' recurring scripts in PHP (the rest is done).
+fn recurring_scripts(root: &Path, php: Option<&[String]>, check: &DevUpgradeCheck, report: &Report) -> Result<ExitCode> {
+    let reasons: Vec<String> = check.recurring_php.iter().map(|n| format!("{}: {}", n.module, n.reason)).collect();
+    let Some(php) = php else {
+        return no_php(report, "recurring setup scripts", &reasons, &check.recurring_php);
+    };
+    if !report.json {
+        report.print_done();
+        eprintln!("{}", style::warn("recurring setup scripts need PHP:"));
+        for r in &reasons {
+            eprintln!("  {r}");
+        }
+    }
+    let modules = serde_json::to_string(&check.recurring_modules())?;
+    let mut cmd = Command::new(&php[0]);
+    cmd.args(&php[1..]).arg("--").arg(&modules).current_dir(root).stdin(Stdio::piped());
+    // Keep stdout for the JSON report; PHP's output goes to stderr then.
+    if report.json {
+        cmd.stdout(std::io::stderr());
+    }
+    let mut child = cmd.spawn().with_context(|| format!("running {}", php.join(" ")))?;
+    child
+        .stdin
+        .take()
+        .context("PHP's stdin")?
+        .write_all(RECURRING_RUNNER.as_bytes())
+        .context("piping the recurring runner to PHP")?;
+    let status = child.wait()?;
+    finish(report, "recurring setup scripts", &reasons, Some(&check.recurring_php), status)
+}
+
+/// The whole `setup:upgrade`, terminal attached, after saying why.
+fn whole_upgrade(
+    root: &Path,
+    php: Option<&[String]>,
+    opts: &Options,
+    reasons: &[String],
+    report: &Report,
+) -> Result<ExitCode> {
+    let Some(php) = php else {
+        return no_php(report, "setup:upgrade", reasons, &[]);
+    };
+    let mut cmd = Command::new(&php[0]);
+    cmd.args(&php[1..]).arg("bin/magento").arg("setup:upgrade").current_dir(root);
+    if opts.keep_generated {
+        cmd.arg("--keep-generated");
+    }
+    if report.json {
+        cmd.stdout(std::io::stderr());
+    } else {
+        report.print_done();
+        eprintln!("{}", style::warn("setup:upgrade needs PHP:"));
+        for r in reasons {
+            eprintln!("  {r}");
+        }
+    }
+    let status = cmd.status().with_context(|| format!("running {} bin/magento setup:upgrade", php.join(" ")))?;
+    finish(report, "setup:upgrade", reasons, None, status)
+}
+
+fn finish(
+    report: &Report,
+    work: &str,
+    reasons: &[String],
+    recurring: Option<&[RecurringNeed]>,
+    status: std::process::ExitStatus,
+) -> Result<ExitCode> {
+    let ms = report.start.elapsed().as_millis();
+    if report.json {
+        let out = serde_json::json!({
+            "php": true,
+            "php_work": work,
+            "needs_php": reasons,
+            "recurring_php": recurring.unwrap_or_default(),
+            "done": report.done,
+            "recurring_skipped": report.skipped,
+            "php_exit_code": status.code(),
+            "elapsed_ms": ms,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else if status.success() {
+        eprintln!("{}", style::pass(&format!("Done in {ms} ms ({work} in PHP).")));
+    } else {
+        eprintln!("{}", style::warn(&format!("{work} failed in PHP after {ms} ms")));
     }
     Ok(match status.code() {
         Some(0) => ExitCode::SUCCESS,

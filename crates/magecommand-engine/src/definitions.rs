@@ -239,6 +239,24 @@ fn canonical_map(classes: &HashMap<String, ClassRecord>) -> HashMap<String, Stri
     map
 }
 
+/// Composer's dumped classmap: the autoloader's last resort for packages
+/// with no PSR prefix.
+fn read_classmap(root: &Path) -> HashMap<String, PathBuf> {
+    let text = fs::read_to_string(root.join("vendor/composer/autoload_classmap.php")).unwrap_or_default();
+    let vendor = root.join("vendor");
+    text.lines()
+        .filter_map(|line| {
+            let (name, rest) = line.trim().strip_prefix('\'')?.split_once("' => ")?;
+            let (dir, rel) = if let Some(r) = rest.strip_prefix("$vendorDir . '") {
+                (vendor.as_path(), r)
+            } else {
+                (root, rest.strip_prefix("$baseDir . '")?)
+            };
+            Some((name.replace("\\\\", "\\"), dir.join(rel.strip_suffix("',")?.trim_start_matches('/'))))
+        })
+        .collect()
+}
+
 impl Definitions {
     /// Test-only: build a `Definitions` from `(fqcn, record)` pairs, populating
     /// the case-insensitive `canonical` map. The other index sets stay empty.
@@ -586,6 +604,142 @@ impl Definitions {
     /// a reproduction/warm run whose scan already read an archived
     /// `generated/code` is a no-op here (that path stays byte-identical, no
     /// second area build). Returns the number of declarations added.
+    /// No classes at all; fill with [`Definitions::load_closure`].
+    pub fn empty() -> Definitions {
+        Definitions {
+            classes: HashMap::new(),
+            scanned: HashSet::new(),
+            setup_classes: HashSet::new(),
+            from_scan: HashSet::new(),
+            generated_classes: HashSet::new(),
+            canonical: HashMap::new(),
+            relations: NameCache::default(),
+            public_methods: NameCache::default(),
+        }
+    }
+
+    /// Load `names` and their ancestor closure (parents, interfaces, traits)
+    /// the way PHP's autoloader finds them, instead of scanning every compile
+    /// path: composer PSR-4/PSR-0 through the index's resolver, then
+    /// `generated/code`, then composer's classmap. The ancestors of records
+    /// already held are loaded too, so calling it again after
+    /// [`Definitions::add_generated_code`] closes over the generated classes.
+    /// Names nothing resolves (internal PHP classes, missing code) are skipped.
+    /// Returns how many declarations were added.
+    pub fn load_closure(
+        &mut self,
+        magento: &Magento,
+        root: &Path,
+        names: impl IntoIterator<Item = String>,
+    ) -> usize {
+        self.load_names(magento, root, names, true)
+    }
+
+    /// [`Definitions::load_closure`] for `names` alone: the ancestors of what
+    /// it adds are loaded, those of records already held are not looked at.
+    pub fn load_classes(&mut self, magento: &Magento, root: &Path, names: impl IntoIterator<Item = String>) -> usize {
+        self.load_names(magento, root, names, false)
+    }
+
+    /// Load the classes that parameter defaults and constant values of the
+    /// records held refer to (`$mode = CacheConstants::CLEANING_MODE_ALL`),
+    /// and theirs in turn. The generators render a default as its VALUE —
+    /// `EntityAbstract` reads `getDefaultValue()` — so the defining class
+    /// must be known; a scan holds every class, an autoloader-driven load
+    /// only what it was asked for. Returns how many declarations were added.
+    pub fn load_constant_classes(&mut self, magento: &Magento, root: &Path) -> usize {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut added = 0;
+        loop {
+            let mut wanted: Vec<String> = Vec::new();
+            for (fqcn, record) in &self.classes {
+                if !seen.insert(fqcn.clone()) {
+                    continue;
+                }
+                let m = &record.meta;
+                let ns = fqcn.rsplit_once('\\').map(|(n, _)| n).unwrap_or("");
+                let exprs = m
+                    .methods
+                    .iter()
+                    .flat_map(|method| method.params.iter().filter_map(|p| p.default.as_deref()))
+                    .chain(m.constants.iter().map(|c| c.value.as_str()));
+                for expr in exprs {
+                    if !expr.contains("::") {
+                        continue;
+                    }
+                    let parsed = magecommand_php::constexpr::parse_const_expr(expr, ns, &m.uses);
+                    wanted.extend(parsed.classes.into_iter().filter(|c| self.get(c).is_none()));
+                }
+            }
+            if wanted.is_empty() {
+                return added;
+            }
+            wanted.sort_unstable();
+            wanted.dedup();
+            let n = self.load_classes(magento, root, wanted);
+            if n == 0 {
+                return added;
+            }
+            added += n;
+        }
+    }
+
+    fn load_names(
+        &mut self,
+        magento: &Magento,
+        root: &Path,
+        names: impl IntoIterator<Item = String>,
+        sweep_held: bool,
+    ) -> usize {
+        self.relations.clear();
+        self.public_methods.clear();
+        let generated = root.join("generated/code");
+        let classmap: std::sync::OnceLock<HashMap<String, PathBuf>> = std::sync::OnceLock::new();
+        let mut tried: HashSet<String> = HashSet::new();
+        let mut frontier: Vec<String> = names.into_iter().collect();
+        if sweep_held {
+            for record in self.classes.values() {
+                let m = &record.meta;
+                frontier.extend(m.extends.iter().chain(&m.implements).chain(&m.traits).cloned());
+            }
+        }
+        let mut added = 0;
+        while !frontier.is_empty() {
+            let wanted: Vec<String> = frontier
+                .drain(..)
+                .map(|n| n.trim_start_matches('\\').to_owned())
+                .filter(|n| !n.is_empty() && self.get(n).is_none() && tried.insert(n.to_ascii_lowercase()))
+                .collect();
+            let parsed: Vec<(PathBuf, Vec<ClassMeta>)> = wanted
+                .par_iter()
+                .filter(|n| !is_internal_class(n))
+                .filter_map(|n| {
+                    let file = magento
+                        .class_file(&magequery_core::ClassName::new(n.clone()))
+                        .or_else(|| {
+                            let p = generated.join(format!("{}.php", n.replace(['\\', '_'], "/")));
+                            p.is_file().then_some(p)
+                        })
+                        .or_else(|| classmap.get_or_init(|| read_classmap(root)).get(n).cloned())?;
+                    let src = fs::read(&file).ok()?;
+                    Some((file, magecommand_php::parse_file(&src).declarations))
+                })
+                .collect();
+            for (file, declarations) in parsed {
+                for decl in declarations {
+                    if self.classes.contains_key(&decl.fqcn) {
+                        continue;
+                    }
+                    frontier.extend(decl.extends.iter().chain(&decl.implements).chain(&decl.traits).cloned());
+                    self.canonical.insert(decl.fqcn.to_ascii_lowercase(), decl.fqcn.clone());
+                    self.classes.insert(decl.fqcn.clone(), ClassRecord { meta: decl, file: file.clone() });
+                    added += 1;
+                }
+            }
+        }
+        added
+    }
+
     pub fn add_generated_code(&mut self, files: &[(String, String)], root: &Path) -> usize {
         self.relations.clear();
         self.public_methods.clear();

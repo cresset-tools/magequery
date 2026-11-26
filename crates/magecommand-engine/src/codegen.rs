@@ -992,6 +992,89 @@ fn generated_rel_path(class: &str) -> String {
     class.replace(['\\', '_'], "/")
 }
 
+/// The bytes the generator writes for one emitted class, or the finding that
+/// explains why it is not modeled.
+fn render_emitted(defs: &Definitions, ext_cfg: &ExtConfig, name: &str, kind: GenKind) -> Result<String, String> {
+    Ok(match kind {
+        GenKind::Factory | GenKind::ExtensionInterfaceFactory => factory_bytes(name, kind),
+        GenKind::Extension | GenKind::ExtensionInterface => extension_bytes(name, kind, ext_cfg),
+        GenKind::SearchResults => search_results_bytes(name),
+        GenKind::Proxy => crate::proxy::proxy_bytes(defs, name.trim_end_matches("\\Proxy"))
+            .ok_or_else(|| format!("proxy source unresolved: {name}"))?,
+        GenKind::ProxyDeferred => crate::proxy::proxy_deferred_bytes(defs, name.trim_end_matches("\\ProxyDeferred"))
+            .ok_or_else(|| format!("proxyDeferred source unresolved: {name}"))?,
+        // Repository/Logger/Mapper/Persistor/Convertor/Remote: the
+        // RepositoryScanner family and the never-exercised registry
+        // entries. None occur on the oracle (archive `other` = 0); a
+        // future store that hits one gets a finding, not a silent gap.
+        other => return Err(format!("unmodeled generator {other:?}: {name}")),
+    })
+}
+
+/// What a developer-mode request's autoloader generates when it
+/// `class_exists()`es each of `names`: the generatable ones `defs` does not
+/// hold yet, with their source chains, as `generated/code` files. Unlike
+/// [`generate_code`] no scanner runs — at runtime only the names asked for
+/// materialize.
+pub fn generate_on_demand<'i>(
+    magento: &Magento,
+    defs: &Definitions,
+    root: PathBuf,
+    global_vtypes: HashSet<String>,
+    names: impl IntoIterator<Item = &'i str>,
+) -> GeneratedCode {
+    let mut cg = Codegen {
+        magento,
+        defs,
+        root,
+        global_vtypes,
+        emitted: BTreeMap::new(),
+        emitted_ci: std::collections::HashMap::new(),
+        failed: HashSet::new(),
+    };
+    cg.ensure_all(names);
+    let ext_cfg = ExtConfig::build(magento);
+    let mut files = Vec::new();
+    let mut findings = Vec::new();
+    for (name, kind) in &cg.emitted {
+        if defs.classes.contains_key(name.as_str()) {
+            continue;
+        }
+        match render_emitted(defs, &ext_cfg, name, *kind) {
+            Ok(bytes) => files.push((format!("{}.php", generated_rel_path(name)), bytes)),
+            Err(finding) => findings.push(finding),
+        }
+    }
+    GeneratedCode { files, findings }
+}
+
+/// [`generate_on_demand`] to a fixpoint, folding each round's files into
+/// `defs`: a generated class whose source is itself generated (`FooFactory\Proxy`)
+/// can only be rendered once its source is held, which is the order PHP's
+/// autoloader produces them in. Returns every file written across the rounds.
+pub fn generate_on_demand_closed<'i>(
+    magento: &Magento,
+    defs: &mut Definitions,
+    root: &std::path::Path,
+    global_vtypes: &HashSet<String>,
+    names: impl IntoIterator<Item = &'i str>,
+) -> GeneratedCode {
+    let names: Vec<&str> = names.into_iter().collect();
+    let mut files: Vec<(String, String)> = Vec::new();
+    let mut findings;
+    loop {
+        let round = generate_on_demand(magento, defs, root.to_path_buf(), global_vtypes.clone(), names.iter().copied());
+        findings = round.findings;
+        if round.files.is_empty() || defs.add_generated_code(&round.files, root) == 0 {
+            break;
+        }
+        defs.load_closure(magento, root, std::iter::empty());
+        defs.load_constant_classes(magento, root);
+        files.extend(round.files);
+    }
+    GeneratedCode { files, findings }
+}
+
 pub fn generate_code(
     magento: &Magento,
     defs: &Definitions,
@@ -1105,34 +1188,10 @@ fn generate(
         if only_new && defs.classes.contains_key(name.as_str()) {
             continue;
         }
-        let content = match kind {
-            GenKind::Factory | GenKind::ExtensionInterfaceFactory => factory_bytes(name, *kind),
-            GenKind::Extension | GenKind::ExtensionInterface => {
-                extension_bytes(name, *kind, &ext_cfg)
-            }
-            GenKind::SearchResults => search_results_bytes(name),
-            GenKind::Proxy => match crate::proxy::proxy_bytes(defs, name.trim_end_matches("\\Proxy")) {
-                Some(bytes) => bytes,
-                None => {
-                    findings.push(format!("proxy source unresolved: {name}"));
-                    continue;
-                }
-            },
-            GenKind::ProxyDeferred => {
-                match crate::proxy::proxy_deferred_bytes(defs, name.trim_end_matches("\\ProxyDeferred")) {
-                    Some(bytes) => bytes,
-                    None => {
-                        findings.push(format!("proxyDeferred source unresolved: {name}"));
-                        continue;
-                    }
-                }
-            }
-            // Repository/Logger/Mapper/Persistor/Convertor/Remote: the
-            // RepositoryScanner family and the never-exercised registry
-            // entries. None occur on the oracle (archive `other` = 0); a
-            // future store that hits one gets a finding, not a silent gap.
-            other => {
-                findings.push(format!("unmodeled generator {other:?}: {name}"));
+        let content = match render_emitted(defs, &ext_cfg, name, *kind) {
+            Ok(bytes) => bytes,
+            Err(finding) => {
+                findings.push(finding);
                 continue;
             }
         };

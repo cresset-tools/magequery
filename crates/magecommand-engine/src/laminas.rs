@@ -521,17 +521,32 @@ impl Class {
     /// The full generated file, `<?php` header included and `_fixCodeStyle`
     /// applied — byte-identical to a Magento code-generator's output.
     pub fn render(&self) -> String {
+        self.render_with_uses(&[])
+    }
+
+    /// [`Class::render`] with `addUse` imports (FQCNs, no leading backslash):
+    /// `use X;` lines after the namespace, and an imported class renders by
+    /// its short name.
+    pub fn render_with_uses(&self, uses: &[String]) -> String {
         let mut out = String::from("<?php\n");
-        out.push_str(&self.render_body());
+        out.push_str(&self.render_body(uses));
         fix_code_style(&out)
     }
 
-    fn render_body(&self) -> String {
+    fn render_body(&self, uses: &[String]) -> String {
         let mut out = String::new();
         if let Some(ns) = &self.namespace {
             out.push_str("namespace ");
             out.push_str(ns);
             out.push_str(";\n\n");
+        }
+        if !uses.is_empty() {
+            for u in uses {
+                out.push_str("use ");
+                out.push_str(u);
+                out.push_str(";\n");
+            }
+            out.push('\n');
         }
         if !self.doc.is_empty() {
             out.push_str(&self.doc.render(""));
@@ -540,13 +555,13 @@ impl Class {
         out.push_str(&self.name);
         if let Some(extends) = &self.extends {
             out.push_str(" extends ");
-            out.push_str(&self.short_or_complete(extends));
+            out.push_str(&self.short_or_complete(extends, uses));
         }
         if !self.implements.is_empty() {
             let kw = if self.is_interface { " extends " } else { " implements " };
             out.push_str(kw);
             let rendered: Vec<String> =
-                self.implements.iter().map(|i| self.short_or_complete(i)).collect();
+                self.implements.iter().map(|i| self.short_or_complete(i, uses)).collect();
             out.push_str(&rendered.join(", "));
         }
         out.push_str("\n{\n");
@@ -556,7 +571,7 @@ impl Class {
             sections.push(
                 self.traits
                     .iter()
-                    .map(|t| format!("{INDENT}use {};", self.short_or_complete(t)))
+                    .map(|t| format!("{INDENT}use {};", self.short_or_complete(t, uses)))
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
@@ -588,14 +603,14 @@ impl Class {
 
     /// `ClassGenerator::generateShortOrCompleteClassname` with no use imports:
     /// a class in the current namespace renders short, else `\`-prefixed FQCN.
-    fn short_or_complete(&self, fqcn: &str) -> String {
+    fn short_or_complete(&self, fqcn: &str, uses: &[String]) -> String {
         let trimmed = fqcn.trim_start_matches('\\');
         let (ns, short) = match trimmed.rfind('\\') {
             Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
             None => ("", trimmed),
         };
         let current = self.namespace.as_deref().unwrap_or("");
-        if ns == current {
+        if ns == current || uses.iter().any(|u| u == trimmed) {
             short.to_owned()
         } else {
             format!("\\{trimmed}")
