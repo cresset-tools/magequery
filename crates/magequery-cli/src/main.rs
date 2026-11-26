@@ -482,8 +482,43 @@ struct DoctorArgs {
     /// its `count` keeps a count of what it matches. New findings are not added.
     #[arg(long, conflicts_with_all = ["generate_baseline", "no_baseline"])]
     prune_baseline: bool,
-    #[arg(long)]
+    /// Print the findings as JSON (= `--format json`).
+    #[arg(long, conflicts_with = "format")]
     json: bool,
+    /// How to print the findings: `text`, `json`, `github` (Actions workflow
+    /// commands, which annotate the pull request lines), `gitlab` (a Code Quality
+    /// report, for `artifacts:reports:codequality`) or `sarif` (SARIF 2.1.0, for
+    /// code scanning). The default, `auto`, is `github` under GitHub Actions and
+    /// `text` everywhere else; GitLab reads its report from a file, so redirect
+    /// `--format gitlab` to one. The CI formats give paths relative to the working
+    /// directory, so run them from the repository root.
+    #[arg(long, value_enum, default_value_t = DoctorFormat::Auto)]
+    format: DoctorFormat,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum DoctorFormat {
+    Auto,
+    Text,
+    Json,
+    Github,
+    Gitlab,
+    Sarif,
+}
+
+impl DoctorFormat {
+    /// `auto` made concrete: annotations where GitHub Actions reads them from
+    /// the log. GitLab has no such channel (its report is an uploaded file), so
+    /// its log stays readable text.
+    fn resolve(self) -> Self {
+        match self {
+            DoctorFormat::Auto if std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true") => {
+                DoctorFormat::Github
+            }
+            DoctorFormat::Auto => DoctorFormat::Text,
+            other => other,
+        }
+    }
 }
 
 #[derive(clap::Args)]
@@ -9322,6 +9357,28 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
     };
     let check = mage.doctor_check(&policy).map_err(|e| anyhow!(e))?;
     let failed = check.failed();
+    let format = if args.json { DoctorFormat::Json } else { args.format.resolve() };
+    if !args.prune_baseline && matches!(format, DoctorFormat::Github | DoctorFormat::Gitlab | DoctorFormat::Sarif) {
+        let cwd = std::env::current_dir().context("reading the working directory")?;
+        match format {
+            DoctorFormat::Github => print!("{}", check.github_annotations(&cwd)),
+            DoctorFormat::Gitlab => println!("{}", serde_json::to_string_pretty(&check.gitlab_code_quality(&cwd))?),
+            _ => println!("{}", serde_json::to_string_pretty(&check.sarif(&cwd))?),
+        }
+        // The log still says what was found; stdout is the format's alone.
+        eprintln!(
+            "magequery doctor: {} error(s), {} warning(s), {} info",
+            check.errors(),
+            check.report.warnings(),
+            check.report.infos()
+        );
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        if failed {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let stale = check.stale().to_vec();
     let stale = &stale[..];
     let (baseline, baseline_file) = match check.baseline {
@@ -9350,7 +9407,7 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    if args.json {
+    if format == DoctorFormat::Json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else if report.findings.is_empty() && stale.is_empty() {
         println!("{}", style::ok("OK, nothing to report"));
@@ -9395,7 +9452,7 @@ fn doctor(mage: &Magento, args: &DoctorArgs, root: &Path) -> Result<()> {
             report.infos(),
         );
     }
-    if let (false, Some(outcome)) = (args.json, &report.baseline) {
+    if let (DoctorFormat::Text, Some(outcome)) = (format, &report.baseline) {
         if outcome.suppressed > 0 {
             eprintln!("{}", style::dim(&format!("{} finding(s) accepted by the baseline", outcome.suppressed)));
         }

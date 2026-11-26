@@ -34,9 +34,11 @@ use crate::definitions::Definitions;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rejection {
     pub kind: RejectionKind,
-    /// The di.xml file and line of the declaration at fault, relative to the
-    /// store root where it lies inside it.
-    pub location: String,
+    /// The di.xml file of the declaration at fault, relative to the store root
+    /// (`/`-separated) where it lies inside it.
+    pub file: String,
+    /// Its 1-based line; 0 when unknown.
+    pub line: u32,
     /// The areas whose configuration has it; empty when every area does.
     pub areas: Vec<String>,
 }
@@ -54,11 +56,46 @@ pub enum RejectionKind {
     PluginClassMissing { class: String, plugin: String, target: String, via: Option<String> },
 }
 
+impl Rejection {
+    /// `file:line`, or the file alone when the line is unknown.
+    pub fn location(&self) -> String {
+        match self.line {
+            0 => self.file.clone(),
+            line => format!("{}:{line}", self.file),
+        }
+    }
+
+    /// Magento's message, without the location or areas the full form adds.
+    pub fn message(&self) -> String {
+        self.kind.to_string()
+    }
+}
+
+impl RejectionKind {
+    /// A stable kebab-case name for the kind, for machine-readable output.
+    pub fn name(&self) -> &'static str {
+        match self {
+            RejectionKind::PreferenceMissing { .. } => "preference-missing",
+            RejectionKind::PreferenceNotCompiled { .. } => "preference-not-compiled",
+            RejectionKind::PluginClassMissing { .. } => "plugin-class-missing",
+        }
+    }
+}
+
 impl fmt::Display for Rejection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: ", self.location)?;
+        write!(f, "{}: {}", self.location(), self.kind)?;
+        if !self.areas.is_empty() {
+            write!(f, " [{}]", self.areas.join(", "))?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for RejectionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Magento's own wording first, so a search for the message finds both.
-        match &self.kind {
+        match self {
             RejectionKind::PreferenceMissing { for_type, preference, not_a_class } => {
                 write!(
                     f,
@@ -80,9 +117,6 @@ impl fmt::Display for Rejection {
                 }
                 write!(f, ")")?;
             }
-        }
-        if !self.areas.is_empty() {
-            write!(f, " [{}]", self.areas.join(", "))?;
         }
         Ok(())
     }
@@ -160,10 +194,10 @@ pub fn check(magento: &Magento, defs: &Definitions, root: &Path) -> Vec<Rejectio
     let lookup = Lookup { magento, defs, classmap: crate::definitions::composer_classmap(root) };
     let scanned: HashSet<String> = defs.scanned.iter().map(|n| n.to_ascii_lowercase()).collect();
 
-    // (kind, location) -> areas it was found in.
-    let mut found: Vec<((RejectionKind, String), BTreeSet<String>)> = Vec::new();
+    // (kind, file, line) -> areas it was found in.
+    let mut found: Vec<((RejectionKind, String, u32), BTreeSet<String>)> = Vec::new();
     let mut record = |kind: RejectionKind, source: &Source, area: &str| {
-        let key = (kind, location(source, root));
+        let key = (kind, relative(&source.file, root), source.line);
         match found.iter_mut().find(|(k, _)| *k == key) {
             Some((_, areas)) => {
                 areas.insert(area.to_owned());
@@ -256,19 +290,47 @@ pub fn check(magento: &Magento, defs: &Definitions, root: &Path) -> Vec<Rejectio
     let every_area = areas.len();
     found
         .into_iter()
-        .map(|((kind, location), in_areas)| Rejection {
+        .map(|((kind, file, line), in_areas)| Rejection {
             kind,
-            location,
+            file,
+            line,
             areas: if in_areas.len() == every_area { Vec::new() } else { in_areas.into_iter().collect() },
         })
         .collect()
 }
 
-fn location(source: &Source, root: &Path) -> String {
-    let file = source.file.strip_prefix(root).unwrap_or(&source.file);
-    if source.line == 0 {
-        file.display().to_string()
-    } else {
-        format!("{}:{}", file.display(), source.line)
+fn relative(file: &Path, root: &Path) -> String {
+    file.strip_prefix(root).unwrap_or(file).to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rejection(line: u32, areas: &[&str]) -> Rejection {
+        Rejection {
+            kind: RejectionKind::PluginClassMissing {
+                class: "Acme\\Gone".into(),
+                plugin: "p".into(),
+                target: "Acme\\Real".into(),
+                via: None,
+            },
+            file: "app/code/Acme/Probe/etc/di.xml".into(),
+            line,
+            areas: areas.iter().map(|a| (*a).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_message_is_magentos_without_where() {
+        let r = rejection(3, &["frontend"]);
+        assert_eq!(r.message(), "Plugin class Acme\\Gone doesn't exist (plugin \"p\" on Acme\\Real)");
+        assert_eq!(r.kind.name(), "plugin-class-missing");
+        assert_eq!(r.to_string(), format!("app/code/Acme/Probe/etc/di.xml:3: {} [frontend]", r.message()));
+    }
+
+    #[test]
+    fn an_unknown_line_is_left_out() {
+        assert_eq!(rejection(0, &[]).location(), "app/code/Acme/Probe/etc/di.xml");
     }
 }
