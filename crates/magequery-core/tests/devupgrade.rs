@@ -162,3 +162,47 @@ fn global_di_config_matches_magento() {
     // A constant that cannot be evaluated leaves the entry to PHP.
     assert!(mage.global_di_config(&|_| None).is_err());
 }
+
+/// Loki's `Setup\Recurring` (Loki_Components, LokiCheckout_Core: the fixtures are
+/// their source verbatim) only enables missing `<sequence>` modules, so it is done
+/// natively when there are none, and left to PHP when there are, or when the
+/// script is anything else.
+#[test]
+fn loki_dependency_recurring_is_native_when_nothing_is_missing() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/loki-recurring");
+    let read = |f: &str| std::fs::read_to_string(fixtures.join(f)).expect("fixture");
+    let tree = |checkout_recurring: &str, dep_enabled: u8| {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        module(root, "Acme_Dep", &[]);
+        module(root, "Loki_Components", &["Acme_Dep"]);
+        module(root, "LokiCheckout_Core", &["Loki_Components"]);
+        put(root, "app/code/Loki/Components/Setup/ModuleDependencies.php", &read("ModuleDependencies.php"));
+        put(root, "app/code/Loki/Components/Setup/Recurring.php", &read("Recurring.php"));
+        put(root, "app/code/LokiCheckout/Core/Setup/Recurring.php", checkout_recurring);
+        put(root, "app/etc/env.php", "<?php\nreturn [\n    'MAGE_MODE' => 'developer'\n];\n");
+        put(
+            root,
+            "app/etc/config.php",
+            &config_php(&[("Acme_Dep", dep_enabled), ("Loki_Components", 1), ("LokiCheckout_Core", 1)]),
+        );
+        let check = Magento::open(root).expect("open").dev_upgrade_check().expect("check");
+        let php: Vec<String> = check.recurring_php.iter().map(|n| format!("{}: {}", n.module, n.reason)).collect();
+        (check.recurring_skipped, php)
+    };
+
+    let (skipped, php) = tree(&read("CheckoutRecurring.php"), 1);
+    assert!(skipped.contains(&"Loki_Components (sequence modules enabled)".to_owned()), "{skipped:?}");
+    assert!(skipped.contains(&"LokiCheckout_Core (sequence modules enabled)".to_owned()), "{skipped:?}");
+    assert!(php.is_empty(), "{php:?}");
+
+    // A sequence module that is off: Loki enables it, in PHP.
+    let (_, php) = tree(&read("CheckoutRecurring.php"), 0);
+    assert_eq!(php, ["Loki_Components: Loki enables Loki_Components's sequence modules Acme_Dep"]);
+
+    // A recurring script that does anything more is not recognised.
+    let more = read("CheckoutRecurring.php")
+        .replace("enableMissingDependencies('LokiCheckout_Core');", "enableMissingDependencies('LokiCheckout_Core');\n        $setup->startSetup();");
+    let (_, php) = tree(&more, 1);
+    assert_eq!(php, ["LokiCheckout_Core: LokiCheckout\\Core\\Setup\\Recurring is not ported"]);
+}

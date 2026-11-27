@@ -325,8 +325,10 @@ impl Magento {
             let ns = m.name.as_str().replace('_', "\\");
             for class in ["Recurring", "RecurringData"] {
                 let class = ClassName::new(format!("{ns}\\Setup\\{class}"));
-                if self.index.resolver.file_for(&class).is_some() {
-                    out.recurring(m.name.as_str(), format!("{} is not ported", class.as_str()));
+                let Some(file) = self.index.resolver.file_for(&class) else { continue };
+                match self.loki_dependency_recurring(&file) {
+                    Some(target) => self.check_loki_dependencies(m.name.as_str(), &target, &enabled, out),
+                    None => out.recurring(m.name.as_str(), format!("{} is not ported", class.as_str())),
                 }
             }
         }
@@ -411,6 +413,61 @@ impl Magento {
         let rank: HashMap<&str, usize> =
             self.index.modules.iter().enumerate().map(|(i, m)| (m.name.as_str(), i)).collect();
         out.recurring_php.sort_by_key(|n| rank.get(n.module.as_str()).copied().unwrap_or(usize::MAX));
+    }
+
+    /// The module a Loki `Setup\Recurring` checks, when that script is exactly
+    /// `Loki\Components\Setup\ModuleDependencies::enableMissingDependencies('<Module>')`
+    /// (Loki_Components, LokiCheckout_Core and others like them), and that class is
+    /// the known one: enable every `<sequence>` module of `<Module>` that is not
+    /// enabled. Anything else is `None`, and runs in PHP.
+    fn loki_dependency_recurring(&self, file: &Path) -> Option<String> {
+        let src = strip_ws(&std::fs::read_to_string(file).ok()?);
+        let same_ns = src.contains("namespaceLoki\\Components\\Setup;");
+        let imported = src.contains("useLoki\\Components\\Setup\\ModuleDependencies;");
+        let ctor = src.contains("publicfunction__construct(privateModuleDependencies$moduleDependencies){}")
+            || src.contains("publicfunction__construct(privateModuleDependencies$moduleDependencies,){}");
+        if !(same_ns || imported)
+            || !ctor
+            || !src.contains("classRecurringimplementsInstallSchemaInterface{")
+            || src.matches("function").count() != 2
+        {
+            return None;
+        }
+        let call = "publicfunctioninstall(SchemaSetupInterface$setup,ModuleContextInterface$context){$this->moduleDependencies->enableMissingDependencies('";
+        let rest = &src[src.find(call)? + call.len()..];
+        let (target, tail) = rest.split_once('\'')?;
+        if !tail.starts_with(");}}") || target.is_empty() || !target.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return None;
+        }
+
+        let deps = self.index.resolver.file_for(&ClassName::new("Loki\\Components\\Setup\\ModuleDependencies".to_owned()))?;
+        let deps = strip_ws(&std::fs::read_to_string(deps).ok()?);
+        let known = [
+            "$moduleXmlPath=$modulePath.'/etc/module.xml';",
+            "foreach($rootNode->module->sequence->moduleas$sequenceModule){$moduleSequence[]=(string)$sequenceModule['name'];}",
+            "foreach($moduleSequenceas$requiredModule){if(!$this->moduleManager->isEnabled($requiredModule)){$missingModules[]=$requiredModule;}}",
+            "publicfunctionenableMissingDependencies(string$moduleName):void{$missingDependencies=$this->getMissingDependencies($moduleName);",
+            "$this->moduleStatus->setIsEnabled(true,$missingDependencies);}",
+        ];
+        known.iter().all(|k| deps.contains(k)).then(|| target.to_owned())
+    }
+
+    /// Loki's `enableMissingDependencies(target)` natively: nothing to do when
+    /// every `<sequence>` module of `target` is enabled. (It would still rewrite
+    /// config.php, with the content this run already wrote.) A module to enable
+    /// is left to PHP.
+    fn check_loki_dependencies(&self, module: &str, target: &str, enabled: &HashMap<&str, &Path>, out: &mut DevUpgradeCheck) {
+        let Some(t) = self.index.modules.iter().find(|m| m.name.as_str() == target) else {
+            out.recurring(module, format!("Loki module dependencies of {target}: module not found"));
+            return;
+        };
+        let missing: Vec<&str> =
+            t.sequence.iter().map(|s| s.as_str()).filter(|s| !enabled.contains_key(s)).collect();
+        if missing.is_empty() {
+            out.recurring_skipped.push(format!("{module} (sequence modules enabled)"));
+        } else {
+            out.recurring(module, format!("Loki enables {target}'s sequence modules {}", missing.join(", ")));
+        }
     }
 
     fn upgrade_db(&self) -> Result<Db> {
@@ -687,27 +744,46 @@ impl Magento {
         self.framework_file("Magento\\Framework\\Cache\\Frontend\\Adapter\\SymfonyAdapterProvider").is_some()
     }
 
-    /// Write `config`-type cache entries (id, payload) the way PHP's cache would
+    /// Write cache entries (id, cache type, payload) the way PHP's cache would
     /// save them, so the next PHP boot reads them instead of rebuilding. Only for
     /// the layouts this is known for — the default frontend on Mage-OS's Symfony
-    /// Redis or filesystem adapter, with its tag index — and only while the
-    /// `config` cache type is enabled; otherwise `Err` says why nothing was
+    /// Redis or filesystem adapter, with its tag index — and only for a cache
+    /// type that is enabled and has no frontend of its own: an entry of any
+    /// other type is left out with a line saying why. `Err` says why nothing was
     /// written (never a failure: PHP rebuilds the entries itself).
-    pub fn fill_config_cache(&self, entries: &[(&str, String)]) -> std::result::Result<Vec<String>, String> {
+    pub fn fill_config_cache(&self, entries: &[(&str, CacheType, String)]) -> std::result::Result<Vec<String>, String> {
         let env = deploy::read_env(self.root(), &self.index.vfs).map_err(|e| e.to_string())?;
         if !self.symfony_cache() {
             return Err("the framework's cache is not built on Symfony adapters".into());
         }
-        let enabled = env
-            .get("cache_types")
-            .and_then(|t| t.get("config"))
-            .and_then(PhpValue::scalar_string)
-            .is_some_and(|v| v == "1" || v == "true");
-        if !enabled {
-            return Err("the config cache type is disabled".into());
-        }
-        if env.get("cache").and_then(|c| c.get("type")).and_then(|t| t.get("config")).is_some() {
-            return Err("the config cache type has its own frontend".into());
+        let mut skipped = Vec::new();
+        let unusable = |t: CacheType| -> Option<String> {
+            let code = t.code();
+            let enabled = env
+                .get("cache_types")
+                .and_then(|c| c.get(code))
+                .and_then(PhpValue::scalar_string)
+                .is_some_and(|v| v == "1" || v == "true");
+            if !enabled {
+                return Some(format!("the {code} cache type is disabled"));
+            }
+            if env.get("cache").and_then(|c| c.get("type")).and_then(|c| c.get(code)).is_some() {
+                return Some(format!("the {code} cache type has its own frontend"));
+            }
+            None
+        };
+        let entries: Vec<&(&str, CacheType, String)> = entries
+            .iter()
+            .filter(|(id, t, _)| match unusable(*t) {
+                Some(why) => {
+                    skipped.push(format!("config cache: {} left for PHP to build ({why})", id.to_ascii_uppercase()));
+                    false
+                }
+                None => true,
+            })
+            .collect();
+        if entries.is_empty() {
+            return Ok(skipped);
         }
         let empty = PhpValue::Array(Vec::new());
         let frontend = env
@@ -737,9 +813,13 @@ impl Magento {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| e.to_string())?
             .as_secs();
-        let items: Vec<(String, String)> = entries
+        let items: Vec<CacheItem> = entries
             .iter()
-            .map(|(id, data)| (id.to_ascii_uppercase(), cache_item(data, now, lifetime, &CONFIG_TAGS)))
+            .map(|(id, t, data)| CacheItem {
+                id: id.to_ascii_uppercase(),
+                value: cache_item(data, now, lifetime, t.tags()),
+                tags: t.tags(),
+            })
             .collect();
 
         match self.cache_backend(&backend) {
@@ -752,10 +832,12 @@ impl Magento {
             }
             CacheBackend::Other(other) => return Err(format!("the default cache backend is {other}")),
         }
-        Ok(entries
+        let mut lines: Vec<String> = entries
             .iter()
-            .map(|(id, data)| format!("config cache: wrote {} ({} KB)", id.to_ascii_uppercase(), data.len() / 1024))
-            .collect())
+            .map(|(id, _, data)| format!("config cache: wrote {} ({} KB)", id.to_ascii_uppercase(), data.len() / 1024))
+            .collect();
+        lines.extend(skipped);
+        Ok(lines)
     }
 
     /// `RedisAdapter` items plus `RedisTagAdapter::onSave`'s index.
@@ -764,7 +846,7 @@ impl Magento {
         env: &PhpValue,
         prefix: &str,
         lifetime: u64,
-        items: &[(String, String)],
+        items: &[CacheItem],
     ) -> std::result::Result<(), String> {
         let adapter = self
             .framework_source("Magento\\Framework\\Cache\\Frontend\\Adapter\\SymfonyAdapters\\RedisTagAdapter");
@@ -775,16 +857,16 @@ impl Magento {
         let redis = deploy::redis_config(env);
         let inst = redis.instances.iter().find(|i| i.purpose == "default").ok_or("no Redis settings in env.php")?;
         let mut commands: Vec<Vec<String>> = Vec::new();
-        for (id, value) in items {
+        for CacheItem { id, value, tags } in items {
             commands.push(vec!["SET".into(), format!("{prefix}:{id}"), value.clone(), "EX".into(), lifetime.to_string()]);
             commands.push(vec!["SADD".into(), "cache:all_ids".into(), id.clone()]);
-            for tag in CONFIG_TAGS {
+            for tag in *tags {
                 commands.push(vec!["SADD".into(), format!("cache:tags:{prefix}{tag}"), id.clone()]);
             }
             let reverse = format!("cache:id_tags:{prefix}{id}");
             commands.push(vec!["DEL".into(), reverse.clone()]);
             let mut sadd = vec!["SADD".into(), reverse.clone()];
-            sadd.extend(CONFIG_TAGS.iter().map(|t| (*t).to_owned()));
+            sadd.extend(tags.iter().map(|t| (*t).to_owned()));
             commands.push(sadd);
             commands.push(vec!["EXPIRE".into(), reverse, (lifetime + 3600).to_string()]);
         }
@@ -799,7 +881,7 @@ impl Magento {
         backend: &str,
         prefix: &str,
         expires_at: u64,
-        items: &[(String, String)],
+        items: &[CacheItem],
     ) -> std::result::Result<(), String> {
         let save = self.framework_source("Symfony\\Component\\Cache\\Traits\\FilesystemTrait");
         let common = self.framework_source("Symfony\\Component\\Cache\\Traits\\FilesystemCommonTrait");
@@ -815,7 +897,7 @@ impl Magento {
         }
         let cache = self.real_root().join("var/cache");
         let dir = cache.join(prefix);
-        for (id, value) in items {
+        for CacheItem { id, value, .. } in items {
             let file = symfony_cache_file(&dir, id);
             let parent = file.parent().ok_or("cache file without a directory")?;
             std::fs::create_dir_all(parent).map_err(|e| format!("creating {}: {e}", parent.display()))?;
@@ -841,16 +923,24 @@ impl Magento {
         let is_class = !name.is_empty() && name != "Cm_Cache_Backend_File" && self.framework_file(name).is_some();
         let tag_dir = if is_class { cache.join("symfony/tags") } else { cache.join("tags") };
         std::fs::create_dir_all(&tag_dir).map_err(|e| format!("creating {}: {e}", tag_dir.display()))?;
-        for tag in CONFIG_TAGS {
+        let mut tags: Vec<&str> = Vec::new();
+        for item in items {
+            for tag in item.tags {
+                if !tags.contains(tag) {
+                    tags.push(tag);
+                }
+            }
+        }
+        for tag in tags {
             let path = tag_dir.join(tag);
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             // FilesystemTagAdapter::getTagIds: up to the last newline, trimmed.
             let body = content.rfind('\n').map_or(content.as_str(), |i| &content[..i]).trim();
             let mut ids: Vec<&str> = if body.is_empty() { Vec::new() } else { body.split('\n').collect() };
             let before = ids.len();
-            for (id, _) in items {
-                if !ids.contains(&id.as_str()) {
-                    ids.push(id);
+            for item in items.iter().filter(|i| i.tags.contains(&tag)) {
+                if !ids.contains(&item.id.as_str()) {
+                    ids.push(&item.id);
                 }
             }
             if ids.len() != before {
@@ -871,8 +961,39 @@ impl Magento {
     }
 }
 
-/// The tags the `config` cache type saves with (`Type\\Config` + the global one).
-const CONFIG_TAGS: [&str; 2] = ["CONFIG", "MAGE"];
+/// The cache types [`Magento::fill_config_cache`] writes entries of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheType {
+    /// `App\\Cache\\Type\\Config`: merged XML configs (`GLOBAL__DICONFIG`, …).
+    Config,
+    /// `App\\Interception\\Cache\\CompiledConfig`: the plugin lists.
+    CompiledConfig,
+}
+
+impl CacheType {
+    /// The `cache_types` key in env.php.
+    fn code(self) -> &'static str {
+        match self {
+            CacheType::Config => "config",
+            CacheType::CompiledConfig => "compiled_config",
+        }
+    }
+
+    /// The tags an entry is saved with: the type's own, then the global one.
+    fn tags(self) -> &'static [&'static str] {
+        match self {
+            CacheType::Config => &["CONFIG", "MAGE"],
+            CacheType::CompiledConfig => &["COMPILED_CONFIG", "MAGE"],
+        }
+    }
+}
+
+/// One cache entry ready to write: id, the saved item, its tags.
+struct CacheItem {
+    id: String,
+    value: String,
+    tags: &'static [&'static str],
+}
 
 /// `FilesystemCommonTrait::getFile` for a `FilesystemAdapter` rooted at `dir`.
 fn symfony_cache_file(dir: &Path, id: &str) -> PathBuf {
@@ -1132,6 +1253,11 @@ fn collapse_semicolons(s: &str) -> String {
 }
 
 /// `preg_replace('/\s+/', ' ', $s)`.
+/// `s` without any whitespace, for matching PHP source by shape.
+fn strip_ws(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 fn collapse_ws(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_ws = false;
