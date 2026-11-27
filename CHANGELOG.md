@@ -51,6 +51,31 @@ relabelled. See "Releases: commit subjects are the changelog" in CLAUDE.md.
 [8c23d6a55]: https://github.com/cresset-tools/magequery/commit/8c23d6a55
 
 
+## [0.30.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.29.0...magequery-v0.30.0) (2026-11-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **magecommand:** `dev upgrade --php` is now `--php-command`, with no default of `php`; without PHP the command exits 2 instead of failing. The JSON report gains php_work, recurring_php and php_missing.
+
+### Features
+
+* **magecommand:** a di compile rejection carries its file, line and message ([cabe1ee](https://github.com/cresset-tools/magequery/commit/cabe1eede86528540f8f646e8702b394f37b6799))
+* **magecommand:** compute the developer-mode interception cache entry ([213389b](https://github.com/cresset-tools/magequery/commit/213389bda39f362a1fc78f840b1e51d63b67e017))
+* **magecommand:** dev upgrade fills the file cache too ([1c5e251](https://github.com/cresset-tools/magequery/commit/1c5e2516c5880039ce36f1b2c25bc5e0e8a04e57))
+* **magecommand:** dev upgrade fills the global DI config cache too ([46589b9](https://github.com/cresset-tools/magequery/commit/46589b9ebe0816dc976a09372c268493f9cec493))
+* **magecommand:** dev upgrade fills the interception cache before PHP boots ([14248c8](https://github.com/cresset-tools/magequery/commit/14248c8241f901c697215b1793465263162f4d8a))
+* **magecommand:** dev upgrade runs PHP only for PHP code ([1edbb6b](https://github.com/cresset-tools/magequery/commit/1edbb6b4095bf0689038d6115869b865556f63e5))
+* **magecommand:** render Mage-OS's compiled interceptors natively ([6e16592](https://github.com/cresset-tools/magequery/commit/6e16592ec43f41e66692d497915f0f9283c83b73))
+* **magequery:** doctor --format github, gitlab and sarif ([0ab46ea](https://github.com/cresset-tools/magequery/commit/0ab46ea800beb7f06258738c416d3898b2b00b7b))
+
+
+### Performance Improvements
+
+* **magecommand:** dev upgrade writes generated/code natively ([6b96b25](https://github.com/cresset-tools/magequery/commit/6b96b251c69817a2f7c72b1521d4be56d86f29a0))
+* **magecommand:** fill dev upgrade's caches in ~50 ms instead of ~300 ([43a3f61](https://github.com/cresset-tools/magequery/commit/43a3f6105cd2284f7b6252d8f064633360548e71))
+* **magequery:** merge the per-area DI configs in parallel ([60638bb](https://github.com/cresset-tools/magequery/commit/60638bb7999ff0c5d667cc5ed1d61939570348ba))
+
 ## [0.29.0](https://github.com/cresset-tools/magequery/compare/magequery-v0.28.0...magequery-v0.29.0) (2026-11-26)
 
 
