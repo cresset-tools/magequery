@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use magequery_core::Magento;
-use magequery_core::devupgrade::{ConfigPhpUpdate, DevUpgradeCheck, EnvPhpUpdate, RecurringNeed, empty_dir};
+use magequery_core::devupgrade::{CacheType, ConfigPhpUpdate, DevUpgradeCheck, EnvPhpUpdate, RecurringNeed, empty_dir};
 
 use crate::style;
 
@@ -161,7 +161,7 @@ pub fn upgrade(root: Option<PathBuf>, json: bool, opts: &Options) -> Result<Exit
 /// kinds rendered byte-identical to PHP's generators are written; PHP
 /// generates the rest when first asked, as it would have anyway.
 fn prepare_runtime(mage: &Magento, previous: Vec<String>, caches: bool) -> std::result::Result<Vec<String>, String> {
-    let (defs, scopes, files) =
+    let (mut defs, scopes, files) =
         magecommand_engine::interception::runtime_definitions_generating(mage, mage.root(), previous)?;
     let mut lines = Vec::new();
     if !files.is_empty() {
@@ -175,11 +175,16 @@ fn prepare_runtime(mage: &Magento, previous: Vec<String>, caches: bool) -> std::
     let map = magecommand_engine::interception::runtime_interception_map(&defs, &scopes);
     let mut entries = vec![(
         "interception",
+        CacheType::Config,
         magequery_core::devupgrade::php_json_bool_map(map.iter().map(|(k, v)| (k.as_str(), *v))),
     )];
     let mut notes = Vec::new();
+    match magecommand_engine::pluginlist::runtime_primary_plugin_list(mage, &mut defs) {
+        Ok(serialized) => entries.push(("GLOBAL_PRIMARY_PLUGIN_LIST", CacheType::CompiledConfig, serialized)),
+        Err(why) => notes.push(format!("config cache: GLOBAL_PRIMARY_PLUGIN_LIST left for PHP to build ({why})")),
+    }
     match magecommand_engine::runtimecache::global_di_config(mage, defs) {
-        Ok(serialized) => entries.push(("GLOBAL__DICONFIG", serialized)),
+        Ok(serialized) => entries.push(("GLOBAL__DICONFIG", CacheType::Config, serialized)),
         Err(why) => notes.push(format!("config cache: GLOBAL__DICONFIG left for PHP to build ({why})")),
     }
     lines.extend(mage.fill_config_cache(&entries)?);

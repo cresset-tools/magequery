@@ -853,6 +853,11 @@ fn replace_recursive_plugins(base: &mut Vec<(String, Entry)>, over: Vec<(String,
 }
 
 fn render_triple(plugin_data: &PluginData, state: &Inherit) -> String {
+    crate::phpexport::to_php_file(&triple_value(plugin_data, state))
+}
+
+/// `[_data, _inherited, _processed]` as the PHP array PluginList holds.
+fn triple_value(plugin_data: &PluginData, state: &Inherit) -> PhpValue {
     let data_value = PhpValue::Array(
         plugin_data
             .iter()
@@ -918,11 +923,11 @@ fn render_triple(plugin_data: &PluginData, state: &Inherit) -> String {
             })
             .collect(),
     );
-    crate::phpexport::to_php_file(&PhpValue::Array(vec![
+    PhpValue::Array(vec![
         (PhpKey::Int(0), data_value),
         (PhpKey::Int(1), inherited_value),
         (PhpKey::Int(2), processed_value),
-    ]))
+    ])
 }
 
 #[cfg(test)]
@@ -1088,6 +1093,82 @@ pub enum RuntimeScope {
     Custom(String),
 }
 
+/// The seeds of a runtime `_loadScopedData`: the typed virtual types of the
+/// newly read scopes, in each read layer's node order (as `generate` seeds them).
+fn runtime_seeds<'e>(scope: &RuntimeScope, seed_export: &'e DiExport, area_filter: Option<Area>) -> Vec<&'e str> {
+    let node_pos: HashMap<&str, &magequery_core::TypeNodePosition> =
+        seed_export.node_positions.iter().map(|n| (n.name.as_str(), n)).collect();
+    let mut vtype_seeds: Vec<(u8, u32, &str)> = seed_export
+        .virtual_types
+        .iter()
+        .filter(|v| area_filter.is_none_or(|a| v.source.area == a))
+        .map(|v| {
+            let pos = node_pos.get(v.name.as_str());
+            match scope {
+                RuntimeScope::Global => {
+                    if v.source.module.as_str() == "(primary)" {
+                        (1u8, pos.and_then(|n| n.primary).unwrap_or(v.decl_order), v.name.as_str())
+                    } else {
+                        (0u8, pos.and_then(|n| n.modules).unwrap_or(v.decl_order), v.name.as_str())
+                    }
+                }
+                _ => (2u8, pos.and_then(|n| n.overlay).unwrap_or(v.decl_order), v.name.as_str()),
+            }
+        })
+        .collect();
+    vtype_seeds.sort();
+    vtype_seeds.into_iter().map(|(_, _, name)| name).collect()
+}
+
+/// The `global|primary|plugin-list` cache entry a developer-mode boot saves on
+/// a cold cache: `PluginList::_loadScopedData` for the `primary` scope reads
+/// `[global, primary]`, inherits their typed virtual types and
+/// `getClassDefinitions()` (the runtime definitions: none), and saves
+/// `serialize([_data, _inherited, _processed])` before any subject is asked
+/// for. The classes the walk reads (the seeds' real types, every plugin class)
+/// are loaded into `defs` first; one that cannot be is an `Err`, for PHP to
+/// build the entry itself.
+pub fn runtime_primary_plugin_list(magento: &Magento, defs: &mut Definitions) -> Result<String, String> {
+    let export = magento.di_export_ref(Area::Global);
+    let global_vtypes: HashMap<String, String> =
+        export.virtual_types.iter().map(|v| (v.name.as_str().to_owned(), v.base.as_str().to_owned())).collect();
+    let seeds = runtime_seeds(&RuntimeScope::Global, export, None);
+    let plugin_data = plugin_data_of(export);
+
+    let mut wanted: Vec<String> = seeds.iter().map(|s| chase(&global_vtypes, s)).collect();
+    wanted.extend(plugin_data.iter().flat_map(|(t, plugins)| {
+        let t = chase(&global_vtypes, t.trim_start_matches('\\'));
+        std::iter::once(t).chain(plugins.iter().filter_map(|(_, e)| {
+            e.instance.as_deref().map(|i| chase(&global_vtypes, i.trim_start_matches('\\')))
+        }))
+    }));
+    wanted.retain(|c| defs.get(c).is_none());
+    wanted.sort();
+    wanted.dedup();
+    defs.load_classes(magento, magento.root(), wanted);
+
+    let mut state = Inherit {
+        defs,
+        global_vtypes: &global_vtypes,
+        plugin_data: &plugin_data,
+        plugin_index: plugin_data.iter().enumerate().map(|(i, (t, _))| (t.as_str(), i)).collect(),
+        inherited: Vec::new(),
+        inherited_index: Default::default(),
+        processed: Vec::new(),
+        processed_index: Default::default(),
+        findings: Vec::new(),
+        inherited_only: false,
+    };
+    for seed in &seeds {
+        state.inherit(seed);
+    }
+    if let Some(first) = state.findings.first() {
+        return Err(first.clone());
+    }
+    crate::phpexport::to_serialized(&triple_value(&plugin_data, &state))
+        .ok_or_else(|| "a value serialize() is not reproduced for".to_owned())
+}
+
 /// `PluginList::_loadScopedData` for one scope, the way creatuity's
 /// `AreasPluginList` drives it, followed by `getNext` for every subject in
 /// `subjects` order (each `getNext` inherits its type on first sight).
@@ -1128,29 +1209,7 @@ pub fn runtime_chains(
         }
     };
 
-    // Seeds: the typed virtual types of the newly read scopes, in each read
-    // layer's node order (as `generate` seeds them).
-    let node_pos: HashMap<&str, &magequery_core::TypeNodePosition> =
-        seed_export.node_positions.iter().map(|n| (n.name.as_str(), n)).collect();
-    let mut vtype_seeds: Vec<(u8, u32, &str)> = seed_export
-        .virtual_types
-        .iter()
-        .filter(|v| area_filter.is_none_or(|a| v.source.area == a))
-        .map(|v| {
-            let pos = node_pos.get(v.name.as_str());
-            match scope {
-                RuntimeScope::Global => {
-                    if v.source.module.as_str() == "(primary)" {
-                        (1u8, pos.and_then(|n| n.primary).unwrap_or(v.decl_order), v.name.as_str())
-                    } else {
-                        (0u8, pos.and_then(|n| n.modules).unwrap_or(v.decl_order), v.name.as_str())
-                    }
-                }
-                _ => (2u8, pos.and_then(|n| n.overlay).unwrap_or(v.decl_order), v.name.as_str()),
-            }
-        })
-        .collect();
-    vtype_seeds.sort();
+    let vtype_seeds = runtime_seeds(scope, seed_export, area_filter);
 
     let plugin_data = plugin_data_of(export);
     let mut state = Inherit {
@@ -1165,7 +1224,7 @@ pub fn runtime_chains(
         findings: Vec::new(),
         inherited_only: false,
     };
-    for (_, _, seed) in &vtype_seeds {
+    for seed in &vtype_seeds {
         state.inherit(seed);
     }
     for subject in subjects {

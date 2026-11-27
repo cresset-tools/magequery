@@ -61,6 +61,56 @@ pub fn to_php_file(value: &PhpValue) -> String {
     out
 }
 
+/// PHP's `serialize()` of `value` — the format a runtime cache entry holds.
+/// `None` for what this does not reproduce (floats, raw expressions, objects).
+/// A string key PHP would store as an integer (`"12"`, `"-3"`) is written as
+/// one, the way the array would have held it.
+pub fn to_serialized(value: &PhpValue) -> Option<String> {
+    fn str_into(out: &mut String, s: &str) {
+        out.push_str(&format!("s:{}:\"", s.len()));
+        out.push_str(s);
+        out.push_str("\";");
+    }
+    fn go(v: &PhpValue, out: &mut String) -> Option<()> {
+        match v {
+            PhpValue::Str(s) => str_into(out, s),
+            PhpValue::Int(i) => out.push_str(&format!("i:{i};")),
+            PhpValue::Bool(b) => out.push_str(if *b { "b:1;" } else { "b:0;" }),
+            PhpValue::Null => out.push_str("N;"),
+            PhpValue::Float(_) | PhpValue::Raw(_) | PhpValue::Object { .. } => return None,
+            PhpValue::Array(items) => {
+                out.push_str(&format!("a:{}:{{", items.len()));
+                for (k, v) in items {
+                    match k {
+                        PhpKey::Int(i) => out.push_str(&format!("i:{i};")),
+                        PhpKey::Str(s) => match php_int_key(s) {
+                            Some(i) => out.push_str(&format!("i:{i};")),
+                            None => str_into(out, s),
+                        },
+                    }
+                    go(v, out)?;
+                }
+                out.push('}');
+            }
+        }
+        Some(())
+    }
+    let mut out = String::new();
+    go(value, &mut out)?;
+    Some(out)
+}
+
+/// The integer PHP's array keys turn a decimal string into: canonical form
+/// only (no leading `+`, zeros or whitespace; `-0` stays a string), in range.
+fn php_int_key(s: &str) -> Option<i64> {
+    let digits = s.strip_prefix('-').unwrap_or(s);
+    let canonical = !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (digits == "0" || !digits.starts_with('0'))
+        && s != "-0";
+    if canonical { s.parse().ok() } else { None }
+}
+
 /// Emit a `var_export` single-quoted string literal (only `\` and `'` are
 /// escaped) — the [`PhpValue::Str`] rendering, factored out so a borrowed `&str`
 /// can be serialized without wrapping it in an owned `PhpValue` first.
@@ -259,6 +309,26 @@ fn export(value: &PhpValue, indent: usize, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn serialized_matches_php() {
+        // PHP: serialize([0 => ['a' => 'é', '7' => true, '07' => null, '-0' => 1, '-3' => false]])
+        let v = PhpValue::Array(vec![(
+            PhpKey::Int(0),
+            PhpValue::Array(vec![
+                (PhpKey::str("a"), PhpValue::str("é")),
+                (PhpKey::str("7"), PhpValue::Bool(true)),
+                (PhpKey::str("07"), PhpValue::Null),
+                (PhpKey::str("-0"), PhpValue::Int(1)),
+                (PhpKey::str("-3"), PhpValue::Bool(false)),
+            ]),
+        )]);
+        assert_eq!(
+            to_serialized(&v).as_deref(),
+            Some(r#"a:1:{i:0;a:5:{s:1:"a";s:2:"é";i:7;b:1;s:2:"07";N;s:2:"-0";i:1;i:-3;b:0;}}"#)
+        );
+        assert_eq!(to_serialized(&PhpValue::Float(1.5)), None);
+    }
+
     /// Magento's metadata is `var_export` output, and `app/bootstrap.php:67`
     /// sets `ini_set('serialize_precision', 14)` before any of it runs — so a
     /// float is written with 14 SIGNIFICANT digits, not PHP's default
